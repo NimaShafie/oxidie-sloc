@@ -10,7 +10,7 @@
 # Both files are tracked by git so that a plain `git clone` is sufficient for a fully
 # offline (air-gapped) build — no separate download step required.
 #
-# Usage: bash scripts/update-vendor.sh
+# Usage: bash scripts/internal/update-vendor.sh
 set -euo pipefail
 
 ARCHIVE=vendor.tar.xz

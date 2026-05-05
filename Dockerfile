@@ -1,7 +1,9 @@
 # Stage 1: build the release binary
-# Pin builder to digest so the toolchain cannot change silently under CI.
-# To refresh: docker pull rust:slim && docker inspect --format '{{index .RepoDigests 0}}' rust:slim
-FROM rust@sha256:715efd1ccdc4a63bd6a6e2f54387fff73f904b70e610d41b4d9d74ff38e13ad3 AS builder
+# Pin builder to rust:1.85-slim-bookworm so the toolchain and runtime both use
+# Debian bookworm (glibc 2.36). rust:slim can resolve to a trixie-based digest
+# (glibc 2.39) while the runtime stage below is still bookworm-slim, causing
+# "GLIBC_2.39 not found" at container startup.
+FROM rust:1.85-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \

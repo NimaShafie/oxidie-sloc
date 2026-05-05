@@ -39,3 +39,7 @@ sloc-config = { path = "../sloc-config", version = "1.4.0" }
 sloc-core = { path = "../sloc-core", version = "1.4.0" }
 sloc-git = { path = "../sloc-git", version = "1.4.0" }
 sloc-report = { path = "../sloc-report", version = "1.4.0" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

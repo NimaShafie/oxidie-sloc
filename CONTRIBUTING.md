@@ -65,18 +65,47 @@ oxide-sloc implements **physical SLOC** per **IEEE Std 1045-1992**. The configur
 
 ## Vendor archive (for air-gapped builds and releases)
 
-The `vendor/` directory is an offline mirror of all Cargo dependencies. It is **not** committed to git — instead, `vendor.tar.xz` is generated and attached to each GitHub release automatically by the release workflow.
+`vendor.tar.xz` and `vendor.tar.xz.sha256` are **committed to the repository** so that a plain `git clone` is sufficient for a fully offline (air-gapped) build. Both files must always be updated together.
 
-For normal development, cargo downloads from crates.io and no vendor setup is needed. When you add or upgrade a dependency, regenerate the archive so the next release includes updated vendored sources:
+For normal development, cargo downloads from crates.io and no vendor setup is needed. When you add or upgrade a dependency, regenerate the archive and commit both files atomically:
 
 ```bash
-# Regenerate the vendor snapshot and repack the archive
-bash scripts/update-vendor.sh
+# Regenerate the vendor snapshot, repack the archive, and rewrite the .sha256 file
+bash scripts/internal/update-vendor.sh
+git add vendor.tar.xz vendor.tar.xz.sha256
+git commit -m "chore: update vendor archive"
 ```
 
-The archive (`vendor.tar.xz`) and its checksum (`vendor.tar.xz.sha256`) are gitignored. Do not commit them — the release workflow uploads them automatically when a version tag is pushed.
+Never commit `vendor.tar.xz` without updating `vendor.tar.xz.sha256` — both the Docker build and Jenkins CI verify the checksum before extracting.
 
 For air-gapped builds, see [`docs/airgap.md`](./docs/airgap.md).
+
+## Release secrets
+
+The release workflow (`release.yml`) uses several optional GitHub repository secrets. Configure them under **Settings → Secrets and variables → Actions**.
+
+| Secret | Purpose | Required? |
+|--------|---------|-----------|
+| `GPG_PRIVATE_KEY` | Armored GPG key for detached `.sig` signatures | Optional |
+| `GPG_PASSPHRASE` | Passphrase protecting the GPG key | Optional |
+| `WINDOWS_CERTIFICATE` | Base64-encoded PFX for Windows Authenticode signing | Optional |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Password for the Windows PFX | Optional |
+| `APPLE_DEVELOPER_ID_CERT` | Base64-encoded PFX for macOS Developer ID signing | Optional |
+| `APPLE_DEVELOPER_ID_CERT_PASSWORD` | Password for the macOS PFX | Optional |
+| `APPLE_NOTARIZE_APPLE_ID` | Apple ID email for notarization | Optional |
+| `APPLE_NOTARIZE_PASSWORD` | App-specific password for notarization | Optional |
+| `APPLE_NOTARIZE_TEAM_ID` | Apple Developer Team ID | Optional |
+| `VT_API_KEY` | VirusTotal API v3 key — submit binaries for malware scanning on every release | Optional |
+
+All secrets are optional — the corresponding workflow steps skip gracefully when the secret is absent.
+
+### VirusTotal scanning
+
+When `VT_API_KEY` is set, the `virustotal` job in `release.yml` automatically runs on every tagged release. It uploads each release binary to VirusTotal, polls for scan completion, and writes a results table to the GitHub Release body showing malicious / suspicious / undetected / harmless counts and a permalink to each full report.
+
+To obtain a free API key: create an account at virustotal.com → API key → copy the v3 key. Free accounts allow 4 requests/minute and 500 requests/day, which is sufficient for a release with 5 binaries. Add the key as a repository secret named `VT_API_KEY`.
+
+False positives on freshly compiled Rust binaries are common. Zero malicious detections is the expected result; any flags on a clean build can be disputed directly from the VirusTotal report page.
 
 ## Commit messages
 
@@ -92,7 +121,7 @@ Common types: `feat`, `fix`, `refactor`, `docs`, `chore`, `ci`, `test`.
 
 - [ ] All four CI gates pass locally
 - [ ] New language support updates both `sloc-languages` and has a fixture file in `tests/fixtures/basic/`
-- [ ] New dependencies: run `bash scripts/update-vendor.sh` so the next release bundles them
+- [ ] New dependencies: run `bash scripts/internal/update-vendor.sh` so the next release bundles them
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`
 - [ ] No `#[allow(...)]` without a comment explaining why
 - [ ] No `.unwrap()` or `.expect()` in library code

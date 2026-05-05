@@ -18,11 +18,14 @@ pub enum ScanScheduleKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum ScanScheduleProvider {
+    #[serde(rename = "github")]
     GitHub,
+    #[serde(rename = "gitlab")]
     GitLab,
+    #[serde(rename = "bitbucket")]
     Bitbucket,
+    #[serde(rename = "any")]
     Any,
 }
 

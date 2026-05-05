@@ -57,6 +57,11 @@ pub(super) struct ScheduleIdQuery {
     :root{--radius:14px;--bg:#f5efe8;--surface:rgba(255,255,255,0.9);--surface-2:#fbf7f2;--line:#e6d0bf;--line-strong:#d8bfad;--text:#43342d;--muted:#7b675b;--nav:#b85d33;--nav-2:#7a371b;--oxide-2:#b85d33;--shadow:0 8px 24px rgba(77,44,20,0.10);}
     body.dark-theme{--bg:#1b1511;--surface:#261c17;--surface-2:#2d221d;--line:#524238;--text:#f5ece6;--muted:#c7b7aa;--shadow:0 8px 24px rgba(0,0,0,0.32);}
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide-2);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1000px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:12px;text-decoration:none;}
@@ -65,7 +70,8 @@ pub(super) struct ScheduleIdQuery {
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     .nav-pill{display:inline-flex;align-items:center;min-height:34px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);}
-    .page{max-width:1000px;margin:0 auto;padding:32px 24px 60px;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:34px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .page{max-width:1000px;margin:0 auto;padding:32px 24px 60px;position:relative;z-index:1;}
     h1{font-size:26px;font-weight:850;margin:0 0 6px;letter-spacing:-0.03em;}
     .subtitle{color:var(--muted);font-size:14px;margin:0 0 28px;}
     .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:24px;box-shadow:var(--shadow);margin-bottom:20px;}
@@ -100,24 +106,75 @@ pub(super) struct ScheduleIdQuery {
     .theme-toggle{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);cursor:pointer;}
     .theme-toggle svg{width:16px;height:16px;stroke:#fff;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;}body.dark-theme .theme-toggle .icon-sun{display:block;}body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .wip-overlay{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);backdrop-filter:blur(3px);}
+    .wip-tape-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;}
+    .wip-tape{position:absolute;left:-10%;width:120%;height:52px;transform:rotate(-3deg);box-shadow:0 4px 24px #0009;}
+    .wip-tape-1{top:18%;background:repeating-linear-gradient(90deg,#f7c900 0,#f7c900 120px,#1a1a1a 120px,#1a1a1a 240px);opacity:0.95;}
+    .wip-tape-2{top:27%;background:repeating-linear-gradient(90deg,#1a1a1a 0,#1a1a1a 120px,#f7c900 120px,#f7c900 240px);opacity:0.92;}
+    .wip-tape-3{top:68%;background:repeating-linear-gradient(90deg,#f7c900 0,#f7c900 120px,#1a1a1a 120px,#1a1a1a 240px);opacity:0.95;}
+    .wip-tape-4{top:77%;background:repeating-linear-gradient(90deg,#1a1a1a 0,#1a1a1a 120px,#f7c900 120px,#f7c900 240px);opacity:0.92;}
+    .wip-card{position:relative;z-index:1;background:#1a1a1a;border:6px solid #f7c900;border-radius:4px;padding:40px 52px;text-align:center;max-width:640px;box-shadow:0 0 80px #f7c90066,0 8px 40px #000c;}
+    .wip-icon{font-size:72px;line-height:1;margin-bottom:8px;}
+    .wip-title{font-family:'Arial Black',Arial,sans-serif;font-size:32px;font-weight:900;color:#f7c900;letter-spacing:4px;text-transform:uppercase;margin-bottom:6px;text-shadow:0 0 20px #f7c90099;}
+    .wip-subtitle{font-family:'Arial Black',Arial,sans-serif;font-size:14px;font-weight:900;color:#f7c900;letter-spacing:6px;text-transform:uppercase;margin-bottom:24px;opacity:0.7;}
+    .wip-body{color:#e5e5e5;font-size:16px;line-height:1.6;margin-bottom:28px;}
+    .wip-body strong{color:#fff;}
+    .wip-proceed-btn{background:#f7c900;color:#1a1a1a;border:none;border-radius:3px;padding:12px 36px;font-size:15px;font-weight:900;letter-spacing:2px;text-transform:uppercase;cursor:pointer;font-family:'Arial Black',Arial,sans-serif;}
   </style>
 </head>
 <body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
   <nav class="top-nav">
     <div class="top-nav-inner">
       <a class="brand" href="/"><img class="brand-logo" src="/images/logo/small-logo.png" alt="">
         <div><div class="brand-title">OxideSLOC</div><div class="brand-sub">Webhook Setup</div></div></a>
       <div class="nav-right">
-        <a class="nav-pill" href="/scan">Scan</a>
-        <a class="nav-pill" href="/git-browser">Git Browser</a>
-        <a class="nav-pill" href="/view-reports">History</a>
-        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+        <a class="nav-pill" href="/">Home</a>
+        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+          </div>
+        </div>
+        <button class="theme-toggle" id="themeToggle" type="button" title="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
         </button>
       </div>
     </div>
   </nav>
+  <!-- Police tape full-screen overlay -->
+  <div id="wip-overlay" class="wip-overlay">
+    <!-- Tape strips -->
+    <div class="wip-tape-layer">
+      <div class="wip-tape wip-tape-1"></div>
+      <div class="wip-tape wip-tape-2"></div>
+      <div class="wip-tape wip-tape-3"></div>
+      <div class="wip-tape wip-tape-4"></div>
+    </div>
+    <!-- Center warning card -->
+    <div class="wip-card">
+      <div class="wip-icon">&#9888;</div>
+      <div class="wip-title">CAUTION</div>
+      <div class="wip-subtitle">DO NOT RELY ON THIS FEATURE</div>
+      <div class="wip-body">
+        <strong>Work in progress</strong> — this feature is not fully tested and may not behave as expected.<br>Proceed only if you understand the risks.
+      </div>
+      <button id="wip-proceed-btn" class="wip-proceed-btn">I UNDERSTAND — PROCEED</button>
+    </div>
+  </div>
+
   <div class="page">
     <h1>Automated Scanning</h1>
     <p class="subtitle">Configure webhooks or polling so OxideSLOC automatically scans when a repository is updated.</p>
@@ -127,7 +184,7 @@ pub(super) struct ScheduleIdQuery {
       <div class="form-row">
         <div class="form-group"><label>Label</label><input id="fLabel" type="text" placeholder="My Repo — main"/></div>
         <div class="form-group"><label>Type</label>
-          <select id="fKind" onchange="onKindChange()">
+          <select id="fKind">
             <option value="webhook">Webhook (GitHub / GitLab / Bitbucket)</option>
             <option value="poll">Polling (interval-based)</option>
           </select>
@@ -146,7 +203,7 @@ pub(super) struct ScheduleIdQuery {
         <div class="form-group"><label>Poll Interval (seconds, min 60)</label><input id="fInterval" type="number" min="60" step="60" value="300"/></div>
       </div>
       <div id="addStatus" class="status-msg"></div>
-      <button class="btn btn-primary" onclick="addSchedule()">Add Schedule</button>
+      <button class="btn btn-primary" id="addScheduleBtn" type="button">Add Schedule</button>
     </div>
 
     <div class="card">
@@ -157,62 +214,138 @@ pub(super) struct ScheduleIdQuery {
     <div class="card">
       <div class="card-title">Webhook Endpoint URLs</div>
       <p style="font-size:13px;color:var(--muted);margin:0 0 16px">Configure these URLs in your provider and use the secret shown on each schedule for HMAC verification.</p>
-      <div class="url-row"><span class="url-label">GitHub</span><span id="urlGH" class="url-box">{{ server_url }}/webhooks/github</span><button class="copy-btn" onclick="copy('urlGH')">Copy</button></div>
-      <div class="url-row"><span class="url-label">GitLab</span><span id="urlGL" class="url-box">{{ server_url }}/webhooks/gitlab</span><button class="copy-btn" onclick="copy('urlGL')">Copy</button></div>
-      <div class="url-row"><span class="url-label">Bitbucket</span><span id="urlBB" class="url-box">{{ server_url }}/webhooks/bitbucket</span><button class="copy-btn" onclick="copy('urlBB')">Copy</button></div>
+      <div class="url-row"><span class="url-label">GitHub</span><span id="urlGH" class="url-box">{{ server_url }}/webhooks/github</span><button class="copy-btn" type="button" data-copy-target="urlGH">Copy</button></div>
+      <div class="url-row"><span class="url-label">GitLab</span><span id="urlGL" class="url-box">{{ server_url }}/webhooks/gitlab</span><button class="copy-btn" type="button" data-copy-target="urlGL">Copy</button></div>
+      <div class="url-row"><span class="url-label">Bitbucket</span><span id="urlBB" class="url-box">{{ server_url }}/webhooks/bitbucket</span><button class="copy-btn" type="button" data-copy-target="urlBB">Copy</button></div>
     </div>
   </div>
 
   <script nonce="{{ csp_nonce }}">
-    function toggleTheme(){const d=document.body.classList.toggle('dark-theme');localStorage.setItem('sloc-theme',d?'dark':'light');}
-    if(localStorage.getItem('sloc-theme')==='dark')document.body.classList.add('dark-theme');
-    function onKindChange(){
-      const poll=document.getElementById('fKind').value==='poll';
-      document.getElementById('pollRow').style.display=poll?'grid':'none';
-      document.getElementById('providerRow').style.display=poll?'none':'grid';
-    }
-    function showStatus(msg,ok){const el=document.getElementById('addStatus');el.style.display='block';el.className='status-msg '+(ok?'status-ok':'status-err');el.textContent=msg;}
-    async function addSchedule(){
-      const kind=document.getElementById('fKind').value;
-      const body={
-        label:document.getElementById('fLabel').value.trim()||'Unnamed',
-        repo_url:document.getElementById('fRepo').value.trim(),
-        branch:document.getElementById('fBranch').value.trim()||'main',
-        kind,
-        provider:kind==='webhook'?document.getElementById('fProvider').value:null,
-        interval_secs:kind==='poll'?parseInt(document.getElementById('fInterval').value,10):null,
-      };
-      if(!body.repo_url){showStatus('Repository URL is required.',false);return;}
-      const r=await fetch('/api/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      const data=await r.json();
-      if(r.ok){showStatus('Schedule added.',true);loadSchedules();}
-      else{showStatus(data.error||'Failed.',false);}
-    }
-    async function deleteSchedule(id){
-      if(!confirm('Delete this schedule?'))return;
-      await fetch('/api/schedules?id='+encodeURIComponent(id),{method:'DELETE'});
+    (function () {
+      function applyTheme() { if (localStorage.getItem('sloc-theme') === 'dark') document.body.classList.add('dark-theme'); }
+      function toggleTheme() { var d = document.body.classList.toggle('dark-theme'); localStorage.setItem('sloc-theme', d ? 'dark' : 'light'); }
+
+      function onKindChange() {
+        var poll = document.getElementById('fKind').value === 'poll';
+        document.getElementById('pollRow').style.display = poll ? 'grid' : 'none';
+        document.getElementById('providerRow').style.display = poll ? 'none' : 'grid';
+      }
+
+      function showStatus(msg, ok) {
+        var el = document.getElementById('addStatus');
+        el.style.display = 'block';
+        el.className = 'status-msg ' + (ok ? 'status-ok' : 'status-err');
+        el.textContent = msg;
+      }
+
+      async function addSchedule() {
+        var kind = document.getElementById('fKind').value;
+        var body = {
+          label: document.getElementById('fLabel').value.trim() || 'Unnamed',
+          repo_url: document.getElementById('fRepo').value.trim(),
+          branch: document.getElementById('fBranch').value.trim() || 'main',
+          kind: kind,
+          provider: kind === 'webhook' ? document.getElementById('fProvider').value : null,
+          interval_secs: kind === 'poll' ? parseInt(document.getElementById('fInterval').value, 10) : null,
+        };
+        if (!body.repo_url) { showStatus('Repository URL is required.', false); return; }
+        var r = await fetch('/api/schedules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        var data = await r.json();
+        if (r.ok) { showStatus('Schedule added.', true); loadSchedules(); }
+        else { showStatus(data.error || 'Failed.', false); }
+      }
+
+      async function deleteSchedule(id) {
+        if (!confirm('Delete this schedule?')) return;
+        await fetch('/api/schedules?id=' + encodeURIComponent(id), { method: 'DELETE' });
+        loadSchedules();
+      }
+
+      async function loadSchedules() {
+        var r = await fetch('/api/schedules');
+        if (!r.ok) return;
+        var data = await r.json();
+        var el = document.getElementById('scheduleList');
+        var list = data.schedules || [];
+        if (!list.length) { el.innerHTML = '<div class="empty-state">No schedules configured yet.</div>'; return; }
+        el.innerHTML = list.map(function (s) {
+          var badge = s.kind === 'webhook' ? '<span class="sched-badge badge-webhook">Webhook</span>' : '<span class="sched-badge badge-poll">Poll</span>';
+          var extra = s.interval_secs ? ' · every ' + s.interval_secs + 's' : (s.provider && s.provider !== 'any' ? ' · ' + esc(s.provider) : '');
+          var secret = s.webhook_secret ? '<div>Secret: <span class="sched-secret">' + esc(s.webhook_secret) + '</span></div>' : '';
+          var last = s.last_scan_at ? 'Last scanned: ' + new Date(s.last_scan_at).toLocaleString() : 'Not yet scanned';
+          return '<div class="sched-item">'
+            + '<div class="sched-header">' + badge + '<span class="sched-label">' + esc(s.label) + '</span></div>'
+            + '<div class="sched-meta"><div>' + esc(s.repo_url) + ' · <strong>' + esc(s.branch) + '</strong>' + extra + '</div>' + secret + '<div>' + last + '</div></div>'
+            + '<div class="sched-actions"><button class="btn btn-danger btn-sm" data-action="delete-schedule" data-id="' + esc(s.id) + '" type="button">Remove</button></div>'
+            + '</div>';
+        }).join('');
+      }
+
+      function copy(id) { navigator.clipboard.writeText(document.getElementById(id).textContent.trim()); }
+      function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+      // ── Event wiring ──────────────────────────────────────────────────────────
+      document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+      document.getElementById('fKind').addEventListener('change', onKindChange);
+      document.getElementById('addScheduleBtn').addEventListener('click', addSchedule);
+
+      // Delegation for copy buttons and delete buttons (rendered dynamically)
+      document.addEventListener('click', function (e) {
+        var copyBtn = e.target.closest('[data-copy-target]');
+        if (copyBtn) { copy(copyBtn.dataset.copyTarget); return; }
+        var delBtn = e.target.closest('[data-action="delete-schedule"]');
+        if (delBtn) { deleteSchedule(delBtn.dataset.id); }
+      });
+
+      // ── Background effects ────────────────────────────────────────────────────
+      (function randomizeWatermarks() {
+        var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+        if (!wms.length) return;
+        var placed = [];
+        function tooClose(top, left) {
+          for (var i = 0; i < placed.length; i++) {
+            if (Math.abs(placed[i][0] - top) < 16 && Math.abs(placed[i][1] - left) < 12) return true;
+          }
+          return false;
+        }
+        function pick(leftBand) {
+          for (var attempt = 0; attempt < 50; attempt++) {
+            var top = Math.random() * 88 + 2, left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+            if (!tooClose(top, left)) { placed.push([top, left]); return [top, left]; }
+          }
+          var top = Math.random() * 88 + 2, left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+          placed.push([top, left]); return [top, left];
+        }
+        var half = Math.floor(wms.length / 2);
+        wms.forEach(function (img, i) {
+          var pos = pick(i < half);
+          var size = Math.floor(Math.random() * 100 + 120);
+          img.style.cssText = 'width:' + size + 'px;top:' + pos[0].toFixed(1) + '%;left:' + pos[1].toFixed(1) + '%;transform:rotate(' + (Math.random() * 360).toFixed(1) + 'deg);opacity:' + (Math.random() * 0.08 + 0.12).toFixed(2) + ';';
+        });
+      })();
+
+      (function spawnCodeParticles() {
+        var container = document.getElementById('code-particles');
+        if (!container) return;
+        var snippets = ['1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312','// comment','pub fn run','use std::fs','Result<()>','let mut n = 0','git main','#[derive]','impl Scan','3,841 physical','files: 60','450 comments','cargo build','Ok(run)','Vec<String>','match lang','fn main() {','.rs .go .py','sloc_core','render_html','2,163 code'];
+        for (var i = 0; i < 38; i++) {
+          (function (idx) {
+            var el = document.createElement('span');
+            el.className = 'code-particle';
+            el.textContent = snippets[idx % snippets.length];
+            el.style.cssText = 'left:' + (Math.random() * 94 + 2).toFixed(1) + '%;top:' + (Math.random() * 88 + 6).toFixed(1) + '%;--rot:' + (Math.random() * 26 - 13).toFixed(1) + 'deg;--op:' + (Math.random() * 0.09 + 0.06).toFixed(3) + ';animation-duration:' + (Math.random() * 10 + 9).toFixed(1) + 's;animation-delay:-' + (Math.random() * 18).toFixed(1) + 's;';
+            container.appendChild(el);
+          })(i);
+        }
+      })();
+
+      document.getElementById('wip-proceed-btn').addEventListener('click', function () {
+        document.getElementById('wip-overlay').style.display = 'none';
+      });
+
+      applyTheme();
       loadSchedules();
-    }
-    async function loadSchedules(){
-      const r=await fetch('/api/schedules');
-      if(!r.ok)return;
-      const data=await r.json();
-      const el=document.getElementById('scheduleList');
-      const list=data.schedules||[];
-      if(!list.length){el.innerHTML='<div class="empty-state">No schedules configured yet.</div>';return;}
-      el.innerHTML=list.map(s=>{
-        const badge=s.kind==='webhook'?'<span class="sched-badge badge-webhook">Webhook</span>':'<span class="sched-badge badge-poll">Poll</span>';
-        const extra=s.interval_secs?` · every ${s.interval_secs}s`:s.provider&&s.provider!=='any'?` · ${esc(s.provider)}`:'';
-        const secret=s.webhook_secret?`<div>Secret: <span class="sched-secret">${esc(s.webhook_secret)}</span></div>`:'';
-        const last=s.last_scan_at?`Last scanned: ${new Date(s.last_scan_at).toLocaleString()}`:'Not yet scanned';
-        return`<div class="sched-item"><div class="sched-header">${badge}<span class="sched-label">${esc(s.label)}</span></div>
-          <div class="sched-meta"><div>${esc(s.repo_url)} · <strong>${esc(s.branch)}</strong>${extra}</div>${secret}<div>${last}</div></div>
-          <div class="sched-actions"><button class="btn btn-danger btn-sm" onclick="deleteSchedule('${esc(s.id)}')">Remove</button></div></div>`;
-      }).join('');
-    }
-    function copy(id){navigator.clipboard.writeText(document.getElementById(id).textContent.trim());}
-    function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-    loadSchedules();
+    })();
   </script>
 </body>
 </html>"##,
@@ -445,7 +578,7 @@ fn scan_commit(
     create_worktree(&dest, sha, &wt_path)?;
     let result = scan_path_to_artifacts(&wt_path, config, label);
     let _ = destroy_worktree(&dest, &wt_path);
-    result
+    result.map(|(run_id, _artifacts, _run)| run_id)
 }
 
 // ── polling ───────────────────────────────────────────────────────────────────

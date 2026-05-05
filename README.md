@@ -21,14 +21,68 @@ oxide-sloc analyze ./my-repo --plain
 
 **Or use a pre-built binary:**
 
-| Platform | Install | Launch |
-|---|---|---|
-| **Windows 10/11** | `bash scripts/install.sh` (Git Bash) | `bash scripts/run.sh` (Git Bash) |
-| **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` |
+| Platform | Install | Launch (localhost) | Launch (LAN server) |
+|---|---|---|---|
+| **Windows 10/11** | `bash scripts/install.sh` (Git Bash) | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
+| **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-The install script uses a pre-built binary from `dist/` if present, or builds from vendored sources when Rust is available. On success, the web UI opens at **http://127.0.0.1:4317**.
+The install script uses a pre-built binary from `dist/` if present, or builds from vendored sources when Rust is available (will offer to install Rust via rustup if it isn't found). On success, the web UI opens at **http://127.0.0.1:4317**.
 
 For air-gapped setup, CI, and Docker, see [`docs/airgap.md`](./docs/airgap.md).
+
+---
+
+## Host on your LAN
+
+Make oxide-sloc reachable from any device on the same network (teammates, phones, test VMs).
+
+**Quickest path — dedicated server script:**
+
+```bash
+bash scripts/serve-server.sh
+```
+
+This auto-generates an API key, prints every LAN address the server is reachable on, and gives you a ready-made `curl` test command.
+
+**Or use the regular launcher with the `--host` flag:**
+
+```bash
+bash scripts/run.sh --host
+# equivalent: SLOC_HOST=1 bash scripts/run.sh
+```
+
+**Or run the binary directly:**
+
+```bash
+export SLOC_API_KEY=$(openssl rand -hex 32)
+oxide-sloc serve --server          # binds to 0.0.0.0:4317
+```
+
+**Find your LAN IP:**
+
+| Platform | Command |
+|---|---|
+| Linux / macOS | `hostname -I` |
+| Windows | `ipconfig` (look for IPv4 Address) |
+
+Then open `http://<your-ip>:4317` from any device on the same network.
+
+**Authentication:** when an API key is set, every request must include it:
+
+```bash
+curl -H "Authorization: Bearer $SLOC_API_KEY" http://<your-ip>:4317/healthz
+```
+
+**Firewall (Linux):**
+
+```bash
+sudo ufw allow 4317/tcp            # UFW
+sudo firewall-cmd --add-port=4317/tcp --permanent  # firewalld
+```
+
+On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
+
+> **Docker:** the published image already binds to `0.0.0.0:4317`. See [Path B — Docker](#path-b--docker) below and [`docs/server-deployment.md`](./docs/server-deployment.md) for persistent deployments.
 
 ---
 

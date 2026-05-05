@@ -6,7 +6,7 @@
 # The vendor-sync job in ci.yml will fail the build if there is a real mismatch.
 #
 # Install: git config core.hooksPath .githooks
-# (or run: bash scripts/install-hooks.sh)
+# (or run: bash scripts/internal/install-hooks.sh)
 
 CARGO_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'Cargo\.(toml|lock)$' || true)
 VENDOR_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'vendor\.tar\.xz(\.sha256)?$' || true)
@@ -16,7 +16,7 @@ if [ -n "$CARGO_CHANGED" ] && [ -z "$VENDOR_CHANGED" ]; then
     echo "  ┌─────────────────────────────────────────────────────────────────┐"
     echo "  │  WARNING: Cargo.toml/Cargo.lock changed — vendor.tar.xz not    │"
     echo "  │  If you added, removed, or updated a dependency, run:           │"
-    echo "  │    bash scripts/update-vendor.sh                                │"
+    echo "  │    bash scripts/internal/update-vendor.sh                      │"
     echo "  │    git add vendor.tar.xz vendor.tar.xz.sha256                  │"
     echo "  │  Version-only bumps (no dep changes) can ignore this warning.  │"
     echo "  │  CI will fail if vendor.tar.xz is actually out of sync.         │"

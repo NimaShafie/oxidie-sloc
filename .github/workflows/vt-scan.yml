@@ -1,0 +1,232 @@
+name: VirusTotal scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >
+          Release tag to scan (e.g. v1.4.0).
+          Leave blank to build from the current HEAD of the branch you run this on.
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  vt-scan:
+    name: VirusTotal scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    continue-on-error: false
+    env:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
+    steps:
+      - name: Verify API key is configured
+        shell: bash
+        run: |
+          if [ -z "$VT_API_KEY" ]; then
+            echo "VT_API_KEY secret is not set. Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "VT_API_KEY is configured."
+
+      # ── Path A: download binaries from an existing release tag ──────────────
+
+      - name: Download release binaries (tag mode)
+        if: inputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p binaries
+          # Download all release assets, then keep only the platform binaries
+          gh release download "${{ inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --dir binaries/
+          # Remove non-binary files
+          find binaries/ -maxdepth 1 \
+            \( -name "*.sig" -o -name "*.bundle" -o -name "*.asc" \
+               -o -name "*.sha256" -o -name "*.txt" -o -name "*.xz" \) \
+            -delete
+          echo "Binaries to scan:"
+          ls -lh binaries/
+
+      # ── Path B: build from HEAD (no tag given) ───────────────────────────────
+
+      - name: Checkout (HEAD mode)
+        if: inputs.tag == ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust (HEAD mode)
+        if: inputs.tag == ''
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo (HEAD mode)
+        if: inputs.tag == ''
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+
+      - name: Install system dependencies (HEAD mode)
+        if: inputs.tag == ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libgtk-3-dev libxdo-dev
+
+      - name: Build release binary (HEAD mode)
+        if: inputs.tag == ''
+        run: |
+          cargo build --release -p oxide-sloc
+          mkdir -p binaries
+          cp target/release/oxide-sloc binaries/oxide-sloc-dev-$(git rev-parse --short HEAD)
+          echo "Built binary:"
+          ls -lh binaries/
+
+      # ── VirusTotal scan (shared) ─────────────────────────────────────────────
+
+      - name: Run VirusTotal scan
+        shell: bash
+        run: |
+          mkdir -p vt-report
+          python3 << 'PYEOF'
+          import glob, json, os, sys, time, urllib.error, urllib.request
+
+          VT_API_KEY   = os.environ["VT_API_KEY"]
+          REPORT_PATH  = "vt-report/vt-scan-summary.md"
+          SUMMARY_PATH = os.environ.get("GITHUB_STEP_SUMMARY", "")
+
+          binaries = sorted([
+              f for f in glob.glob("binaries/*")
+              if os.path.isfile(f)
+              and not any(f.endswith(ext) for ext in
+                          (".sig", ".bundle", ".asc", ".sha256", ".txt", ".md", ".xz"))
+          ])
+
+          if not binaries:
+              print("No binaries found in binaries/ — nothing to scan.", file=sys.stderr)
+              sys.exit(1)
+
+          def vt_request(method, url, files=None):
+              headers = {"x-apikey": VT_API_KEY}
+              if files:
+                  boundary = "----VTBoundary0xideSLOC"
+                  parts = []
+                  for field, (fname, data, ct) in files.items():
+                      parts.append((
+                          f"--{boundary}\r\nContent-Disposition: form-data; "
+                          f'name="{field}"; filename="{fname}"\r\nContent-Type: {ct}\r\n\r\n'
+                      ).encode() + data + b"\r\n")
+                  body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+                  headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+                  req = urllib.request.Request(url, data=body, headers=headers, method=method)
+              else:
+                  req = urllib.request.Request(url, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      return json.loads(r.read().decode())
+              except urllib.error.HTTPError as e:
+                  raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from e
+
+          rows = []
+          timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+          any_flagged = False
+
+          for idx, path in enumerate(binaries):
+              name = os.path.basename(path)
+              size = os.path.getsize(path)
+              print(f"\nUploading {name} ({size:,} bytes)...", flush=True)
+
+              with open(path, "rb") as fh:
+                  data = fh.read()
+
+              try:
+                  resp = vt_request("POST", "https://www.virustotal.com/api/v3/files",
+                                    files={"file": (name, data, "application/octet-stream")})
+              except RuntimeError as exc:
+                  print(f"  Upload failed: {exc}", file=sys.stderr)
+                  rows.append(f"| `{name}` | N/A | N/A | N/A | N/A | upload failed |")
+                  if idx < len(binaries) - 1:
+                      time.sleep(16)
+                  continue
+
+              analysis_id = resp.get("data", {}).get("id", "")
+              if not analysis_id:
+                  print("  No analysis ID returned.", file=sys.stderr)
+                  rows.append(f"| `{name}` | N/A | N/A | N/A | N/A | no analysis ID |")
+                  if idx < len(binaries) - 1:
+                      time.sleep(16)
+                  continue
+
+              report_url = f"https://www.virustotal.com/gui/analysis/{analysis_id}"
+              print(f"  Analysis ID: {analysis_id}")
+              print(f"  Report:      {report_url}")
+              print("  Polling (max 10 × 30s)...", flush=True)
+
+              stats = None
+              for attempt in range(10):
+                  time.sleep(30)
+                  try:
+                      poll = vt_request("GET",
+                                        f"https://www.virustotal.com/api/v3/analyses/{analysis_id}")
+                  except RuntimeError as exc:
+                      print(f"  Attempt {attempt+1}/10: error — {exc}", file=sys.stderr)
+                      continue
+                  status = poll.get("data", {}).get("attributes", {}).get("status", "")
+                  print(f"  Attempt {attempt+1}/10: {status}", flush=True)
+                  if status == "completed":
+                      stats = poll["data"]["attributes"].get("stats", {})
+                      break
+
+              if stats is not None:
+                  m = stats.get("malicious",  0)
+                  s = stats.get("suspicious", 0)
+                  u = stats.get("undetected", 0)
+                  h = stats.get("harmless",   0)
+                  if m > 0 or s > 0:
+                      any_flagged = True
+                  rows.append(f"| `{name}` | {m} | {s} | {u} | {h} | [View]({report_url}) |")
+              else:
+                  rows.append(f"| `{name}` | ⏳ | ⏳ | ⏳ | ⏳ | [View]({report_url}) |")
+
+              if idx < len(binaries) - 1:
+                  print("  Sleeping 16s before next upload (free-tier rate limit)...", flush=True)
+                  time.sleep(16)
+
+          header = (
+              "## VirusTotal Scan Results\n\n"
+              "| Binary | Malicious | Suspicious | Undetected | Harmless | Report |\n"
+              "|--------|-----------|------------|------------|---------|--------|"
+          )
+          body_lines = [header] + rows + [
+              "",
+              f"*Scanned at: {timestamp} UTC*",
+              "",
+              "*False positives are common for freshly compiled Rust binaries. "
+              "Zero malicious detections is the expected result. "
+              "Open any report link and click 'Is this a false positive?' to dispute a detection.*",
+          ]
+          report_text = "\n".join(body_lines) + "\n"
+
+          with open(REPORT_PATH, "w") as fh:
+              fh.write(report_text)
+
+          if SUMMARY_PATH:
+              with open(SUMMARY_PATH, "a") as fh:
+                  fh.write(report_text)
+
+          print("\n" + report_text)
+
+          if any_flagged:
+              print("WARNING: one or more binaries were flagged. See report links above.", file=sys.stderr)
+
+          sys.exit(0)
+          PYEOF
+
+      - name: Upload VT scan report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vt-scan-report-${{ github.run_number }}
+          path: vt-report/

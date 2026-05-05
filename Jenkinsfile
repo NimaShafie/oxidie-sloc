@@ -516,7 +516,7 @@ CARGOEOF
 
         // ── 5. SonarQube scan ──────────────────────────────────────────────────
         // Runs cargo clippy in JSON mode, converts to SonarQube generic-issue
-        // format via scripts/clippy_to_sonar.py, optionally generates test
+        // format via scripts/internal/clippy_to_sonar.py, optionally generates test
         // coverage via ci/sonar/generate-coverage.sh, then launches the scanner
         // container. Results appear in the SonarQube dashboard at http://10.0.0.8:9000
         //
@@ -538,7 +538,7 @@ CARGOEOF
                            -A clippy::multiple_crate_versions \
                         > clippy.json 2> clippy.stderr || true
 
-                    python3 scripts/clippy_to_sonar.py \
+                    python3 scripts/internal/clippy_to_sonar.py \
                         clippy.json clippy-sonar.json "$WORKSPACE"
                 '''
 

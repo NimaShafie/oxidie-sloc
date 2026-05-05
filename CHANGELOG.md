@@ -10,6 +10,62 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.1] — 2026-05-04
+
+### Added
+
+- **LAN server launcher** (`scripts/serve-server.sh`): Dedicated script to start oxide-sloc in
+  server mode (binds to `0.0.0.0:4317`). Auto-generates an API key, prints every LAN address the
+  server is reachable on, and shows a ready-made `curl` test command. Also add `--host` flag and
+  `SLOC_HOST=1` env var to `run.sh` as an alternative.
+- **Auto-install Rust via rustup** (`scripts/install.sh`): When no pre-built binary is found and
+  Rust is not installed, the installer now detects internet connectivity and offers to install Rust
+  via `rustup`. New `--auto` flag installs without prompting (useful in CI).
+- **VirusTotal scanning workflow** (`.github/workflows/vt-scan.yml`): Manual `workflow_dispatch`
+  action that uploads compiled release binaries to VirusTotal and publishes a markdown scan report
+  as a job summary. Supports both tag mode (scans an existing release) and HEAD mode (builds from
+  current branch).
+- **Integration test harness** (`crates/sloc-web/tests/integration.rs`): Initial integration test
+  suite using the new `make_test_router()` entry point, covering core web routes without a live
+  TCP binding.
+- **`/locate-reports-dir` route**: New web endpoint to open a native directory-picker dialog
+  specifically for selecting a reports output directory.
+
+### Fixed
+
+- **Webhook payload hardening** (`sloc-git/webhook.rs`): Replaced silent empty-string fallbacks
+  with proper error propagation in all three webhook parsers (GitHub, GitLab, Bitbucket). Malformed
+  or incomplete payloads now return descriptive errors instead of silently triggering scans with
+  blank repository URLs or commit SHAs.
+- **`ScanScheduleProvider` serialization** (`sloc-git/schedule.rs`): Changed from
+  `rename_all = "snake_case"` to explicit per-variant `serde(rename = …)` attributes to ensure
+  correct lowercase round-trip serialization (`github`, `gitlab`, `bitbucket`, `any`).
+- **Git ref date format** (`sloc-git/ops.rs`): Changed `--format` date specifier from `iso8601`
+  to `iso-strict` (RFC 3339) for branch and tag listing, fixing date parsing in environments
+  where the `iso8601` alias is not available.
+- **Git shallow clone depth** (`sloc-git/ops.rs`): Added `--depth=50` to `clone_or_fetch` so
+  the git browser does not download the full history of large repositories.
+- **PDF page layout** (`sloc-report/lib.rs`): Changed `@page` CSS from A4 landscape to A4
+  portrait with tighter margins; fixes reports that were clipped or had excessive whitespace when
+  exported to PDF.
+- **Print page-break control** (`sloc-report/lib.rs`): `.hero` moved to `break-inside: auto`
+  so large summary tables are not forced onto a single page, preventing blank-page artefacts.
+- **CSP nonce plumbing** (`sloc-report/lib.rs`): Added `nonce` field to `ReportTemplate` and
+  `nonce="{{ nonce }}"` attribute on the inline `<style>` tag so the web server can inject a
+  per-request Content-Security-Policy nonce.
+
+### Changed
+
+- **Scripts reorganisation**: Internal maintenance scripts (`airgap-build.sh`,
+  `clippy_to_sonar.py`, `install-hooks.sh`, `make-airgap-kit.sh`, `update-vendor.sh`,
+  `vt-scan.py`) moved to `scripts/internal/`. All CI workflow references updated accordingly.
+- **Router extraction** (`sloc-web/lib.rs`): `build_router()` extracted from `serve()` and made
+  separately callable; `make_test_router()` added as a public entry point for test code.
+- **README**: Added "Host on your LAN" section documenting `serve-server.sh`, firewall commands,
+  and authentication usage for LAN deployments.
+
+---
+
 ## [1.4.0] — 2026-05-03
 
 ### Added

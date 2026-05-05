@@ -13,7 +13,7 @@
 
 ## Option A — Fully self-contained kit (recommended)
 
-Run `scripts/make-airgap-kit.sh` on any **networked** machine to produce a single archive
+Run `scripts/internal/make-airgap-kit.sh` on any **networked** machine to produce a single archive
 that contains everything needed to build oxide-sloc on a machine with no internet access,
 no pre-installed Rust, and no system C compiler.
 
@@ -35,11 +35,11 @@ runtime library dependencies.
 
 ```bash
 # Auto-detect arch (Linux x86_64 or arm64):
-bash scripts/make-airgap-kit.sh
+bash scripts/internal/make-airgap-kit.sh
 
 # Or specify explicitly:
-bash scripts/make-airgap-kit.sh linux-x86_64
-bash scripts/make-airgap-kit.sh linux-arm64
+bash scripts/internal/make-airgap-kit.sh linux-x86_64
+bash scripts/internal/make-airgap-kit.sh linux-arm64
 
 # Output: oxide-sloc-airgap-kit-{platform}-v{version}.tar.gz  (~700 MB)
 ```
@@ -133,11 +133,11 @@ tar -czf oxide-sloc-bundle.tar.gz \
 
 # Transfer, then on the air-gapped machine:
 tar xzf oxide-sloc-bundle.tar.gz
-bash scripts/airgap-build.sh vendor.tar.xz
+bash scripts/internal/airgap-build.sh vendor.tar.xz
 # Binary lands at: target/release/oxide-sloc
 ```
 
-`scripts/airgap-build.sh` verifies the vendor checksum, extracts, writes
+`scripts/internal/airgap-build.sh` verifies the vendor checksum, extracts, writes
 `.cargo/config.toml`, and runs `cargo build --release --offline`.
 
 > **What vendor.tar.xz covers:** All Rust crate source dependencies (~328 crates).

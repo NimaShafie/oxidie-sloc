@@ -63,10 +63,16 @@ fn constant_eq_str(a: &str, b: &str) -> bool {
 /// Parse a GitHub `push` webhook payload.
 pub fn parse_github_push(body: &[u8]) -> Result<WebhookEvent> {
     let v: serde_json::Value = serde_json::from_slice(body)?;
-    let repo_url = string_at(&v, &["repository", "clone_url"]);
-    let ref_str = v["ref"].as_str().unwrap_or("");
+    let repo_url = require_str(&v, &["repository", "clone_url"], "repository.clone_url")?;
+    let ref_str = v["ref"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing field: ref"))?;
     let branch = strip_refs_heads(ref_str);
-    let commit_sha = v["after"].as_str().unwrap_or("").to_owned();
+    let commit_sha = v["after"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing field: after"))?
+        .to_owned();
     let pusher = v["pusher"]["name"].as_str().map(str::to_owned);
     Ok(WebhookEvent {
         provider: WebhookProvider::GitHub,
@@ -80,10 +86,16 @@ pub fn parse_github_push(body: &[u8]) -> Result<WebhookEvent> {
 /// Parse a GitLab `push` webhook payload.
 pub fn parse_gitlab_push(body: &[u8]) -> Result<WebhookEvent> {
     let v: serde_json::Value = serde_json::from_slice(body)?;
-    let repo_url = string_at(&v, &["project", "git_http_url"]);
-    let ref_str = v["ref"].as_str().unwrap_or("");
+    let repo_url = require_str(&v, &["project", "git_http_url"], "project.git_http_url")?;
+    let ref_str = v["ref"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing field: ref"))?;
     let branch = strip_refs_heads(ref_str);
-    let commit_sha = v["checkout_sha"].as_str().unwrap_or("").to_owned();
+    let commit_sha = v["checkout_sha"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing field: checkout_sha"))?
+        .to_owned();
     let pusher = v["user_username"].as_str().map(str::to_owned);
     Ok(WebhookEvent {
         provider: WebhookProvider::GitLab,
@@ -97,10 +109,19 @@ pub fn parse_gitlab_push(body: &[u8]) -> Result<WebhookEvent> {
 /// Parse a Bitbucket Server / Cloud `push` webhook payload.
 pub fn parse_bitbucket_push(body: &[u8]) -> Result<WebhookEvent> {
     let v: serde_json::Value = serde_json::from_slice(body)?;
-    let repo_url = extract_bitbucket_clone_url(&v);
+    let repo_url = extract_bitbucket_clone_url(&v)
+        .ok_or_else(|| anyhow::anyhow!("missing field: repository.links.clone[https].href"))?;
     let push = &v["push"]["changes"][0]["new"];
-    let branch = push["name"].as_str().unwrap_or("").to_owned();
-    let commit_sha = push["target"]["hash"].as_str().unwrap_or("").to_owned();
+    let branch = push["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing field: push.changes[0].new.name"))?
+        .to_owned();
+    let commit_sha = push["target"]["hash"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing field: push.changes[0].new.target.hash"))?
+        .to_owned();
     let pusher = v["actor"]["display_name"].as_str().map(str::to_owned);
     Ok(WebhookEvent {
         provider: WebhookProvider::Bitbucket,
@@ -113,23 +134,25 @@ pub fn parse_bitbucket_push(body: &[u8]) -> Result<WebhookEvent> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn string_at(v: &serde_json::Value, path: &[&str]) -> String {
-    path.iter()
+fn require_str(v: &serde_json::Value, path: &[&str], field: &str) -> Result<String> {
+    let s = path
+        .iter()
         .fold(v, |cur, key| &cur[key])
         .as_str()
-        .unwrap_or("")
-        .to_owned()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing field: {field}"))?;
+    Ok(s.to_owned())
 }
 
 fn strip_refs_heads(r: &str) -> String {
     r.strip_prefix("refs/heads/").unwrap_or(r).to_owned()
 }
 
-fn extract_bitbucket_clone_url(v: &serde_json::Value) -> String {
+fn extract_bitbucket_clone_url(v: &serde_json::Value) -> Option<String> {
     v["repository"]["links"]["clone"]
         .as_array()
         .and_then(|arr| arr.iter().find(|e| e["name"] == "https"))
         .and_then(|e| e["href"].as_str())
-        .unwrap_or("")
-        .to_owned()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
