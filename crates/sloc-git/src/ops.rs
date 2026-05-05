@@ -32,7 +32,10 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
         std::fs::create_dir_all(dest).context("failed to create clone directory")?;
         let dest_str = dest.to_str().unwrap_or(".");
         let parent = dest.parent().unwrap_or(dest);
-        run_git(parent, &["clone", "--no-single-branch", url, dest_str])?;
+        run_git(
+            parent,
+            &["clone", "--no-single-branch", "--depth=50", url, dest_str],
+        )?;
     }
     Ok(())
 }
@@ -70,7 +73,7 @@ pub fn list_refs(repo: &Path) -> Result<RepoRefs> {
 }
 
 fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
-    let fmt = "%(refname:short)|%(objectname:short)|%(creatordate:iso8601)|%(subject)";
+    let fmt = "%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)";
     let out = run_git(repo, &["branch", "-a", &format!("--format={fmt}")])?;
     out.lines()
         .filter(|l| !l.trim().is_empty())
@@ -79,7 +82,7 @@ fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
 }
 
 fn list_tags(repo: &Path) -> Result<Vec<GitRef>> {
-    let fmt = "%(refname:short)|%(objectname:short)|%(creatordate:iso8601)|%(subject)";
+    let fmt = "%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)";
     let out = run_git(
         repo,
         &["tag", "--sort=-creatordate", &format!("--format={fmt}")],

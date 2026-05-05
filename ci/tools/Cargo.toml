@@ -9,7 +9,7 @@ publish = false
 # source trees in vendor.tar.xz, making them installable on air-gapped
 # agents with `cargo install --offline <crate-name>`.
 #
-# To add a new tool: append it here, re-run `bash scripts/update-vendor.sh`,
+# To add a new tool: append it here, re-run `bash scripts/internal/update-vendor.sh`,
 # then commit vendor.tar.xz + vendor.tar.xz.sha256.
 
 [dependencies]

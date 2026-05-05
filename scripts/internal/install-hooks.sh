@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Point git at the project-local hooks directory.
-# Run once after cloning: bash scripts/install-hooks.sh
+# Run once after cloning: bash scripts/internal/install-hooks.sh
 set -euo pipefail
 git config core.hooksPath .githooks
 chmod +x .githooks/*

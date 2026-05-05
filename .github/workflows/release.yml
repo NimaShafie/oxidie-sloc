@@ -236,7 +236,7 @@ jobs:
           toolchain: stable
 
       - name: Generate vendor archive
-        run: bash scripts/update-vendor.sh
+        run: bash scripts/internal/update-vendor.sh
 
       - name: Upload vendor archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -676,7 +676,7 @@ jobs:
 
             ```bash
             # Download source + vendor archive from this release, then on the air-gapped machine:
-            bash scripts/airgap-build.sh vendor.tar.xz
+            bash scripts/internal/airgap-build.sh vendor.tar.xz
             ```
 
             ## Or build from source (requires Rust 1.95+)

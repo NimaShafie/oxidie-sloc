@@ -6,7 +6,7 @@
 # source tarball, then transfer both to the air-gapped system.
 #
 # On the air-gapped system, run:
-#   bash scripts/airgap-build.sh [vendor.tar.xz]
+#   bash scripts/internal/airgap-build.sh [vendor.tar.xz]
 #
 # Requirements: Rust toolchain (see rust-toolchain.toml), tar, sha256sum.
 set -euo pipefail

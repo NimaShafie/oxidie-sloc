@@ -14,7 +14,7 @@
 #   bash ci/jenkins/install-vendor-cache.sh /path/to/vendor.tar.xz
 #
 #   # Option C — regenerate from the current workspace (requires Cargo online once):
-#   bash scripts/update-vendor.sh
+#   bash scripts/internal/update-vendor.sh
 #   bash ci/jenkins/install-vendor-cache.sh vendor.tar.xz
 #
 # After staging, transfer the persistent cache directory to the air-gapped host:
@@ -58,7 +58,7 @@ else
             echo "       $0 --download vX.Y.Z" >&2
             echo "" >&2
             echo "Generate a fresh archive first with:" >&2
-            echo "  bash scripts/update-vendor.sh" >&2
+            echo "  bash scripts/internal/update-vendor.sh" >&2
             exit 1
         fi
     fi

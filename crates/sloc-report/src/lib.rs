@@ -84,6 +84,9 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
     let small_logo_uri = png_data_uri(SMALL_LOGO_PNG);
 
     let template = ReportTemplate {
+        // Empty nonce for disk-saved reports; patch_html_nonce replaces it
+        // with the request nonce when serving from the web server.
+        nonce: String::new(),
         title: run.effective_configuration.reporting.report_title.clone(),
         browser_title: format!(
             "Oxide-SLOC | {}",
@@ -801,7 +804,7 @@ struct WarningOpportunityRow {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ browser_title }}</title>
   <link rel="icon" href="{{ small_logo_uri }}" type="image/png" />
-  <style>
+  <style nonce="{{ nonce }}">
     :root {
       --radius: 18px;
       --bg: #f5efe8;
@@ -973,8 +976,8 @@ struct WarningOpportunityRow {
     }
     /* ── Print & PDF export ──────────────────────────────────────────── */
     @page {
-      size: A4 landscape;
-      margin: 0.45in 0.5in;
+      size: A4 portrait;
+      margin: 0.4in 0.45in;
     }
 
     @media print {
@@ -1046,13 +1049,13 @@ struct WarningOpportunityRow {
       .metric-value { font-size: 20px !important; }
       .metric-label { font-size: 10px !important; }
 
-      /* Page break control — only small cards get break-inside:avoid.
-         Panels and stacks that contain large tables must be allowed to break
-         across pages; giving them break-inside:avoid causes blank pages. */
-      .metric, .warning-card { break-inside: avoid !important; }
-      .hero { break-inside: avoid !important; }
-      .panel, .stack { break-inside: auto !important; }
+      /* Page break control — small atomic cards stay together; large panels
+         and tables flow freely so they never force blank pages. */
+      .metric, .warning-card, .run-id-chip { break-inside: avoid !important; }
+      .hero, .panel, .stack { break-inside: auto !important; }
       section { break-inside: auto !important; }
+      /* Keep the summary grid on the same page as the hero header when possible */
+      .summary-grid { break-before: avoid !important; }
 
       /* Tables */
       .table-shell {
@@ -1292,52 +1295,6 @@ struct WarningOpportunityRow {
     </section>
 
     <div class="report-stack">
-      {% if !is_sub_report %}
-      <section class="panel stack">
-        <div>
-          <div class="toolbar"><div class="toolbar-left"><h2>Warnings and next improvements</h2></div><div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">{{ warning_count }} total warnings</span></div></div>
-          {% if !has_run_warnings %}
-            <div class="pill good">No top-level warnings.</div>
-          {% else %}
-            <div class="warning-grid">
-              {% for row in warning_summary_rows %}
-              <div class="warning-card {{ row.tone_class }}">
-                <h3>{{ row.label }}</h3>
-                <div class="count">{{ row.count }}</div>
-                <div class="support-note">{{ row.detail }}</div>
-              </div>
-              {% endfor %}
-            </div>
-          {% endif %}
-        </div>
-
-        <div>
-          <h2>High-value support opportunities</h2>
-          <p class="support-note">This groups the noisy unsupported warnings into the next format buckets most worth classifying or supporting in the analysis core.</p>
-          {% if warning_opportunity_rows.is_empty() %}
-            <div class="pill good">No unsupported text-format buckets detected.</div>
-          {% else %}
-          <div class="table-shell">
-            <table class="support-table">
-              <thead>
-                <tr><th>Opportunity</th><th>Count</th><th>Recommended next move</th></tr>
-              </thead>
-              <tbody>
-                {% for row in warning_opportunity_rows %}
-                <tr>
-                  <td>{{ row.label }}</td>
-                  <td>{{ row.count }}</td>
-                  <td class="small">{{ row.recommendation }}</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-          {% endif %}
-        </div>
-      </section>
-      {% endif %}
-
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
@@ -1445,6 +1402,52 @@ struct WarningOpportunityRow {
         </div>
       </section>
 
+      {% if !is_sub_report %}
+      <section class="panel stack">
+        <div>
+          <div class="toolbar"><div class="toolbar-left"><h2>Warnings and next improvements</h2></div><div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">{{ warning_count }} total warnings</span></div></div>
+          {% if !has_run_warnings %}
+            <div class="pill good">No top-level warnings.</div>
+          {% else %}
+            <div class="warning-grid">
+              {% for row in warning_summary_rows %}
+              <div class="warning-card {{ row.tone_class }}">
+                <h3>{{ row.label }}</h3>
+                <div class="count">{{ row.count }}</div>
+                <div class="support-note">{{ row.detail }}</div>
+              </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+
+        <div>
+          <h2>High-value support opportunities</h2>
+          <p class="support-note">This groups the noisy unsupported warnings into the next format buckets most worth classifying or supporting in the analysis core.</p>
+          {% if warning_opportunity_rows.is_empty() %}
+            <div class="pill good">No unsupported text-format buckets detected.</div>
+          {% else %}
+          <div class="table-shell">
+            <table class="support-table">
+              <thead>
+                <tr><th>Opportunity</th><th>Count</th><th>Recommended next move</th></tr>
+              </thead>
+              <tbody>
+                {% for row in warning_opportunity_rows %}
+                <tr>
+                  <td>{{ row.label }}</td>
+                  <td>{{ row.count }}</td>
+                  <td class="small">{{ row.recommendation }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+        </div>
+      </section>
+      {% endif %}
+
       <section class="panel stack">
         <div>
           <h2>Diagnostics &amp; Configuration</h2>
@@ -1489,7 +1492,7 @@ struct WarningOpportunityRow {
     </div>
   </div>
 
-  <script>
+  <script nonce="{{ nonce }}">
     // Hide "View PDF" button when the report is opened as a local file (not from web server)
     (function () {
       var pdfBtn = document.getElementById('nav-view-pdf-btn');
@@ -1687,7 +1690,7 @@ struct WarningOpportunityRow {
       // Code lines donut
       var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
       var cx=90,cy=90,Ro=70,Ri=38,DW=280,DH=Math.max(190,14+D.length*18);
-      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="100%" style="max-width:'+DW+'px;" xmlns="http://www.w3.org/2000/svg">';
+      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
       var ang=-Math.PI/2;
       D.forEach(function(d,i){
         var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
@@ -1710,7 +1713,7 @@ struct WarningOpportunityRow {
       // Per-language stacked bar
       var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
       var LW=82,BW=220,rHb=26,bH=20,SH=D.length*rHb+28;
-      var bs='<svg viewBox="0 0 '+(LW+BW+54)+' '+SH+'" width="100%" style="max-width:'+(LW+BW+54)+'px;" xmlns="http://www.w3.org/2000/svg">';
+      var bs='<svg viewBox="0 0 '+(LW+BW+54)+' '+SH+'" width="'+(LW+BW+54)+'" height="'+SH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
       D.forEach(function(d,i){
         var y=10+i*rHb,x=LW;
         var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
@@ -1725,9 +1728,9 @@ struct WarningOpportunityRow {
       bs+='<rect x="'+(LW+48)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+60)+'" y="'+(ly+9)+'" font-family="Calibri,Arial" font-size="9" font-weight="600" fill="#555">Comments</text>';
       bs+='<rect x="'+(LW+130)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+142)+'" y="'+(ly+9)+'" font-family="Calibri,Arial" font-size="9" font-weight="600" fill="#555">Blanks</text>';
       bs+='</svg>';
-      el.innerHTML='<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;justify-content:center;">'+
-        '<div style="flex:0 0 auto;"><p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 8px;">Code Lines by Language</p>'+ds+'</div>'+
-        '<div style="flex:0 0 auto;min-width:260px;"><p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 8px;">Line Mix per Language</p>'+bs+'</div>'+
+      el.innerHTML='<div style="display:flex;gap:32px;align-items:flex-start;">'+
+        '<div style="flex:0 0 auto;overflow:hidden;"><p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 8px;">Code Lines by Language</p>'+ds+'</div>'+
+        '<div style="flex:0 0 auto;overflow:hidden;"><p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 8px;">Line Mix per Language</p>'+bs+'</div>'+
         '</div>';
     })();
   </script>
@@ -1737,6 +1740,7 @@ struct WarningOpportunityRow {
     ext = "html"
 )]
 struct ReportTemplate<'a> {
+    nonce: String,
     title: String,
     browser_title: String,
     generated_display: String,

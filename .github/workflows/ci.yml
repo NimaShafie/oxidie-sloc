@@ -148,7 +148,7 @@ jobs:
         run: |
           if ! diff -rq vendor/ vendor-expected/ > /dev/null 2>&1; then
             echo "vendor.tar.xz is out of sync with Cargo.lock." >&2
-            echo "Run 'bash scripts/update-vendor.sh' and commit both updated files." >&2
+            echo "Run 'bash scripts/internal/update-vendor.sh' and commit both updated files." >&2
             diff -rq vendor/ vendor-expected/ >&2 || true
             exit 1
           fi

@@ -16,7 +16,12 @@ use serde::Deserialize;
 
 use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, list_refs, RepoRefs};
 
-use super::{git_clone_dest, scan_path_to_artifacts, AppState, CspNonce};
+use sloc_report::render_html;
+
+use super::{
+    build_run_registry_entry, git_clone_dest, sanitize_project_label, scan_path_to_artifacts,
+    AppState, CspNonce, RunArtifacts,
+};
 
 // ── query types ───────────────────────────────────────────────────────────────
 
@@ -55,6 +60,11 @@ pub(super) struct CompareRefsQuery {
     :root{--radius:14px;--bg:#f5efe8;--surface:rgba(255,255,255,0.9);--surface-2:#fbf7f2;--line:#e6d0bf;--line-strong:#d8bfad;--text:#43342d;--muted:#7b675b;--nav:#b85d33;--nav-2:#7a371b;--oxide:#d37a4c;--oxide-2:#b85d33;--accent-2:#2563eb;--shadow:0 8px 24px rgba(77,44,20,0.10);}
     body.dark-theme{--bg:#1b1511;--surface:#261c17;--surface-2:#2d221d;--line:#524238;--text:#f5ece6;--muted:#c7b7aa;--shadow:0 8px 24px rgba(0,0,0,0.32);}
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1400px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:12px;text-decoration:none;}
@@ -63,7 +73,10 @@ pub(super) struct CompareRefsQuery {
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     .nav-pill{display:inline-flex;align-items:center;min-height:34px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);}
-    .page{max-width:1400px;margin:0 auto;padding:32px 24px 60px;}
+    .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
+    .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;gap:7px;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:34px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .page{max-width:1400px;margin:0 auto;padding:32px 24px 60px;position:relative;z-index:1;}
     h1{font-size:26px;font-weight:850;margin:0 0 6px;letter-spacing:-0.03em;}
     .subtitle{color:var(--muted);font-size:14px;margin:0 0 28px;}
     .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:24px;box-shadow:var(--shadow);margin-bottom:20px;}
@@ -78,15 +91,24 @@ pub(super) struct CompareRefsQuery {
     .tab{padding:10px 20px;font-size:13px;font-weight:700;cursor:pointer;border-radius:8px 8px 0 0;border:none;background:none;color:var(--muted);}
     .tab.active{background:var(--oxide-2);color:#fff;}
     .tab-pane{display:none;padding-top:16px;}.tab-pane.active{display:block;}
-    .ref-table{width:100%;border-collapse:collapse;font-size:13px;}
+    .ref-table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}
+    .ref-table col.col-check{width:40px;}
+    .ref-table col.col-name{width:22%;}
+    .ref-table col.col-sha{width:88px;}
+    .ref-table col.col-date{width:92px;}
+    .ref-table col.col-msg{width:auto;}
+    .ref-table col.col-actions{width:96px;}
     .ref-table th{text-align:left;padding:8px 12px;color:var(--muted);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.06em;border-bottom:2px solid var(--line);}
     .ref-table td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:middle;}
-    .ref-table tr:hover td{background:var(--surface-2);}
+    .ref-table th:first-child,.ref-table td:first-child{padding-left:10px;padding-right:4px;}
+    .ref-table th:last-child,.ref-table td:last-child{text-align:right;padding-right:16px;}
+    .ref-table td.col-msg-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ref-table tbody tr{cursor:pointer;}.ref-table tr:hover td{background:var(--surface-2);}
     .sha-badge{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:2px 7px;color:var(--muted);}
     .kind-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;letter-spacing:.05em;}
     .kind-branch{background:#dcfce7;color:#166534;}.kind-tag{background:#ede9fe;color:#5b21b6;}
     body.dark-theme .kind-branch{background:#14532d;color:#86efac;}body.dark-theme .kind-tag{background:#2e1065;color:#c4b5fd;}
-    .row-actions{display:flex;gap:7px;}
+    .btn-scan{width:62px;white-space:nowrap;overflow:hidden;justify-content:center;}
     .compare-check{width:16px;height:16px;cursor:pointer;accent-color:var(--oxide);}
     .compare-bar{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--surface-2);border-radius:10px;border:1px solid var(--line);margin-top:14px;}
     .status-msg{padding:12px 16px;border-radius:9px;font-size:13px;font-weight:600;margin-top:12px;}
@@ -94,25 +116,134 @@ pub(super) struct CompareRefsQuery {
     .status-err{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;}
     body.dark-theme .status-ok{background:#14532d;color:#86efac;border-color:#166534;}
     body.dark-theme .status-err{background:#450a0a;color:#fca5a5;border-color:#991b1b;}
-    .spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;flex-shrink:0;}
     @keyframes spin{to{transform:rotate(360deg);}}
-    .date-cell{color:var(--muted);font-size:12px;}.msg-cell{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .skeleton-panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:24px;box-shadow:var(--shadow);margin-bottom:20px;}
+    .loading-info{display:flex;align-items:center;gap:10px;padding:0 0 18px;font-size:13px;font-weight:700;color:var(--oxide);}
+    .loading-spinner{display:inline-block;width:16px;height:16px;border:2.5px solid rgba(211,122,76,0.25);border-top-color:var(--oxide);border-radius:50%;animation:spin 0.75s linear infinite;flex-shrink:0;}
+    .sk{border-radius:6px;background:linear-gradient(90deg,var(--surface-2) 0%,var(--line) 50%,var(--surface-2) 100%);background-size:400% 100%;animation:shimmer 1.5s ease infinite;}
+    @keyframes shimmer{0%{background-position:100% 0;}100%{background-position:-100% 0;}}
+    .sk-tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid var(--line);padding-bottom:0;}
+    .sk-tab{height:38px;width:90px;border-radius:8px 8px 0 0;}
+    .sk-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);}
+    .sk-sm{height:13px;width:55px;}.sk-md{height:13px;width:110px;}.sk-lg{height:13px;flex:1;min-width:60px;}.sk-badge{height:20px;width:54px;border-radius:999px;}.sk-btn{height:26px;width:52px;border-radius:7px;}
+    .date-cell{color:var(--muted);font-size:12px;}
+    .panel-hidden{display:none !important;}
+    .empty-state{text-align:center;padding:44px 12px;color:var(--muted);font-size:13px;font-style:italic;}
     .theme-toggle{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);cursor:pointer;}
     .theme-toggle svg{width:16px;height:16px;stroke:#fff;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;}body.dark-theme .theme-toggle .icon-sun{display:block;}body.dark-theme .theme-toggle .icon-moon{display:none;}
+    /* ── Page header ── */
+    .page-header{display:flex;align-items:flex-start;gap:16px;}
+    .page-header-icon{flex:0 0 auto;width:44px;height:44px;border-radius:11px;background:linear-gradient(135deg,var(--oxide),var(--nav-2));display:flex;align-items:center;justify-content:center;}
+    .page-header-icon svg{width:22px;height:22px;stroke:#fff;fill:none;stroke-width:2;}
+    .page-header-body{flex:1;min-width:0;}
+    .page-header-title{font-size:24px;font-weight:900;margin:0 0 5px;letter-spacing:-0.03em;color:var(--text);}
+    .page-header-sub{font-size:13px;color:var(--muted);margin:0 0 11px;line-height:1.55;}
+    .page-header-chips{display:flex;flex-wrap:wrap;gap:7px;}
+    .page-header-chip{display:inline-flex;align-items:center;gap:5px;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;}
+    .page-header-chip svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2.5;flex:0 0 auto;}
+    /* ── Workflow steps ── */
+    .how-row{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:center;margin-bottom:20px;}
+    .how-step{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:15px 16px;display:flex;align-items:center;gap:13px;box-shadow:var(--shadow);}
+    .how-step-num{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--oxide),var(--nav-2));color:#fff;font-size:13px;font-weight:900;display:flex;align-items:center;justify-content:center;}
+    .how-step-body{min-width:0;}
+    .how-step-label{font-size:13px;font-weight:800;color:var(--text);}
+    .how-step-desc{font-size:11px;color:var(--muted);margin-top:2px;}
+    .how-arrow{color:var(--muted);font-size:20px;font-weight:200;text-align:center;padding:0 2px;opacity:0.6;}
+    @media(max-width:700px){.how-row{grid-template-columns:1fr;}.how-arrow{display:none;}}
+    /* ── URL card ── */
+    .fetch-card-header{display:flex;align-items:flex-start;gap:13px;margin-bottom:16px;}
+    .fetch-card-icon{flex:0 0 auto;width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,var(--oxide),var(--nav-2));display:flex;align-items:center;justify-content:center;}
+    .fetch-card-icon svg{width:19px;height:19px;stroke:#fff;fill:none;stroke-width:2;}
+    .fetch-card-title{font-size:15px;font-weight:800;margin:0 0 2px;}
+    .fetch-card-desc{font-size:12px;color:var(--muted);margin:0;}
+    .provider-row{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:13px;}
+    .provider-pill{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;border:1.5px solid transparent;user-select:none;}
+    .pp-github{background:#24292e12;color:#24292e;border-color:#24292e28;}body.dark-theme .pp-github{background:#ffffff10;color:#cdd9e5;border-color:#ffffff22;}
+    .pp-gitlab{background:#fc6d2612;color:#b84800;border-color:#fc6d2630;}body.dark-theme .pp-gitlab{background:#fc6d2612;color:#fc9c6a;border-color:#fc6d2640;}
+    .pp-bitbucket{background:#0052cc12;color:#003d99;border-color:#0052cc28;}body.dark-theme .pp-bitbucket{background:#0052cc15;color:#5b8fc9;border-color:#0052cc35;}
+    .input-with-icon{position:relative;flex:1;min-width:0;}
+    .input-with-icon .repo-input{width:100%;}
+    .input-icon-prefix{position:absolute;left:11px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--muted);}
+    .input-icon-prefix svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;}
+    .repo-input-padded{padding-left:34px;}
+    .card.fetch-card{padding-bottom:0;}
+    .fetch-footer{margin:14px -24px 0;padding:11px 24px 10px;background:var(--surface-2);border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius);font-size:12px;color:var(--muted);line-height:1.4;}
+    /* ── Tabs with icons ── */
+    .tab-inner{display:inline-flex;align-items:center;gap:6px;}
+    .tab-inner svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;opacity:0.65;flex:0 0 auto;}
+    .tab.active .tab-inner svg{opacity:1;}
+    .tab{display:inline-flex;align-items:center;}
+    .tab-count{background:rgba(255,255,255,0.22);color:rgba(255,255,255,0.9);font-size:10px;font-weight:800;padding:1px 6px;border-radius:999px;line-height:1;min-width:18px;text-align:center;display:none;margin-left:3px;vertical-align:middle;}
+    .tab-count.has-data{display:inline-flex;align-items:center;justify-content:center;}
+    .tab:not(.active) .tab-count{background:rgba(0,0,0,0.09);color:var(--muted);}
+    body.dark-theme .tab:not(.active) .tab-count{background:rgba(255,255,255,0.09);color:var(--muted);}
+    /* ── Ref panel header (loaded repo) ── */
+    .ref-panel-topbar{display:none;align-items:center;justify-content:space-between;padding:0 4px 14px;border-bottom:1px solid var(--line);margin-bottom:0;}
+    .ref-panel-topbar.visible{display:flex;}
+    .ref-panel-repo-label{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px;}
+    .ref-panel-repo-url{font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:480px;}
+    .ref-panel-badge{display:inline-flex;align-items:center;gap:5px;background:#dcfce7;color:#166534;border:1px solid #86efac;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;}
+    body.dark-theme .ref-panel-badge{background:#14532d;color:#86efac;border-color:#166534;}
+    .ref-panel-badge svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    /* ── Rich empty state ── */
+    .empty-rich{text-align:center;padding:52px 20px 42px;}
+    .empty-rich-icon{width:52px;height:52px;border-radius:14px;background:var(--surface-2);border:2px solid var(--line);display:inline-flex;align-items:center;justify-content:center;margin-bottom:13px;}
+    .empty-rich-icon svg{width:26px;height:26px;stroke:var(--muted);fill:none;stroke-width:1.5;}
+    .empty-rich-title{font-size:14px;font-weight:700;color:var(--text);margin:0 0 5px;}
+    .empty-rich-desc{font-size:12px;color:var(--muted);max-width:340px;margin:0 auto;line-height:1.5;}
+    /* ── Compare bar ── */
+    .compare-bar{display:flex;align-items:center;gap:12px;padding:13px 18px;background:linear-gradient(135deg,rgba(124,58,237,0.07),rgba(99,40,217,0.05));border-radius:10px;border:1.5px solid rgba(124,58,237,0.22);margin-top:16px;}
+    .compare-refs-label{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);flex:1;min-width:0;flex-wrap:wrap;}
+    .compare-refs-label svg{width:13px;height:13px;stroke:var(--muted);fill:none;stroke-width:2;flex-shrink:0;}
+    .compare-ref-tag{background:rgba(124,58,237,0.1);color:#5b21b6;border:1px solid rgba(124,58,237,0.22);border-radius:5px;padding:2px 8px;font-size:12px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap;overflow:hidden;max-width:160px;text-overflow:ellipsis;display:inline-block;vertical-align:middle;}
+    body.dark-theme .compare-ref-tag{background:rgba(167,139,250,0.1);color:#c4b5fd;border-color:rgba(167,139,250,0.22);}
+    .compare-vs{font-size:11px;font-weight:600;color:var(--muted);}
+    /* ── Pagination ── */
+    .pag-bar{display:flex;align-items:center;gap:6px;padding:10px 14px;border-top:1px solid var(--line);flex-wrap:wrap;min-height:46px;}
+    .pag-info{font-size:12px;color:var(--muted);white-space:nowrap;margin-right:auto;}
+    .pag-size-wrap{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap;}
+    .pag-size-select{font-size:12px;padding:3px 6px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);cursor:pointer;outline:none;}
+    .pag-size-select:focus{border-color:var(--oxide);}
+    .pag-nav{display:flex;align-items:center;gap:3px;}
+    .pag-btn{min-width:30px;height:28px;padding:0 9px;border-radius:6px;border:1.5px solid var(--line);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background 0.12s,color 0.12s,border-color 0.12s;}
+    .pag-btn:hover:not(:disabled):not(.active){background:var(--surface);border-color:var(--oxide);color:var(--oxide);}
+    .pag-btn.active{background:var(--oxide-2);color:#fff;border-color:var(--oxide-2);}
+    .pag-btn:disabled{opacity:0.35;cursor:default;}
+    .pag-ellipsis{font-size:13px;color:var(--muted);padding:0 3px;line-height:28px;}
   </style>
 </head>
 <body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
   <nav class="top-nav">
     <div class="top-nav-inner">
       <a class="brand" href="/"><img class="brand-logo" src="/images/logo/small-logo.png" alt="">
         <div><div class="brand-title">OxideSLOC</div><div class="brand-sub">Git Browser</div></div></a>
       <div class="nav-right">
-        <a class="nav-pill" href="/scan">Scan</a>
-        <a class="nav-pill" href="/view-reports">History</a>
-        <a class="nav-pill" href="/compare-scans">Compare</a>
-        <a class="nav-pill" href="/webhook-setup">Webhooks</a>
-        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+        <a class="nav-pill" href="/">Home</a>
+        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+          </div>
+        </div>
+        <div class="server-status-wrap">
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        </div>
+        <button class="theme-toggle" id="themeToggle" title="Toggle theme" type="button">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
         </button>
@@ -120,123 +251,481 @@ pub(super) struct CompareRefsQuery {
     </div>
   </nav>
   <div class="page">
-    <h1>Git Browser</h1>
-    <p class="subtitle">Browse branches, tags, and commits of any local or remote repository — then scan or compare any two refs.</p>
     <div class="card">
-      <div class="card-title">Repository</div>
+      <div class="page-header">
+        <div class="page-header-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="6" cy="6" r="3"/></svg>
+        </div>
+        <div class="page-header-body">
+          <h1 class="page-header-title">Git Browser</h1>
+          <p class="page-header-sub">Browse branches, tags, commits, and releases from any GitHub, GitLab, or Bitbucket repository — then run a point-in-time SLOC scan or compare any two refs side-by-side.</p>
+          <div class="page-header-chips">
+            <span class="page-header-chip"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Branches &amp; Tags</span>
+            <span class="page-header-chip"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Commit History</span>
+            <span class="page-header-chip"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>Point-in-time SLOC</span>
+            <span class="page-header-chip"><svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Side-by-side Compare</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="how-row">
+      <div class="how-step">
+        <div class="how-step-num">1</div>
+        <div class="how-step-body"><div class="how-step-label">Paste a URL</div><div class="how-step-desc">GitHub, GitLab, Bitbucket, or a local path</div></div>
+      </div>
+      <div class="how-arrow">&#8594;</div>
+      <div class="how-step">
+        <div class="how-step-num">2</div>
+        <div class="how-step-body"><div class="how-step-label">Browse refs</div><div class="how-step-desc">Explore branches, tags, or commits</div></div>
+      </div>
+      <div class="how-arrow">&#8594;</div>
+      <div class="how-step">
+        <div class="how-step-num">3</div>
+        <div class="how-step-body"><div class="how-step-label">Scan or compare</div><div class="how-step-desc">Get SLOC counts or diff two refs</div></div>
+      </div>
+    </div>
+    <div class="card fetch-card" style="overflow:hidden;">
+      <div class="fetch-card-header">
+        <div class="fetch-card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <div>
+          <div class="fetch-card-title">Load from Version Control</div>
+          <p class="fetch-card-desc">Paste a repository URL, then click <strong>Fetch</strong> to browse its branches, tags, and commits.</p>
+        </div>
+      </div>
+      <div class="provider-row">
+        <span class="provider-pill pp-github"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>GitHub</span>
+        <span class="provider-pill pp-gitlab"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0 1 18.6 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L23 13.45a.84.84 0 0 1-.35.94z"/></svg>GitLab</span>
+        <span class="provider-pill pp-bitbucket"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M.778 1.213a.768.768 0 0 0-.768.892l3.263 19.81c.084.5.515.868 1.022.873H19.95a.772.772 0 0 0 .77-.646l3.27-20.03a.768.768 0 0 0-.768-.891zM14.52 15.53H9.522L8.17 8.466h7.561z"/></svg>Bitbucket</span>
+      </div>
       <div class="repo-bar">
-        <input id="repoInput" class="repo-input" type="text"
-               placeholder="https://github.com/owner/repo.git  or  /path/to/local/repo"
-               value="{{ repo_url }}" />
-        <button class="btn btn-primary" onclick="loadRepo()">
-          <span id="loadSpinner" style="display:none" class="spinner"></span>Load
+        <div class="input-with-icon">
+          <div class="input-icon-prefix" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
+          <input id="repoInput" class="repo-input repo-input-padded" type="text"
+                 placeholder="https://github.com/owner/repo  ·  https://gitlab.com/group/repo"
+                 value="{{ repo_url }}" />
+        </div>
+        <button class="btn btn-primary" id="loadBtn" type="button">
+          <span id="loadSpinner" class="spinner panel-hidden"></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          Fetch
         </button>
       </div>
       <div id="statusMsg" style="display:none" class="status-msg"></div>
+      <div class="fetch-footer">First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching.</div>
     </div>
-    <div id="refPanel" style="display:none" class="card">
+    <div id="loadingPanel" class="skeleton-panel panel-hidden">
+      <div class="loading-info">
+        <span class="loading-spinner"></span>
+        Loading repository…
+      </div>
+      <div class="sk-tabs">
+        <div class="sk sk-tab"></div>
+        <div class="sk sk-tab" style="width:60px;"></div>
+        <div class="sk sk-tab" style="width:80px;"></div>
+      </div>
+      <div class="sk-row"><div class="sk sk-sm"></div><div class="sk sk-badge"></div><div class="sk sk-md"></div><div class="sk sk-md"></div><div class="sk sk-lg"></div><div class="sk sk-btn"></div></div>
+      <div class="sk-row" style="opacity:0.75;"><div class="sk sk-sm"></div><div class="sk sk-badge"></div><div class="sk sk-md"></div><div class="sk sk-md"></div><div class="sk sk-lg"></div><div class="sk sk-btn"></div></div>
+      <div class="sk-row" style="opacity:0.55;"><div class="sk sk-sm"></div><div class="sk sk-badge"></div><div class="sk sk-md"></div><div class="sk sk-md"></div><div class="sk sk-lg"></div><div class="sk sk-btn"></div></div>
+      <div class="sk-row" style="opacity:0.35;"><div class="sk sk-sm"></div><div class="sk sk-badge"></div><div class="sk sk-md"></div><div class="sk sk-md"></div><div class="sk sk-lg"></div><div class="sk sk-btn"></div></div>
+    </div>
+    <div id="refPanel" class="card">
+      <div class="ref-panel-topbar" id="refPanelTopbar">
+        <div>
+          <div class="ref-panel-repo-label">Loaded repository</div>
+          <div class="ref-panel-repo-url" id="refPanelRepo"></div>
+        </div>
+        <span class="ref-panel-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>Ready</span>
+      </div>
       <div class="tabs">
-        <button class="tab active" onclick="showTab('branches')">Branches</button>
-        <button class="tab" onclick="showTab('tags')">Tags</button>
-        <button class="tab" onclick="showTab('commits')">Commits</button>
+        <button class="tab active" data-tab="branches" type="button"><span class="tab-inner"><svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="6" cy="6" r="3"/></svg>Branches</span><span class="tab-count" id="branchCount"></span></button>
+        <button class="tab" data-tab="tags" type="button"><span class="tab-inner"><svg viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>Tags / Releases</span><span class="tab-count" id="tagCount"></span></button>
+        <button class="tab" data-tab="commits" type="button"><span class="tab-inner"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Commits</span><span class="tab-count" id="commitCount"></span></button>
       </div>
       <div id="tab-branches" class="tab-pane active">
-        <table class="ref-table"><thead><tr><th></th><th>Branch</th><th>SHA</th><th>Date</th><th>Message</th><th>Actions</th></tr></thead>
-          <tbody id="branchBody"></tbody></table>
+        <table class="ref-table">
+          <colgroup><col class="col-check"><col class="col-name"><col class="col-sha"><col class="col-date"><col class="col-msg"><col class="col-actions"></colgroup>
+          <thead><tr><th></th><th>Branch</th><th>SHA</th><th>Date</th><th>Message</th><th>Actions</th></tr></thead>
+          <tbody id="branchBody"><tr><td colspan="6"><div class="empty-rich"><div class="empty-rich-icon"><svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="6" cy="6" r="3"/></svg></div><div class="empty-rich-title">No repository loaded</div><div class="empty-rich-desc">Paste a repository URL above and click Fetch to browse branches.</div></div></td></tr></tbody>
+        </table>
+        <div id="branchPag"></div>
       </div>
       <div id="tab-tags" class="tab-pane">
-        <table class="ref-table"><thead><tr><th></th><th>Tag</th><th>SHA</th><th>Date</th><th>Message</th><th>Actions</th></tr></thead>
-          <tbody id="tagBody"></tbody></table>
+        <table class="ref-table">
+          <colgroup><col class="col-check"><col class="col-name"><col class="col-sha"><col class="col-date"><col class="col-msg"><col class="col-actions"></colgroup>
+          <thead><tr><th></th><th>Tag / Release</th><th>SHA</th><th>Date</th><th>Message</th><th>Actions</th></tr></thead>
+          <tbody id="tagBody"><tr><td colspan="6"><div class="empty-rich"><div class="empty-rich-icon"><svg viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg></div><div class="empty-rich-title">No repository loaded</div><div class="empty-rich-desc">Paste a repository URL above and click Fetch to browse tags and releases.</div></div></td></tr></tbody>
+        </table>
+        <div id="tagPag"></div>
       </div>
       <div id="tab-commits" class="tab-pane">
-        <table class="ref-table"><thead><tr><th></th><th>SHA</th><th>Author</th><th>Date</th><th>Subject</th><th>Actions</th></tr></thead>
-          <tbody id="commitBody"></tbody></table>
+        <table class="ref-table">
+          <colgroup><col class="col-check"><col class="col-name"><col class="col-sha"><col class="col-date"><col class="col-msg"><col class="col-actions"></colgroup>
+          <thead><tr><th></th><th>Author</th><th>SHA</th><th>Date</th><th>Subject</th><th>Actions</th></tr></thead>
+          <tbody id="commitBody"><tr><td colspan="6"><div class="empty-rich"><div class="empty-rich-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div><div class="empty-rich-title">No repository loaded</div><div class="empty-rich-desc">Paste a repository URL above and click Fetch to browse recent commits.</div></div></td></tr></tbody>
+        </table>
+        <div id="commitPag"></div>
       </div>
       <div class="compare-bar" id="compareBar" style="display:none">
-        <span style="font-size:13px;color:var(--muted)">Compare: <strong id="compareA">—</strong> vs <strong id="compareB">—</strong></span>
-        <button class="btn btn-compare btn-sm" onclick="runCompare()">Compare Refs</button>
-        <button class="btn btn-sm" style="background:var(--line);color:var(--text);" onclick="clearCompare()">Clear</button>
+        <div class="compare-refs-label">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Compare: <span class="compare-ref-tag" id="compareA">—</span> <span class="compare-vs">vs</span> <span class="compare-ref-tag" id="compareB">—</span>
+        </div>
+        <button class="btn btn-compare btn-sm" id="compareBtn" type="button">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          Compare Refs
+        </button>
+        <button class="btn btn-sm" id="clearBtn" style="background:var(--line);color:var(--text);" type="button">Clear</button>
       </div>
     </div>
   </div>
   <script nonce="{{ csp_nonce }}">
-    let compareA=null,compareB=null,currentRepo={{ repo_url_json }};
-    function toggleTheme(){const d=document.body.classList.toggle('dark-theme');localStorage.setItem('sloc-theme',d?'dark':'light');}
-    function applyTheme(){if(localStorage.getItem('sloc-theme')==='dark')document.body.classList.add('dark-theme');}
-    function showTab(name){
-      const names=['branches','tags','commits'];
-      document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',names[i]===name));
-      document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
-      document.getElementById('tab-'+name).classList.add('active');
-    }
-    function showStatus(msg,ok){const el=document.getElementById('statusMsg');el.style.display='block';el.className='status-msg '+(ok?'status-ok':'status-err');el.textContent=msg;}
-    async function loadRepo(){
-      const repo=document.getElementById('repoInput').value.trim();
-      if(!repo){showStatus('Enter a repository URL or path.',false);return;}
-      currentRepo=repo;
-      document.getElementById('loadSpinner').style.display='inline-block';
-      document.getElementById('refPanel').style.display='none';
-      try{
-        const r=await fetch('/api/git/refs?'+new URLSearchParams({repo}));
-        const data=await r.json();
-        if(!r.ok){showStatus(data.error||'Failed to load repository.',false);return;}
-        renderRefs(data);
-        document.getElementById('refPanel').style.display='block';
-        document.getElementById('statusMsg').style.display='none';
-      }catch(e){showStatus('Network error: '+e.message,false);}
-      finally{document.getElementById('loadSpinner').style.display='none';}
-    }
-    function renderRefs(data){
-      renderRows('branchBody',data.branches||[],'branch');
-      renderRows('tagBody',data.tags||[],'tag');
-      renderCommitRows('commitBody',data.recent_commits||[]);
-      clearCompare();
-    }
-    function renderRows(tbodyId,items,kind){
-      document.getElementById(tbodyId).innerHTML=items.map(it=>refRowHtml(it,kind)).join('');
-    }
-    function refRowHtml(it,kind){
-      const d=it.date?new Date(it.date).toLocaleDateString():'';
-      const badge=kind==='branch'?'<span class="kind-badge kind-branch">branch</span>':'<span class="kind-badge kind-tag">tag</span>';
-      const n=esc(it.name),m=esc(it.message||''),s=esc(it.sha.slice(0,8));
-      return`<tr><td><input type="checkbox" class="compare-check" value="${n}" onchange="toggleCompare('${n}',this)"></td><td>${badge} ${n}</td><td><span class="sha-badge">${s}</span></td><td class="date-cell">${d}</td><td class="msg-cell" title="${m}">${m}</td><td class="row-actions"><button class="btn btn-primary btn-sm" onclick="scanRef('${n}')">Scan</button></td></tr>`;
-    }
-    function renderCommitRows(tbodyId,commits){
-      document.getElementById(tbodyId).innerHTML=commits.map(c=>{
-        const d=c.date?new Date(c.date).toLocaleDateString():'';
-        const sha=esc(c.sha),s=esc(c.short_sha),a=esc(c.author),sub=esc(c.subject);
-        return`<tr><td><input type="checkbox" class="compare-check" value="${sha}" onchange="toggleCompare('${sha}',this)"></td><td><span class="sha-badge">${s}</span></td><td>${a}</td><td class="date-cell">${d}</td><td class="msg-cell" title="${sub}">${sub}</td><td class="row-actions"><button class="btn btn-primary btn-sm" onclick="scanRef('${sha}')">Scan</button></td></tr>`;
-      }).join('');
-    }
-    function toggleCompare(ref,cb){
-      if(cb.checked){if(!compareA){compareA=ref;}else if(!compareB&&ref!==compareA){compareB=ref;}else{cb.checked=false;return;}}
-      else{if(compareA===ref)compareA=null;else if(compareB===ref)compareB=null;}
-      const bar=document.getElementById('compareBar');
-      bar.style.display=(compareA||compareB)?'flex':'none';
-      document.getElementById('compareA').textContent=compareA?short(compareA):'—';
-      document.getElementById('compareB').textContent=compareB?short(compareB):'—';
-    }
-    function clearCompare(){compareA=null;compareB=null;document.querySelectorAll('.compare-check').forEach(c=>c.checked=false);document.getElementById('compareBar').style.display='none';}
-    function short(r){return r.length>12?r.slice(0,8)+'…':r;}
-    async function scanRef(refName){
-      if(!currentRepo)return;
-      showStatus('Scanning…',true);
-      const r=await fetch('/api/git/scan-ref?'+new URLSearchParams({repo:currentRepo,ref_name:refName}));
-      const data=await r.json();
-      if(r.ok&&data.html_url){window.location.href=data.html_url;}
-      else{showStatus(data.error||'Scan failed.',false);}
-    }
-    async function runCompare(){
-      if(!compareA||!compareB){showStatus('Select exactly two refs.',false);return;}
-      showStatus('Scanning both refs…',true);
-      const r=await fetch('/api/git/compare-refs?'+new URLSearchParams({repo:currentRepo,baseline_ref:compareA,current_ref:compareB}));
-      const data=await r.json();
-      if(r.ok&&data.compare_url){window.location.href=data.compare_url;}
-      else{showStatus(data.error||'Compare failed.',false);}
-    }
-    function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-    applyTheme();
-    if(currentRepo)loadRepo();
+    (function () {
+      var compareA = null, compareB = null, currentRepo = {{ repo_url_json|safe }};
+
+      // ── Pagination state ──────────────────────────────────────────────────────
+      var allBranches = [], allTags = [], allCommits = [];
+      var pagState = {
+        branches: { page: 1, size: 15 },
+        tags:     { page: 1, size: 15 },
+        commits:  { page: 1, size: 15 },
+      };
+
+      function applyTheme() { if (localStorage.getItem('sloc-theme') === 'dark') document.body.classList.add('dark-theme'); }
+      function toggleTheme() { var d = document.body.classList.toggle('dark-theme'); localStorage.setItem('sloc-theme', d ? 'dark' : 'light'); }
+
+      function showTab(name) {
+        var names = ['branches', 'tags', 'commits'];
+        document.querySelectorAll('.tab').forEach(function (t, i) { t.classList.toggle('active', names[i] === name); });
+        document.querySelectorAll('.tab-pane').forEach(function (p) { p.classList.remove('active'); });
+        document.getElementById('tab-' + name).classList.add('active');
+      }
+
+      function showStatus(msg, ok) {
+        var el = document.getElementById('statusMsg');
+        el.style.display = 'block';
+        el.className = 'status-msg ' + (ok ? 'status-ok' : 'status-err');
+        el.textContent = msg;
+      }
+
+      function resetLoadingState() {
+        document.getElementById('loadingPanel').classList.add('panel-hidden');
+        document.getElementById('loadSpinner').classList.add('panel-hidden');
+        document.getElementById('loadBtn').disabled = false;
+        document.getElementById('statusMsg').style.display = 'none';
+      }
+
+      async function fetchRefs() {
+        var repo = document.getElementById('repoInput').value.trim();
+        if (!repo) { showStatus('Enter a GitHub, GitLab, or Bitbucket HTTPS URL.', false); return; }
+        currentRepo = repo;
+        document.getElementById('statusMsg').style.display = 'none';
+        document.getElementById('loadSpinner').classList.remove('panel-hidden');
+        document.getElementById('loadBtn').disabled = true;
+        document.getElementById('refPanel').classList.add('panel-hidden');
+        document.getElementById('loadingPanel').classList.remove('panel-hidden');
+
+        var elapsed = 0;
+        var loadingMsg = document.querySelector('#loadingPanel .loading-info');
+        var baseText = ' Fetching repository…';
+        var timer = setInterval(function () {
+          elapsed++;
+          var hint = elapsed >= 10 ? ' (first fetch may take 15–30s)' : '';
+          if (loadingMsg) loadingMsg.lastChild.textContent = baseText + ' ' + elapsed + 's' + hint;
+        }, 1000);
+
+        try {
+          var r = await fetch('/api/git/refs?' + new URLSearchParams({ repo: repo }));
+          var data = await r.json();
+          if (!r.ok) { showStatus(data.error || 'Failed to load repository.', false); return; }
+          renderRefs(data);
+          document.getElementById('refPanel').classList.remove('panel-hidden');
+          document.getElementById('statusMsg').style.display = 'none';
+        } catch (e) { showStatus('Network error: ' + e.message, false); }
+        finally {
+          clearInterval(timer);
+          if (loadingMsg) loadingMsg.lastChild.textContent = baseText;
+          resetLoadingState();
+        }
+      }
+
+      function renderRefs(data) {
+        allBranches = data.branches || [];
+        allTags     = data.tags || [];
+        allCommits  = data.recent_commits || [];
+        pagState.branches.page = 1;
+        pagState.tags.page     = 1;
+        pagState.commits.page  = 1;
+        renderPage('branches');
+        renderPage('tags');
+        renderPage('commits');
+        clearCompare();
+        setTabCount('branchCount', allBranches.length);
+        setTabCount('tagCount',    allTags.length);
+        setTabCount('commitCount', allCommits.length);
+        var topbar = document.getElementById('refPanelTopbar');
+        var repoEl = document.getElementById('refPanelRepo');
+        if (topbar && repoEl) { repoEl.textContent = currentRepo; topbar.classList.add('visible'); }
+      }
+
+      // ── Pagination helpers ────────────────────────────────────────────────────
+
+      function renderPage(tab) {
+        var items  = tab === 'branches' ? allBranches : tab === 'tags' ? allTags : allCommits;
+        var state  = pagState[tab];
+        var total  = items.length;
+        var start  = (state.page - 1) * state.size;
+        var end    = Math.min(start + state.size, total);
+        var slice  = items.slice(start, end);
+        var bodyId = tab === 'branches' ? 'branchBody' : tab === 'tags' ? 'tagBody' : 'commitBody';
+        var pagId  = tab === 'branches' ? 'branchPag'  : tab === 'tags' ? 'tagPag'  : 'commitPag';
+
+        if (tab === 'commits') {
+          renderCommitSlice(bodyId, slice);
+        } else {
+          renderRefSlice(bodyId, slice, tab === 'branches' ? 'branch' : 'tag');
+        }
+        renderPagBar(pagId, tab, total, state.page, state.size, start, end);
+      }
+
+      function renderRefSlice(tbodyId, items, kind) {
+        if (!items.length) {
+          document.getElementById(tbodyId).innerHTML = '<tr><td colspan="6"><div class="empty-state">No entries found.</div></td></tr>';
+          return;
+        }
+        document.getElementById(tbodyId).innerHTML = items.map(function (it) {
+          var d = it.date ? new Date(it.date).toLocaleDateString() : '';
+          var badge = kind === 'branch'
+            ? '<span class="kind-badge kind-branch">branch</span>'
+            : '<span class="kind-badge kind-tag">tag</span>';
+          var n = esc(it.name), m = esc(it.message || ''), s = esc(it.sha.slice(0, 8));
+          var ref = esc(it.name);
+          return '<tr>'
+            + '<td><input type="checkbox" class="compare-check" data-ref="' + ref + '"></td>'
+            + '<td>' + badge + ' ' + n + '</td>'
+            + '<td><span class="sha-badge">' + s + '</span></td>'
+            + '<td class="date-cell">' + d + '</td>'
+            + '<td class="col-msg-cell" title="' + m + '">' + m + '</td>'
+            + '<td><button class="btn btn-primary btn-sm btn-scan" data-action="scan-ref" data-ref="' + ref + '" type="button">Scan</button></td>'
+            + '</tr>';
+        }).join('');
+      }
+
+      function renderCommitSlice(tbodyId, commits) {
+        if (!commits.length) {
+          document.getElementById(tbodyId).innerHTML = '<tr><td colspan="6"><div class="empty-state">No entries found.</div></td></tr>';
+          return;
+        }
+        document.getElementById(tbodyId).innerHTML = commits.map(function (c) {
+          var d = c.date ? new Date(c.date).toLocaleDateString() : '';
+          var sha = esc(c.sha), s = esc(c.short_sha), a = esc(c.author), sub = esc(c.subject);
+          return '<tr>'
+            + '<td><input type="checkbox" class="compare-check" data-ref="' + sha + '"></td>'
+            + '<td>' + a + '</td>'
+            + '<td><span class="sha-badge">' + s + '</span></td>'
+            + '<td class="date-cell">' + d + '</td>'
+            + '<td class="col-msg-cell" title="' + sub + '">' + sub + '</td>'
+            + '<td><button class="btn btn-primary btn-sm btn-scan" data-action="scan-ref" data-ref="' + sha + '" type="button">Scan</button></td>'
+            + '</tr>';
+        }).join('');
+      }
+
+      function renderPagBar(containerId, tab, total, page, size, start, end) {
+        var el = document.getElementById(containerId);
+        if (!el) return;
+        if (total <= size && total > 0) {
+          // All rows fit on one page — show a simple count, no nav needed
+          el.innerHTML = '<div class="pag-bar"><span class="pag-info">Showing all ' + total + ' entr' + (total === 1 ? 'y' : 'ies') + '</span>'
+            + '<div class="pag-size-wrap">Per page: <select class="pag-size-select" data-tab="' + tab + '">'
+            + pagSizeOptions(size) + '</select></div></div>';
+          return;
+        }
+        if (total === 0) { el.innerHTML = ''; return; }
+
+        var totalPages = Math.ceil(total / size);
+        var from = start + 1;
+        var html = '<div class="pag-bar">';
+        html += '<span class="pag-info">Showing ' + from + '–' + end + ' of ' + total + '</span>';
+        html += '<div class="pag-size-wrap">Per page: <select class="pag-size-select" data-tab="' + tab + '">' + pagSizeOptions(size) + '</select></div>';
+        html += '<div class="pag-nav">';
+        html += '<button class="pag-btn" data-tab="' + tab + '" data-page="' + (page - 1) + '"' + (page <= 1 ? ' disabled' : '') + '>&#8592; Prev</button>';
+        pageRange(page, totalPages).forEach(function (p) {
+          if (p === '…') {
+            html += '<span class="pag-ellipsis">…</span>';
+          } else {
+            html += '<button class="pag-btn' + (p === page ? ' active' : '') + '" data-tab="' + tab + '" data-page="' + p + '">' + p + '</button>';
+          }
+        });
+        html += '<button class="pag-btn" data-tab="' + tab + '" data-page="' + (page + 1) + '"' + (page >= totalPages ? ' disabled' : '') + '>Next &#8594;</button>';
+        html += '</div></div>';
+        el.innerHTML = html;
+      }
+
+      function pagSizeOptions(current) {
+        return [15, 25, 50, 100].map(function (s) {
+          return '<option value="' + s + '"' + (s === current ? ' selected' : '') + '>' + s + '</option>';
+        }).join('');
+      }
+
+      function pageRange(current, total) {
+        if (total <= 7) {
+          var arr = [];
+          for (var i = 1; i <= total; i++) arr.push(i);
+          return arr;
+        }
+        if (current <= 4) {
+          return [1, 2, 3, 4, 5, '…', total];
+        }
+        if (current >= total - 3) {
+          return [1, '…', total - 4, total - 3, total - 2, total - 1, total];
+        }
+        return [1, '…', current - 1, current, current + 1, '…', total];
+      }
+
+      function setTabCount(id, n) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = n;
+        el.classList.toggle('has-data', n > 0);
+      }
+
+      function toggleCompare(ref, cb) {
+        if (cb.checked) {
+          if (!compareA) { compareA = ref; }
+          else if (!compareB && ref !== compareA) { compareB = ref; }
+          else { cb.checked = false; return; }
+        } else {
+          if (compareA === ref) compareA = null;
+          else if (compareB === ref) compareB = null;
+        }
+        var bar = document.getElementById('compareBar');
+        bar.style.display = (compareA || compareB) ? 'flex' : 'none';
+        document.getElementById('compareA').textContent = compareA ? short(compareA) : '—';
+        document.getElementById('compareB').textContent = compareB ? short(compareB) : '—';
+      }
+
+      function clearCompare() {
+        compareA = null; compareB = null;
+        document.querySelectorAll('.compare-check').forEach(function (c) { c.checked = false; });
+        document.getElementById('compareBar').style.display = 'none';
+      }
+
+      function short(r) { return r.length > 12 ? r.slice(0, 8) + '…' : r; }
+
+      function scanRef(refName) {
+        if (!currentRepo) return;
+        var params = new URLSearchParams({ git_repo: currentRepo, git_ref: refName });
+        window.location.href = '/scan?' + params.toString();
+      }
+
+      async function runCompare() {
+        if (!compareA || !compareB) { showStatus('Select exactly two refs.', false); return; }
+        showStatus('Scanning both refs…', true);
+        var r = await fetch('/api/git/compare-refs?' + new URLSearchParams({ repo: currentRepo, baseline_ref: compareA, current_ref: compareB }));
+        var data = await r.json();
+        if (r.ok && data.compare_url) { window.location.href = data.compare_url; }
+        else { showStatus(data.error || 'Compare failed.', false); }
+      }
+
+      function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+      // ── Event wiring ──────────────────────────────────────────────────────────
+      document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+      document.getElementById('loadBtn').addEventListener('click', fetchRefs);
+      document.getElementById('repoInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') fetchRefs(); });
+      document.getElementById('compareBtn').addEventListener('click', runCompare);
+      document.getElementById('clearBtn').addEventListener('click', clearCompare);
+
+      document.querySelectorAll('.tab').forEach(function (btn) {
+        btn.addEventListener('click', function () { showTab(btn.dataset.tab); });
+      });
+
+      // Event delegation for dynamically-injected table rows and pagination controls
+      document.getElementById('refPanel').addEventListener('click', function (e) {
+        // Pagination page buttons
+        var pb = e.target.closest('.pag-btn:not(:disabled)');
+        if (pb && pb.dataset.tab && pb.dataset.page) {
+          var tab = pb.dataset.tab, pg = Number(pb.dataset.page);
+          if (!isNaN(pg) && pg >= 1) {
+            pagState[tab].page = pg;
+            renderPage(tab);
+          }
+          return;
+        }
+        // Scan button
+        var btn = e.target.closest('[data-action="scan-ref"]');
+        if (btn) { scanRef(btn.dataset.ref); return; }
+        // Clicking anywhere on a row (outside the checkbox or scan button) toggles the checkbox
+        if (e.target.closest('.compare-check') || e.target.closest('.btn-scan')) return;
+        var row = e.target.closest('tr');
+        if (!row) return;
+        var cb = row.querySelector('.compare-check');
+        if (cb) { cb.checked = !cb.checked; toggleCompare(cb.dataset.ref, cb); }
+      });
+      document.getElementById('refPanel').addEventListener('change', function (e) {
+        // Page-size selector
+        var sel = e.target.closest('.pag-size-select');
+        if (sel && sel.dataset.tab) {
+          pagState[sel.dataset.tab].size = Number(sel.value);
+          pagState[sel.dataset.tab].page = 1;
+          renderPage(sel.dataset.tab);
+          return;
+        }
+        var cb = e.target.closest('.compare-check');
+        if (cb) toggleCompare(cb.dataset.ref, cb);
+      });
+
+      // ── Background effects ────────────────────────────────────────────────────
+      (function randomizeWatermarks() {
+        var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+        if (!wms.length) return;
+        var placed = [];
+        function tooClose(top, left) {
+          for (var i = 0; i < placed.length; i++) {
+            if (Math.abs(placed[i][0] - top) < 16 && Math.abs(placed[i][1] - left) < 12) return true;
+          }
+          return false;
+        }
+        function pick(leftBand) {
+          for (var attempt = 0; attempt < 50; attempt++) {
+            var top = Math.random() * 88 + 2, left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+            if (!tooClose(top, left)) { placed.push([top, left]); return [top, left]; }
+          }
+          var top = Math.random() * 88 + 2, left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+          placed.push([top, left]); return [top, left];
+        }
+        var half = Math.floor(wms.length / 2);
+        wms.forEach(function (img, i) {
+          var pos = pick(i < half);
+          var size = Math.floor(Math.random() * 100 + 120);
+          img.style.cssText = 'width:' + size + 'px;top:' + pos[0].toFixed(1) + '%;left:' + pos[1].toFixed(1) + '%;transform:rotate(' + (Math.random() * 360).toFixed(1) + 'deg);opacity:' + (Math.random() * 0.08 + 0.12).toFixed(2) + ';';
+        });
+      })();
+
+      (function spawnCodeParticles() {
+        var container = document.getElementById('code-particles');
+        if (!container) return;
+        var snippets = ['1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312','// comment','pub fn run','use std::fs','Result<()>','let mut n = 0','git main','#[derive]','impl Scan','3,841 physical','files: 60','450 comments','cargo build','Ok(run)','Vec<String>','match lang','fn main() {','.rs .go .py','sloc_core','render_html','2,163 code'];
+        for (var i = 0; i < 38; i++) {
+          (function (idx) {
+            var el = document.createElement('span');
+            el.className = 'code-particle';
+            el.textContent = snippets[idx % snippets.length];
+            el.style.cssText = 'left:' + (Math.random() * 94 + 2).toFixed(1) + '%;top:' + (Math.random() * 88 + 6).toFixed(1) + '%;--rot:' + (Math.random() * 26 - 13).toFixed(1) + 'deg;--op:' + (Math.random() * 0.09 + 0.06).toFixed(3) + ';animation-duration:' + (Math.random() * 10 + 9).toFixed(1) + 's;animation-delay:-' + (Math.random() * 18).toFixed(1) + 's;';
+            container.appendChild(el);
+          })(i);
+        }
+      })();
+
+      // Before the page enters BFCache, reset loading state so it's never
+      // cached mid-load and shown to the user on back-navigation.
+      window.addEventListener('pagehide', resetLoadingState);
+      // Belt-and-suspenders: reset again on any page show (fresh load or BFCache restore).
+      window.addEventListener('pageshow', resetLoadingState);
+
+      applyTheme();
+    })();
   </script>
 </body>
 </html>"##,
@@ -294,6 +783,7 @@ pub(super) async fn api_scan_ref(
         .label
         .clone()
         .unwrap_or_else(|| make_label(&q.repo, &q.ref_name));
+    let label_for_reg = label.clone();
     let repo = q.repo.clone();
     let ref_name = q.ref_name.clone();
 
@@ -302,11 +792,14 @@ pub(super) async fn api_scan_ref(
     })
     .await
     {
-        Ok(Ok((run_id, html_url))) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "run_id": run_id, "html_url": html_url })),
-        )
-            .into_response(),
+        Ok(Ok((run_id, html_url, artifacts, run))) => {
+            register_scan(&state, &run_id, &label_for_reg, artifacts, &run).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "run_id": run_id, "html_url": html_url })),
+            )
+                .into_response()
+        }
         Ok(Err(e)) => json_error(StatusCode::BAD_GATEWAY, &e.to_string()),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -322,9 +815,12 @@ pub(super) async fn api_compare_refs(
         .label
         .clone()
         .unwrap_or_else(|| make_label(&q.repo, "compare"));
+    let label_for_reg = label.clone();
     let repo = q.repo.clone();
     let baseline_ref = q.baseline_ref.clone();
     let current_ref = q.current_ref.clone();
+    let baseline_ref_label = baseline_ref.clone();
+    let current_ref_label = current_ref.clone();
 
     match tokio::task::spawn_blocking(move || {
         run_compare_refs(
@@ -338,8 +834,12 @@ pub(super) async fn api_compare_refs(
     })
     .await
     {
-        Ok(Ok((b_id, c_id))) => {
-            let url = format!("/compare?baseline={b_id}&current={c_id}");
+        Ok(Ok((b_id, b_arts, b_run, c_id, c_arts, c_run))) => {
+            let b_label = format!("{label_for_reg} ({baseline_ref_label})");
+            let c_label = format!("{label_for_reg} ({current_ref_label})");
+            register_scan(&state, &b_id, &b_label, b_arts, &b_run).await;
+            register_scan(&state, &c_id, &c_label, c_arts, &c_run).await;
+            let url = format!("/compare?a={b_id}&b={c_id}");
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -350,6 +850,26 @@ pub(super) async fn api_compare_refs(
         }
         Ok(Err(e)) => json_error(StatusCode::BAD_GATEWAY, &e.to_string()),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+async fn register_scan(
+    state: &AppState,
+    run_id: &str,
+    label: &str,
+    artifacts: RunArtifacts,
+    run: &sloc_core::AnalysisRun,
+) {
+    let project_label = sanitize_project_label(label);
+    {
+        let mut map = state.artifacts.lock().await;
+        map.insert(run_id.to_owned(), artifacts.clone());
+    }
+    {
+        let entry = build_run_registry_entry(run, run_id, &project_label, &artifacts);
+        let mut reg = state.registry.lock().await;
+        reg.add_entry(entry);
+        let _ = reg.save(&state.registry_path);
     }
 }
 
@@ -367,16 +887,26 @@ fn run_ref_scan(
     clones_dir: &Path,
     base_config: &sloc_config::AppConfig,
     label: &str,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(String, String, RunArtifacts, sloc_core::AnalysisRun)> {
     let dest = git_clone_dest(repo, clones_dir);
     clone_or_fetch(repo, &dest)?;
     let wt_path = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
     create_worktree(&dest, ref_name, &wt_path)?;
     let result = scan_path_to_artifacts(&wt_path, base_config, label);
     let _ = destroy_worktree(&dest, &wt_path);
-    let run_id = result?;
-    let html_url = format!("/runs/{run_id}/report.html");
-    Ok((run_id, html_url))
+    let (run_id, artifacts, mut run) = result?;
+    // Worktrees at a tag/commit are in detached HEAD; git branch --show-current
+    // returns empty. Use the ref_name we checked out instead.
+    if run.git_branch.is_none() {
+        run.git_branch = Some(ref_name.to_owned());
+        if let Some(html_path) = &artifacts.html_path {
+            if let Ok(html) = render_html(&run) {
+                let _ = std::fs::write(html_path, html);
+            }
+        }
+    }
+    let html_url = format!("/runs/{run_id}/html");
+    Ok((run_id, html_url, artifacts, run))
 }
 
 fn run_compare_refs(
@@ -386,7 +916,14 @@ fn run_compare_refs(
     clones_dir: &Path,
     base_config: &sloc_config::AppConfig,
     label: &str,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(
+    String,
+    RunArtifacts,
+    sloc_core::AnalysisRun,
+    String,
+    RunArtifacts,
+    sloc_core::AnalysisRun,
+)> {
     let dest = git_clone_dest(repo, clones_dir);
     clone_or_fetch(repo, &dest)?;
 
@@ -397,13 +934,31 @@ fn run_compare_refs(
     create_worktree(&dest, baseline_ref, &wt_a)?;
     let b_result = scan_path_to_artifacts(&wt_a, base_config, &b_label);
     let _ = destroy_worktree(&dest, &wt_a);
+    let (b_id, b_arts, mut b_run) = b_result?;
+    if b_run.git_branch.is_none() {
+        b_run.git_branch = Some(baseline_ref.to_owned());
+        if let Some(p) = &b_arts.html_path {
+            if let Ok(html) = render_html(&b_run) {
+                let _ = std::fs::write(p, html);
+            }
+        }
+    }
 
     let wt_b = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
     create_worktree(&dest, current_ref, &wt_b)?;
     let c_result = scan_path_to_artifacts(&wt_b, base_config, &c_label);
     let _ = destroy_worktree(&dest, &wt_b);
+    let (c_id, c_arts, mut c_run) = c_result?;
+    if c_run.git_branch.is_none() {
+        c_run.git_branch = Some(current_ref.to_owned());
+        if let Some(p) = &c_arts.html_path {
+            if let Ok(html) = render_html(&c_run) {
+                let _ = std::fs::write(p, html);
+            }
+        }
+    }
 
-    Ok((b_result?, c_result?))
+    Ok((b_id, b_arts, b_run, c_id, c_arts, c_run))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -415,7 +970,17 @@ fn make_label(repo: &str, ref_name: &str) -> String {
         .rsplit('/')
         .next()
         .unwrap_or("repo");
-    format!("{base} @ {ref_name}")
+    let ref_safe: String = ref_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{base}_at_{ref_safe}_sloc")
 }
 
 fn json_error(status: StatusCode, msg: &str) -> axum::response::Response {

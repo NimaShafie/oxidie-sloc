@@ -16,9 +16,9 @@
 # Runtime result: a single fully static binary with zero system library dependencies.
 #
 # Usage:
-#   bash scripts/make-airgap-kit.sh                  # auto-detect host arch
-#   bash scripts/make-airgap-kit.sh linux-x86_64
-#   bash scripts/make-airgap-kit.sh linux-arm64
+#   bash scripts/internal/make-airgap-kit.sh                  # auto-detect host arch
+#   bash scripts/internal/make-airgap-kit.sh linux-x86_64
+#   bash scripts/internal/make-airgap-kit.sh linux-arm64
 #
 # Output: oxide-sloc-airgap-kit-{target}-v{version}.tar.gz
 # On the air-gapped machine:
@@ -104,7 +104,7 @@ fetch() {
 # ── Step 1: Vendor archive ───────────────────────────────────────────────────
 
 echo "==> Generating vendor archive (cargo vendor)..."
-bash scripts/update-vendor.sh
+bash scripts/internal/update-vendor.sh
 cp vendor.tar.xz        "$KIT_DIR/vendor.tar.xz"
 cp vendor.tar.xz.sha256 "$KIT_DIR/vendor.tar.xz.sha256"
 

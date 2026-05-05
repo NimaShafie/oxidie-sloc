@@ -23,6 +23,7 @@ This document covers how to wire oxide-sloc into your CI/CD pipelines and how to
      - [Trend charts](#trend-charts-plot-plugin)
      - [Setting the artifact-viewer CSP](#setting-the-artifact-viewer-csp)
 3. [GitHub Actions](#github-actions)
+   - [VirusTotal binary scanning](#virustotal-binary-scanning)
 4. [GitLab CI](#gitlab-ci)
 5. [Environment variables reference](#environment-variables-reference)
 6. [CLI flag quick reference](#cli-flag-quick-reference)
@@ -55,7 +56,7 @@ replace-with = "vendored-sources"
 directory = "vendor"
 ```
 
-To regenerate the archive after any dependency change, run `bash scripts/update-vendor.sh` and commit both output files.
+To regenerate the archive after any dependency change, run `bash scripts/internal/update-vendor.sh` and commit both output files.
 
 ### Rust toolchain — offline options
 
@@ -676,10 +677,11 @@ print(table)
 
 Two workflows ship in `.github/workflows/`:
 
-| Workflow      | Trigger                   | Purpose                                              |
-|---------------|---------------------------|------------------------------------------------------|
-| `ci.yml`      | push to `main`, all PRs   | fmt → lint → build → smoke tests → web UI check      |
-| `release.yml` | push a `v*` tag           | cross-compile for 4 platforms → publish GitHub Release |
+| Workflow       | Trigger                        | Purpose                                                                              |
+|----------------|--------------------------------|--------------------------------------------------------------------------------------|
+| `ci.yml`       | push to `main`, all PRs        | fmt → lint → build → smoke tests → web UI health check                               |
+| `release.yml`  | push a `v*` tag                | cross-compile for 5 platforms → GPG + cosign sign → VirusTotal scan → publish release |
+| `vt-scan.yml`  | manual (`workflow_dispatch`)   | on-demand VirusTotal scan against a release tag or HEAD build                        |
 
 ### Adding a scan step to an existing workflow
 
@@ -726,6 +728,23 @@ Two workflows ship in `.github/workflows/`:
     oxide-sloc send out/result.json \
       --webhook-url "$SLOC_WEBHOOK_URL"
 ```
+
+### VirusTotal binary scanning
+
+The `virustotal` job in `release.yml` submits every release binary to VirusTotal for malware scanning and embeds the results table in the GitHub Release body. It runs automatically on every `v*` tag push when `VT_API_KEY` is set.
+
+**Setup:** Go to **Settings → Secrets and variables → Actions** and add a repository secret named `VT_API_KEY` containing your VirusTotal v3 API key. Free accounts support 4 requests/minute and 500/day — sufficient for a 5-binary release.
+
+The job:
+1. Downloads all cross-compiled binaries from the `build` job
+2. Uploads each to `POST https://www.virustotal.com/api/v3/files`
+3. Polls `GET /api/v3/analyses/{id}` until status is `completed` (up to 5 min per binary)
+4. Writes a summary table to `vt-report/vt-scan-summary.md` and uploads it as a workflow artifact
+5. The `publish` job includes the table in the GitHub Release body
+
+The job uses `continue-on-error: true` so a VT outage or quota exhaustion never blocks a release.
+
+**False positives:** Freshly compiled Rust binaries are sometimes flagged by heuristic engines. Zero malicious detections is the expected result. If a binary is incorrectly flagged, use the permalink in the release body to open the report on virustotal.com and click **"Is this a false positive?"** to submit a dispute directly to the affected vendor.
 
 ---
 
@@ -799,6 +818,7 @@ Store credentials in **Settings → CI/CD → Variables** as `CONFLUENCE_USER` a
 | `SLOC_SMTP_USER`      | `send`      | SMTP username (alternative to `--smtp-user`)                           |
 | `SLOC_SMTP_PASS`      | `send`      | SMTP password — prefer this over `--smtp-pass` to keep creds out of process listings |
 | `SLOC_WEBHOOK_TOKEN`  | `send`      | Bearer token for webhook delivery (alternative to `--webhook-token`)   |
+| `VT_API_KEY`          | `release.yml` | VirusTotal API v3 key; enables binary scanning on every tagged release |
 
 ---
 

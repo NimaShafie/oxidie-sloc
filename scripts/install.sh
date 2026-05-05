@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # oxide-sloc installer
-# Usage:  bash scripts/install.sh            (Windows via Git Bash, Linux, macOS)
-#         bash scripts/install.sh --rebuild  (force a fresh build even if binary exists)
+#
+# Usage:
+#   bash scripts/install.sh           # auto-detects best path
+#   bash scripts/install.sh --rebuild # force a fresh build even if binary exists
+#   bash scripts/install.sh --auto    # install rustup automatically if needed (no prompt)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 FORCE_REBUILD=false
+AUTO_RUSTUP=false
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true ;;
+        --auto) AUTO_RUSTUP=true ;;
     esac
 done
 
@@ -109,35 +114,72 @@ EOF
     exit 1
 fi
 
-# ── 4. No Rust — air-gapped instructions ────────────────────────────────────
+# ── 4. No Rust — offer to install it (networked) or give air-gap instructions ──
+
 echo ""
 echo " No pre-built binary and no Rust toolchain found."
 echo ""
-echo " Option A — pre-built binary (easiest):"
+
+# Detect whether we can reach the internet (quick probe, ignore errors).
+_has_internet=false
+if command -v curl &>/dev/null && curl -sSf --max-time 4 https://sh.rustup.rs -o /dev/null 2>/dev/null; then
+    _has_internet=true
+elif command -v wget &>/dev/null && wget -q --timeout=4 --spider https://sh.rustup.rs 2>/dev/null; then
+    _has_internet=true
+fi
+
+if [[ "$_has_internet" == true ]] && [[ "$PLATFORM" == linux ]]; then
+    echo " Internet detected. Rust is required to build from source."
+    echo ""
+    if [[ "$AUTO_RUSTUP" == true ]]; then
+        _install_rust=y
+    else
+        printf ' Install Rust toolchain now via rustup? [y/N] '
+        read -r _install_rust </dev/tty || _install_rust=n
+    fi
+
+    if [[ "${_install_rust,,}" == y* ]]; then
+        echo " Installing rustup (minimal profile, stable toolchain)..."
+        curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable --profile minimal -y
+        # Source the newly-installed cargo environment for this session
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+        echo " [OK] Rust installed. Re-running installer..."
+        exec bash "$SCRIPT_DIR/install.sh" "$@"
+    fi
+fi
+
+echo " Option A — pre-built binary (easiest, no Rust required):"
 echo "   Download from https://github.com/oxide-sloc/oxide-sloc/releases"
 echo "   Place the binary next to scripts/, then run:  bash scripts/install.sh"
 echo ""
-echo " Option B — build from source (air-gapped, no internet on target):"
+echo " Option B — install Rust and build from source:"
+if [[ "$PLATFORM" == linux ]]; then
+    echo "   curl -sSf https://sh.rustup.rs | sh"
+    echo "   source ~/.cargo/env"
+    echo "   bash scripts/install.sh"
+else
+    echo "   Download rustup-init.exe from https://rustup.rs and run it."
+    echo "   Open a new Git Bash terminal, then: bash scripts/install.sh"
+fi
+echo ""
+echo " Option C — build from source on an air-gapped machine:"
 echo "   On a NETWORKED machine, bundle the Rust toolchain:"
 echo ""
-echo "   Windows (PowerShell):"
-echo "     rustup-init.exe --default-toolchain stable --no-modify-path"
-echo "     Compress-Archive \"\$env:USERPROFILE\.rustup\",\"\$env:USERPROFILE\.cargo\" rust-toolchain-windows.zip"
-echo ""
-echo "   Linux:"
-echo "     curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable --no-modify-path"
-echo "     tar -czf rust-toolchain-linux.tar.gz ~/.rustup ~/.cargo"
-echo ""
-echo "   Transfer the archive to this machine, then:"
-echo ""
-echo "   Windows (PowerShell):"
-echo "     Expand-Archive rust-toolchain-windows.zip -DestinationPath \$env:USERPROFILE"
-echo "     [Environment]::SetEnvironmentVariable('PATH', \"\$env:USERPROFILE\.cargo\bin;\$env:PATH\", 'User')"
-echo "   Open a new terminal, then:  bash scripts/install.sh"
-echo ""
-echo "   Linux:"
-echo "     tar xzf rust-toolchain-linux.tar.gz -C ~"
-echo "     echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
-echo "   Then:  bash scripts/install.sh"
+if [[ "$PLATFORM" == linux ]]; then
+    echo "   curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable --no-modify-path"
+    echo "   tar -czf rust-toolchain-linux.tar.gz ~/.rustup ~/.cargo"
+    echo "   Transfer to this machine, then:"
+    echo "   tar xzf rust-toolchain-linux.tar.gz -C ~"
+    echo "   echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+    echo "   bash scripts/install.sh"
+else
+    echo "   rustup-init.exe --default-toolchain stable --no-modify-path"
+    echo "   Compress-Archive \"\$env:USERPROFILE\.rustup\",\"\$env:USERPROFILE\.cargo\" rust-toolchain-windows.zip"
+    echo "   Transfer to this machine, then (PowerShell):"
+    echo "   Expand-Archive rust-toolchain-windows.zip -DestinationPath \$env:USERPROFILE"
+    echo "   [Environment]::SetEnvironmentVariable('PATH', \"\$env:USERPROFILE\.cargo\bin;\$env:PATH\", 'User')"
+    echo "   Open a new terminal, then:  bash scripts/install.sh"
+fi
 echo ""
 exit 1

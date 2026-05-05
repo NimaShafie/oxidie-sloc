@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # oxide-sloc launcher
-# Usage: bash scripts/run.sh [--rebuild]   (Windows via Git Bash; Linux/macOS)
+#
+# Usage:
+#   bash scripts/run.sh              # localhost only  (http://127.0.0.1:4317)
+#   bash scripts/run.sh --host       # LAN server mode (http://0.0.0.0:4317)
+#   bash scripts/run.sh --lan        # alias for --host
+#   SLOC_HOST=1 bash scripts/run.sh  # env-var form of --host
+#
+# For a dedicated LAN-server launcher with API-key setup and IP guidance see:
+#   bash scripts/serve-server.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SLOC_PORT=4317
+
+# Honour SLOC_HOST env var as well as --host / --lan CLI flag
+HOST_MODE="${SLOC_HOST:-0}"
 
 # Detect Windows (Git Bash / MSYS2 / Cygwin)
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
@@ -51,22 +62,51 @@ free_port() {
     fi
 }
 
+# Print the local LAN IP if available (best-effort; no failure on error).
+print_lan_ip() {
+    local ip=""
+    if [[ "$PLATFORM" == linux ]]; then
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+    else
+        ip="$(powershell -NoProfile -Command \
+            "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -notmatch '^127\.' -and \$_.IPAddress -notmatch '^169\.254\.' } | Select-Object -First 1).IPAddress" \
+            2>/dev/null)" || true
+    fi
+    [[ -n "$ip" ]] && printf '  LAN address \xe2\x86\x92 http://%s:%s\n' "$ip" "$SLOC_PORT"
+}
+
 launch() {
     free_port
     [[ "$PLATFORM" == linux ]] && chmod +x "$1"
-    printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT"
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
-    "$1"
+    if [[ "$HOST_MODE" == "1" ]]; then
+        printf '\n  oxide-sloc starting in LAN server mode\n  Local   \xe2\x86\x92 http://127.0.0.1:%s\n' "$SLOC_PORT"
+        print_lan_ip
+        printf '  Press Ctrl+C to stop.\n\n'
+        [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
+        "$1" serve --server
+    else
+        printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT"
+        "$1"
+    fi
 }
 
 launch_cargo() {
     free_port
-    printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT" "$SLOC_PORT"
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
     export CARGO_INCREMENTAL=0
-    cargo run -p oxide-sloc
+    if [[ "$HOST_MODE" == "1" ]]; then
+        printf '\n  oxide-sloc starting in LAN server mode\n  Local   \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n' "$SLOC_PORT" "$SLOC_PORT"
+        print_lan_ip
+        printf '  Press Ctrl+C to stop.\n\n'
+        [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
+        cargo run -p oxide-sloc -- serve --server
+    else
+        printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT" "$SLOC_PORT"
+        cargo run -p oxide-sloc
+    fi
 }
 
 extract_bundle() {
@@ -80,11 +120,11 @@ extract_bundle() {
     fi
 }
 
-# --rebuild is a no-op hint (cargo handles incremental compilation automatically);
-# we accept it so the flag doesn't get forwarded to the binary as a path argument.
+# Parse flags — none are forwarded to the binary.
 for arg in "$@"; do
     case "$arg" in
-        --rebuild) ;;   # recognised, intentionally ignored
+        --rebuild) ;;                   # no-op: cargo handles incremental builds
+        --host|--lan) HOST_MODE=1 ;;   # enable LAN server mode
         *) ;;
     esac
 done
