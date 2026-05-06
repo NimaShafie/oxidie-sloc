@@ -75,6 +75,7 @@ const MAX_CONCURRENT_ANALYSES: usize = 4;
 /// (b) spin a polling watcher that finds the dialog by title and calls
 /// SetForegroundWindow + FlashWindowEx once it appears.
 #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+#[allow(clippy::upper_case_acronyms)]
 mod win_dialog_focus {
     use std::mem::size_of;
 
@@ -1101,7 +1102,6 @@ struct PreviewQuery {
     exclude_globs: Option<String>,
 }
 
-
 #[cfg(feature = "native-dialog")]
 #[derive(Debug, Deserialize)]
 struct PickDirectoryQuery {
@@ -1589,29 +1589,30 @@ async fn open_path_handler(
 }
 
 async fn image_handler(AxumPath((folder, file)): AxumPath<(String, String)>) -> impl IntoResponse {
-    let (content_type, bytes): (&'static str, &'static [u8]) = match (folder.as_str(), file.as_str()) {
-        ("logo", "logo-text.png") => ("image/png", IMG_LOGO_TEXT),
-        ("logo", "small-logo.png") => ("image/png", IMG_LOGO_SMALL),
-        ("icons", "c.png") => ("image/png", IMG_ICON_C),
-        ("icons", "cpp.png") => ("image/png", IMG_ICON_CPP),
-        ("icons", "c-sharp.png") => ("image/png", IMG_ICON_CSHARP),
-        ("icons", "python.png") => ("image/png", IMG_ICON_PYTHON),
-        ("icons", "shell.png") => ("image/png", IMG_ICON_SHELL),
-        ("icons", "powershell.png") => ("image/png", IMG_ICON_POWERSHELL),
-        ("icons", "java-script.png") => ("image/png", IMG_ICON_JAVASCRIPT),
-        ("icons", "html-5.png") => ("image/png", IMG_ICON_HTML),
-        ("icons", "java.png") => ("image/png", IMG_ICON_JAVA),
-        ("icons", "visual-basic.png") => ("image/png", IMG_ICON_VB),
-        ("icons", "asm.png") => ("image/png", IMG_ICON_ASSEMBLY),
-        ("icons", "go.png") => ("image/png", IMG_ICON_GO),
-        ("icons", "r.png") => ("image/png", IMG_ICON_R),
-        ("icons", "xml.png") => ("image/png", IMG_ICON_XML),
-        ("icons", "groovy.png") => ("image/png", IMG_ICON_GROOVY),
-        ("icons", "docker.png") => ("image/png", IMG_ICON_DOCKERFILE),
-        ("icons", "makefile.svg") => ("image/svg+xml", IMG_ICON_MAKEFILE),
-        ("icons", "perl.svg") => ("image/svg+xml", IMG_ICON_PERL),
-        _ => return StatusCode::NOT_FOUND.into_response(),
-    };
+    let (content_type, bytes): (&'static str, &'static [u8]) =
+        match (folder.as_str(), file.as_str()) {
+            ("logo", "logo-text.png") => ("image/png", IMG_LOGO_TEXT),
+            ("logo", "small-logo.png") => ("image/png", IMG_LOGO_SMALL),
+            ("icons", "c.png") => ("image/png", IMG_ICON_C),
+            ("icons", "cpp.png") => ("image/png", IMG_ICON_CPP),
+            ("icons", "c-sharp.png") => ("image/png", IMG_ICON_CSHARP),
+            ("icons", "python.png") => ("image/png", IMG_ICON_PYTHON),
+            ("icons", "shell.png") => ("image/png", IMG_ICON_SHELL),
+            ("icons", "powershell.png") => ("image/png", IMG_ICON_POWERSHELL),
+            ("icons", "java-script.png") => ("image/png", IMG_ICON_JAVASCRIPT),
+            ("icons", "html-5.png") => ("image/png", IMG_ICON_HTML),
+            ("icons", "java.png") => ("image/png", IMG_ICON_JAVA),
+            ("icons", "visual-basic.png") => ("image/png", IMG_ICON_VB),
+            ("icons", "asm.png") => ("image/png", IMG_ICON_ASSEMBLY),
+            ("icons", "go.png") => ("image/png", IMG_ICON_GO),
+            ("icons", "r.png") => ("image/png", IMG_ICON_R),
+            ("icons", "xml.png") => ("image/png", IMG_ICON_XML),
+            ("icons", "groovy.png") => ("image/png", IMG_ICON_GROOVY),
+            ("icons", "docker.png") => ("image/png", IMG_ICON_DOCKERFILE),
+            ("icons", "makefile.svg") => ("image/svg+xml", IMG_ICON_MAKEFILE),
+            ("icons", "perl.svg") => ("image/svg+xml", IMG_ICON_PERL),
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
     ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
 }
 
@@ -2196,7 +2197,9 @@ async fn analyze_handler(
         project_path: form.path.clone(),
         csp_nonce,
     };
-    let html = template.render().unwrap_or_else(|err| format!("<pre>{err}</pre>"));
+    let html = template
+        .render()
+        .unwrap_or_else(|err| format!("<pre>{err}</pre>"));
     let mut response = Html(html).into_response();
     if let Ok(name) = axum::http::HeaderName::from_bytes(b"x-wait-id") {
         if let Ok(val) = axum::http::HeaderValue::from_str(&wait_id) {
@@ -2514,7 +2517,11 @@ fn render_result_page(
             .iter()
             .map(|s| build_submodule_row(s, run, run_id, &run_dir, artifacts.html_path.is_some()))
             .collect(),
-        pdf_generating: artifacts.pdf_path.as_ref().map(|p| !p.exists()).unwrap_or(false),
+        pdf_generating: artifacts
+            .pdf_path
+            .as_ref()
+            .map(|p| !p.exists())
+            .unwrap_or(false),
         scan_config_url: format!("/runs/{run_id}/scan-config"),
         lang_chart_json: {
             let entries: Vec<String> = run
@@ -2586,7 +2593,7 @@ async fn pdf_status_handler(
     } else {
         let reg = state.registry.lock().await;
         reg.find_by_run_id(&run_id)
-            .map(|e| recover_artifacts_from_registry(e))
+            .map(recover_artifacts_from_registry)
             .and_then(|a| a.pdf_path)
     };
     let ready = pdf_path.map(|p| p.exists()).unwrap_or(false);
@@ -3012,30 +3019,33 @@ async fn artifact_handler(
             }
             let filename = format!("{artifact}.html");
             let path = artifact_set.output_dir.join(&filename);
-            fs::read_to_string(&path).map_or_else(
-                |_| {
-                    let html = ErrorTemplate {
-                        message: format!(
-                            "Sub-report '{artifact}' was not found in the run directory.\n\
-                             Re-run the analysis with 'Detect and separate git submodules' \
-                             and HTML output enabled."
-                        ),
-                        last_report_url: Some("/view-reports".to_string()),
-                        last_report_label: Some("View Reports".to_string()),
-                        csp_nonce: csp_nonce.clone(),
-                    }
-                    .render()
-                    .unwrap_or_else(|_| "<pre>Sub-report not found.</pre>".to_string());
-                    (StatusCode::NOT_FOUND, Html(html)).into_response()
-                },
-                |content| Html(content).into_response(),
-            )
+            if !path.exists() {
+                let html = ErrorTemplate {
+                    message: format!(
+                        "Sub-report '{artifact}' was not found in the run directory.\n\
+                         Re-run the analysis with 'Detect and separate git submodules' \
+                         and HTML output enabled."
+                    ),
+                    last_report_url: Some("/view-reports".to_string()),
+                    last_report_label: Some("View Reports".to_string()),
+                    csp_nonce: csp_nonce.clone(),
+                }
+                .render()
+                .unwrap_or_else(|_| "<pre>Sub-report not found.</pre>".to_string());
+                return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            }
+            serve_html_artifact(&path, wants_download, &csp_nonce)
         }
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
+
+struct SubmoduleLinkRow {
+    name: String,
+    url: String,
+}
 
 struct HistoryEntryRow {
     run_id: String,
@@ -3053,6 +3063,7 @@ struct HistoryEntryRow {
     has_html: bool,
     has_json: bool,
     has_pdf: bool,
+    submodule_links: Vec<SubmoduleLinkRow>,
 }
 
 fn fmt_pst(dt: chrono::DateTime<chrono::Utc>) -> String {
@@ -3097,6 +3108,27 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
             has_html: e.html_path.as_ref().is_some_and(|p| p.exists()),
             has_json: e.json_path.as_ref().is_some_and(|p| p.exists()),
             has_pdf: e.pdf_path.as_ref().is_some_and(|p| p.exists()),
+            submodule_links: {
+                let mut links: Vec<SubmoduleLinkRow> = vec![];
+                if let Some(dir) = e.html_path.as_ref().and_then(|p| p.parent()) {
+                    if let Ok(rd) = std::fs::read_dir(dir) {
+                        for entry_res in rd.flatten() {
+                            let fname = entry_res.file_name();
+                            let fname_str = fname.to_string_lossy();
+                            if fname_str.starts_with("sub_") && fname_str.ends_with(".html") {
+                                let stem = &fname_str[..fname_str.len() - 5];
+                                let display = stem[4..].replace('-', " ");
+                                links.push(SubmoduleLinkRow {
+                                    name: display,
+                                    url: format!("/runs/{}/{stem}", e.run_id),
+                                });
+                            }
+                        }
+                    }
+                }
+                links.sort_by(|a, b| a.name.cmp(&b.name));
+                links
+            },
         })
         .collect()
 }
@@ -3167,6 +3199,8 @@ async fn compare_select_handler(
 struct CompareQuery {
     a: Option<String>,
     b: Option<String>,
+    /// Optional submodule name to scope the comparison to one submodule.
+    sub: Option<String>,
 }
 
 struct CompareFileDeltaRow {
@@ -3181,6 +3215,37 @@ struct CompareFileDeltaRow {
     comment_delta_class: String,
     total_delta_str: String,
     total_delta_class: String,
+}
+
+/// Recompute `summary_totals` from the current `per_file_records` slice.
+/// Used when per_file_records has been narrowed to a submodule subset.
+fn recompute_summary_from_records(run: &mut AnalysisRun) {
+    let files_analyzed = run
+        .per_file_records
+        .iter()
+        .filter(|r| r.language.is_some())
+        .count() as u64;
+    let code_lines: u64 = run
+        .per_file_records
+        .iter()
+        .map(|r| r.effective_counts.code_lines)
+        .sum();
+    let comment_lines: u64 = run
+        .per_file_records
+        .iter()
+        .map(|r| r.effective_counts.comment_lines)
+        .sum();
+    let blank_lines: u64 = run
+        .per_file_records
+        .iter()
+        .map(|r| r.effective_counts.blank_lines)
+        .sum();
+    run.summary_totals.files_analyzed = files_analyzed;
+    run.summary_totals.files_considered = files_analyzed;
+    run.summary_totals.code_lines = code_lines;
+    run.summary_totals.comment_lines = comment_lines;
+    run.summary_totals.blank_lines = blank_lines;
+    run.summary_totals.total_physical_lines = code_lines + comment_lines + blank_lines;
 }
 
 fn fmt_delta(n: i64) -> String {
@@ -3350,7 +3415,43 @@ async fn compare_handler(
         }
     };
 
-    let comparison = compute_delta(&baseline_run, &current_run);
+    let active_submodule = query.sub.clone();
+
+    // Build the intersection of submodule names present in both runs.
+    // Only populated when submodule_breakdown was enabled for both scans.
+    let submodule_options = {
+        let base_names: Vec<&str> = baseline_run
+            .submodule_summaries
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        let mut opts: Vec<String> = current_run
+            .submodule_summaries
+            .iter()
+            .filter(|s| base_names.contains(&s.name.as_str()))
+            .map(|s| s.name.clone())
+            .collect();
+        opts.sort();
+        opts
+    };
+
+    // When a submodule scope is active, narrow per_file_records to that submodule
+    // and recompute summary totals so the delta cards reflect submodule-only counts.
+    let (effective_baseline, effective_current) = if let Some(ref sub_name) = active_submodule {
+        let mut b = baseline_run.clone();
+        let mut c = current_run.clone();
+        b.per_file_records
+            .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+        c.per_file_records
+            .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+        recompute_summary_from_records(&mut b);
+        recompute_summary_from_records(&mut c);
+        (b, c)
+    } else {
+        (baseline_run, current_run)
+    };
+
+    let comparison = compute_delta(&effective_baseline, &effective_current);
 
     let file_rows: Vec<CompareFileDeltaRow> = comparison
         .file_deltas
@@ -3470,6 +3571,8 @@ async fn compare_handler(
             .find(|s| !s.is_empty())
             .unwrap_or(&project_path)
             .to_string(),
+        submodule_options,
+        active_submodule,
         csp_nonce,
     };
 
@@ -9526,6 +9629,14 @@ struct ErrorTemplate {
     #history-table col:nth-child(9){width:85px;}
     #history-table col:nth-child(10){width:115px;}
     #history-table td:nth-child(2){white-space:normal;word-break:break-word;overflow:visible;}
+    .submod-details{margin-top:6px;font-size:12px;color:var(--muted);}
+    .submod-details summary{cursor:pointer;font-weight:600;user-select:none;list-style:none;padding:2px 0;}
+    .submod-details summary::-webkit-details-marker{display:none;}
+    .submod-spacer{margin-top:6px;height:21px;}
+    .submod-link-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;}
+    .submod-view-btn{display:inline-flex;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(111,155,255,0.10);border:1px solid rgba(111,155,255,0.22);color:var(--accent-2);text-decoration:none;white-space:nowrap;}
+    .submod-view-btn:hover{background:rgba(111,155,255,0.22);}
+    body.dark-theme .submod-view-btn{background:rgba(111,155,255,0.14);border-color:rgba(111,155,255,0.28);color:var(--accent);}
   </style>
 </head>
 <body>
@@ -9671,6 +9782,18 @@ struct ErrorTemplate {
                   <a class="btn primary rpt-btn" href="/runs/{{ entry.run_id }}/html" target="_blank" rel="noopener" title="View HTML report">View</a>
                   {% if entry.has_pdf %}<a class="btn primary rpt-btn" href="/runs/{{ entry.run_id }}/pdf" target="_blank" rel="noopener" title="View PDF report">PDF</a>{% endif %}
                 </div>
+                {% if !entry.submodule_links.is_empty() %}
+                <details class="submod-details">
+                  <summary>&#8627; {{ entry.submodule_links.len() }} submodule(s)</summary>
+                  <div class="submod-link-list">
+                    {% for sub in entry.submodule_links %}
+                    <a href="{{ sub.url }}" target="_blank" rel="noopener" class="submod-view-btn">{{ sub.name }}</a>
+                    {% endfor %}
+                  </div>
+                </details>
+                {% else %}
+                <div class="submod-spacer"></div>
+                {% endif %}
               </td>
             </tr>
             {% endfor %}
@@ -10709,6 +10832,11 @@ struct CompareSelectTemplate {
     body.dark-theme .tab-btn.tab-added{background:#163927;color:#8fe2a8;border-color:#2a6b4a;}
     body.dark-theme .tab-btn.tab-removed{background:#3d1c1c;color:#f5a3a3;border-color:#7a3a3a;}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .submod-scope-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 16px;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;margin-bottom:18px;}
+    .submod-scope-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);flex-shrink:0;white-space:nowrap;}
+    .submod-scope-btn{padding:5px 14px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:background .12s ease,border-color .12s ease;}
+    .submod-scope-btn:hover{background:var(--line);}
+    .submod-scope-btn.active{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
   </style>
 </head>
 <body>
@@ -10756,7 +10884,11 @@ struct CompareSelectTemplate {
         <div>
           <h1 style="margin:0 0 6px;">Scan Delta</h1>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            {% if let Some(sub) = active_submodule %}
+            <span class="muted" style="font-size:16px;">Comparing submodule <strong>{{ sub }}</strong> across two scans of</span>
+            {% else %}
             <span class="muted" style="font-size:16px;">Comparing two scans of</span>
+            {% endif %}
             <a class="path-link" id="project-path-link" data-folder="{{ project_path }}" href="#" style="font-size:16px;font-weight:700;">{{ project_path }}</a>
           </div>
         </div>
@@ -10881,6 +11013,18 @@ struct CompareSelectTemplate {
       </div>
     </section>
 
+    {% if !submodule_options.is_empty() %}
+    <div class="submod-scope-bar">
+      <span class="submod-scope-label">Scope:</span>
+      <a class="submod-scope-btn{% if active_submodule.is_none() %} active{% endif %}"
+         href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}">Full Repo</a>
+      {% for sub in submodule_options %}
+      <a class="submod-scope-btn{% if active_submodule.as_deref() == Some(sub.as_str()) %} active{% endif %}"
+         href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}&amp;sub={{ sub }}">{{ sub }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <section class="panel">
       <h2>File-level delta</h2>
       <div class="filter-tabs-row">
@@ -10914,13 +11058,13 @@ struct CompareSelectTemplate {
       <div class="table-wrap">
       <table id="delta-table">
         <colgroup>
-          <col style="width:34%">
-          <col style="width:10%">
-          <col style="width:9%">
+          <col style="width:35%">
           <col style="width:15%">
+          <col style="width:12%">
+          <col style="width:16%">
           <col style="width:8%">
-          <col style="width:8%">
-          <col style="width:8%">
+          <col style="width:7%">
+          <col style="width:7%">
         </colgroup>
         <thead>
           <tr id="delta-thead">
@@ -11250,10 +11394,10 @@ struct CompareSelectTemplate {
       r1('');
       r1(s1(0,'FILE CHANGES',8));
       r1(s1(0,'Category',3)+s1(3,'Count',3)+s1(4,'% of Total',3));
-      r1(s1(0,'Modified')+n1(3,sd.fm,4)+s1(4,_tp(sd.fm)));
-      r1(s1(0,'Added')+n1(3,sd.fa,4)+s1(4,_tp(sd.fa)));
-      r1(s1(0,'Removed')+n1(3,sd.fr,4)+s1(4,_tp(sd.fr)));
-      r1(s1(0,'Unchanged')+n1(3,sd.fu,4)+s1(4,_tp(sd.fu)));
+      r1(s1(0,'Modified')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fm,4)+s1(4,_tp(sd.fm)));
+      r1(s1(0,'Added')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fa,4)+s1(4,_tp(sd.fa)));
+      r1(s1(0,'Removed')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fr,4)+s1(4,_tp(sd.fr)));
+      r1(s1(0,'Unchanged')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fu,4)+s1(4,_tp(sd.fu)));
       if(langs.length){
         r1('');r1(s1(0,'LANGUAGE BREAKDOWN',8));
         r1(s1(0,'Language',3)+s1(1,'Files Changed',3)+s1(2,'Code Delta',3));
@@ -11320,7 +11464,7 @@ struct CompareSelectTemplate {
     function _tfPct(n){var tf=_sd.fm+_sd.fa+_sd.fr+_sd.fu;return tf>0?(n/tf*100).toFixed(1)+'%':'';}
     function _filePct(b,c,st){if(st==='added'&&b===0)return'new';if(st==='removed')return'-100.0%';if(st==='unchanged')return'0.0%';return b>0?_slPct(c-b,b):'';}
     var _summaryHdrs = ['Metric',_blabel,_clabel,'Delta','% Change'];
-    function getSummaryExportRows(){return[['Code Lines',String(_sd.bc),String(_sd.cc),_sd.cd,_slPct(_sd.cc-_sd.bc,_sd.bc)],['Files Analyzed',String(_sd.bf),String(_sd.cf),_sd.fd,_slPct(_sd.cf-_sd.bf,_sd.bf)],['Comment Lines',String(_sd.bcm),String(_sd.ccm),_sd.cmd,_slPct(_sd.ccm-_sd.bcm,_sd.bcm)],['Modified Files','','',String(_sd.fm),_tfPct(_sd.fm)],['Added Files','','',String(_sd.fa),_tfPct(_sd.fa)],['Removed Files','','',String(_sd.fr),_tfPct(_sd.fr)],['Unchanged Files','','',String(_sd.fu),_tfPct(_sd.fu)]];}
+    function getSummaryExportRows(){return[['Code Lines',String(_sd.bc),String(_sd.cc),_sd.cd,_slPct(_sd.cc-_sd.bc,_sd.bc)],['Files Analyzed',String(_sd.bf),String(_sd.cf),_sd.fd,_slPct(_sd.cf-_sd.bf,_sd.bf)],['Comment Lines',String(_sd.bcm),String(_sd.ccm),_sd.cmd,_slPct(_sd.ccm-_sd.bcm,_sd.bcm)],['Modified Files','0','0',String(_sd.fm),_tfPct(_sd.fm)],['Added Files','0','0',String(_sd.fa),_tfPct(_sd.fa)],['Removed Files','0','0',String(_sd.fr),_tfPct(_sd.fr)],['Unchanged Files','0','0',String(_sd.fu),_tfPct(_sd.fu)]];}
     var _dh = ['File','Language','Status','Code Before ('+_blabel+')','Code After ('+_clabel+')','Code Delta','Comment Delta','Total Delta','% Code Chg'];
     function getDeltaExportRows(){var r=[];document.querySelectorAll('#delta-tbody .delta-row').forEach(function(tr){var b=parseInt(tr.getAttribute('data-baseline-code'))||0,c=parseInt(tr.getAttribute('data-current-code'))||0,st=tr.getAttribute('data-status')||'';r.push([tr.getAttribute('data-path')||'',tr.getAttribute('data-language')||'',st,tr.getAttribute('data-baseline-code')||'',tr.getAttribute('data-current-code')||'',tr.getAttribute('data-code-delta')||'',tr.getAttribute('data-comment-delta')||'',tr.getAttribute('data-total-delta')||'',_filePct(b,c,st)]);});return r;}
     window.exportDeltaCsv = function(){slocCsv(_exportBase+'_summary.csv',_summaryHdrs,getSummaryExportRows());};
@@ -11527,5 +11671,9 @@ struct CompareTemplate {
     baseline_git_commit_date: Option<String>,
     current_git_commit_date: Option<String>,
     project_name: String,
+    /// Submodule names present in both runs (empty when submodule_breakdown was not enabled).
+    submodule_options: Vec<String>,
+    /// The submodule currently being compared, if the `sub` query param was provided.
+    active_submodule: Option<String>,
     csp_nonce: String,
 }

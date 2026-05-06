@@ -384,7 +384,12 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
             .spawn()
             .with_context(|| format!("failed to launch browser {}", browser.display()))?;
 
-        wait_for_pdf_stable(&mut child, &browser.display(), headless_flag, &chrome_pdf_path)
+        wait_for_pdf_stable(
+            &mut child,
+            &browser.display(),
+            headless_flag,
+            &chrome_pdf_path,
+        )
     };
 
     let result = run_once("--headless=old").or_else(|err| {
@@ -398,9 +403,8 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
 
     result?;
 
-    fs::rename(&chrome_pdf_path, &absolute_pdf).with_context(|| {
-        format!("failed to move generated PDF to {}", absolute_pdf.display())
-    })?;
+    fs::rename(&chrome_pdf_path, &absolute_pdf)
+        .with_context(|| format!("failed to move generated PDF to {}", absolute_pdf.display()))?;
 
     eprintln!("[oxide-sloc][pdf] done");
     Ok(())
@@ -952,10 +956,15 @@ struct WarningOpportunityRow {
     .table-resizable { table-layout: fixed; }
     .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
     .table-resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #per-file-table { min-width: 1150px; }
+    /* Column resize handle */
+    .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
+    .col-resize-handle:hover, .col-resize-handle.dragging { background: rgba(211,122,76,0.3); }
+    #per-file-table { min-width: 1200px; }
+    /* Numeric columns get more breathing room */
+    #per-file-table th, #per-file-table td { padding: 11px 14px; }
     /* File column stays pinned so it never scrolls out of view */
-    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; min-width: 200px; background: var(--surface-2); }
-    #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); }
+    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; min-width: 200px; background: var(--surface-2); padding: 11px 10px 11px 14px; }
+    #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); padding: 11px 10px 11px 14px; }
     #per-file-table tbody tr:hover td:first-child { background: rgba(255,247,238,0.6); }
     body.dark-theme #per-file-table tbody tr:hover td:first-child { background: rgba(255,255,255,0.03); }
     .num-col { text-align: right !important; }
@@ -1087,9 +1096,9 @@ struct WarningOpportunityRow {
       /* Keep the first few rows of a table with the header */
       thead { break-after: avoid !important; }
 
-      /* Language charts — always side-by-side, never wrap */
-      #lang-overview-charts > div { overflow-x: visible !important; }
-      #lang-overview-charts > div > div { flex-wrap: nowrap !important; }
+      /* Language charts — table layout is inherently side-by-side */
+      #lang-overview-charts table { display: inline-table !important; }
+      #lang-overview-charts td { vertical-align: top !important; }
 
       /* Tables */
       .table-shell {
@@ -1381,19 +1390,24 @@ struct WarningOpportunityRow {
         <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" onclick="resetPerFileTable()" title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" onclick="exportReportCsv()">&#8595; CSV</button><button class="export-btn" onclick="exportReportXls()">&#8595; Excel</button></div></div></div>
         <div class="table-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
+            <colgroup>
+              <col><col style="width:100px"><col style="width:90px"><col style="width:72px">
+              <col style="width:90px"><col style="width:72px"><col style="width:76px">
+              <col style="width:90px"><col style="width:76px"><col style="width:90px"><col style="width:76px">
+            </colgroup>
             <thead>
               <tr>
-                <th data-sort-type="text">File</th>
-                <th data-sort-type="text" style="width:90px">Language</th>
-                <th data-sort-type="number" class="num-col" style="width:84px">Physical</th>
-                <th data-sort-type="number" class="num-col" style="width:62px">Code</th>
-                <th data-sort-type="number" class="num-col" style="width:84px">Comments</th>
-                <th data-sort-type="number" class="num-col" style="width:62px">Blank</th>
-                <th data-sort-type="number" class="num-col" style="width:68px">Mixed</th>
-                <th data-sort-type="number" class="num-col" style="width:84px">Functions</th>
-                <th data-sort-type="number" class="num-col" style="width:68px">Classes</th>
-                <th data-sort-type="number" class="num-col" style="width:84px">Variables</th>
-                <th data-sort-type="number" class="num-col" style="width:68px">Imports</th>
+                <th data-sort-type="text">File<div class="col-resize-handle"></div></th>
+                <th data-sort-type="text">Language<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Physical<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Code<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Comments<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Blank<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Mixed<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Functions<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Classes<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Variables<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Imports<div class="col-resize-handle"></div></th>
               </tr>
             </thead>
             <tbody>
@@ -1643,9 +1657,10 @@ struct WarningOpportunityRow {
           var direction = 1;
           var marker = document.createElement('span');
           marker.className = 'sort-indicator';
-          marker.textContent = '↕';
+          marker.textContent = ' ↕';
           th.appendChild(marker);
-          th.addEventListener('click', function () {
+          th.addEventListener('click', function (e) {
+            if (e.target.closest && e.target.closest('.col-resize-handle')) return;
             var tbody = table.tBodies[0];
             var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
             rows.sort(function (a, b) {
@@ -1660,6 +1675,28 @@ struct WarningOpportunityRow {
           });
         });
       });
+
+      // ── Column resize for per-file-table ─────────────────────────────────────
+      (function() {
+        var table = document.getElementById('per-file-table');
+        if (!table) return;
+        var cols = Array.prototype.slice.call(table.querySelectorAll('col'));
+        var ths = Array.prototype.slice.call(table.querySelectorAll('thead th'));
+        ths.forEach(function(th, i) {
+          var handle = th.querySelector('.col-resize-handle');
+          if (!handle || !cols[i]) return;
+          var startX, startW;
+          handle.addEventListener('mousedown', function(e) {
+            e.stopPropagation(); e.preventDefault();
+            startX = e.clientX; startW = cols[i].offsetWidth || th.offsetWidth;
+            handle.classList.add('dragging');
+            function onMove(e) { cols[i].style.width = Math.max(40, startW + e.clientX - startX) + 'px'; }
+            function onUp() { handle.classList.remove('dragging'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+          });
+        });
+      })();
 
       document.querySelectorAll('[data-table-filter]').forEach(function (input) {
         var table = document.getElementById(input.getAttribute('data-table-filter'));
@@ -1751,6 +1788,7 @@ struct WarningOpportunityRow {
       var shell = tbl.closest('.table-shell');
       if (shell) shell.scrollLeft = 0;
       Array.prototype.slice.call(tbl.querySelectorAll('th')).forEach(function(th) { th.style.width = ''; });
+      Array.prototype.slice.call(tbl.querySelectorAll('col')).forEach(function(c) { c.style.width = ''; });
     };
     var _rh=['File','Language','Physical Lines','Code Lines','Comments','Blank','Mixed Separate','Functions','Classes','Variables','Imports'];
     function getReportExportRows(){var r=[];document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<11)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim(),tds[3].textContent.trim(),tds[4].textContent.trim(),tds[5].textContent.trim(),tds[6].textContent.trim(),tds[7].textContent.trim(),tds[8].textContent.trim(),tds[9].textContent.trim(),tds[10].textContent.trim()]);});return r;}
@@ -1771,7 +1809,7 @@ struct WarningOpportunityRow {
       // Code lines donut — larger radius and legend area for legibility
       var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
       var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
-      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
       if(D.length===1){
         // Single language: full-circle arc paths can degenerate in some renderers; use a stroked circle instead
         var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
@@ -1800,7 +1838,7 @@ struct WarningOpportunityRow {
       // Per-language stacked bar — wider bars and labels for legibility
       var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
       var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
-      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
       D.forEach(function(d,i){
         var y=10+i*rHb,x=LW;
         var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
@@ -1816,11 +1854,13 @@ struct WarningOpportunityRow {
       bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
       bs+='</svg>';
       var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
-      el.innerHTML='<div style="width:100%;overflow-x:auto;display:flex;justify-content:center;padding:6px 0;">'+
-        '<div style="display:inline-flex;gap:56px;align-items:flex-start;flex-wrap:nowrap;flex-shrink:0;">'+
-          '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
-          '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
-        '</div>'+
+      el.innerHTML='<div style="overflow-x:auto;text-align:center;padding:6px 0;">'+
+        '<table style="display:inline-table;border-collapse:separate;border-spacing:56px 0;margin:0 auto;">'+
+          '<tr>'+
+            '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</td>'+
+            '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</td>'+
+          '</tr>'+
+        '</table>'+
       '</div>';
     })();
   </script>
