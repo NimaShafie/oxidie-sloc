@@ -180,7 +180,6 @@ elif [[ -f "$EXE_BUILD" ]]; then do_launch_binary "$EXE_BUILD"; exit 0
 fi
 
 printf '\noxide-sloc: no binary found.\n\n' >&2
-printf '  Install first: bash scripts/install.sh\n' >&2
-printf '  Or build:      cargo build --release -p oxide-sloc\n' >&2
-printf '  Or Docker:     docker compose up\n\n' >&2
+printf '  Run the installer first: bash scripts/install.sh\n' >&2
+printf '  See docs/airgap.md for all deployment paths (no internet required).\n\n' >&2
 exit 1

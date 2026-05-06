@@ -145,8 +145,10 @@ pub(super) struct CompareRefsQuery {
     .page-header-chip svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2.5;flex:0 0 auto;}
     /* ── Workflow steps ── */
     .how-row{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:center;margin-bottom:20px;}
-    .how-step{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:15px 16px;display:flex;align-items:center;gap:13px;box-shadow:var(--shadow);}
-    .how-step-num{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--oxide),var(--nav-2));color:#fff;font-size:13px;font-weight:900;display:flex;align-items:center;justify-content:center;}
+    .how-step{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:15px 16px;display:flex;align-items:center;gap:13px;box-shadow:var(--shadow);cursor:default;transition:transform 0.18s ease,box-shadow 0.18s ease,border-color 0.18s ease;}
+    .how-step:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(0,0,0,0.13);border-color:var(--oxide);}
+    .how-step-num{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--oxide),var(--nav-2));color:#fff;font-size:13px;font-weight:900;display:flex;align-items:center;justify-content:center;transition:transform 0.18s ease;}
+    .how-step:hover .how-step-num{transform:scale(1.12);}
     .how-step-body{min-width:0;}
     .how-step-label{font-size:13px;font-weight:800;color:var(--text);}
     .how-step-desc{font-size:11px;color:var(--muted);margin-top:2px;}
@@ -170,6 +172,8 @@ pub(super) struct CompareRefsQuery {
     .repo-input-padded{padding-left:34px;}
     .card.fetch-card{padding-bottom:0;}
     .fetch-footer{margin:14px -24px 0;padding:11px 24px 10px;background:var(--surface-2);border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius);font-size:12px;color:var(--muted);line-height:1.4;}
+    .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
+    .site-footer a{color:var(--muted);}
     /* ── Tabs with icons ── */
     .tab-inner{display:inline-flex;align-items:center;gap:6px;}
     .tab-inner svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;opacity:0.65;flex:0 0 auto;}
@@ -313,7 +317,7 @@ pub(super) struct CompareRefsQuery {
         </button>
       </div>
       <div id="statusMsg" style="display:none" class="status-msg"></div>
-      <div class="fetch-footer">First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching.</div>
+      <div class="fetch-footer"><span style="display:block">First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached).</span><span style="display:block;margin-top:4px">Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching.</span></div>
     </div>
     <div id="loadingPanel" class="skeleton-panel panel-hidden">
       <div class="loading-info">
@@ -727,6 +731,12 @@ pub(super) struct CompareRefsQuery {
       applyTheme();
     })();
   </script>
+  <footer class="site-footer">
+    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+  </footer>
 </body>
 </html>"##,
     ext = "html"
@@ -735,6 +745,7 @@ pub(super) struct GitBrowserTemplate {
     pub csp_nonce: String,
     pub repo_url: String,
     pub repo_url_json: String,
+    pub version: &'static str,
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -750,6 +761,7 @@ pub(super) async fn git_browser_handler(
         csp_nonce,
         repo_url,
         repo_url_json,
+        version: env!("CARGO_PKG_VERSION"),
     };
     Html(
         template

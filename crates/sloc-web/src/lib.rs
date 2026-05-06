@@ -2,6 +2,19 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 #![allow(clippy::multiple_crate_versions)]
 
+static IMG_LOGO_TEXT: &[u8] = include_bytes!("../assets/logo/logo-text.png");
+static IMG_LOGO_SMALL: &[u8] = include_bytes!("../assets/logo/small-logo.png");
+static IMG_ICON_C: &[u8] = include_bytes!("../assets/icons/c.png");
+static IMG_ICON_CPP: &[u8] = include_bytes!("../assets/icons/cpp.png");
+static IMG_ICON_CSHARP: &[u8] = include_bytes!("../assets/icons/c-sharp.png");
+static IMG_ICON_PYTHON: &[u8] = include_bytes!("../assets/icons/python.png");
+static IMG_ICON_SHELL: &[u8] = include_bytes!("../assets/icons/shell.png");
+static IMG_ICON_POWERSHELL: &[u8] = include_bytes!("../assets/icons/powershell.png");
+static IMG_ICON_JAVASCRIPT: &[u8] = include_bytes!("../assets/icons/java-script.png");
+static IMG_ICON_HTML: &[u8] = include_bytes!("../assets/icons/html-5.png");
+static IMG_ICON_JAVA: &[u8] = include_bytes!("../assets/icons/java.png");
+static IMG_ICON_VB: &[u8] = include_bytes!("../assets/icons/visual-basic.png");
+
 pub(crate) mod git_browser;
 pub(crate) mod git_webhook;
 
@@ -45,6 +58,113 @@ use sloc_core::{
 };
 use sloc_report::{render_html, render_sub_report_html, write_pdf_from_html};
 const MAX_CONCURRENT_ANALYSES: usize = 4;
+
+/// Windows-only helpers that force the native file-picker dialog into the
+/// foreground instead of appearing minimised behind other windows.
+///
+/// Strategy: (a) attach the spawn_blocking thread's input queue to the current
+/// foreground thread so that windows created on our thread inherit focus; and
+/// (b) spin a polling watcher that finds the dialog by title and calls
+/// SetForegroundWindow + FlashWindowEx once it appears.
+#[cfg(all(target_os = "windows", feature = "native-dialog"))]
+mod win_dialog_focus {
+    use std::mem::size_of;
+
+    type HWND = *mut core::ffi::c_void;
+    type DWORD = u32;
+    type UINT = u32;
+    type BOOL = i32;
+
+    // Mirror of FLASHWINFO from winuser.h — field names kept in PascalCase to
+    // match the Win32 ABI layout exactly; the #[allow] suppresses the Rust
+    // naming lint for this one struct.
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct FLASHWINFO {
+        cbSize: UINT,
+        hwnd: HWND,
+        dwFlags: DWORD,
+        uCount: UINT,
+        dwTimeout: DWORD,
+    }
+
+    const FLASHW_ALL: DWORD = 0x3;
+    const FLASHW_TIMERNOFG: DWORD = 0xC;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> HWND;
+        fn SetForegroundWindow(hWnd: HWND) -> BOOL;
+        fn BringWindowToTop(hWnd: HWND) -> BOOL;
+        fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
+        fn AttachThreadInput(idAttach: DWORD, idAttachTo: DWORD, fAttach: BOOL) -> BOOL;
+        fn FlashWindowEx(pfwi: *const FLASHWINFO) -> BOOL;
+        fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> DWORD;
+    }
+
+    /// Attaches our thread's input to the foreground window's thread so that
+    /// windows created on our thread inherit foreground focus.  Returns the
+    /// foreground thread ID (needed for `detach_from_foreground`), or 0 if
+    /// the thread was already the foreground thread.
+    pub fn attach_to_foreground() -> DWORD {
+        unsafe {
+            let fg_hwnd = GetForegroundWindow();
+            if fg_hwnd.is_null() {
+                return 0;
+            }
+            let fg_tid = GetWindowThreadProcessId(fg_hwnd, core::ptr::null_mut());
+            let my_tid = GetCurrentThreadId();
+            if fg_tid == my_tid {
+                return 0;
+            }
+            AttachThreadInput(my_tid, fg_tid, 1);
+            fg_tid
+        }
+    }
+
+    /// Undoes `attach_to_foreground`.
+    pub fn detach_from_foreground(fg_tid: DWORD) {
+        if fg_tid == 0 {
+            return;
+        }
+        unsafe {
+            AttachThreadInput(GetCurrentThreadId(), fg_tid, 0);
+        }
+    }
+
+    /// Spawns a short-lived watcher thread that polls for a dialog window
+    /// matching `title` and, once found, forces it to the foreground and
+    /// flashes its taskbar button until the user interacts with it.
+    pub fn flash_dialog_when_ready(title: String) {
+        std::thread::spawn(move || {
+            let title_w: Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
+            for _ in 0..40 {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                unsafe {
+                    let hwnd = FindWindowW(core::ptr::null(), title_w.as_ptr());
+                    if !hwnd.is_null() {
+                        SetForegroundWindow(hwnd);
+                        BringWindowToTop(hwnd);
+                        #[allow(non_snake_case)]
+                        FlashWindowEx(&FLASHWINFO {
+                            cbSize: size_of::<FLASHWINFO>() as UINT,
+                            hwnd,
+                            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+                            uCount: 3,
+                            dwTimeout: 0,
+                        });
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
 
 /// Sliding-window rate limiter keyed by client IP.
 /// Uses only std primitives — no external crate required.
@@ -125,10 +245,34 @@ impl IpRateLimiter {
     }
 }
 
+/// Carries context from scan time to result render time (stored inside RunArtifacts).
+#[derive(Clone, Debug, Default)]
+struct RunResultContext {
+    prev_entry: Option<RegistryEntry>,
+    prev_scan_count: usize,
+    project_path: String,
+}
+
+/// State of a background async scan, keyed by wait_id in AppState::async_runs.
+#[derive(Clone)]
+enum AsyncRunState {
+    Running {
+        started_at: std::time::Instant,
+    },
+    /// run_id so the status endpoint can redirect to /runs/{run_id}/result.
+    Complete {
+        run_id: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
 #[derive(Clone)]
 struct AppState {
     base_config: AppConfig,
     artifacts: Arc<Mutex<HashMap<String, RunArtifacts>>>,
+    async_runs: Arc<Mutex<HashMap<String, AsyncRunState>>>,
     registry: Arc<Mutex<ScanRegistry>>,
     registry_path: PathBuf,
     analyze_semaphore: Arc<tokio::sync::Semaphore>,
@@ -146,6 +290,8 @@ struct AppState {
 
 type PendingPdf = Option<(PathBuf, PathBuf, bool)>;
 
+/// Parameters for the fire-and-forget HTML + PDF background task.
+
 #[derive(Clone, Debug)]
 pub(crate) struct RunArtifacts {
     output_dir: PathBuf,
@@ -154,6 +300,7 @@ pub(crate) struct RunArtifacts {
     json_path: Option<PathBuf>,
     scan_config_path: Option<PathBuf>,
     report_title: String,
+    result_context: RunResultContext,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -176,6 +323,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/metrics/latest", get(api_metrics_latest_handler))
         .route("/api/metrics/{run_id}", get(api_metrics_run_handler))
         .route("/api/project-history", get(project_history_handler))
+        .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
+        .route("/runs/{run_id}/result", get(async_run_result_handler))
         .route("/embed/summary", get(embed_handler))
         // ── Git browser ────────────────────────────────────────────────────────
         .route("/git-browser", get(git_browser::git_browser_handler))
@@ -222,6 +371,7 @@ pub fn make_test_router() -> Router {
     let state = AppState {
         base_config: AppConfig::default(),
         artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
         registry: Arc::new(Mutex::new(ScanRegistry::default())),
         registry_path: tmp.join("registry.json"),
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
@@ -309,6 +459,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let state = AppState {
         base_config: config,
         artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
         registry: Arc::new(Mutex::new(registry)),
         registry_path,
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
@@ -941,6 +1092,7 @@ struct PreviewQuery {
     exclude_globs: Option<String>,
 }
 
+
 #[cfg(feature = "native-dialog")]
 #[derive(Debug, Deserialize)]
 struct PickDirectoryQuery {
@@ -977,22 +1129,39 @@ async fn pick_directory_handler(
         Some("output") => "Select output directory",
         Some("reports") => "Select folder containing saved reports",
         _ => "Select project directory",
-    };
-
-    let mut dialog = rfd::FileDialog::new().set_title(title);
-    if let Some(current) = query.current.as_deref() {
-        let resolved = resolve_input_path(current);
-        let seed = if resolved.is_dir() {
-            Some(resolved)
-        } else {
-            resolved.parent().map(Path::to_path_buf)
-        };
-        if let Some(seed_dir) = seed.filter(|p| p.exists()) {
-            dialog = dialog.set_directory(seed_dir);
-        }
     }
+    .to_owned();
+    let current = query.current.clone();
 
-    let picked = dialog.pick_folder();
+    let picked = tokio::task::spawn_blocking(move || {
+        // Windows: attach to the foreground thread so the dialog inherits focus,
+        // and kick off a watcher that flashes the dialog once it appears.
+        #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+        let _fg_tid = win_dialog_focus::attach_to_foreground();
+        #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+        win_dialog_focus::flash_dialog_when_ready(title.clone());
+
+        let mut dialog = rfd::FileDialog::new().set_title(&title);
+        if let Some(current) = current.as_deref() {
+            let resolved = resolve_input_path(current);
+            let seed = if resolved.is_dir() {
+                Some(resolved)
+            } else {
+                resolved.parent().map(Path::to_path_buf)
+            };
+            if let Some(seed_dir) = seed.filter(|p| p.exists()) {
+                dialog = dialog.set_directory(seed_dir);
+            }
+        }
+        let result = dialog.pick_folder();
+
+        #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+        win_dialog_focus::detach_from_foreground(_fg_tid);
+
+        result
+    })
+    .await
+    .unwrap_or(None);
 
     Json(PickDirectoryResponse {
         selected_path: picked.as_ref().map(|p| display_path(p)),
@@ -1014,10 +1183,24 @@ async fn pick_file_handler(State(state): State<AppState>) -> Response {
     if state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let picked = rfd::FileDialog::new()
-        .set_title("Select HTML report")
-        .add_filter("HTML report", &["html"])
-        .pick_file();
+    let picked = tokio::task::spawn_blocking(|| {
+        #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+        let _fg_tid = win_dialog_focus::attach_to_foreground();
+        #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+        win_dialog_focus::flash_dialog_when_ready("Select HTML report".to_owned());
+
+        let result = rfd::FileDialog::new()
+            .set_title("Select HTML report")
+            .add_filter("HTML report", &["html"])
+            .pick_file();
+
+        #[cfg(all(target_os = "windows", feature = "native-dialog"))]
+        win_dialog_focus::detach_from_foreground(_fg_tid);
+
+        result
+    })
+    .await
+    .unwrap_or(None);
     Json(PickDirectoryResponse {
         selected_path: picked.as_ref().map(|p| display_path(p)),
         cancelled: picked.is_none(),
@@ -1082,6 +1265,7 @@ fn registry_entry_from_run(
         git_commit: None,
         git_author: None,
         git_tags: None,
+        git_commit_date: None,
     }
 }
 
@@ -1317,10 +1501,11 @@ async fn locate_reports_dir_handler(
                 variables: run.summary_totals.variables,
                 imports: run.summary_totals.imports,
             },
-            git_branch: None,
-            git_commit: None,
-            git_author: None,
-            git_tags: None,
+            git_branch: run.git_branch.clone(),
+            git_commit: run.git_commit_short.clone(),
+            git_author: run.git_commit_author.clone(),
+            git_tags: run.git_tags.clone(),
+            git_commit_date: run.git_commit_date.clone(),
         };
         reg.add_entry(entry);
         linked_count += 1;
@@ -1395,43 +1580,22 @@ async fn open_path_handler(
 }
 
 async fn image_handler(AxumPath((folder, file)): AxumPath<(String, String)>) -> impl IntoResponse {
-    let safe_folder = match folder.as_str() {
-        "icons" | "logo" => folder,
+    let bytes: &'static [u8] = match (folder.as_str(), file.as_str()) {
+        ("logo", "logo-text.png") => IMG_LOGO_TEXT,
+        ("logo", "small-logo.png") => IMG_LOGO_SMALL,
+        ("icons", "c.png") => IMG_ICON_C,
+        ("icons", "cpp.png") => IMG_ICON_CPP,
+        ("icons", "c-sharp.png") => IMG_ICON_CSHARP,
+        ("icons", "python.png") => IMG_ICON_PYTHON,
+        ("icons", "shell.png") => IMG_ICON_SHELL,
+        ("icons", "powershell.png") => IMG_ICON_POWERSHELL,
+        ("icons", "java-script.png") => IMG_ICON_JAVASCRIPT,
+        ("icons", "html-5.png") => IMG_ICON_HTML,
+        ("icons", "java.png") => IMG_ICON_JAVA,
+        ("icons", "visual-basic.png") => IMG_ICON_VB,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-
-    let safe_name = Path::new(&file)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-
-    if safe_name.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    let ext = Path::new(safe_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    let content_type = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        _ => return StatusCode::NOT_FOUND.into_response(),
-    };
-
-    let path = workspace_root()
-        .join("docs")
-        .join("assets")
-        .join(safe_folder)
-        .join(safe_name);
-    fs::read(path).map_or_else(
-        |_| StatusCode::NOT_FOUND.into_response(),
-        |bytes| ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
-    )
+    ([(header::CONTENT_TYPE, "image/png")], bytes).into_response()
 }
 
 async fn preview_handler(
@@ -1601,38 +1765,7 @@ pub(crate) fn build_run_registry_entry(
         git_commit: run.git_commit_short.clone(),
         git_author: run.git_commit_author.clone(),
         git_tags: run.git_tags.clone(),
-    }
-}
-
-/// Serialize form settings into a `ScanConfig` for `scan-config.json`.
-fn build_scan_config_from_form(form: &AnalyzeForm, run: &AnalysisRun) -> ScanConfig {
-    let policy_str = serde_json::to_value(form.mixed_line_policy)
-        .ok()
-        .filter(|v| !v.is_null())
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "code_only".to_string());
-    let behavior_str = serde_json::to_value(form.binary_file_behavior)
-        .ok()
-        .filter(|v| !v.is_null())
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "skip".to_string());
-    ScanConfig {
-        oxide_sloc_version: env!("CARGO_PKG_VERSION").to_string(),
-        path: form.path.clone(),
-        include_globs: form.include_globs.clone().unwrap_or_default(),
-        exclude_globs: form.exclude_globs.clone().unwrap_or_default(),
-        submodule_breakdown: form.submodule_breakdown.as_deref() == Some("enabled"),
-        mixed_line_policy: policy_str,
-        python_docstrings_as_comments: form.python_docstrings_as_comments.is_some(),
-        generated_file_detection: form.generated_file_detection.as_deref() != Some("disabled"),
-        minified_file_detection: form.minified_file_detection.as_deref() != Some("disabled"),
-        vendor_directory_detection: form.vendor_directory_detection.as_deref() != Some("disabled"),
-        include_lockfiles: form.include_lockfiles.as_deref() == Some("enabled"),
-        binary_file_behavior: behavior_str,
-        output_dir: form.output_dir.clone().unwrap_or_default(),
-        report_title: run.effective_configuration.reporting.report_title.clone(),
-        generate_html: form.generate_html.is_some(),
-        generate_pdf: form.generate_pdf.is_some(),
+        git_commit_date: run.git_commit_date.clone(),
     }
 }
 
@@ -1747,9 +1880,8 @@ fn build_submodule_row(
     }
 }
 
-// This Axum handler manages the full analysis lifecycle including config, execution, artifact
-// writing, and response rendering; splitting it would require threading many borrowed values
-// through async boundaries, complicating Send requirements.
+// Immediately returns a wait page and runs the analysis in a background tokio task.
+// The semaphore permit is moved into the spawned task so concurrency limiting is maintained.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)]
 async fn analyze_handler(
@@ -1781,7 +1913,6 @@ async fn analyze_handler(
     let git_repo = form.git_repo.clone().filter(|s| !s.is_empty());
     let git_ref_name = form.git_ref.clone().filter(|s| !s.is_empty());
     let is_git_mode = git_repo.is_some() && git_ref_name.is_some();
-    let clones_dir = state.git_clones_dir.clone();
 
     if !is_git_mode {
         let resolved_path = resolve_input_path(&form.path);
@@ -1794,171 +1925,406 @@ async fn analyze_handler(
     }
 
     apply_form_to_config(&mut config, &form);
-    // Auto-exclude the output directory so scan artifacts never appear in counts.
     apply_output_dir_exclusions(
         &mut config,
         &form.path,
         form.output_dir.as_deref().unwrap_or(""),
     );
 
-    let analysis_result =
-        tokio::task::spawn_blocking(move || -> Result<(sloc_core::AnalysisRun, String)> {
-            if let (Some(repo), Some(refname)) = (&git_repo, &git_ref_name) {
-                let dest = git_clone_dest(repo, &clones_dir);
-                sloc_git::clone_or_fetch(repo, &dest)?;
-                let wt = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
-                sloc_git::create_worktree(&dest, refname, &wt)?;
-                config.discovery.root_paths = vec![wt.clone()];
-                let run = analyze(&config, "serve");
-                let _ = sloc_git::destroy_worktree(&dest, &wt);
-                let mut run = run?;
-                // Worktrees at a tag/commit are in detached HEAD, so git branch
-                // --show-current returns empty. Use the ref name we checked out.
-                if run.git_branch.is_none() {
-                    run.git_branch = Some(refname.clone());
-                }
-                let html = render_html(&run)?;
-                return Ok((run, html));
-            }
-            let run = analyze(&config, "serve")?;
-            let html = render_html(&run)?;
-            Ok((run, html))
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!(err.to_string()))
-        .and_then(|result| result);
+    // Generate a wait_id now (before spawning) so the client can poll for status.
+    let wait_id = uuid::Uuid::new_v4().to_string();
+    let wait_id_json = serde_json::to_string(&wait_id).unwrap_or_else(|_| "\"\"".to_owned());
 
-    let (run, report_html) = match analysis_result {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("[oxide-sloc][analyze] analysis failed: {err:#}");
-            let template = ErrorTemplate {
-                message: "Analysis failed. Check that the path exists and is readable.".to_string(),
-                last_report_url: None,
-                last_report_label: None,
-                csp_nonce: csp_nonce.clone(),
+    // Clone everything the background task needs before moving into the spawn.
+    let project_path_bg = form.path.clone();
+    let output_dir_bg = form.output_dir.clone();
+    let git_repo_bg = form.git_repo.clone().filter(|s| !s.is_empty());
+    let git_ref_bg = form.git_ref.clone().filter(|s| !s.is_empty());
+    let generate_html_bg = form.generate_html.is_some();
+    let generate_pdf_bg = form.generate_pdf.is_some();
+    let clones_dir = state.git_clones_dir.clone();
+    let wait_id_bg = wait_id.clone();
+    let state_bg = state.clone();
+
+    {
+        let mut runs = state.async_runs.lock().await;
+        runs.insert(
+            wait_id.clone(),
+            AsyncRunState::Running {
+                started_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    tokio::spawn(async move {
+        // Hold the permit for the lifetime of the background task.
+        let _permit = _permit;
+
+        // Clone before moving into spawn_blocking so we can use them again afterwards.
+        let git_repo_sb = git_repo_bg.clone();
+        let git_ref_sb = git_ref_bg.clone();
+        let analysis_result =
+            tokio::task::spawn_blocking(move || -> Result<(sloc_core::AnalysisRun, String)> {
+                if let (Some(repo), Some(refname)) = (&git_repo_sb, &git_ref_sb) {
+                    let dest = git_clone_dest(repo, &clones_dir);
+                    sloc_git::clone_or_fetch(repo, &dest)?;
+                    let wt = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
+                    sloc_git::create_worktree(&dest, refname, &wt)?;
+                    config.discovery.root_paths = vec![wt.clone()];
+                    let run = analyze(&config, "serve");
+                    let _ = sloc_git::destroy_worktree(&dest, &wt);
+                    let mut run = run?;
+                    if run.git_branch.is_none() {
+                        run.git_branch = Some(refname.clone());
+                    }
+                    let html = render_html(&run)?;
+                    return Ok((run, html));
+                }
+                let run = analyze(&config, "serve")?;
+                let html = render_html(&run)?;
+                Ok((run, html))
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
+            .and_then(|result| result);
+
+        let (run, report_html) = match analysis_result {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("[oxide-sloc][analyze] analysis failed: {err:#}");
+                let mut runs = state_bg.async_runs.lock().await;
+                runs.insert(
+                    wait_id_bg.clone(),
+                    AsyncRunState::Failed {
+                        message: "Analysis failed. Check that the path exists and is readable."
+                            .to_string(),
+                    },
+                );
+                return;
+            }
+        };
+
+        let run_id = run.tool.run_id.clone();
+        tracing::info!(event = "scan_complete", run_id = %run_id,
+            path = %project_path_bg, files = run.summary_totals.files_analyzed,
+            "Analysis finished");
+
+        let prev_entry: Option<RegistryEntry> = {
+            let reg = state_bg.registry.lock().await;
+            reg.entries_for_roots(&run.input_roots)
+                .into_iter()
+                .find(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
+                .cloned()
+        };
+
+        let scan_delta = prev_entry.as_ref().and_then(|prev| {
+            prev.json_path
+                .as_ref()
+                .and_then(|p| read_json(p).ok())
+                .map(|prev_run| compute_delta(&prev_run, &run))
+        });
+        let prev_scan_count: usize = {
+            let reg = state_bg.registry.lock().await;
+            reg.entries_for_roots(&run.input_roots)
+                .iter()
+                .filter(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
+                .count()
+        };
+
+        let output_root = resolve_output_root(output_dir_bg.as_deref());
+
+        let project_label = if let (Some(repo), Some(refname)) = (
+            git_repo_bg.as_deref().filter(|s| !s.is_empty()),
+            git_ref_bg.as_deref().filter(|s| !s.is_empty()),
+        ) {
+            let repo_name = repo
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .rsplit('/')
+                .next()
+                .unwrap_or("repo");
+            sanitize_project_label(&format!("{repo_name}_{refname}"))
+        } else {
+            sanitize_project_label(&project_path_bg)
+        };
+        let run_dir = output_root.join(format!("{project_label}_{run_id}"));
+        let file_stem = {
+            let commit = run.git_commit_short.as_deref().unwrap_or("").trim();
+            if commit.is_empty() {
+                project_label.clone()
+            } else {
+                format!("{project_label}_{commit}")
+            }
+        };
+
+        let result_context = RunResultContext {
+            prev_entry: prev_entry.clone(),
+            prev_scan_count,
+            project_path: project_path_bg.clone(),
+        };
+
+        let artifact_result = persist_run_artifacts(
+            &run,
+            &report_html,
+            &run_dir,
+            true,
+            generate_html_bg,
+            generate_pdf_bg,
+            &run.effective_configuration.reporting.report_title,
+            &file_stem,
+            result_context,
+        );
+
+        let (artifacts, pending_pdf) = match artifact_result {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("[oxide-sloc][analyze] artifact write failed: {err:#}");
+                let mut runs = state_bg.async_runs.lock().await;
+                runs.insert(
+                    wait_id_bg.clone(),
+                    AsyncRunState::Failed {
+                        message: "Failed to save report artifacts. Check available disk space."
+                            .to_string(),
+                    },
+                );
+                return;
+            }
+        };
+
+        {
+            let mut map = state_bg.artifacts.lock().await;
+            map.insert(run_id.clone(), artifacts.clone());
+        }
+
+        {
+            let entry = build_run_registry_entry(&run, &run_id, &project_label, &artifacts);
+            let mut reg = state_bg.registry.lock().await;
+            reg.add_entry(entry);
+            let _ = reg.save(&state_bg.registry_path);
+        }
+
+        if let Some(ref cfg_path) = artifacts.scan_config_path {
+            let policy_str =
+                serde_json::to_value(run.effective_configuration.analysis.mixed_line_policy)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "code_only".to_string());
+            let behavior_str =
+                serde_json::to_value(run.effective_configuration.analysis.binary_file_behavior)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "skip".to_string());
+            let scan_cfg = ScanConfig {
+                oxide_sloc_version: env!("CARGO_PKG_VERSION").to_string(),
+                path: project_path_bg.clone(),
+                include_globs: run
+                    .effective_configuration
+                    .discovery
+                    .include_globs
+                    .join("\n"),
+                exclude_globs: run
+                    .effective_configuration
+                    .discovery
+                    .exclude_globs
+                    .join("\n"),
+                submodule_breakdown: run.effective_configuration.discovery.submodule_breakdown,
+                mixed_line_policy: policy_str,
+                python_docstrings_as_comments: run
+                    .effective_configuration
+                    .analysis
+                    .python_docstrings_as_comments,
+                generated_file_detection: run
+                    .effective_configuration
+                    .analysis
+                    .generated_file_detection,
+                minified_file_detection: run
+                    .effective_configuration
+                    .analysis
+                    .minified_file_detection,
+                vendor_directory_detection: run
+                    .effective_configuration
+                    .analysis
+                    .vendor_directory_detection,
+                include_lockfiles: run.effective_configuration.analysis.include_lockfiles,
+                binary_file_behavior: behavior_str,
+                output_dir: output_dir_bg.clone().unwrap_or_default(),
+                report_title: run.effective_configuration.reporting.report_title.clone(),
+                generate_html: generate_html_bg,
+                generate_pdf: generate_pdf_bg,
             };
-            return Html(
-                template
-                    .render()
-                    .unwrap_or_else(|_| "<pre>Analysis failed.</pre>".to_string()),
-            )
-            .into_response();
+            if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
+                let _ = std::fs::write(cfg_path, json);
+            }
+        }
+
+        spawn_pdf_background(pending_pdf);
+
+        // Mark complete — client is now polling and will be redirected to /runs/{run_id}/result.
+        let mut runs = state_bg.async_runs.lock().await;
+        runs.insert(
+            wait_id_bg.clone(),
+            AsyncRunState::Complete {
+                run_id: run_id.clone(),
+            },
+        );
+        drop(runs);
+
+        // Submodule sub-reports are rendered synchronously above inside background task.
+        let _ = scan_delta;
+    });
+
+    let template = ScanWaitTemplate {
+        wait_id_json,
+        project_path: form.path.clone(),
+        csp_nonce,
+    };
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|err| format!("<pre>{err}</pre>")),
+    )
+    .into_response()
+}
+
+// ── Async scan status + result handlers ──────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum AsyncRunStatusResponse {
+    Running { elapsed_secs: u64 },
+    Complete { run_id: String },
+    Failed { message: String },
+}
+
+async fn async_run_status_handler(
+    State(state): State<AppState>,
+    AxumPath(wait_id): AxumPath<String>,
+) -> Response {
+    // Basic input validation — wait_id is a UUID we generated, so these are defence-in-depth.
+    if wait_id.len() > 128 || wait_id.contains('/') || wait_id.contains('\\') {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let run_state = {
+        let runs = state.async_runs.lock().await;
+        runs.get(&wait_id).cloned()
+    };
+    match run_state {
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some(AsyncRunState::Running { started_at }) => {
+            // Treat runs older than 2 h as timed out (analysis should finish well under that).
+            if started_at.elapsed() > std::time::Duration::from_secs(7200) {
+                let mut runs = state.async_runs.lock().await;
+                runs.insert(
+                    wait_id,
+                    AsyncRunState::Failed {
+                        message: "Analysis timed out after 2 hours.".to_string(),
+                    },
+                );
+                return Json(AsyncRunStatusResponse::Failed {
+                    message: "Analysis timed out after 2 hours.".to_string(),
+                })
+                .into_response();
+            }
+            Json(AsyncRunStatusResponse::Running {
+                elapsed_secs: started_at.elapsed().as_secs(),
+            })
+            .into_response()
+        }
+        Some(AsyncRunState::Complete { run_id }) => {
+            Json(AsyncRunStatusResponse::Complete { run_id }).into_response()
+        }
+        Some(AsyncRunState::Failed { message }) => {
+            Json(AsyncRunStatusResponse::Failed { message }).into_response()
+        }
+    }
+}
+
+async fn async_run_result_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    if run_id.len() > 128 || run_id.contains('/') || run_id.contains('\\') {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let artifacts = {
+        let map = state.artifacts.lock().await;
+        map.get(&run_id).cloned()
+    };
+    let artifacts = if let Some(a) = artifacts {
+        a
+    } else {
+        let reg = state.registry.lock().await;
+        if let Some(entry) = reg.find_by_run_id(&run_id) {
+            recover_artifacts_from_registry(entry)
+        } else {
+            let html = ErrorTemplate {
+                message: format!(
+                    "Report not found. Run ID {} is not in the scan history.",
+                    &run_id[..run_id.len().min(8)]
+                ),
+                last_report_url: Some("/view-reports".to_string()),
+                last_report_label: Some("View Reports".to_string()),
+                csp_nonce: csp_nonce.clone(),
+            }
+            .render()
+            .unwrap_or_else(|_| "<pre>Report not found.</pre>".to_string());
+            return (StatusCode::NOT_FOUND, Html(html)).into_response();
         }
     };
 
-    let run_id = run.tool.run_id.clone();
-    tracing::info!(event = "scan_complete", run_id = %run_id,
-        path = %form.path, files = run.summary_totals.files_analyzed, "Analysis finished");
-
-    // Capture the most-recent previous scan for this project before registering the current one.
-    // Only consider entries whose json file still exists on disk.
-    let prev_entry: Option<RegistryEntry> = {
-        let reg = state.registry.lock().await;
-        reg.entries_for_roots(&run.input_roots)
-            .into_iter()
-            .find(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
-            .cloned()
+    let json_path = match &artifacts.json_path {
+        Some(p) => p.clone(),
+        None => {
+            let html = ErrorTemplate {
+                message: "JSON result was not saved for this run.".to_string(),
+                last_report_url: Some("/view-reports".to_string()),
+                last_report_label: Some("View Reports".to_string()),
+                csp_nonce: csp_nonce.clone(),
+            }
+            .render()
+            .unwrap_or_else(|_| "<pre>No JSON.</pre>".to_string());
+            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+        }
     };
 
-    // Git info is now captured inside analyze() and stored on the run.
-    let git_branch = run.git_branch.clone();
-    let git_commit = run.git_commit_short.clone();
-    let git_author = run.git_commit_author.clone();
+    let run = match read_json(&json_path) {
+        Ok(r) => r,
+        Err(e) => {
+            let html = ErrorTemplate {
+                message: format!("Could not load scan result: {e}"),
+                last_report_url: Some("/view-reports".to_string()),
+                last_report_label: Some("View Reports".to_string()),
+                csp_nonce: csp_nonce.clone(),
+            }
+            .render()
+            .unwrap_or_else(|_| "<pre>Load error.</pre>".to_string());
+            return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
+        }
+    };
 
-    // Compute line-level delta vs the previous scan if JSON is available.
+    render_result_page(&run, &artifacts, &run_id, &csp_nonce)
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_result_page(
+    run: &AnalysisRun,
+    artifacts: &RunArtifacts,
+    run_id: &str,
+    csp_nonce: &str,
+) -> Response {
+    let ctx = &artifacts.result_context;
+    let prev_entry = &ctx.prev_entry;
+    let prev_scan_count = ctx.prev_scan_count;
+    let project_path = &ctx.project_path;
+
     let scan_delta = prev_entry.as_ref().and_then(|prev| {
         prev.json_path
             .as_ref()
             .and_then(|p| read_json(p).ok())
-            .map(|prev_run| compute_delta(&prev_run, &run))
+            .map(|prev_run| compute_delta(&prev_run, run))
     });
-    let prev_scan_count: usize = {
-        let reg = state.registry.lock().await;
-        reg.entries_for_roots(&run.input_roots)
-            .iter()
-            .filter(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
-            .count()
-    };
-
-    let output_root = resolve_output_root(form.output_dir.as_deref());
-
-    let project_label = if let (Some(repo), Some(refname)) = (
-        form.git_repo.as_deref().filter(|s| !s.is_empty()),
-        form.git_ref.as_deref().filter(|s| !s.is_empty()),
-    ) {
-        let repo_name = repo
-            .trim_end_matches('/')
-            .trim_end_matches(".git")
-            .rsplit('/')
-            .next()
-            .unwrap_or("repo");
-        sanitize_project_label(&format!("{repo_name}_{refname}"))
-    } else {
-        sanitize_project_label(&form.path)
-    };
-    let run_dir = output_root.join(format!("{project_label}_{run_id}"));
-    let file_stem = {
-        let commit = run.git_commit_short.as_deref().unwrap_or("").trim();
-        if commit.is_empty() {
-            project_label.clone()
-        } else {
-            format!("{project_label}_{commit}")
-        }
-    };
-
-    let artifact_result = persist_run_artifacts(
-        &run,
-        &report_html,
-        &run_dir,
-        true, // JSON always generated so compare and diff are always available
-        form.generate_html.is_some(),
-        form.generate_pdf.is_some(),
-        &run.effective_configuration.reporting.report_title,
-        &file_stem,
-    );
-
-    let (artifacts, pending_pdf) = match artifact_result {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("[oxide-sloc][analyze] artifact write failed: {err:#}");
-            let template = ErrorTemplate {
-                message: "Failed to save report artifacts. Check available disk space.".to_string(),
-                last_report_url: None,
-                last_report_label: None,
-                csp_nonce: csp_nonce.clone(),
-            };
-            return Html(
-                template
-                    .render()
-                    .unwrap_or_else(|_| "<pre>Artifact write failed.</pre>".to_string()),
-            )
-            .into_response();
-        }
-    };
-
-    {
-        let mut map = state.artifacts.lock().await;
-        map.insert(run_id.clone(), artifacts.clone());
-    }
-
-    // Persist entry to the on-disk registry.
-    {
-        let entry = build_run_registry_entry(&run, &run_id, &project_label, &artifacts);
-        let mut reg = state.registry.lock().await;
-        reg.add_entry(entry);
-        let _ = reg.save(&state.registry_path);
-    }
-
-    // Export scan-config alongside artifacts so users can reload settings later.
-    if let Some(ref cfg_path) = artifacts.scan_config_path {
-        let scan_cfg = build_scan_config_from_form(&form, &run);
-        if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
-            let _ = fs::write(cfg_path, json);
-        }
-    }
-
-    spawn_pdf_background(pending_pdf);
 
     let language_rows = run
         .totals_by_language
@@ -1980,17 +2346,16 @@ async fn analyze_handler(
 
     let files_analyzed = run.per_file_records.len() as u64;
     let files_skipped = run.skipped_file_records.len() as u64;
-    let physical_lines = language_rows.iter().map(|row| row.physical).sum::<u64>();
-    let code_lines = language_rows.iter().map(|row| row.code).sum::<u64>();
-    let comment_lines = language_rows.iter().map(|row| row.comments).sum::<u64>();
-    let blank_lines = language_rows.iter().map(|row| row.blank).sum::<u64>();
-    let mixed_lines = language_rows.iter().map(|row| row.mixed).sum::<u64>();
-    let functions = language_rows.iter().map(|row| row.functions).sum::<u64>();
-    let classes = language_rows.iter().map(|row| row.classes).sum::<u64>();
-    let variables = language_rows.iter().map(|row| row.variables).sum::<u64>();
-    let imports = language_rows.iter().map(|row| row.imports).sum::<u64>();
+    let physical_lines = language_rows.iter().map(|r| r.physical).sum::<u64>();
+    let code_lines = language_rows.iter().map(|r| r.code).sum::<u64>();
+    let comment_lines = language_rows.iter().map(|r| r.comments).sum::<u64>();
+    let blank_lines = language_rows.iter().map(|r| r.blank).sum::<u64>();
+    let mixed_lines = language_rows.iter().map(|r| r.mixed).sum::<u64>();
+    let functions = language_rows.iter().map(|r| r.functions).sum::<u64>();
+    let classes = language_rows.iter().map(|r| r.classes).sum::<u64>();
+    let variables = language_rows.iter().map(|r| r.variables).sum::<u64>();
+    let imports = language_rows.iter().map(|r| r.imports).sum::<u64>();
 
-    // Previous scan summary values for the metrics table Previous/Change columns.
     let prev_sum = prev_entry.as_ref().map(|e| &e.summary);
     let prev_fa = prev_sum.map(|s| s.files_analyzed);
     let prev_fs = prev_sum.map(|s| s.files_skipped);
@@ -2018,7 +2383,6 @@ async fn analyze_handler(
     let delta_cml_class = delta_cml_class.to_string();
     let delta_bl_class = delta_bl_class.to_string();
 
-    // Pre-compute line-level deltas for the line change summary.
     let delta_lines_added: Option<i64> = scan_delta.as_ref().map(sum_added_code_lines);
     let delta_lines_removed: Option<i64> = scan_delta.as_ref().map(sum_removed_code_lines);
     let (delta_lines_net_str, delta_lines_net_class) =
@@ -2030,12 +2394,17 @@ async fn analyze_handler(
             _ => ("—".to_string(), "na".to_string()),
         };
 
+    let run_dir = artifacts.output_dir.clone();
+    let git_branch = run.git_branch.clone();
+    let git_commit = run.git_commit_short.clone();
+    let git_author = run.git_commit_author.clone();
+
     let template = ResultTemplate {
         version: env!("CARGO_PKG_VERSION"),
         report_title: run.effective_configuration.reporting.report_title.clone(),
-        project_path: form.path,
+        project_path: project_path.clone(),
         output_dir: display_path(&artifacts.output_dir),
-        run_id: run_id.clone(),
+        run_id: run_id.to_owned(),
         files_analyzed,
         files_skipped,
         physical_lines,
@@ -2071,9 +2440,9 @@ async fn analyze_handler(
             .json_path
             .as_ref()
             .map(|_| format!("/runs/{run_id}/json?download=1")),
-        html_path: artifacts.html_path.as_ref().map(|path| display_path(path)),
-        pdf_path: artifacts.pdf_path.as_ref().map(|path| display_path(path)),
-        json_path: artifacts.json_path.as_ref().map(|path| display_path(path)),
+        html_path: artifacts.html_path.as_ref().map(|p| display_path(p)),
+        pdf_path: artifacts.pdf_path.as_ref().map(|p| display_path(p)),
+        json_path: artifacts.json_path.as_ref().map(|p| display_path(p)),
         language_rows,
         prev_run_id: prev_entry.as_ref().map(|e| e.run_id.clone()),
         prev_run_timestamp: prev_entry.as_ref().map(|e| fmt_pst(e.timestamp_utc)),
@@ -2096,7 +2465,6 @@ async fn analyze_handler(
         delta_cml_class,
         delta_bl_str,
         delta_bl_class,
-        // delta metrics derived from the comparison against the previous scan
         delta_lines_added,
         delta_lines_removed,
         delta_lines_net_str,
@@ -2124,10 +2492,29 @@ async fn analyze_handler(
         submodule_rows: run
             .submodule_summaries
             .iter()
-            .map(|s| build_submodule_row(s, &run, &run_id, &run_dir, form.generate_html.is_some()))
+            .map(|s| build_submodule_row(s, run, run_id, &run_dir, artifacts.html_path.is_some()))
             .collect(),
         scan_config_url: format!("/runs/{run_id}/scan-config"),
-        csp_nonce,
+        lang_chart_json: {
+            let entries: Vec<String> = run
+                .totals_by_language
+                .iter()
+                .take(12)
+                .map(|l| {
+                    let name = l
+                        .language
+                        .display_name()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    format!(
+                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{}}}"#,
+                        name, l.code_lines, l.comment_lines, l.blank_lines,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        csp_nonce: csp_nonce.to_owned(),
     };
 
     Html(
@@ -2170,7 +2557,12 @@ fn build_pdf_filename(report_title: &str, run_id: &str) -> String {
 fn patch_html_nonce(html: &str, new_nonce: &str) -> String {
     // Find the first nonce value that was baked in at render time.
     let Some(start) = html.find("nonce=\"") else {
-        return html.to_owned();
+        // Reports generated before nonce support was added have bare <style> and <script>
+        // tags with no nonce attribute.  Inject the nonce so the current-request CSP allows
+        // the inline blocks — without it the browser blocks all CSS and JS.
+        return html
+            .replace("<style>", &format!("<style nonce=\"{new_nonce}\">"))
+            .replace("<script>", &format!("<script nonce=\"{new_nonce}\">"));
     };
     let value_start = start + 7; // len(r#"nonce=""#) == 7
     let Some(end_offset) = html[value_start..].find('"') else {
@@ -2347,6 +2739,7 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
         json_path: entry.json_path.clone(),
         scan_config_path: find_scan_config_in_dir(&output_dir),
         report_title: entry.project_label.clone(),
+        result_context: RunResultContext::default(),
     }
 }
 
@@ -2404,8 +2797,8 @@ async fn artifact_handler(
                     .to_string();
                 let html = ErrorTemplate {
                     message: msg,
-                    last_report_url: Some("/view-reports".to_string()),
-                    last_report_label: Some("View Report".to_string()),
+                    last_report_url: Some(format!("/runs/{run_id}/html")),
+                    last_report_label: Some("View HTML Report".to_string()),
                     csp_nonce: csp_nonce.clone(),
                 }
                 .render()
@@ -2544,6 +2937,12 @@ fn fmt_pst(dt: chrono::DateTime<chrono::Utc>) -> String {
         .to_string()
 }
 
+fn fmt_git_date(iso: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|d| fmt_pst(d.with_timezone(&chrono::Utc)))
+}
+
 fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
     reg.entries
         .iter()
@@ -2674,6 +3073,20 @@ fn delta_class(n: i64) -> &'static str {
         Ordering::Greater => "pos",
         Ordering::Less => "neg",
         Ordering::Equal => "zero",
+    }
+}
+
+fn fmt_pct(delta: i64, baseline: u64) -> String {
+    if baseline == 0 {
+        return "—".to_string();
+    }
+    let pct = (delta as f64 / baseline as f64) * 100.0;
+    if pct > 0.049 {
+        format!("+{pct:.1}%")
+    } else if pct < -0.049 {
+        format!("{pct:.1}%")
+    } else {
+        "±0%".to_string()
     }
 }
 
@@ -2843,14 +3256,21 @@ async fn compare_handler(
         .first()
         .map(|s| sanitize_path_str(s))
         .unwrap_or_default();
+    let lines_added = sum_added_code_lines(&comparison);
+    let lines_removed = sum_removed_code_lines(&comparison);
+    let churn_pct = if comparison.summary.baseline_code > 0 {
+        (lines_added + lines_removed) as f64 / comparison.summary.baseline_code as f64 * 100.0
+    } else {
+        0.0
+    };
+    let scope_flag = comparison.summary.baseline_code > 0
+        && lines_added as f64 / comparison.summary.baseline_code as f64 > 0.20;
     let s = &comparison.summary;
     let template = CompareTemplate {
         version: env!("CARGO_PKG_VERSION"),
         project_label: baseline_entry.project_label.clone(),
         baseline_git_commit: baseline_entry.git_commit.clone().unwrap_or_default(),
         current_git_commit: current_entry.git_commit.clone().unwrap_or_default(),
-        baseline_git_commit_long: baseline_run.git_commit_long.clone().unwrap_or_default(),
-        current_git_commit_long: current_run.git_commit_long.clone().unwrap_or_default(),
         baseline_run_id: baseline_entry.run_id.clone(),
         current_run_id: current_entry.run_id.clone(),
         baseline_run_id_short: baseline_entry
@@ -2871,7 +3291,7 @@ async fn compare_handler(
             .collect(),
         baseline_timestamp: fmt_pst(baseline_entry.timestamp_utc),
         current_timestamp: fmt_pst(current_entry.timestamp_utc),
-        project_path,
+        project_path: project_path.clone(),
         baseline_code: s.baseline_code,
         current_code: s.current_code,
         code_lines_delta_str: fmt_delta(s.code_lines_delta),
@@ -2884,6 +3304,24 @@ async fn compare_handler(
         current_comments: s.current_comments,
         comment_lines_delta_str: fmt_delta(s.comment_lines_delta),
         comment_lines_delta_class: delta_class(s.comment_lines_delta).into(),
+        code_lines_pct_str: fmt_pct(s.code_lines_delta, s.baseline_code),
+        files_analyzed_pct_str: fmt_pct(s.files_analyzed_delta, s.baseline_files),
+        comment_lines_pct_str: fmt_pct(s.comment_lines_delta, s.baseline_comments),
+        code_lines_added: lines_added,
+        code_lines_removed: lines_removed,
+        churn_rate_str: if s.baseline_code > 0 {
+            format!("{churn_pct:.1}%")
+        } else {
+            "—".to_string()
+        },
+        churn_rate_class: if churn_pct > 20.0 {
+            "high".into()
+        } else if churn_pct > 5.0 {
+            "med".into()
+        } else {
+            "low".into()
+        },
+        scope_flag,
         files_added: comparison.files_added,
         files_removed: comparison.files_removed,
         files_modified: comparison.files_modified,
@@ -2895,6 +3333,19 @@ async fn compare_handler(
         current_git_branch: current_entry.git_branch.clone().unwrap_or_default(),
         baseline_git_tags: baseline_entry.git_tags.clone(),
         current_git_tags: current_entry.git_tags.clone(),
+        baseline_git_commit_date: baseline_entry
+            .git_commit_date
+            .as_deref()
+            .and_then(fmt_git_date),
+        current_git_commit_date: current_entry
+            .git_commit_date
+            .as_deref()
+            .and_then(fmt_git_date),
+        project_name: project_path
+            .rsplit(['/', '\\'])
+            .find(|s| !s.is_empty())
+            .unwrap_or(&project_path)
+            .to_string(),
         csp_nonce,
     };
 
@@ -3378,6 +3829,7 @@ fn persist_run_artifacts(
     generate_pdf: bool,
     report_title: &str,
     file_stem: &str,
+    result_context: RunResultContext,
 ) -> Result<(RunArtifacts, PendingPdf)> {
     fs::create_dir_all(run_dir)
         .with_context(|| format!("failed to create output directory {}", run_dir.display()))?;
@@ -3433,6 +3885,7 @@ fn persist_run_artifacts(
             json_path,
             scan_config_path,
             report_title: report_title.to_string(),
+            result_context,
         },
         pending_pdf,
     ))
@@ -3528,6 +3981,7 @@ pub(crate) fn scan_path_to_artifacts(
         false,
         label,
         &file_stem,
+        RunResultContext::default(),
     )?;
     Ok((run_id, artifacts, run))
 }
@@ -3600,6 +4054,7 @@ fn build_sub_run(
         git_commit_long: parent.git_commit_long.clone(),
         git_branch: parent.git_branch.clone(),
         git_commit_author: parent.git_commit_author.clone(),
+        git_commit_date: parent.git_commit_date.clone(),
         git_tags: parent.git_tags.clone(),
     }
 }
@@ -3677,26 +4132,8 @@ fn workspace_root() -> PathBuf {
         }
     }
 
-    // Binary's parent directory — works when the binary is co-located with
-    // docs/assets/, regardless of where the project lives.
-    // env!("CARGO_MANIFEST_DIR") bakes the compile-time path into the binary,
-    // which breaks on any machine other than the one that compiled it.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if dir.join("docs").join("assets").is_dir() {
-                return dir.to_path_buf();
-            }
-        }
-    }
-
-    // Current working directory — works for `cargo run` invocations launched
-    // from the project root, and for scripts/run.sh which cds there first.
-    if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("docs").join("assets").is_dir() {
-            return cwd;
-        }
-    }
-
+    // Current working directory — works for `cargo run` from the project root
+    // and for scripts/run.sh which cds there first.
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
@@ -4508,7 +4945,7 @@ struct SubmoduleRow {
     .nav-project-pill { width: 100%; max-width: 240px; display:none; align-items:center; justify-content:center; gap: 10px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.10); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nav-project-pill.visible { display:inline-flex; }
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
-    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .nav-status { display: flex; align-items: center; justify-content:flex-end; gap: 10px; flex-wrap: wrap; }
     .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); text-decoration:none; transition:background .15s ease,transform .15s ease; }
     a.nav-pill:hover { background:rgba(255,255,255,0.18); transform:translateY(-1px); }
@@ -4547,7 +4984,9 @@ struct SubmoduleRow {
     .ws-path-link:hover { color:var(--oxide); }
     body.dark-theme .ws-path-link { color:var(--oxide); }
     .ws-stat-output { flex:1 1 0; min-width:0; overflow:hidden; }
-    .ws-stat-output .ws-value { overflow:hidden; display:block; }
+    .ws-stat-output .ws-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
+    .ws-stat-clamp { max-width: 200px; overflow: hidden; }
+    .ws-stat-clamp .ws-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
     .ws-mini-box-sm { flex:0 0 auto; min-width:80px; max-width:110px; }
     .ws-mini-box-sm .ws-mini-label { font-size:9px; }
     .ws-mini-box-sm .ws-mini-value { font-size:13px; }
@@ -4690,7 +5129,8 @@ struct SubmoduleRow {
     .output-field-aside { padding: 16px 18px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); font-size: 14px; color: var(--muted); line-height: 1.6; }
     .output-field-aside strong { display:block; font-size: 13px; font-weight: 800; letter-spacing: 0.04em; color: var(--text); margin-bottom: 6px; }
     .step3-subtitle { margin-bottom: 28px; }
-    .counting-intro { margin-bottom: 22px; max-width: none; }
+    .counting-intro { margin-bottom: 8px; max-width: none; }
+    .ieee-note { margin-bottom: 22px; padding: 9px 14px; border-left: 3px solid var(--oxide); background: linear-gradient(180deg, rgba(184,93,51,0.07), transparent), var(--surface-2); border-radius: 0 8px 8px 0; font-size: 13px; color: var(--muted); line-height: 1.5; font-style: italic; }
     .counting-top-grid { gap: 20px; margin-top: 12px; align-items: start; }
     .counting-top-grid .field { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
     .counting-top-grid .hint { margin-top: 14px; padding: 12px 14px; border-left: 4px solid var(--oxide); background: linear-gradient(180deg, rgba(184,93,51,0.06), transparent), var(--surface-2); border-radius: 10px; }
@@ -4842,6 +5282,7 @@ struct SubmoduleRow {
     .progress-bar { width:100%; height:8px; margin-top:14px; background: var(--surface-3); border-radius:999px; overflow:hidden; }
     .progress-bar span { display:block; width:42%; height:100%; background: linear-gradient(90deg, var(--accent), #6b8cff); animation: pulseBar 1.4s ease-in-out infinite; }
     @keyframes pulseBar { 0% { transform: translateX(-35%); width:25%; } 50% { transform: translateX(130%); width:44%; } 100% { transform: translateX(250%); width:25%; } }
+    .scan-phase { margin:10px 0 0; font-size:12px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--accent); opacity:0.85; letter-spacing:0.02em; min-height:1.4em; transition: opacity 0.3s; }
     .hidden { display:none !important; }
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
@@ -4912,7 +5353,8 @@ struct SubmoduleRow {
     <div class="loading-card">
       <div class="spinner"></div>
       <h2>Scanning project...</h2>
-      <p>This build still performs web scans synchronously. For very large repositories, keep this tab open while the Rust analysis core completes the run.</p>
+      <p>Web scans run synchronously — for large repositories, keep this tab open while the analysis completes.</p>
+      <p class="scan-phase" id="scan-phase"></p>
       <div class="progress-bar"><span></span></div>
     </div>
   </div>
@@ -4980,7 +5422,7 @@ struct SubmoduleRow {
           <div class="ws-divider"></div>
           <div class="ws-stat"><span class="ws-label">Mode</span><span class="ws-value">Localhost workbench</span></div>
           <div class="ws-divider"></div>
-          <div class="ws-stat"><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
+          <div class="ws-stat ws-stat-clamp"><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
           <div class="ws-divider"></div>
           <div class="ws-stat ws-stat-output">
             <span class="ws-label">Output</span>
@@ -5175,7 +5617,8 @@ struct SubmoduleRow {
               <div class="section">
                 <div class="section-kicker">Step 2</div>
                 <h2>Choose counting behavior</h2>
-                <p class="card-subtitle counting-intro">These settings decide how mixed code-plus-comment lines and Python docstrings are classified. Pure comment lines, block comments, physical lines, and blank lines are still tracked by supported analyzers even when they do not share a line with executable code. Counting methodology follows IEEE Std 1045-1992 physical SLOC.</p>
+                <p class="card-subtitle counting-intro">These settings decide how mixed code-plus-comment lines and Python docstrings are classified. Pure comment lines, block comments, physical lines, and blank lines are still tracked by supported analyzers even when they do not share a line with executable code.</p>
+                <div class="ieee-note">Counting methodology follows IEEE Std 1045-1992 physical SLOC.</div>
                 <div class="subsection-bar">Primary line classification</div>
                 <div class="preset-inline-row" style="align-items:start;">
                   <div class="toggle-card mixed-line-card" style="margin:0;">
@@ -5312,7 +5755,7 @@ struct SubmoduleRow {
               <div class="section">
                 <div class="section-kicker">Step 3</div>
                 <h2>Output and report identity</h2>
-                <p class="card-subtitle step3-subtitle">Choose where generated files should be saved, what the exported report title should be, and which artifact bundle fits your workflow.</p>
+                <p class="card-subtitle step3-subtitle" style="white-space:nowrap;">Choose where generated files should be saved, what the exported report title should be, and which artifact bundle fits your workflow.</p>
                 <div class="preset-inline-row" style="align-items:start;">
                   <div class="toggle-card" style="margin:0;">
                     <div class="field-help-title" style="margin-bottom:10px;">Scan configuration</div>
@@ -5479,6 +5922,33 @@ struct SubmoduleRow {
 
   <script nonce="{{ csp_nonce }}">
     (function () {
+      function startScanPhase() {
+        var phaseEl = document.getElementById("scan-phase");
+        if (!phaseEl) return;
+        var phases = [
+          "Discovering files...",
+          "Decoding file encodings...",
+          "Detecting languages...",
+          "Analyzing source lines...",
+          "Applying counting policies...",
+          "Aggregating results...",
+          "Rendering report..."
+        ];
+        var durations = [800, 600, 1200, 3000, 1000, 800, 600];
+        var i = 0;
+        function next() {
+          phaseEl.style.opacity = "0";
+          setTimeout(function () {
+            phaseEl.textContent = phases[i];
+            phaseEl.style.opacity = "0.85";
+            var delay = durations[i] || 1800;
+            i++;
+            if (i < phases.length) { setTimeout(next, delay); }
+          }, 200);
+        }
+        next();
+      }
+
       var form = document.getElementById("analyze-form");
       var loading = document.getElementById("loading");
       var submitButton = document.getElementById("submit-button");
@@ -5528,6 +5998,7 @@ struct SubmoduleRow {
           quickScanBtn.textContent = "Scanning...";
           if (submitButton) { submitButton.disabled = true; submitButton.textContent = "Scanning..."; }
           if (loading) loading.classList.add("active");
+          startScanPhase();
           if (form) form.submit();
         });
       }
@@ -6436,6 +6907,7 @@ struct SubmoduleRow {
           submitButton.disabled = true;
           submitButton.textContent = "Scanning...";
           loading.classList.add("active");
+          startScanPhase();
         });
       }
 
@@ -6504,7 +6976,7 @@ struct SubmoduleRow {
           var size = Math.floor(Math.random() * 80 + 110);
           var rot = (Math.random() * 360).toFixed(1);
           var op = (Math.random() * 0.08 + 0.13).toFixed(2);
-          img.style.cssText = "width:" + size + "px;top:" + pos[0].toFixed(1) + "%;left:" + pos[1].toFixed(1) + "%;transform:rotate(" + rot + "deg);opacity:" + op + ";";
+          img.style.width=size+"px";img.style.top=pos[0].toFixed(1)+"%";img.style.left=pos[1].toFixed(1)+"%";img.style.transform="rotate("+rot+"deg)";img.style.opacity=op;
         });
       })();
 
@@ -6523,7 +6995,7 @@ struct SubmoduleRow {
             var delay = (Math.random() * 18).toFixed(1);
             var rot = (Math.random() * 26 - 13).toFixed(1);
             var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-            el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
             container.appendChild(el);
           })(i);
         }
@@ -6787,9 +7259,9 @@ struct IndexTemplate {
         <div class="action-card-icon">
           <svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
         </div>
-        <div class="action-card-title">Git Tools</div>
+        <div class="action-card-title">Git Browser</div>
         <p class="action-card-desc">Browse repository branches and commits in the Git Browser, or configure webhook triggers and automated scan schedules.</p>
-        <span class="action-card-cta">Open Git Tools <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+        <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
       </a>
     </div>
 
@@ -6912,7 +7384,7 @@ struct IndexTemplate {
           var size = Math.floor(Math.random() * 100 + 120);
           var rot = (Math.random() * 360).toFixed(1);
           var op = (Math.random() * 0.08 + 0.12).toFixed(2);
-          img.style.cssText = 'width:' + size + 'px;top:' + pos[0].toFixed(1) + '%;left:' + pos[1].toFixed(1) + '%;transform:rotate(' + rot + 'deg);opacity:' + op + ';';
+          img.style.width=size+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;
         });
       })();
 
@@ -6939,7 +7411,7 @@ struct IndexTemplate {
             var delay = (Math.random() * 18).toFixed(1);
             var rot = (Math.random() * 26 - 13).toFixed(1);
             var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-            el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;'
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';
               + '--rot:' + rot + 'deg;--op:' + op + ';'
               + 'animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
             container.appendChild(el);
@@ -7224,14 +7696,14 @@ struct SplashTemplate {
         function tooClose(top, left) { for (var i = 0; i < placed.length; i++) { var dt = Math.abs(placed[i][0] - top), dl = Math.abs(placed[i][1] - left); if (dt < 16 && dl < 12) return true; } return false; }
         function pick(leftBand) { for (var attempt = 0; attempt < 50; attempt++) { var top = Math.random() * 88 + 2; var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74; if (!tooClose(top, left)) { placed.push([top, left]); return [top, left]; } } var top = Math.random() * 88 + 2; var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74; placed.push([top, left]); return [top, left]; }
         var half = Math.floor(wms.length / 2);
-        wms.forEach(function (img, i) { var pos = pick(i < half); var size = Math.floor(Math.random() * 100 + 120); var rot = (Math.random() * 360).toFixed(1); var op = (Math.random() * 0.08 + 0.12).toFixed(2); img.style.cssText = 'width:' + size + 'px;top:' + pos[0].toFixed(1) + '%;left:' + pos[1].toFixed(1) + '%;transform:rotate(' + rot + 'deg);opacity:' + op + ';'; });
+        wms.forEach(function (img, i) { var pos = pick(i < half); var size = Math.floor(Math.random() * 100 + 120); var rot = (Math.random() * 360).toFixed(1); var op = (Math.random() * 0.08 + 0.12).toFixed(2); img.style.width=size+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op; });
       })();
       (function spawnCodeParticles() {
         var container = document.getElementById('code-particles');
         if (!container) return;
         var snippets = ['1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312','// comment','pub fn run','use std::fs','Result<()>','let mut n = 0','git main','#[derive]','impl Scan','3,841 physical','files: 60','450 comments','cargo build','Ok(run)','Vec<String>','match lang','fn main() {','.rs .go .py','sloc_core','render_html','2,163 code'];
         var count = 38;
-        for (var i = 0; i < count; i++) { (function(idx) { var el = document.createElement('span'); el.className = 'code-particle'; el.textContent = snippets[idx % snippets.length]; var left = Math.random() * 94 + 2; var top = Math.random() * 88 + 6; var dur = (Math.random() * 10 + 9).toFixed(1); var delay = (Math.random() * 18).toFixed(1); var rot = (Math.random() * 26 - 13).toFixed(1); var op = (Math.random() * 0.09 + 0.06).toFixed(3); el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;'; container.appendChild(el); })(i); }
+        for (var i = 0; i < count; i++) { (function(idx) { var el = document.createElement('span'); el.className = 'code-particle'; el.textContent = snippets[idx % snippets.length]; var left = Math.random() * 94 + 2; var top = Math.random() * 88 + 6; var dur = (Math.random() * 10 + 9).toFixed(1); var delay = (Math.random() * 18).toFixed(1); var rot = (Math.random() * 26 - 13).toFixed(1); var op = (Math.random() * 0.09 + 0.06).toFixed(3); el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s'; container.appendChild(el); })(i); }
       })();
 
       // Recent scans data injected from server
@@ -7410,7 +7882,7 @@ struct ScanSetupTemplate {
     .nav-project-slot { display:flex; justify-content:center; min-width:0; }
     .nav-project-pill { width: 100%; max-width: 260px; display:inline-flex; align-items:center; justify-content:center; gap: 10px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.10); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
-    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .nav-status { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
     .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); text-decoration: none; }
     .theme-toggle { width: 38px; justify-content: center; padding: 0; cursor: pointer; transition: transform 0.15s ease, background 0.15s ease; }
@@ -7432,13 +7904,13 @@ struct ScanSetupTemplate {
     .compare-banner-body { display:flex; align-items:center; gap: 14px; flex-wrap:wrap; }
     .compare-banner-meta { display:flex; flex-direction:column; gap:2px; min-width:0; flex: 0 0 auto; }
     .delta-chip { font-size:12px; font-weight:700; padding:2px 8px; border-radius:999px; }
-    .delta-chip.pos { background:#e6f4ea; color:#1e7e34; }
-    .delta-chip.neg { background:#fde8e8; color:#b91c1c; }
+    .delta-chip.pos { background:var(--pos-bg); color:var(--pos); }
+    .delta-chip.neg { background:var(--neg-bg); color:var(--neg); }
     .delta-cards-inline { display:flex; flex-wrap:wrap; gap:8px; flex:1 1 auto; align-items:center; justify-content:center; }
     .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:6px 12px; text-align:center; min-width:80px; }
     .delta-card-val { font-size:16px; font-weight:800; }
     .delta-card-val.pos { color:#1e7e34; }
-    .delta-card-val.neg { color:#b91c1c; }
+    .delta-card-val.neg { color:var(--neg); }
     .delta-card-val.mod { color:#b35428; }
     .delta-card-lbl { font-size:10px; color:var(--muted); margin-top:2px; }
     .compare-label { font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--info-text, #4467d8); }
@@ -7506,8 +7978,8 @@ struct ScanSetupTemplate {
     .metrics-section-header td { background: linear-gradient(180deg, rgba(184,93,51,0.04), transparent); font-size: 11px !important; font-weight: 900 !important; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2) !important; padding: 8px 16px !important; border-bottom: 1px solid var(--line) !important; }
     .metrics-section-header.metrics-section-gap td { padding-top: 30px !important; border-top: 2px solid var(--line) !important; }
     .mt-val-large { font-size: 16px; font-weight: 800; color: var(--text); }
-    .mt-val-pos { color: #1e7e34; font-weight: 700; }
-    .mt-val-neg { color: #b91c1c; font-weight: 700; }
+    .mt-val-pos { color: var(--pos); font-weight: 700; }
+    .mt-val-neg { color: var(--neg); font-weight: 700; }
     .mt-val-zero { color: var(--muted); }
     .mt-val-mod { color: var(--oxide-2); }
     .mt-val-na { color: var(--muted-2); font-size: 13px; font-style: italic; }
@@ -7937,6 +8409,7 @@ struct ScanSetupTemplate {
             <p class="muted">A quick summary of what this run actually counted across supported languages.</p>
           </div>
         </div>
+        <div id="result-lang-charts" style="margin:0 0 18px;"></div>
         <table>
           <thead>
             <tr>
@@ -8022,6 +8495,71 @@ struct ScanSetupTemplate {
 
       loadSavedTheme();
 
+      // ── Language overview charts ───────────────────────────────────────────
+      (function(){
+        var D={{ lang_chart_json|safe }};
+        if(!D||!D.length)return;
+        var el=document.getElementById('result-lang-charts');
+        if(!el)return;
+        var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
+        var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082'];
+        var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+        function fmt(n){return Number(n).toLocaleString();}
+        function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        function px(n){return Math.round(n);}
+        var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
+        var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
+        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+        if(D.length===1){
+          var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
+          ds+='<circle cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
+        } else {
+          var ang=-Math.PI/2;
+          D.forEach(function(d,i){
+            var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
+            var x1=cx+Ro*Math.cos(ang),y1=cy+Ro*Math.sin(ang);
+            var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
+            var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
+            var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
+            ds+='<path d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
+            ang+=sw;
+          });
+        }
+        ds+='<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="22" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
+        ds+='<text x="'+cx+'" y="'+(cy+16)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
+        D.forEach(function(d,i){
+          var ly=12+i*22;
+          if(ly+16>DH)return;
+          ds+='<rect x="'+(cx+Ro+14)+'" y="'+ly+'" width="13" height="13" fill="'+(COLS[i%COLS.length])+'" rx="3"/>';
+          ds+='<text x="'+(cx+Ro+32)+'" y="'+(ly+11)+'" font-family="'+FONT+'" font-size="12" fill="#43342d">'+esc(d.lang)+'</text>';
+        });
+        ds+='</svg>';
+        var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
+        var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
+        var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+        D.forEach(function(d,i){
+          var y=10+i*rHb,x=LW;
+          var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+          bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          if(cW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
+          if(cmW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
+          if(blW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
+        });
+        var ly=SH-16;
+        bs+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
+        bs+='<rect x="'+(LW+56)+'" y="'+ly+'" width="10" height="10" fill="'+GN+'"/><text x="'+(LW+70)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
+        bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
+        bs+='</svg>';
+        var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
+        el.innerHTML='<div style="width:100%;overflow-x:auto;display:flex;justify-content:center;padding:6px 0;">'+
+          '<div style="display:inline-flex;gap:56px;align-items:flex-start;flex-wrap:nowrap;flex-shrink:0;">'+
+            '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
+            '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
+          '</div>'+
+        '</div>';
+      })();
+
       (function randomizeWatermarks() {
         var wms = Array.prototype.slice.call(document.querySelectorAll(".background-watermarks img"));
         if (!wms.length) return;
@@ -8052,7 +8590,7 @@ struct ScanSetupTemplate {
           var size = Math.floor(Math.random() * 100 + 160);
           var rot = angles[i % angles.length] + (Math.random() * 6 - 3);
           var op = (Math.random() * 0.06 + 0.07).toFixed(2);
-          img.style.cssText = "width:" + size + "px;top:" + pos[0].toFixed(1) + "%;left:" + pos[1].toFixed(1) + "%;transform:rotate(" + rot.toFixed(1) + "deg);opacity:" + op + ";";
+          img.style.width=size+"px";img.style.top=pos[0].toFixed(1)+"%";img.style.left=pos[1].toFixed(1)+"%";img.style.transform="rotate("+rot.toFixed(1)+"deg)";img.style.opacity=op;
         });
       })();
 
@@ -8071,7 +8609,7 @@ struct ScanSetupTemplate {
             var delay = (Math.random() * 18).toFixed(1);
             var rot = (Math.random() * 26 - 13).toFixed(1);
             var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-            el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
             container.appendChild(el);
           })(i);
         }
@@ -8159,6 +8697,191 @@ struct ResultTemplate {
     // submodule breakdown (empty when not requested)
     submodule_rows: Vec<SubmoduleRow>,
     scan_config_url: String,
+    lang_chart_json: String,
+    csp_nonce: String,
+}
+
+#[derive(Template)]
+#[template(
+    source = r##"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OxideSLOC | Analyzing…</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{{ csp_nonce }}">
+    :root {
+      --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
+      --line:#e6d0bf; --line-strong:#dcb89f; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
+      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#4a78ee;
+      --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
+    }
+    body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }
+    *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
+    .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
+    .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
+    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
+    .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
+    .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
+    .page-body{max-width:1720px;margin:0 auto;padding:32px 24px 80px;}
+    .wait-panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:36px 40px;box-shadow:var(--shadow);position:relative;}
+    .wait-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(111,155,255,0.12);border:1px solid rgba(111,155,255,0.3);border-radius:999px;padding:5px 14px 5px 10px;font-size:12px;font-weight:700;color:var(--accent-2);margin-bottom:20px;}
+    .pulse-dot{width:9px;height:9px;border-radius:50%;background:var(--accent-2);animation:pulse 1.4s ease-in-out infinite;}
+    @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.7);}}
+    .wait-title{font-size:1.6rem;font-weight:800;color:var(--text);margin:0 0 6px;}
+    .wait-sub{color:var(--muted);font-size:0.95rem;margin-bottom:24px;}
+    .path-block{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.85rem;color:var(--muted);word-break:break-all;margin-bottom:24px;}
+    .metrics-row{display:flex;gap:20px;margin-bottom:24px;flex-wrap:wrap;}
+    .metric-card{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:12px 18px;min-width:140px;}
+    .metric-label{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;}
+    .metric-value{font-size:1.1rem;font-weight:700;color:var(--text);}
+    .progress-bar-wrap{background:var(--surface-2);border-radius:999px;height:6px;overflow:hidden;margin-bottom:24px;}
+    .progress-bar{height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,var(--accent-2),var(--oxide));animation:indeterminate 1.8s ease-in-out infinite;}
+    @keyframes indeterminate{0%{transform:translateX(-100%) scaleX(0.5);}50%{transform:translateX(0%) scaleX(0.5);}100%{transform:translateX(200%) scaleX(0.5);}}
+    .hidden{display:none!important;}
+    .warn-slow{background:rgba(230,160,50,0.12);border:1px solid rgba(230,160,50,0.3);border-radius:10px;padding:12px 16px;font-size:13px;color:#8a6a10;margin-bottom:20px;}
+    .err-panel{background:rgba(180,40,40,0.08);border:1px solid rgba(180,40,40,0.25);border-radius:10px;padding:14px 18px;margin-bottom:20px;}
+    .err-panel strong{display:block;color:#8b1f1f;margin-bottom:6px;font-size:14px;}
+    .err-panel p{margin:0;font-size:13px;color:var(--muted);}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:4px;}
+    .btn-primary{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:999px;background:linear-gradient(135deg,var(--oxide),var(--nav-2));color:#fff;font-size:13px;font-weight:700;text-decoration:none;border:none;cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 4px 12px rgba(185,93,51,0.3);}
+    .btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(185,93,51,0.4);}
+    .btn-outline{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:999px;background:transparent;color:var(--nav);border:2px solid var(--nav);font-size:13px;font-weight:700;text-decoration:none;cursor:pointer;transition:background .15s,transform .15s;}
+    .btn-outline:hover{background:rgba(185,93,51,0.08);transform:translateY(-1px);}
+  </style>
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="/" class="brand">
+        <img src="/images/logo/logo-text.png" alt="OxideSLOC" class="brand-logo">
+        <div class="brand-copy">
+          <h1 class="brand-title">OxideSLOC</h1>
+          <div class="brand-subtitle">Source Line Analysis</div>
+        </div>
+      </a>
+      <div class="nav-right">
+        <a href="/view-reports" class="nav-pill">View Reports</a>
+        <a href="/scan" class="nav-pill">New Scan</a>
+      </div>
+    </div>
+  </nav>
+  <div class="page-body">
+    <div class="wait-panel">
+      <div class="wait-badge"><span class="pulse-dot"></span>Analysis running</div>
+      <h2 class="wait-title">Analyzing your project…</h2>
+      <p class="wait-sub">This may take a few minutes for large repositories. You can leave this page — results are saved automatically.</p>
+      <div class="path-block">{{ project_path }}</div>
+      <div class="metrics-row">
+        <div class="metric-card">
+          <div class="metric-label">Elapsed</div>
+          <div class="metric-value" id="elapsed">0s</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Phase</div>
+          <div class="metric-value" id="phase">Starting</div>
+        </div>
+      </div>
+      <div class="progress-bar-wrap"><div class="progress-bar"></div></div>
+      <div class="warn-slow hidden" id="warn-slow">
+        This is taking longer than usual. Large repositories with many files can take several minutes. Hang tight — the analysis is still running in the background.
+      </div>
+      <div class="err-panel hidden" id="err-panel">
+        <strong>Analysis failed</strong>
+        <p id="err-msg">An unexpected error occurred. Check that the path exists and is readable.</p>
+      </div>
+      <div class="actions hidden" id="actions">
+        <a href="/scan" class="btn-primary">Try Again</a>
+        <a href="/view-reports" class="btn-outline">View Reports</a>
+      </div>
+    </div>
+  </div>
+  <script nonce="{{ csp_nonce }}">
+    (function() {
+      var WAIT_ID = {{ wait_id_json }};
+      var startTime = Date.now();
+      var pollInterval = 1500;
+      var retries = 0;
+      var maxRetries = 5;
+      var warnShown = false;
+
+      function elapsed() {
+        return Math.floor((Date.now() - startTime) / 1000);
+      }
+
+      function updateElapsed() {
+        var s = elapsed();
+        document.getElementById('elapsed').textContent = s < 60 ? s + 's' : Math.floor(s/60) + 'm ' + (s%60) + 's';
+      }
+
+      function setPhase(txt) {
+        document.getElementById('phase').textContent = txt;
+      }
+
+      var elapsedTimer = setInterval(updateElapsed, 1000);
+
+      function poll() {
+        fetch('/api/runs/' + encodeURIComponent(WAIT_ID) + '/status')
+          .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then(function(data) {
+            retries = 0;
+            if (data.state === 'complete') {
+              clearInterval(elapsedTimer);
+              setPhase('Done');
+              window.location.href = '/runs/' + encodeURIComponent(data.run_id) + '/result';
+            } else if (data.state === 'failed') {
+              clearInterval(elapsedTimer);
+              setPhase('Failed');
+              document.getElementById('err-msg').textContent = data.message || 'Analysis failed.';
+              document.getElementById('err-panel').classList.remove('hidden');
+              document.getElementById('actions').classList.remove('hidden');
+            } else {
+              // still running
+              var s = elapsed();
+              if (s > 90 && !warnShown) {
+                warnShown = true;
+                document.getElementById('warn-slow').classList.remove('hidden');
+              }
+              setPhase(s < 10 ? 'Starting' : s < 30 ? 'Scanning files' : 'Analyzing');
+              setTimeout(poll, pollInterval);
+            }
+          })
+          .catch(function(err) {
+            retries++;
+            if (retries >= maxRetries) {
+              clearInterval(elapsedTimer);
+              document.getElementById('err-msg').textContent = 'Lost connection to server. Reload the page to check status.';
+              document.getElementById('err-panel').classList.remove('hidden');
+              document.getElementById('actions').classList.remove('hidden');
+            } else {
+              // exponential back-off capped at 8s
+              setTimeout(poll, Math.min(pollInterval * Math.pow(2, retries), 8000));
+            }
+          });
+      }
+
+      setTimeout(poll, pollInterval);
+    })();
+  </script>
+</body>
+</html>
+"##,
+    ext = "html"
+)]
+struct ScanWaitTemplate {
+    wait_id_json: String,
+    project_path: String,
     csp_nonce: String,
 }
 
@@ -8283,7 +9006,7 @@ struct ResultTemplate {
           var delay = (Math.random() * 18).toFixed(1);
           var rot = (Math.random() * 26 - 13).toFixed(1);
           var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-          el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
+          el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
           container.appendChild(el);
         })(i);
       }
@@ -8301,7 +9024,7 @@ struct ResultTemplate {
         var op = (Math.random()*0.08+0.05).toFixed(2);
         var animDur = (Math.random()*6+5).toFixed(1);
         var animDelay = (Math.random()*10).toFixed(1);
-        img.style.cssText = 'top:'+pos[0].toFixed(1)+'%;left:'+pos[1].toFixed(1)+'%;width:'+w+'px;transform:rotate('+rot+'deg);opacity:'+op+';animation:wmFade '+animDur+'s ease-in-out -'+animDelay+'s infinite alternate;';
+        img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;img.style.animation='wmFade '+animDur+'s ease-in-out -'+animDelay+'s infinite alternate';
       });
     })();
   </script>
@@ -8337,9 +9060,9 @@ struct ErrorTemplate {
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
       --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#2563eb;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
-      --pos:#1a8f47; --pos-bg:#e8f5ed; --neg:#b33b3b; --neg-bg:#fdeaea;
+      --pos:#1a8f47; --pos-bg:#e8f5ed; --neg:#b33b3b; --neg-bg:#fcd6d6;
     }
-    body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }
+    body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; --pos:#8fe2a8; --pos-bg:#163927; --neg:#ff6b6b; --neg-bg:#4a1e1e; }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
@@ -8427,6 +9150,18 @@ struct ErrorTemplate {
     .vr-hint{grid-column:2;grid-row:1;text-align:right;margin:0;font-size:13px;color:var(--muted);white-space:nowrap;}
     .vr-browse{grid-column:2;grid-row:2;justify-self:end;white-space:nowrap;}
     .rpt-btn{min-width:58px;justify-content:center;}
+    .flex-row{display:flex;align-items:center;gap:8px;}
+    .report-cell{overflow:visible;white-space:normal;}
+    #history-table col:nth-child(1){width:215px;}
+    #history-table col:nth-child(2){width:160px;}
+    #history-table col:nth-child(3){width:115px;}
+    #history-table col:nth-child(4){width:90px;}
+    #history-table col:nth-child(5){width:100px;}
+    #history-table col:nth-child(6){width:100px;}
+    #history-table col:nth-child(7){width:80px;}
+    #history-table col:nth-child(8){width:100px;}
+    #history-table col:nth-child(9){width:100px;}
+    #history-table col:nth-child(10){width:150px;}
   </style>
 </head>
 <body>
@@ -8490,7 +9225,7 @@ struct ErrorTemplate {
           <h1>View Reports</h1>
           <p class="panel-meta">{{ total_scans }} report(s) available. Use the View or PDF button to open a report.</p>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div class="flex-row">
           <button type="button" class="export-btn" id="export-csv-btn">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export CSV
@@ -8530,16 +9265,7 @@ struct ErrorTemplate {
       <div class="table-wrap">
         <table id="history-table">
           <colgroup>
-            <col style="width:215px">
-            <col style="width:160px">
-            <col style="width:115px">
-            <col style="width:90px">
-            <col style="width:100px">
-            <col style="width:100px">
-            <col style="width:80px">
-            <col style="width:100px">
-            <col style="width:100px">
-            <col style="width:150px">
+            <col><col><col><col><col><col><col><col><col><col>
           </colgroup>
           <thead>
             <tr id="history-thead">
@@ -8576,10 +9302,10 @@ struct ErrorTemplate {
               <td><span class="metric-num">{{ entry.blank_lines }}</span></td>
               <td>{% if !entry.git_branch.is_empty() %}<span class="git-chip">{{ entry.git_branch }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
               <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip" title="{{ entry.git_commit }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
-              <td style="overflow:visible;white-space:normal;">
+              <td class="report-cell">
                 <div class="actions-cell">
                   <a class="btn primary rpt-btn" href="/runs/{{ entry.run_id }}/html" target="_blank" rel="noopener" title="View HTML report">View</a>
-                  {% if entry.has_pdf %}<a class="btn rpt-btn" href="/runs/{{ entry.run_id }}/pdf" target="_blank" rel="noopener" title="View PDF report" style="background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;">PDF</a>{% endif %}
+                  {% if entry.has_pdf %}<a class="btn primary rpt-btn" href="/runs/{{ entry.run_id }}/pdf" target="_blank" rel="noopener" title="View PDF report">PDF</a>{% endif %}
                 </div>
               </td>
             </tr>
@@ -8590,7 +9316,7 @@ struct ErrorTemplate {
       <div class="pagination">
         <span class="pagination-info" id="pagination-info"></span>
         <div class="pagination-btns" id="pagination-btns"></div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div class="flex-row">
           <span class="per-page-label">Show</span>
           <select class="per-page" id="per-page-sel">
             <option value="10">10 per page</option>
@@ -8776,25 +9502,24 @@ struct ErrorTemplate {
         function u2(n){return[n&0xFF,(n>>8)&0xFF];}
         function u4(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
         function xe(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-        function col(c){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s;}
+        function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}
         var ss=[],si={};function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}
         var rx='<row r="1">';
-        hdrs.forEach(function(h,c){rx+='<c r="'+col(c)+'1" t="s"><v>'+S(h)+'</v></c>';});
+        hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});
         rx+='</row>';
-        rows.forEach(function(row,r){rx+='<row r="'+(r+2)+'">';row.forEach(function(cell,c){var ref=col(c)+(r+2),isNum=c>0&&cell!==''&&!isNaN(String(cell).replace(/^[+\-]/,''));rx+=isNum?'<c r="'+ref+'"><v>'+xe(cell)+'</v></c>':'<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';});rx+='</row>';});
-        var sh='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData>'+rx+'</sheetData></worksheet>';
-        var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';
+        rows.forEach(function(row,ri){var rn=ri+2;rx+='<row r="'+rn+'">';row.forEach(function(cell,c){var ref=colRef(c,rn),num=cell!==''&&cell!=null&&!isNaN(Number(cell))&&isFinite(Number(cell))&&/^[+\-]?\d/.test(String(cell));rx+=num?'<c r="'+ref+'"><v>'+xe(cell)+'</v></c>':'<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';});rx+='</row>';});
         var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
+        var sh='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData>'+rx+'</sheetData></worksheet>';
+        var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';
+        var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><b/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
         var F={'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
           '_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
           'xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets><sheet name="'+xe(sheet)+'" sheetId="1" r:id="rId1"/></sheets></workbook>',
           'xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
-          'xl/styles.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
-          'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sh};
+          'xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sh};
+        var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'];
         var zparts=[],zcds=[],zoff=0,znf=0;
-        ['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels',
-         'xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'
-        ].forEach(function(name){
+        order.forEach(function(name){
           var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);
           var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);
           var entry=new Uint8Array(lha.length+nb.length+sz);
@@ -8864,7 +9589,7 @@ struct ErrorTemplate {
         function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}
         function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}
         var half=Math.floor(wms.length/2);
-        wms.forEach(function(img,i){var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.cssText='width:'+sz+'px;top:'+pos[0].toFixed(1)+'%;left:'+pos[1].toFixed(1)+'%;transform:rotate('+rot+'deg);opacity:'+op+';';});
+        wms.forEach(function(img,i){var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.width=sz+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;});
       })();
 
       (function spawnCodeParticles() {
@@ -8882,7 +9607,7 @@ struct ErrorTemplate {
             var delay = (Math.random() * 18).toFixed(1);
             var rot = (Math.random() * 26 - 13).toFixed(1);
             var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-            el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
             container.appendChild(el);
           })(i);
         }
@@ -8975,6 +9700,7 @@ struct HistoryTemplate {
     .btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
     .btn.primary:hover{opacity:.9;}
     .btn:disabled{opacity:.35;cursor:default;pointer-events:none;}
+    #reset-view-btn{padding:5px 14px;}
     .btn-back{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;}
     .btn-back:hover{background:var(--line);}
     .empty-state{text-align:center;padding:48px 24px;color:var(--muted);}
@@ -9148,7 +9874,7 @@ struct HistoryTemplate {
       <div class="pagination">
         <span class="pagination-info" id="pagination-info"></span>
         <div class="pagination-btns" id="pagination-btns"></div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div class="flex-row">
           <span class="per-page-label">Show</span>
           <select class="per-page" id="per-page-sel">
             <option value="10">10 per page</option>
@@ -9390,7 +10116,7 @@ struct HistoryTemplate {
         function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}
         function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}
         var half=Math.floor(wms.length/2);
-        wms.forEach(function(img,i){var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.cssText='width:'+sz+'px;top:'+pos[0].toFixed(1)+'%;left:'+pos[1].toFixed(1)+'%;transform:rotate('+rot+'deg);opacity:'+op+';';});
+        wms.forEach(function(img,i){var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.width=sz+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;});
       })();
 
       (function spawnCodeParticles() {
@@ -9408,7 +10134,7 @@ struct HistoryTemplate {
             var delay = (Math.random() * 18).toFixed(1);
             var rot = (Math.random() * 26 - 13).toFixed(1);
             var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-            el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
             container.appendChild(el);
           })(i);
         }
@@ -9445,12 +10171,12 @@ struct CompareSelectTemplate {
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08777;
       --nav:#b85d33; --nav-2:#7a371b;
       --accent:#6f9bff; --oxide:#d37a4c; --oxide-2:#b35428; --shadow:0 18px 42px rgba(77,44,20,0.12);
-      --pos:#1a8f47; --pos-bg:#e8f5ed; --neg:#b33b3b; --neg-bg:#fdeaea; --zero-bg:transparent;
+      --pos:#1a8f47; --pos-bg:#e8f5ed; --neg:#b33b3b; --neg-bg:#fcd6d6; --zero-bg:transparent;
       --added:#1a8f47; --removed:#b33b3b; --modified:#926000; --unchanged:#7b675b;
     }
     body.dark-theme {
       --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6c5649; --text:#f5ece6;
-      --muted:#c7b7aa; --muted-2:#aa9485; --pos:#8fe2a8; --pos-bg:#163927; --neg:#f5a3a3; --neg-bg:#3d1c1c;
+      --muted:#c7b7aa; --muted-2:#aa9485; --pos:#8fe2a8; --pos-bg:#163927; --neg:#ff6b6b; --neg-bg:#4a1e1e;
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
@@ -9488,12 +10214,14 @@ struct CompareSelectTemplate {
     .delta-card-label{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted-2);margin-bottom:10px;}
     .delta-card-from{font-size:12px;color:var(--muted);}
     .delta-card-to{font-size:20px;font-weight:800;margin:2px 0;}
-    .meta-card-ref{font-size:32px;font-weight:850;letter-spacing:-0.025em;line-height:1.15;margin:4px 0 14px;color:var(--text);}
-    .meta-card-branch{font-size:14px;font-weight:700;color:var(--muted);margin-bottom:10px;}
-    .meta-card-branch span{color:var(--text);}
-    .meta-card-sha-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:6px;}
-    .meta-card-ts{font-size:13px;color:var(--muted-2);}
-    .meta-card-author{font-size:13px;color:var(--muted-2);margin-top:12px;font-style:italic;}
+    .meta-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:12px;}
+    .meta-card-project{font-size:11px;font-weight:600;color:var(--muted);font-style:italic;text-align:right;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .meta-card-commit{display:block;font-family:ui-monospace,monospace;font-size:28px;font-weight:800;letter-spacing:-0.02em;line-height:1.1;color:var(--accent);text-decoration:none;margin-bottom:16px;word-break:break-all;}
+    .meta-card-commit:hover{color:var(--oxide);}
+    .meta-card-rows{display:flex;flex-direction:column;gap:6px;}
+    .meta-card-row{display:flex;align-items:baseline;gap:8px;font-size:13px;}
+    .meta-label{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);white-space:nowrap;flex-shrink:0;}
+    .meta-value{color:var(--text);font-size:13px;}
     .dc-tip{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:200;background:rgba(20,12,8,0.96);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:11.5px;font-weight:500;line-height:1.55;width:230px;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);text-transform:none;letter-spacing:0;}
     .dc-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.96);}
     .delta-card:hover .dc-tip{display:block;}
@@ -9504,6 +10232,27 @@ struct CompareSelectTemplate {
     .delta-card-change.pos{color:var(--pos);background:var(--pos-bg);}
     .delta-card-change.neg{color:var(--neg);background:var(--neg-bg);}
     .delta-card-change.zero{color:var(--muted);background:transparent;}
+    .delta-card-pct{font-size:11px;font-weight:700;margin-top:4px;letter-spacing:.01em;}
+    .delta-card-pct.pos{color:var(--pos);}
+    .delta-card-pct.neg{color:var(--neg);}
+    .delta-card-pct.zero{color:var(--muted);}
+    .insights-panel{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;}
+    .insight-card{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;flex:1;min-width:120px;position:relative;cursor:default;}
+    .insight-card.insight-flag{border-color:var(--oxide);}
+    .insight-card:hover .dc-tip{display:block;}
+    .dc-tip.up{top:auto;bottom:calc(100% + 8px);}
+    .dc-tip.up::after{bottom:auto;top:100%;border-bottom-color:transparent;border-top-color:rgba(20,12,8,0.96);}
+    .insight-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);margin-bottom:4px;}
+    .insight-label.flag{color:var(--oxide);}
+    .insight-val{font-size:18px;font-weight:800;line-height:1.2;}
+    .insight-val.pos{color:var(--pos);}
+    .insight-val.neg{color:var(--neg);}
+    .insight-val.high{color:#c0392a;}
+    .insight-val.med{color:#926000;}
+    .insight-val.low{color:var(--pos);}
+    body.dark-theme .insight-val.high{color:#ff6b6b;}
+    body.dark-theme .insight-val.med{color:#f0c060;}
+    .insight-sub{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.4;}
     .file-changes-grid{display:flex;flex-direction:column;gap:5px;margin-top:6px;font-size:12px;}
     .fc-row{display:flex;align-items:center;gap:8px;}
     .fc-count{font-weight:800;font-size:16px;min-width:28px;}
@@ -9654,32 +10403,44 @@ struct CompareSelectTemplate {
       <div class="hero-body">
       <div class="meta-strip">
         <div class="delta-card delta-card-meta">
-          <div class="delta-card-label">Baseline</div>
-          <div class="meta-card-ref">{% if let Some(tags) = baseline_git_tags %}{{ tags }}{% else if !baseline_git_branch.is_empty() %}{{ baseline_git_branch }}{% else %}{{ baseline_timestamp }}{% endif %}</div>
-          {% if !baseline_git_branch.is_empty() %}<div class="meta-card-branch">Branch: <span>{{ baseline_git_branch }}</span></div>{% endif %}
-          <div class="meta-card-sha-row">
-            {% if !baseline_git_commit_long.is_empty() %}
-            <a class="vpill-id" href="/runs/{{ baseline_run_id }}/html" target="_blank" style="font-size:11px;word-break:break-all;overflow-wrap:break-word;">{{ baseline_git_commit_long }}</a>
-            {% else %}
-            <a class="vpill-id" href="/runs/{{ baseline_run_id }}/html" target="_blank">{{ baseline_run_id_short }}</a>
-            {% endif %}
-            <span class="meta-card-ts">{{ baseline_timestamp }}</span>
+          <div class="meta-card-header">
+            <div class="delta-card-label" style="margin-bottom:0;font-size:17px;letter-spacing:.04em;">Baseline</div>
+            <div class="meta-card-project">{{ project_name }}</div>
           </div>
-          {% if let Some(author) = baseline_git_author %}<div class="meta-card-author">Last commit by: {{ author }}</div>{% endif %}
+          {% if !baseline_git_commit.is_empty() %}
+          <a class="meta-card-commit" href="/runs/{{ baseline_run_id }}/html" target="_blank">{{ baseline_git_commit }}</a>
+          {% else %}
+          <a class="meta-card-commit" href="/runs/{{ baseline_run_id }}/html" target="_blank">{{ baseline_run_id_short }}</a>
+          {% endif %}
+          <div class="meta-card-rows">
+            <div class="meta-card-row"><span class="meta-label">Branch:</span>{% if !baseline_git_branch.is_empty() %}<span class="git-chip">{{ baseline_git_branch }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
+            <div class="meta-card-row"><span class="meta-label">Last commit on:</span>{% if let Some(date) = baseline_git_commit_date %}<span class="meta-value">{{ date }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
+            <div class="meta-card-row"><span class="meta-label">Last commit by:</span>{% if let Some(author) = baseline_git_author %}<span class="meta-value">{{ author }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
+            <div class="meta-card-row"><span class="meta-label">Scanned on:</span><span class="meta-value">{{ baseline_timestamp }}</span></div>
+            {% if let Some(tags) = baseline_git_tags %}
+            <div class="meta-card-row"><span class="meta-label">Tags:</span><span class="meta-value">{{ tags }}</span></div>
+            {% endif %}
+          </div>
         </div>
         <div class="delta-card delta-card-meta">
-          <div class="delta-card-label">Current</div>
-          <div class="meta-card-ref">{% if let Some(tags) = current_git_tags %}{{ tags }}{% else if !current_git_branch.is_empty() %}{{ current_git_branch }}{% else %}{{ current_timestamp }}{% endif %}</div>
-          {% if !current_git_branch.is_empty() %}<div class="meta-card-branch">Branch: <span>{{ current_git_branch }}</span></div>{% endif %}
-          <div class="meta-card-sha-row">
-            {% if !current_git_commit_long.is_empty() %}
-            <a class="vpill-id" href="/runs/{{ current_run_id }}/html" target="_blank" style="font-size:11px;word-break:break-all;overflow-wrap:break-word;">{{ current_git_commit_long }}</a>
-            {% else %}
-            <a class="vpill-id" href="/runs/{{ current_run_id }}/html" target="_blank">{{ current_run_id_short }}</a>
-            {% endif %}
-            <span class="meta-card-ts">{{ current_timestamp }}</span>
+          <div class="meta-card-header">
+            <div class="delta-card-label" style="margin-bottom:0;font-size:17px;letter-spacing:.04em;">Current</div>
+            <div class="meta-card-project">{{ project_name }}</div>
           </div>
-          {% if let Some(author) = current_git_author %}<div class="meta-card-author">Last commit by: {{ author }}</div>{% endif %}
+          {% if !current_git_commit.is_empty() %}
+          <a class="meta-card-commit" href="/runs/{{ current_run_id }}/html" target="_blank">{{ current_git_commit }}</a>
+          {% else %}
+          <a class="meta-card-commit" href="/runs/{{ current_run_id }}/html" target="_blank">{{ current_run_id_short }}</a>
+          {% endif %}
+          <div class="meta-card-rows">
+            <div class="meta-card-row"><span class="meta-label">Branch:</span>{% if !current_git_branch.is_empty() %}<span class="git-chip">{{ current_git_branch }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
+            <div class="meta-card-row"><span class="meta-label">Last commit on:</span>{% if let Some(date) = current_git_commit_date %}<span class="meta-value">{{ date }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
+            <div class="meta-card-row"><span class="meta-label">Last commit by:</span>{% if let Some(author) = current_git_author %}<span class="meta-value">{{ author }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
+            <div class="meta-card-row"><span class="meta-label">Scanned on:</span><span class="meta-value">{{ current_timestamp }}</span></div>
+            {% if let Some(tags) = current_git_tags %}
+            <div class="meta-card-row"><span class="meta-label">Tags:</span><span class="meta-value">{{ tags }}</span></div>
+            {% endif %}
+          </div>
         </div>
       </div>
       <div class="delta-strip">
@@ -9688,8 +10449,9 @@ struct CompareSelectTemplate {
           <div class="delta-card-label">Code lines</div>
           <div class="delta-card-from">Before: {{ baseline_code }}</div>
           <div class="delta-card-to">{{ current_code }}</div>
-          {% if code_lines_delta_class == "pos" %}<span class="delta-card-change pos">{{ code_lines_delta_str }}</span>
-          {% else if code_lines_delta_class == "neg" %}<span class="delta-card-change neg">{{ code_lines_delta_str }}</span>
+          {% if code_lines_delta_class == "pos" %}<span class="delta-card-change pos">{{ code_lines_delta_str }}</span><div class="delta-card-pct pos">{{ code_lines_pct_str }}</div>
+          {% else if code_lines_delta_class == "neg" %}<span class="delta-card-change neg">{{ code_lines_delta_str }}</span><div class="delta-card-pct neg">{{ code_lines_pct_str }}</div>
+          {% else %}<div class="delta-card-pct zero">±0%</div>
           {% endif %}
         </div>
         <div class="delta-card">
@@ -9697,8 +10459,9 @@ struct CompareSelectTemplate {
           <div class="delta-card-label">Files analyzed</div>
           <div class="delta-card-from">Before: {{ baseline_files }}</div>
           <div class="delta-card-to">{{ current_files }}</div>
-          {% if files_analyzed_delta_class == "pos" %}<span class="delta-card-change pos">{{ files_analyzed_delta_str }}</span>
-          {% else if files_analyzed_delta_class == "neg" %}<span class="delta-card-change neg">{{ files_analyzed_delta_str }}</span>
+          {% if files_analyzed_delta_class == "pos" %}<span class="delta-card-change pos">{{ files_analyzed_delta_str }}</span><div class="delta-card-pct pos">{{ files_analyzed_pct_str }}</div>
+          {% else if files_analyzed_delta_class == "neg" %}<span class="delta-card-change neg">{{ files_analyzed_delta_str }}</span><div class="delta-card-pct neg">{{ files_analyzed_pct_str }}</div>
+          {% else %}<div class="delta-card-pct zero">±0%</div>
           {% endif %}
         </div>
         <div class="delta-card">
@@ -9706,8 +10469,9 @@ struct CompareSelectTemplate {
           <div class="delta-card-label">Comment lines</div>
           <div class="delta-card-from">Before: {{ baseline_comments }}</div>
           <div class="delta-card-to">{{ current_comments }}</div>
-          {% if comment_lines_delta_class == "pos" %}<span class="delta-card-change pos">{{ comment_lines_delta_str }}</span>
-          {% else if comment_lines_delta_class == "neg" %}<span class="delta-card-change neg">{{ comment_lines_delta_str }}</span>
+          {% if comment_lines_delta_class == "pos" %}<span class="delta-card-change pos">{{ comment_lines_delta_str }}</span><div class="delta-card-pct pos">{{ comment_lines_pct_str }}</div>
+          {% else if comment_lines_delta_class == "neg" %}<span class="delta-card-change neg">{{ comment_lines_delta_str }}</span><div class="delta-card-pct neg">{{ comment_lines_pct_str }}</div>
+          {% else %}<div class="delta-card-pct zero">±0%</div>
           {% endif %}
         </div>
         <div class="delta-card delta-card-wide">
@@ -9720,6 +10484,34 @@ struct CompareSelectTemplate {
             <div class="fc-row fc-unchanged"><span class="fc-count">{{ files_unchanged }}</span><span class="fc-label">Unchanged (identical code counts)</span></div>
           </div>
         </div>
+      </div>
+      <div class="insights-panel">
+        <div class="insight-card">
+          <div class="dc-tip up">Sum of code lines added or grown across all files between the two scans. Only counts files where the current scan has more code than the baseline — shrunk files do not contribute here.</div>
+          <div class="insight-label">Lines Added</div>
+          <div class="insight-val pos">+{{ code_lines_added }}</div>
+          <div class="insight-sub">New or grown source lines</div>
+        </div>
+        <div class="insight-card">
+          <div class="dc-tip up">Sum of code lines removed or shrunk across all files between the two scans. Only counts files where the current scan has fewer code lines than the baseline — grown files do not contribute here.</div>
+          <div class="insight-label">Lines Removed</div>
+          <div class="insight-val neg">&minus;{{ code_lines_removed }}</div>
+          <div class="insight-sub">Deleted or shrunk source lines</div>
+        </div>
+        <div class="insight-card">
+          <div class="dc-tip up">Measures total editing activity relative to codebase size. Formula: (lines added + lines removed) ÷ baseline code lines × 100%. Above 20% = high activity, 5–20% = normal velocity, below 5% = stable.</div>
+          <div class="insight-label">Churn Rate</div>
+          <div class="insight-val {{ churn_rate_class }}">{{ churn_rate_str }}</div>
+          <div class="insight-sub">{% if churn_rate_class == "high" %}High activity — verify scope{% else if churn_rate_class == "med" %}Normal development velocity{% else %}Stable baseline{% endif %} · (added + removed) ÷ baseline</div>
+        </div>
+        {% if scope_flag %}
+        <div class="insight-card insight-flag">
+          <div class="dc-tip up">Triggered when net code growth exceeds 20% of the baseline. This often signals a large feature branch, a bulk import, or a generated-file inclusion. Review the file-level delta below to confirm scope.</div>
+          <div class="insight-label flag">Scope Signal</div>
+          <div class="insight-val high">{{ code_lines_pct_str }}</div>
+          <div class="insight-sub">Added &gt; 20% of baseline — large feature addition detected</div>
+        </div>
+        {% endif %}
       </div>
       </div>
     </section>
@@ -9802,7 +10594,7 @@ struct CompareSelectTemplate {
       <div class="pagination">
         <span class="pagination-info" id="pg-info"></span>
         <div class="pagination-btns" id="pg-btns"></div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div class="flex-row">
           <span class="per-page-label">Show</span>
           <select class="per-page" id="per-page-sel">
             <option value="10">10 per page</option>
@@ -9842,7 +10634,7 @@ struct CompareSelectTemplate {
         function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}
         function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}
         var half=Math.floor(wms.length/2);
-        wms.forEach(function(img,i){var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.cssText='width:'+sz+'px;top:'+pos[0].toFixed(1)+'%;left:'+pos[1].toFixed(1)+'%;transform:rotate('+rot+'deg);opacity:'+op+';';});
+        wms.forEach(function(img,i){var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.width=sz+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;});
       })();
 
       (function spawnCodeParticles() {
@@ -9860,7 +10652,7 @@ struct CompareSelectTemplate {
             var delay = (Math.random() * 18).toFixed(1);
             var rot = (Math.random() * 26 - 13).toFixed(1);
             var op = (Math.random() * 0.09 + 0.06).toFixed(3);
-            el.style.cssText = 'left:' + left.toFixed(1) + '%;top:' + top.toFixed(1) + '%;--rot:' + rot + 'deg;--op:' + op + ';animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
             container.appendChild(el);
           })(i);
         }
@@ -10076,23 +10868,27 @@ struct CompareSelectTemplate {
       var elp=document.querySelector('[data-folder]'),proj=elp?elp.getAttribute('data-folder'):'';
       // Styles: 0=dflt 1=title 2=sub 3=hdr 4=num(#,##0) 5=pos 6=neg 7=zer 8=sectHdr
       function dstyle(v){var s=String(v);if(!s||s==='0'||s==='+0')return 7;return s.charAt(0)==='-'?6:5;}
+      function _sp(num,den){if(!den||den===0)return'';var v=(num/den)*100;return(v>0?'+':'')+v.toFixed(1)+'%';}
+      function _tp(n){var tf=sd.fm+sd.fa+sd.fr+sd.fu;return tf>0?(n/tf*100).toFixed(1)+'%':'';}
+      function _fp(b,c,st){if(st==='added'&&b===0)return'new';if(st==='removed')return'-100.0%';if(st==='unchanged')return'0.0%';return b>0?_sp(c-b,b):'';}
+      function _ps(p){if(!p)return 0;if(p==='0.0%')return 7;if(p==='new')return 5;return p.charAt(0)==='-'?6:5;}
       // Summary sheet
       var W1=WS(),s1=W1.sc,n1=W1.nc,r1=W1.row;
       r1(s1(0,'OxideSLOC — Scan Delta Report',1));
       r1(s1(0,proj,2));
       r1(s1(0,sd.bts+' → '+sd.cts,2));
       r1('');
-      r1(s1(0,'Metric',3)+s1(1,_blabel,3)+s1(2,_clabel,3)+s1(3,'Delta',3));
-      r1(s1(0,'Code Lines')+n1(1,sd.bc,4)+n1(2,sd.cc,4)+s1(3,sd.cd,dstyle(sd.cd)));
-      r1(s1(0,'Files Analyzed')+n1(1,sd.bf,4)+n1(2,sd.cf,4)+s1(3,sd.fd,dstyle(sd.fd)));
-      r1(s1(0,'Comment Lines')+n1(1,sd.bcm,4)+n1(2,sd.ccm,4)+s1(3,sd.cmd,dstyle(sd.cmd)));
+      r1(s1(0,'Metric',3)+s1(1,_blabel,3)+s1(2,_clabel,3)+s1(3,'Delta',3)+s1(4,'% Change',3));
+      r1(s1(0,'Code Lines')+n1(1,sd.bc,4)+n1(2,sd.cc,4)+s1(3,sd.cd,dstyle(sd.cd))+s1(4,_sp(sd.cc-sd.bc,sd.bc),_ps(_sp(sd.cc-sd.bc,sd.bc))));
+      r1(s1(0,'Files Analyzed')+n1(1,sd.bf,4)+n1(2,sd.cf,4)+s1(3,sd.fd,dstyle(sd.fd))+s1(4,_sp(sd.cf-sd.bf,sd.bf),_ps(_sp(sd.cf-sd.bf,sd.bf))));
+      r1(s1(0,'Comment Lines')+n1(1,sd.bcm,4)+n1(2,sd.ccm,4)+s1(3,sd.cmd,dstyle(sd.cmd))+s1(4,_sp(sd.ccm-sd.bcm,sd.bcm),_ps(_sp(sd.ccm-sd.bcm,sd.bcm))));
       r1('');
       r1(s1(0,'FILE CHANGES',8));
-      r1(s1(0,'Category',3)+s1(3,'Count',3));
-      r1(s1(0,'Modified')+n1(3,sd.fm,4));
-      r1(s1(0,'Added')+n1(3,sd.fa,4));
-      r1(s1(0,'Removed')+n1(3,sd.fr,4));
-      r1(s1(0,'Unchanged')+n1(3,sd.fu,4));
+      r1(s1(0,'Category',3)+s1(3,'Count',3)+s1(4,'% of Total',3));
+      r1(s1(0,'Modified')+n1(3,sd.fm,4)+s1(4,_tp(sd.fm)));
+      r1(s1(0,'Added')+n1(3,sd.fa,4)+s1(4,_tp(sd.fa)));
+      r1(s1(0,'Removed')+n1(3,sd.fr,4)+s1(4,_tp(sd.fr)));
+      r1(s1(0,'Unchanged')+n1(3,sd.fu,4)+s1(4,_tp(sd.fu)));
       if(langs.length){
         r1('');r1(s1(0,'LANGUAGE BREAKDOWN',8));
         r1(s1(0,'Language',3)+s1(1,'Files Changed',3)+s1(2,'Code Delta',3));
@@ -10102,12 +10898,12 @@ struct CompareSelectTemplate {
       r1(s1(1,_blabel)+s1(2,_clabel));
       r1(s1(0,'Run ID')+s1(1,sd.bid)+s1(2,sd.cid));
       r1(s1(0,'Timestamp')+s1(1,sd.bts)+s1(2,sd.cts));
-      var sh1=W1.xml('<col min="1" max="1" width="24" customWidth="1"/><col min="2" max="4" width="14" customWidth="1"/>');
+      var sh1=W1.xml('<col min="1" max="1" width="24" customWidth="1"/><col min="2" max="4" width="14" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/>');
       // File Delta sheet
       var W2=WS(),s2=W2.sc,n2=W2.nc,r2=W2.row;
-      r2(s2(0,'File',3)+s2(1,'Language',3)+s2(2,'Status',3)+s2(3,'Code ('+_blabel+')',3)+s2(4,'Code ('+_clabel+')',3)+s2(5,'Code Delta',3)+s2(6,'Comment Delta',3)+s2(7,'Total Delta',3));
-      dr.forEach(function(r){r2(s2(0,r[0])+s2(1,r[1])+s2(2,r[2])+n2(3,r[3],4)+n2(4,r[4],4)+s2(5,r[5],dstyle(r[5]))+s2(6,r[6],dstyle(r[6]))+s2(7,r[7],dstyle(r[7])));});
-      var sh2=W2.xml('<col min="1" max="1" width="42" customWidth="1"/><col min="2" max="8" width="13" customWidth="1"/>');
+      r2(s2(0,'File',3)+s2(1,'Language',3)+s2(2,'Status',3)+s2(3,'Code ('+_blabel+')',3)+s2(4,'Code ('+_clabel+')',3)+s2(5,'Code Delta',3)+s2(6,'Comment Delta',3)+s2(7,'Total Delta',3)+s2(8,'% Code Chg',3));
+      dr.forEach(function(r){var b=parseInt(r[3])||0,c=parseInt(r[4])||0,st=r[2]||'',fp=_fp(b,c,st);r2(s2(0,r[0])+s2(1,r[1])+s2(2,r[2])+n2(3,r[3],4)+n2(4,r[4],4)+s2(5,r[5],dstyle(r[5]))+s2(6,r[6],dstyle(r[6]))+s2(7,r[7],dstyle(r[7]))+s2(8,fp,_ps(fp)));});
+      var sh2=W2.xml('<col min="1" max="1" width="42" customWidth="1"/><col min="2" max="9" width="13" customWidth="1"/>');
       // Shared strings XML
       var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
         '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+
@@ -10118,7 +10914,7 @@ struct CompareSelectTemplate {
         '_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
         'xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
         'xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="File Delta" sheetId="2" r:id="rId2"/></sheets></workbook>',
-        'xl/styles.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="8"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="14"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font><font><sz val="10"/><color rgb="FF888888"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FF155724"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FF721C24"/><name val="Calibri"/></font><font><sz val="11"/><color rgb="FF888888"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC45C10"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD4EDDA"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF8D7DA"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="9"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="3" fillId="2" borderId="0" xfId="0" applyFill="1"><alignment horizontal="left"/></xf><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="4" fillId="3" borderId="0" xfId="0" applyFill="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="5" fillId="4" borderId="0" xfId="0" applyFill="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="6" fillId="0" borderId="0" xfId="0"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="7" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+        'xl/styles.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="8"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="14"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font><font><sz val="10"/><color rgb="FF888888"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FF155724"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FF721C24"/><name val="Calibri"/></font><font><sz val="11"/><color rgb="FF888888"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC45C10"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD4EDDA"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF8D7DA"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="9"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="left"/></xf><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="4" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="5" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="6" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="7" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
         'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sh1,'xl/worksheets/sheet2.xml':sh2};
       // ZIP packer — STORED (no compression), compatible with all XLSX readers
       var zparts=[],zcds=[],zoff=0,znf=0;
@@ -10155,11 +10951,14 @@ struct CompareSelectTemplate {
     function _mkScanLabel(pfx,tag,br,sha){var ref=tag||(br||'');if(ref&&sha)return pfx+' ('+ref+' @ '+sha+')';if(ref)return pfx+' ('+ref+')';if(sha)return pfx+' ('+sha+')';return pfx;}
     var _blabel=_mkScanLabel('Baseline',_sd.btag,_sd.bbr,_sd.bsha);
     var _clabel=_mkScanLabel('Current',_sd.ctag,_sd.cbr,_sd.csha);
-    var _summaryHdrs = ['Metric',_blabel,_clabel,'Delta'];
-    function getSummaryExportRows(){return[['Code Lines',String(_sd.bc),String(_sd.cc),_sd.cd],['Files Analyzed',String(_sd.bf),String(_sd.cf),_sd.fd],['Comment Lines',String(_sd.bcm),String(_sd.ccm),_sd.cmd],['Modified Files','','',String(_sd.fm)],['Added Files','','',String(_sd.fa)],['Removed Files','','',String(_sd.fr)],['Unchanged Files','','',String(_sd.fu)]];}
-    var _dh = ['File','Language','Status','Code Before ('+_blabel+')','Code After ('+_clabel+')','Code Delta','Comment Delta','Total Delta'];
-    function getDeltaExportRows(){var r=[];document.querySelectorAll('#delta-tbody .delta-row').forEach(function(tr){r.push([tr.getAttribute('data-path')||'',tr.getAttribute('data-language')||'',tr.getAttribute('data-status')||'',tr.getAttribute('data-baseline-code')||'',tr.getAttribute('data-current-code')||'',tr.getAttribute('data-code-delta')||'',tr.getAttribute('data-comment-delta')||'',tr.getAttribute('data-total-delta')||'']);});return r;}
-    window.exportDeltaCsv = function(){slocCsv(_exportBase+'_summary.csv',_summaryHdrs,getSummaryExportRows());setTimeout(function(){slocCsv(_exportBase+'_files.csv',_dh,getDeltaExportRows());},150);};
+    function _slPct(num,den){if(!den||den===0)return'';var v=(num/den)*100;return(v>0?'+':'')+v.toFixed(1)+'%';}
+    function _tfPct(n){var tf=_sd.fm+_sd.fa+_sd.fr+_sd.fu;return tf>0?(n/tf*100).toFixed(1)+'%':'';}
+    function _filePct(b,c,st){if(st==='added'&&b===0)return'new';if(st==='removed')return'-100.0%';if(st==='unchanged')return'0.0%';return b>0?_slPct(c-b,b):'';}
+    var _summaryHdrs = ['Metric',_blabel,_clabel,'Delta','% Change'];
+    function getSummaryExportRows(){return[['Code Lines',String(_sd.bc),String(_sd.cc),_sd.cd,_slPct(_sd.cc-_sd.bc,_sd.bc)],['Files Analyzed',String(_sd.bf),String(_sd.cf),_sd.fd,_slPct(_sd.cf-_sd.bf,_sd.bf)],['Comment Lines',String(_sd.bcm),String(_sd.ccm),_sd.cmd,_slPct(_sd.ccm-_sd.bcm,_sd.bcm)],['Modified Files','','',String(_sd.fm),_tfPct(_sd.fm)],['Added Files','','',String(_sd.fa),_tfPct(_sd.fa)],['Removed Files','','',String(_sd.fr),_tfPct(_sd.fr)],['Unchanged Files','','',String(_sd.fu),_tfPct(_sd.fu)]];}
+    var _dh = ['File','Language','Status','Code Before ('+_blabel+')','Code After ('+_clabel+')','Code Delta','Comment Delta','Total Delta','% Code Chg'];
+    function getDeltaExportRows(){var r=[];document.querySelectorAll('#delta-tbody .delta-row').forEach(function(tr){var b=parseInt(tr.getAttribute('data-baseline-code'))||0,c=parseInt(tr.getAttribute('data-current-code'))||0,st=tr.getAttribute('data-status')||'';r.push([tr.getAttribute('data-path')||'',tr.getAttribute('data-language')||'',st,tr.getAttribute('data-baseline-code')||'',tr.getAttribute('data-current-code')||'',tr.getAttribute('data-code-delta')||'',tr.getAttribute('data-comment-delta')||'',tr.getAttribute('data-total-delta')||'',_filePct(b,c,st)]);});return r;}
+    window.exportDeltaCsv = function(){slocCsv(_exportBase+'_summary.csv',_summaryHdrs,getSummaryExportRows());};
     window.exportDeltaXls = function(){slocMakeXlsx(getExportFilename('xlsx'),_sd,getDeltaExportRows());};
 
     // ── Chart HTML report ─────────────────────────────────────────────────────
@@ -10322,8 +11121,6 @@ struct CompareTemplate {
     project_label: String,
     baseline_git_commit: String,
     current_git_commit: String,
-    baseline_git_commit_long: String,
-    current_git_commit_long: String,
     baseline_run_id: String,
     current_run_id: String,
     baseline_run_id_short: String,
@@ -10343,6 +11140,14 @@ struct CompareTemplate {
     current_comments: u64,
     comment_lines_delta_str: String,
     comment_lines_delta_class: String,
+    code_lines_pct_str: String,
+    files_analyzed_pct_str: String,
+    comment_lines_pct_str: String,
+    code_lines_added: i64,
+    code_lines_removed: i64,
+    churn_rate_str: String,
+    churn_rate_class: String,
+    scope_flag: bool,
     files_added: usize,
     files_removed: usize,
     files_modified: usize,
@@ -10354,5 +11159,8 @@ struct CompareTemplate {
     current_git_branch: String,
     baseline_git_tags: Option<String>,
     current_git_tags: Option<String>,
+    baseline_git_commit_date: Option<String>,
+    current_git_commit_date: Option<String>,
+    project_name: String,
     csp_nonce: String,
 }

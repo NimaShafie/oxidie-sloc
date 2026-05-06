@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Air-gapped build setup for oxide-sloc.
+# Offline source build for oxide-sloc.
 #
-# On a network-connected machine, download the vendor archive for the desired
-# release from https://github.com/oxide-sloc/oxide-sloc/releases alongside the
-# source tarball, then transfer both to the air-gapped system.
+# vendor.tar.xz is committed to the repository — no separate download needed.
+# Transfer the full repository (or vendor.tar.xz + source tree) to the target
+# machine, then run this script.
 #
-# On the air-gapped system, run:
+# Usage (on the target machine):
 #   bash scripts/internal/airgap-build.sh [vendor.tar.xz]
 #
 # Requirements: Rust toolchain (see rust-toolchain.toml), tar, sha256sum.
@@ -15,7 +15,8 @@ ARCHIVE="${1:-vendor.tar.xz}"
 
 if [ ! -f "$ARCHIVE" ]; then
     echo "ERROR: vendor archive not found: $ARCHIVE"
-    echo "Download it from the GitHub release page alongside the source tarball."
+    echo "vendor.tar.xz is committed to the repository — ensure you have the complete"
+    echo "repository, not just source files."
     exit 1
 fi
 
