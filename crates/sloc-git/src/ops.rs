@@ -78,7 +78,8 @@ fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
     // Strip the leading remote name (e.g. "origin/") from each ref so the
     // displayed name matches what the upstream repository calls the branch.
     let out = run_git(repo, &["branch", "-r", &format!("--format={fmt}")])?;
-    let refs = out.lines()
+    let refs = out
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| parse_ref_line(l, GitRefKind::Branch))
         .collect::<Result<Vec<_>>>()?
