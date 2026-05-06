@@ -345,6 +345,11 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
     let profile_dir = profile_dir_handle.path().to_path_buf();
     eprintln!("[oxide-sloc][pdf] profile = {}", profile_dir.display());
 
+    // Chrome's --print-to-pdf silently fails when the output path exceeds ~260 characters
+    // (Windows MAX_PATH). Write to a short path inside the profile dir (which is always in
+    // %TEMP%) and rename to the final destination afterward.
+    let chrome_pdf_path = profile_dir.join("output.pdf");
+
     // --no-sandbox is required in Docker (and other rootless environments) where
     // the Linux kernel namespacing that Chrome's sandbox relies on is unavailable.
     // It is NOT enabled by default because it disables security isolation.
@@ -357,12 +362,12 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
     let run_once = |headless_flag: &str| -> Result<()> {
         eprintln!("[oxide-sloc][pdf] launching {headless_flag}");
 
-        if absolute_pdf.exists() {
-            let _ = fs::remove_file(&absolute_pdf);
+        if chrome_pdf_path.exists() {
+            let _ = fs::remove_file(&chrome_pdf_path);
         }
 
         let user_data_arg = format!("--user-data-dir={}", profile_dir.display());
-        let print_to_pdf_arg = format!("--print-to-pdf={}", absolute_pdf.display());
+        let print_to_pdf_arg = format!("--print-to-pdf={}", chrome_pdf_path.display());
         let args = build_browser_args(
             headless_flag,
             &user_data_arg,
@@ -379,7 +384,7 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
             .spawn()
             .with_context(|| format!("failed to launch browser {}", browser.display()))?;
 
-        wait_for_pdf_stable(&mut child, &browser.display(), headless_flag, &absolute_pdf)
+        wait_for_pdf_stable(&mut child, &browser.display(), headless_flag, &chrome_pdf_path)
     };
 
     let result = run_once("--headless=old").or_else(|err| {
@@ -392,6 +397,11 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
     }
 
     result?;
+
+    fs::rename(&chrome_pdf_path, &absolute_pdf).with_context(|| {
+        format!("failed to move generated PDF to {}", absolute_pdf.display())
+    })?;
+
     eprintln!("[oxide-sloc][pdf] done");
     Ok(())
 }
@@ -942,7 +952,7 @@ struct WarningOpportunityRow {
     .table-resizable { table-layout: fixed; }
     .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
     .table-resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #per-file-table { min-width: 900px; }
+    #per-file-table { min-width: 1150px; }
     /* File column stays pinned so it never scrolls out of view */
     #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; min-width: 200px; background: var(--surface-2); }
     #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); }
@@ -1221,7 +1231,7 @@ struct WarningOpportunityRow {
   </div>
   <div class="top-nav">
     <div class="top-nav-inner">
-      <a class="brand" href="/">
+      <a class="brand" href="/" onclick="if(location.protocol==='file:'){event.preventDefault();}">
         <img class="brand-logo" src="{{ small_logo_uri }}" alt="OxideSLOC logo" />
         <div class="brand-copy">
           <div class="brand-title">OxideSLOC Local analysis workbench</div>
@@ -1374,16 +1384,16 @@ struct WarningOpportunityRow {
             <thead>
               <tr>
                 <th data-sort-type="text">File</th>
-                <th data-sort-type="text" style="width:86px">Language</th>
-                <th data-sort-type="number" class="num-col" style="width:67px">Physical</th>
-                <th data-sort-type="number" class="num-col" style="width:56px">Code</th>
-                <th data-sort-type="number" class="num-col" style="width:74px">Comments</th>
-                <th data-sort-type="number" class="num-col" style="width:54px">Blank</th>
-                <th data-sort-type="number" class="num-col" style="width:64px">Mixed</th>
-                <th data-sort-type="number" class="num-col" style="width:70px">Functions</th>
-                <th data-sort-type="number" class="num-col" style="width:60px">Classes</th>
-                <th data-sort-type="number" class="num-col" style="width:70px">Variables</th>
-                <th data-sort-type="number" class="num-col" style="width:58px">Imports</th>
+                <th data-sort-type="text" style="width:90px">Language</th>
+                <th data-sort-type="number" class="num-col" style="width:84px">Physical</th>
+                <th data-sort-type="number" class="num-col" style="width:62px">Code</th>
+                <th data-sort-type="number" class="num-col" style="width:84px">Comments</th>
+                <th data-sort-type="number" class="num-col" style="width:62px">Blank</th>
+                <th data-sort-type="number" class="num-col" style="width:68px">Mixed</th>
+                <th data-sort-type="number" class="num-col" style="width:84px">Functions</th>
+                <th data-sort-type="number" class="num-col" style="width:68px">Classes</th>
+                <th data-sort-type="number" class="num-col" style="width:84px">Variables</th>
+                <th data-sort-type="number" class="num-col" style="width:68px">Imports</th>
               </tr>
             </thead>
             <tbody>

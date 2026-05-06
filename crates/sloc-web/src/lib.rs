@@ -14,6 +14,14 @@ static IMG_ICON_JAVASCRIPT: &[u8] = include_bytes!("../assets/icons/java-script.
 static IMG_ICON_HTML: &[u8] = include_bytes!("../assets/icons/html-5.png");
 static IMG_ICON_JAVA: &[u8] = include_bytes!("../assets/icons/java.png");
 static IMG_ICON_VB: &[u8] = include_bytes!("../assets/icons/visual-basic.png");
+static IMG_ICON_ASSEMBLY: &[u8] = include_bytes!("../assets/icons/asm.png");
+static IMG_ICON_GO: &[u8] = include_bytes!("../assets/icons/go.png");
+static IMG_ICON_R: &[u8] = include_bytes!("../assets/icons/r.png");
+static IMG_ICON_XML: &[u8] = include_bytes!("../assets/icons/xml.png");
+static IMG_ICON_GROOVY: &[u8] = include_bytes!("../assets/icons/groovy.png");
+static IMG_ICON_DOCKERFILE: &[u8] = include_bytes!("../assets/icons/docker.png");
+static IMG_ICON_MAKEFILE: &[u8] = include_bytes!("../assets/icons/makefile.svg");
+static IMG_ICON_PERL: &[u8] = include_bytes!("../assets/icons/perl.svg");
 
 pub(crate) mod git_browser;
 pub(crate) mod git_webhook;
@@ -324,6 +332,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/metrics/{run_id}", get(api_metrics_run_handler))
         .route("/api/project-history", get(project_history_handler))
         .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
+        .route("/api/runs/{run_id}/pdf-status", get(pdf_status_handler))
         .route("/runs/{run_id}/result", get(async_run_result_handler))
         .route("/embed/summary", get(embed_handler))
         // ── Git browser ────────────────────────────────────────────────────────
@@ -1580,22 +1589,30 @@ async fn open_path_handler(
 }
 
 async fn image_handler(AxumPath((folder, file)): AxumPath<(String, String)>) -> impl IntoResponse {
-    let bytes: &'static [u8] = match (folder.as_str(), file.as_str()) {
-        ("logo", "logo-text.png") => IMG_LOGO_TEXT,
-        ("logo", "small-logo.png") => IMG_LOGO_SMALL,
-        ("icons", "c.png") => IMG_ICON_C,
-        ("icons", "cpp.png") => IMG_ICON_CPP,
-        ("icons", "c-sharp.png") => IMG_ICON_CSHARP,
-        ("icons", "python.png") => IMG_ICON_PYTHON,
-        ("icons", "shell.png") => IMG_ICON_SHELL,
-        ("icons", "powershell.png") => IMG_ICON_POWERSHELL,
-        ("icons", "java-script.png") => IMG_ICON_JAVASCRIPT,
-        ("icons", "html-5.png") => IMG_ICON_HTML,
-        ("icons", "java.png") => IMG_ICON_JAVA,
-        ("icons", "visual-basic.png") => IMG_ICON_VB,
+    let (content_type, bytes): (&'static str, &'static [u8]) = match (folder.as_str(), file.as_str()) {
+        ("logo", "logo-text.png") => ("image/png", IMG_LOGO_TEXT),
+        ("logo", "small-logo.png") => ("image/png", IMG_LOGO_SMALL),
+        ("icons", "c.png") => ("image/png", IMG_ICON_C),
+        ("icons", "cpp.png") => ("image/png", IMG_ICON_CPP),
+        ("icons", "c-sharp.png") => ("image/png", IMG_ICON_CSHARP),
+        ("icons", "python.png") => ("image/png", IMG_ICON_PYTHON),
+        ("icons", "shell.png") => ("image/png", IMG_ICON_SHELL),
+        ("icons", "powershell.png") => ("image/png", IMG_ICON_POWERSHELL),
+        ("icons", "java-script.png") => ("image/png", IMG_ICON_JAVASCRIPT),
+        ("icons", "html-5.png") => ("image/png", IMG_ICON_HTML),
+        ("icons", "java.png") => ("image/png", IMG_ICON_JAVA),
+        ("icons", "visual-basic.png") => ("image/png", IMG_ICON_VB),
+        ("icons", "asm.png") => ("image/png", IMG_ICON_ASSEMBLY),
+        ("icons", "go.png") => ("image/png", IMG_ICON_GO),
+        ("icons", "r.png") => ("image/png", IMG_ICON_R),
+        ("icons", "xml.png") => ("image/png", IMG_ICON_XML),
+        ("icons", "groovy.png") => ("image/png", IMG_ICON_GROOVY),
+        ("icons", "docker.png") => ("image/png", IMG_ICON_DOCKERFILE),
+        ("icons", "makefile.svg") => ("image/svg+xml", IMG_ICON_MAKEFILE),
+        ("icons", "perl.svg") => ("image/svg+xml", IMG_ICON_PERL),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([(header::CONTENT_TYPE, "image/png")], bytes).into_response()
+    ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
 }
 
 async fn preview_handler(
@@ -2174,16 +2191,19 @@ async fn analyze_handler(
     });
 
     let template = ScanWaitTemplate {
+        version: env!("CARGO_PKG_VERSION"),
         wait_id_json,
         project_path: form.path.clone(),
         csp_nonce,
     };
-    Html(
-        template
-            .render()
-            .unwrap_or_else(|err| format!("<pre>{err}</pre>")),
-    )
-    .into_response()
+    let html = template.render().unwrap_or_else(|err| format!("<pre>{err}</pre>"));
+    let mut response = Html(html).into_response();
+    if let Ok(name) = axum::http::HeaderName::from_bytes(b"x-wait-id") {
+        if let Ok(val) = axum::http::HeaderValue::from_str(&wait_id) {
+            response.headers_mut().insert(name, val);
+        }
+    }
+    response
 }
 
 // ── Async scan status + result handlers ──────────────────────────────────────
@@ -2494,6 +2514,7 @@ fn render_result_page(
             .iter()
             .map(|s| build_submodule_row(s, run, run_id, &run_dir, artifacts.html_path.is_some()))
             .collect(),
+        pdf_generating: artifacts.pdf_path.as_ref().map(|p| !p.exists()).unwrap_or(false),
         scan_config_url: format!("/runs/{run_id}/scan-config"),
         lang_chart_json: {
             let entries: Vec<String> = run
@@ -2548,6 +2569,28 @@ fn build_pdf_filename(report_title: &str, run_id: &str) -> String {
     } else {
         format!("{slug}_{short_id}.pdf")
     }
+}
+
+/// Return `{"ready": true}` once the PDF file exists on disk for a given run.
+/// Clients poll this to update the button state without page reloads.
+async fn pdf_status_handler(
+    State(state): State<AppState>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let pdf_path = {
+        let registry = state.artifacts.lock().await;
+        registry.get(&run_id).and_then(|a| a.pdf_path.clone())
+    };
+    let pdf_path = if pdf_path.is_some() {
+        pdf_path
+    } else {
+        let reg = state.registry.lock().await;
+        reg.find_by_run_id(&run_id)
+            .map(|e| recover_artifacts_from_registry(e))
+            .and_then(|a| a.pdf_path)
+    };
+    let ready = pdf_path.map(|p| p.exists()).unwrap_or(false);
+    Json(serde_json::json!({"ready": ready})).into_response()
 }
 
 /// Serve the HTML artifact for a run — view or download.
@@ -2809,20 +2852,101 @@ async fn artifact_handler(
             // Return a self-refreshing "please wait" page rather than an error.
             if !path.exists() {
                 let html = format!(
-                    "<!doctype html><html><head><meta charset=utf-8>\
-                     <meta http-equiv=\"refresh\" content=\"4\">\
-                     <title>PDF generating…</title>\
-                     <style>body{{font-family:system-ui;background:#f5efe8;color:#43342d;\
-                     display:flex;align-items:center;justify-content:center;min-height:100vh;\
-                     margin:0;}}.box{{text-align:center;padding:2rem;background:#fff;\
-                     border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.12);}}\
-                     h2{{margin:0 0 .5rem;font-size:1.3rem;}}p{{color:#7b675b;margin:0 0 1rem;}}\
-                     a{{color:#b85d33;font-weight:700;}}</style></head>\
-                     <body><div class=\"box\">\
-                     <h2>PDF is being generated…</h2>\
-                     <p>This page will refresh automatically. Usually takes 15–45 seconds.</p>\
-                     <a href=\"/runs/{run_id}/pdf\">Refresh now</a>\
-                     </div></body></html>"
+                    "<!doctype html><html lang=\"en\"><head>\
+                     <meta charset=utf-8>\
+                     <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+                     <meta http-equiv=\"refresh\" content=\"5\">\
+                     <title>OxideSLOC | Generating PDF\u{2026}</title>\
+                     <link rel=\"icon\" type=\"image/png\" href=\"/images/logo/small-logo.png\">\
+                     <style nonce=\"{csp_nonce}\">\
+                     :root{{--radius:18px;--bg:#f5efe8;--surface:rgba(255,255,255,0.86);--surface-2:#fbf7f2;\
+                     --line:#e6d0bf;--line-strong:#dcb89f;--text:#43342d;--muted:#7b675b;\
+                     --nav:#b85d33;--nav-2:#7a371b;--oxide-2:#b85d33;--shadow:0 18px 42px rgba(77,44,20,0.12);}}\
+                     body.dark-theme{{--bg:#1b1511;--surface:#261c17;--surface-2:#2d221d;\
+                     --line:#524238;--line-strong:#6b5548;--text:#f5ece6;--muted:#c7b7aa;}}\
+                     *{{box-sizing:border-box;}}html,body{{margin:0;min-height:100vh;\
+                     font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;\
+                     background:var(--bg);color:var(--text);}}\
+                     .top-nav{{position:sticky;top:0;z-index:30;\
+                     background:linear-gradient(180deg,var(--nav),var(--nav-2));\
+                     border-bottom:1px solid rgba(255,255,255,0.12);\
+                     box-shadow:0 4px 14px rgba(0,0,0,0.18);}}\
+                     .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;\
+                     min-height:56px;display:flex;align-items:center;gap:14px;}}\
+                     .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;}}\
+                     .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;\
+                     filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}\
+                     .brand-copy{{display:flex;flex-direction:column;justify-content:center;min-width:0;}}\
+                     .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}}\
+                     .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}}\
+                     .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;}}\
+                     .nav-pill{{display:inline-flex;align-items:center;min-height:38px;padding:0 14px;\
+                     border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;\
+                     background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}}\
+                     .nav-pill:hover{{background:rgba(255,255,255,0.18);}}\
+                     .theme-toggle{{width:38px;display:inline-flex;align-items:center;\
+                     justify-content:center;min-height:38px;border-radius:999px;\
+                     border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);cursor:pointer;}}\
+                     .theme-toggle svg{{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}}\
+                     .theme-toggle .icon-sun{{display:none;}}\
+                     body.dark-theme .theme-toggle .icon-sun{{display:block;}}\
+                     body.dark-theme .theme-toggle .icon-moon{{display:none;}}\
+                     .page{{max-width:1720px;margin:0 auto;padding:60px 24px;\
+                     display:flex;align-items:center;justify-content:center;\
+                     min-height:calc(100vh - 56px);}}\
+                     .panel{{background:var(--surface);border:1px solid var(--line);\
+                     border-radius:var(--radius);box-shadow:var(--shadow);\
+                     padding:48px 56px;text-align:center;max-width:480px;width:100%;}}\
+                     .spin-ring{{width:56px;height:56px;border-radius:50%;\
+                     border:5px solid var(--line);border-top-color:var(--oxide-2);\
+                     animation:spin 1s linear infinite;margin:0 auto 28px;}}\
+                     @keyframes spin{{to{{transform:rotate(360deg);}}}}\
+                     h1{{margin:0 0 12px;font-size:22px;font-weight:800;color:var(--text);}}\
+                     p{{color:var(--muted);margin:0 0 28px;font-size:15px;line-height:1.5;}}\
+                     .back-link{{display:inline-flex;align-items:center;justify-content:center;\
+                     min-height:42px;padding:0 20px;border-radius:14px;\
+                     border:1px solid var(--line-strong);text-decoration:none;\
+                     color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;}}\
+                     .back-link:hover{{background:var(--line);}}\
+                     </style></head>\
+                     <body>\
+                     <div class=\"top-nav\"><div class=\"top-nav-inner\">\
+                       <a class=\"brand\" href=\"/\">\
+                         <img class=\"brand-logo\" src=\"/images/logo/small-logo.png\" alt=\"OxideSLOC logo\" />\
+                         <div class=\"brand-copy\">\
+                           <div class=\"brand-title\">OxideSLOC</div>\
+                           <div class=\"brand-subtitle\">Local analysis workbench</div>\
+                         </div>\
+                       </a>\
+                       <div class=\"nav-right\">\
+                         <a class=\"nav-pill\" href=\"/\">Home</a>\
+                         <a class=\"nav-pill\" href=\"/view-reports\">View Reports</a>\
+                         <button type=\"button\" class=\"theme-toggle\" id=\"theme-toggle\" aria-label=\"Toggle theme\">\
+                           <svg class=\"icon-moon\" viewBox=\"0 0 24 24\"><path d=\"M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z\"></path></svg>\
+                           <svg class=\"icon-sun\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"4.2\"></circle>\
+                           <path d=\"M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1\"></path></svg>\
+                         </button>\
+                       </div>\
+                     </div></div>\
+                     <div class=\"page\"><div class=\"panel\">\
+                       <div class=\"spin-ring\"></div>\
+                       <h1>Generating PDF\u{2026}</h1>\
+                       <p>The PDF is being rendered from the HTML report.<br>\
+                       This page refreshes automatically \u{2014} usually 15\u{2013}45 seconds.</p>\
+                       <a class=\"back-link\" href=\"/runs/{run_id}/pdf\">Refresh now</a>\
+                     </div></div>\
+                     <script nonce=\"{csp_nonce}\">\
+                     (function(){{\
+                       var k=\"oxide-theme\",b=document.body,s=localStorage.getItem(k);\
+                       if(s===\"dark\")b.classList.add(\"dark-theme\");\
+                       var t=document.getElementById(\"theme-toggle\");\
+                       if(t)t.addEventListener(\"click\",function(){{\
+                         var d=b.classList.toggle(\"dark-theme\");\
+                         localStorage.setItem(k,d?\"dark\":\"light\");\
+                       }});\
+                     }})();\
+                     </script>\
+                     </body></html>"
                 );
                 return Html(html).into_response();
             }
@@ -4693,6 +4817,14 @@ fn language_icon_file(language: &str) -> Option<&'static str> {
         "HTML" => Some("html-5.png"),
         "Java" => Some("java.png"),
         "Visual Basic" => Some("visual-basic.png"),
+        "Assembly" => Some("asm.png"),
+        "Go" => Some("go.png"),
+        "R" => Some("r.png"),
+        "XML" => Some("xml.png"),
+        "Groovy" => Some("groovy.png"),
+        "Dockerfile" => Some("docker.png"),
+        "Makefile" => Some("makefile.svg"),
+        "Perl" => Some("perl.svg"),
         _ => None,
     }
 }
@@ -4703,9 +4835,6 @@ fn language_icon_file(language: &str) -> Option<&'static str> {
 // r##"..."## delimiter used because the SVG content contains "#" (hex colours).
 fn language_inline_svg(language: &str) -> Option<&'static str> {
     match language {
-        "Go" => Some(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 100 100" aria-hidden="true"><rect width="100" height="100" rx="16" fill="#00ACD7"/><text x="50" y="68" text-anchor="middle" font-family="sans-serif" font-weight="900" font-size="46" fill="#fff">Go</text></svg>"##,
-        ),
         "Rust" => Some(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 100 100" aria-hidden="true"><rect width="100" height="100" rx="16" fill="#B7410E"/><text x="50" y="68" text-anchor="middle" font-family="sans-serif" font-weight="900" font-size="46" fill="#fff">Rs</text></svg>"##,
         ),
@@ -5274,15 +5403,28 @@ struct SubmoduleRow {
     .tree-date-cell, .tree-type-cell { color: var(--muted); font-size: 13px; }
     .tree-status-cell { display:flex; justify-content:flex-start; }
     .preview-error { color: var(--danger-text); background: var(--danger-bg); border:1px solid #efc2c2; padding: 12px; border-radius: 12px; }
-    .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.28); z-index: 100; }
+    .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
-    .loading-card { width: min(540px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 40px rgba(0,0,0,0.18); padding: 24px; text-align:center; }
-    .spinner { width:44px; height:44px; margin:0 auto 16px; border-radius:999px; border:4px solid rgba(0,0,0,0.10); border-top-color: var(--accent); animation: spin .9s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg);} }
-    .progress-bar { width:100%; height:8px; margin-top:14px; background: var(--surface-3); border-radius:999px; overflow:hidden; }
-    .progress-bar span { display:block; width:42%; height:100%; background: linear-gradient(90deg, var(--accent), #6b8cff); animation: pulseBar 1.4s ease-in-out infinite; }
-    @keyframes pulseBar { 0% { transform: translateX(-35%); width:25%; } 50% { transform: translateX(130%); width:44%; } 100% { transform: translateX(250%); width:25%; } }
-    .scan-phase { margin:10px 0 0; font-size:12px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--accent); opacity:0.85; letter-spacing:0.02em; min-height:1.4em; transition: opacity 0.3s; }
+    .loading-card { width: min(560px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 28px 32px; }
+    .progress-bar { width:100%; height:6px; margin-top:0; background: var(--surface-3); border-radius:999px; overflow:hidden; margin-bottom:0; }
+    .progress-bar span { display:block; width:42%; height:100%; background: linear-gradient(90deg, var(--accent-2), var(--oxide,#d37a4c)); animation: pulseBar 1.6s ease-in-out infinite; }
+    @keyframes pulseBar { 0% { transform: translateX(-100%) scaleX(0.5); } 50% { transform: translateX(0%) scaleX(0.5); } 100% { transform: translateX(200%) scaleX(0.5); } }
+    .lc-badge { display:inline-flex;align-items:center;gap:8px;background:rgba(111,155,255,0.12);border:1px solid rgba(111,155,255,0.28);border-radius:999px;padding:5px 14px 5px 10px;font-size:12px;font-weight:700;color:var(--accent-2);margin-bottom:16px; }
+    .lc-dot { width:9px;height:9px;border-radius:50%;background:var(--accent-2);animation:lcPulse 1.4s ease-in-out infinite;flex:0 0 auto; }
+    @keyframes lcPulse { 0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.7);} }
+    .lc-title { font-size:1.25rem;font-weight:800;margin:0 0 6px; }
+    .lc-sub { color:var(--muted);font-size:0.88rem;margin:0 0 16px; }
+    .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:16px; }
+    .lc-metrics { display:flex;gap:12px;margin-bottom:16px; }
+    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 16px;flex:0 0 auto; }
+    .lc-metric-label { font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px; }
+    .lc-metric-value { font-size:1.05rem;font-weight:700;color:var(--text); }
+    .lc-warn { background:rgba(230,160,50,0.12);border:1px solid rgba(230,160,50,0.3);border-radius:8px;padding:10px 14px;font-size:12px;color:#8a6a10;margin-top:14px; }
+    .lc-err { background:rgba(180,40,40,0.08);border:1px solid rgba(180,40,40,0.25);border-radius:8px;padding:12px 16px;margin-top:14px; }
+    .lc-err strong { display:block;color:#8b1f1f;margin-bottom:4px;font-size:13px; }
+    .lc-err p { margin:0;font-size:12px;color:var(--muted); }
+    .lc-actions { display:flex;gap:10px;flex-wrap:wrap;margin-top:14px; }
+    .lc-outline-btn { display:inline-flex;align-items:center;padding:9px 20px;border-radius:999px;background:transparent;color:var(--nav,#b85d33);border:2px solid var(--nav,#b85d33);font-size:13px;font-weight:700;text-decoration:none;cursor:pointer; }
     .hidden { display:none !important; }
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
@@ -5351,11 +5493,21 @@ struct SubmoduleRow {
 
   <div class="loading" id="loading">
     <div class="loading-card">
-      <div class="spinner"></div>
-      <h2>Scanning project...</h2>
-      <p>Web scans run synchronously — for large repositories, keep this tab open while the analysis completes.</p>
-      <p class="scan-phase" id="scan-phase"></p>
+      <div class="lc-badge"><span class="lc-dot"></span>Analysis running</div>
+      <h2 class="lc-title">Analyzing your project…</h2>
+      <p class="lc-sub">Results are saved automatically — you can leave this page.</p>
+      <div class="lc-path" id="lc-path"></div>
+      <div class="lc-metrics">
+        <div class="lc-metric"><div class="lc-metric-label">Elapsed</div><div class="lc-metric-value" id="lc-elapsed">0s</div></div>
+        <div class="lc-metric"><div class="lc-metric-label">Phase</div><div class="lc-metric-value" id="lc-phase">Starting</div></div>
+      </div>
       <div class="progress-bar"><span></span></div>
+      <div class="lc-warn hidden" id="lc-warn">This is taking longer than usual. Large repositories can take several minutes — the analysis is still running.</div>
+      <div class="lc-err hidden" id="lc-err"><strong>Analysis failed</strong><p id="lc-err-msg">An unexpected error occurred. Check that the path exists and is readable.</p></div>
+      <div class="lc-actions hidden" id="lc-actions">
+        <button class="primary" id="lc-dismiss" type="button">Try Again</button>
+        <a href="/view-reports" class="lc-outline-btn">View Reports</a>
+      </div>
     </div>
   </div>
 
@@ -5987,6 +6139,110 @@ struct SubmoduleRow {
       var previewTimer = null;
       var quickScanBtn = document.getElementById("quick-scan-btn");
 
+      function dismissAnalysisModal() {
+        if (loading) loading.classList.remove("active");
+        ["lc-err","lc-warn","lc-actions"].forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el) el.classList.add("hidden");
+        });
+        var el = document.getElementById("lc-elapsed"); if (el) el.textContent = "0s";
+        var ph = document.getElementById("lc-phase"); if (ph) ph.textContent = "Starting";
+        if (submitButton) { submitButton.disabled = false; submitButton.textContent = "Run analysis"; }
+        if (quickScanBtn) { quickScanBtn.disabled = false; quickScanBtn.textContent = "Quick Scan"; }
+      }
+
+      var lcDismissBtn = document.getElementById("lc-dismiss");
+      if (lcDismissBtn) lcDismissBtn.addEventListener("click", dismissAnalysisModal);
+
+      function startAsyncAnalysis(formData) {
+        var gitRepo = (formData.get("git_repo") || "").toString();
+        var gitRef  = (formData.get("git_ref")  || "").toString();
+        var pathVal = (gitRepo || (formData.get("path") || "")).toString();
+        var displayPath = (gitRepo && gitRef) ? pathVal + " @ " + gitRef : pathVal;
+
+        var pathEl = document.getElementById("lc-path");
+        if (pathEl) pathEl.textContent = displayPath;
+
+        ["lc-err","lc-warn","lc-actions"].forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el) el.classList.add("hidden");
+        });
+        var elapsed0 = document.getElementById("lc-elapsed"); if (elapsed0) elapsed0.textContent = "0s";
+        var phase0   = document.getElementById("lc-phase");   if (phase0)   phase0.textContent   = "Starting";
+
+        if (loading) loading.classList.add("active");
+
+        var startTime = Date.now();
+        var elapsedTimer = setInterval(function() {
+          var s = Math.floor((Date.now() - startTime) / 1000);
+          var el = document.getElementById("lc-elapsed");
+          if (el) el.textContent = s < 60 ? s + "s" : Math.floor(s/60) + "m " + (s%60) + "s";
+        }, 1000);
+
+        var warnShown = false, pollRetries = 0;
+
+        function lcSetPhase(txt) { var el = document.getElementById("lc-phase"); if (el) el.textContent = txt; }
+
+        function lcShowError(msg) {
+          clearInterval(elapsedTimer);
+          lcSetPhase("Failed");
+          var msgEl = document.getElementById("lc-err-msg");
+          if (msgEl) msgEl.textContent = msg || "Analysis failed.";
+          var errEl = document.getElementById("lc-err");
+          var actEl = document.getElementById("lc-actions");
+          if (errEl) errEl.classList.remove("hidden");
+          if (actEl) actEl.classList.remove("hidden");
+          if (submitButton) { submitButton.disabled = false; submitButton.textContent = "Run analysis"; }
+          if (quickScanBtn) { quickScanBtn.disabled = false; quickScanBtn.textContent = "Quick Scan"; }
+        }
+
+        function lcPoll(waitId) {
+          fetch("/api/runs/" + encodeURIComponent(waitId) + "/status")
+            .then(function(r) {
+              if (!r.ok) throw new Error("HTTP " + r.status);
+              return r.json();
+            })
+            .then(function(data) {
+              pollRetries = 0;
+              if (data.state === "complete") {
+                clearInterval(elapsedTimer);
+                lcSetPhase("Done");
+                window.location.href = "/runs/" + encodeURIComponent(data.run_id) + "/result";
+              } else if (data.state === "failed") {
+                lcShowError(data.message);
+              } else {
+                var s = Math.floor((Date.now() - startTime) / 1000);
+                if (s > 90 && !warnShown) {
+                  warnShown = true;
+                  var w = document.getElementById("lc-warn");
+                  if (w) w.classList.remove("hidden");
+                }
+                lcSetPhase(s < 10 ? "Starting" : s < 30 ? "Scanning files" : "Analyzing");
+                setTimeout(function() { lcPoll(waitId); }, 1500);
+              }
+            })
+            .catch(function() {
+              pollRetries++;
+              if (pollRetries >= 5) {
+                lcShowError("Lost connection to server. Reload to check status.");
+              } else {
+                setTimeout(function() { lcPoll(waitId); }, Math.min(1500 * Math.pow(2, pollRetries), 8000));
+              }
+            });
+        }
+
+        var params = new URLSearchParams(formData);
+        fetch("/analyze", { method: "POST", body: params, headers: { "Content-Type": "application/x-www-form-urlencoded" } })
+          .then(function(r) {
+            var waitId = r.headers.get("x-wait-id");
+            if (!waitId) { window.location.href = "/scan"; return; }
+            setTimeout(function() { lcPoll(waitId); }, 1500);
+          })
+          .catch(function(err) {
+            lcShowError("Could not reach server: " + (err.message || err));
+          });
+      }
+
       if (quickScanBtn) {
         quickScanBtn.addEventListener("click", function () {
           var pathVal = pathInput ? pathInput.value.trim() : "";
@@ -5997,9 +6253,7 @@ struct SubmoduleRow {
           quickScanBtn.disabled = true;
           quickScanBtn.textContent = "Scanning...";
           if (submitButton) { submitButton.disabled = true; submitButton.textContent = "Scanning..."; }
-          if (loading) loading.classList.add("active");
-          startScanPhase();
-          if (form) form.submit();
+          startAsyncAnalysis(new FormData(form));
         });
       }
 
@@ -6903,11 +7157,11 @@ struct SubmoduleRow {
       });
 
       if (form && loading && submitButton) {
-        form.addEventListener("submit", function () {
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
           submitButton.disabled = true;
           submitButton.textContent = "Scanning...";
-          loading.classList.add("active");
-          startScanPhase();
+          startAsyncAnalysis(new FormData(form));
         });
       }
 
@@ -7925,6 +8179,7 @@ struct ScanSetupTemplate {
       display: inline-flex; align-items: center; justify-content: center; border-radius: 14px; border: 1px solid rgba(111, 144, 255, 0.30); padding: 11px 14px; text-decoration: none; color: white; background: linear-gradient(135deg, var(--accent), var(--accent-2)); font-weight: 800; font-size: 14px; box-shadow: 0 12px 24px rgba(73, 106, 255, 0.22); cursor: pointer;
     }
     .button.secondary, .copy-button.secondary { background: var(--surface-3); box-shadow: none; color: var(--text); border-color: var(--line-strong); }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .path-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 18px; }
     .path-item { padding: 14px 16px; background: var(--surface-2); display: flex; flex-direction: column; justify-content: center; gap: 4px; }
     .path-item-label { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 4px; }
@@ -8141,11 +8396,18 @@ struct ScanSetupTemplate {
           <div class="action-buttons">
             {% match pdf_url %}
               {% when Some with (url) %}
-                <a class="button" href="{{ url }}" target="_blank" rel="noopener">Open PDF</a>
+                {% if pdf_generating %}
+                  <button class="button" id="pdf-open-btn" disabled style="opacity:0.55;cursor:not-allowed;gap:8px;">
+                    <span style="width:14px;height:14px;border:2px solid rgba(255,255,255,0.4);border-top-color:#fff;border-radius:50%;display:inline-block;animation:spin .75s linear infinite;flex:0 0 auto;"></span>
+                    Generating PDF…
+                  </button>
+                {% else %}
+                  <a class="button" href="{{ url }}" target="_blank" rel="noopener" id="pdf-open-btn">Open PDF</a>
+                {% endif %}
               {% when None %}{% endmatch %}
             {% match pdf_download_url %}
               {% when Some with (url) %}
-                <a class="button secondary" href="{{ url }}">Download PDF</a>
+                <a class="button secondary" href="{{ url }}" id="pdf-download-btn"{% if pdf_generating %} style="opacity:0.55;pointer-events:none;"{% endif %}>Download PDF</a>
               {% when None %}{% endmatch %}
             {% match pdf_path %}
               {% when Some with (_path) %}{% when None %}{% endmatch %}
@@ -8614,6 +8876,38 @@ struct ScanSetupTemplate {
           })(i);
         }
       })();
+
+      {% if pdf_generating %}
+      // Poll for PDF readiness and swap the disabled button to a live link once done.
+      (function() {
+        var openBtn = document.getElementById('pdf-open-btn');
+        var dlBtn = document.getElementById('pdf-download-btn');
+        function checkPdf() {
+          fetch('/api/runs/{{ run_id }}/pdf-status')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+              if (d.ready) {
+                if (openBtn) {
+                  var a = document.createElement('a');
+                  a.className = 'button';
+                  a.id = 'pdf-open-btn';
+                  a.href = '/runs/{{ run_id }}/pdf';
+                  a.target = '_blank';
+                  a.rel = 'noopener';
+                  a.textContent = 'Open PDF';
+                  openBtn.replaceWith(a);
+                }
+                if (dlBtn) { dlBtn.style.opacity = ''; dlBtn.style.pointerEvents = ''; }
+              } else {
+                setTimeout(checkPdf, 3000);
+              }
+            })
+            .catch(function() { setTimeout(checkPdf, 5000); });
+        }
+        setTimeout(checkPdf, 3000);
+      })();
+      {% endif %}
+
     })();
   </script>
   <footer class="site-footer">
@@ -8698,6 +8992,7 @@ struct ResultTemplate {
     submodule_rows: Vec<SubmoduleRow>,
     scan_config_url: String,
     lang_chart_json: String,
+    pdf_generating: bool,
     csp_nonce: String,
 }
 
@@ -8756,9 +9051,30 @@ struct ResultTemplate {
     .btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(185,93,51,0.4);}
     .btn-outline{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:999px;background:transparent;color:var(--nav);border:2px solid var(--nav);font-size:13px;font-weight:700;text-decoration:none;cursor:pointer;transition:background .15s,transform .15s;}
     .btn-outline:hover{background:rgba(185,93,51,0.08);transform:translateY(-1px);}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    @keyframes wmFade{0%,100%{opacity:.07;}50%{opacity:.13;}}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
+    .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
+    .site-footer a{color:var(--muted);}
+    .theme-toggle{width:38px;height:38px;justify-content:center;padding:0;cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;display:inline-flex;align-items:center;}
+    .theme-toggle svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+    body:not(.dark-theme) .icon-moon{display:block;}body:not(.dark-theme) .icon-sun{display:none;}
+    body.dark-theme .icon-moon{display:none;}body.dark-theme .icon-sun{display:block;}
   </style>
 </head>
 <body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
   <nav class="top-nav">
     <div class="top-nav-inner">
       <a href="/" class="brand">
@@ -8771,6 +9087,10 @@ struct ResultTemplate {
       <div class="nav-right">
         <a href="/view-reports" class="nav-pill">View Reports</a>
         <a href="/scan" class="nav-pill">New Scan</a>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
       </div>
     </div>
   </nav>
@@ -8806,7 +9126,7 @@ struct ResultTemplate {
   </div>
   <script nonce="{{ csp_nonce }}">
     (function() {
-      var WAIT_ID = {{ wait_id_json }};
+      var WAIT_ID = {{ wait_id_json|safe }};
       var startTime = Date.now();
       var pollInterval = 1500;
       var retries = 0;
@@ -8874,12 +9194,55 @@ struct ResultTemplate {
       setTimeout(poll, pollInterval);
     })();
   </script>
+  <footer class="site-footer">
+    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+  </footer>
+  <script nonce="{{ csp_nonce }}">
+    (function(){
+      var k="oxide-theme",b=document.body,s=localStorage.getItem(k);
+      if(s==="dark")b.classList.add("dark-theme");
+      var tt=document.getElementById("theme-toggle");
+      if(tt)tt.addEventListener("click",function(){var d=b.classList.toggle("dark-theme");localStorage.setItem(k,d?"dark":"light");});
+    })();
+    (function spawnCodeParticles(){
+      var c=document.getElementById('code-particles');if(!c)return;
+      var sn=['1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312','// comment','pub fn run','use std::fs','Result<()>','let mut n=0','git main','#[derive]','impl Scan','3,841 physical','files: 60','450 comments','cargo build','Ok(run)','Vec<String>','match lang','fn main()','sloc_core','render_html','2,163 code'];
+      for(var i=0;i<32;i++){(function(idx){
+        var el=document.createElement('span');el.className='code-particle';el.textContent=sn[idx%sn.length];
+        var l=(Math.random()*94+2).toFixed(1),t=(Math.random()*88+6).toFixed(1);
+        var dur=(Math.random()*10+9).toFixed(1),delay=(Math.random()*18).toFixed(1);
+        var rot=(Math.random()*26-13).toFixed(1),op=(Math.random()*0.09+0.06).toFixed(3);
+        el.style.left=l+'%';el.style.top=t+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);
+        el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
+        c.appendChild(el);
+      })(i);}
+    })();
+    (function randomizeWatermarks(){
+      var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+      var placed=[];
+      function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}
+      function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}
+      var half=Math.floor(wms.length/2);
+      wms.forEach(function(img,i){
+        var pos=pick(i<half),w=Math.floor(Math.random()*60+80);
+        var rot=(Math.random()*40-20).toFixed(1),op=(Math.random()*0.08+0.05).toFixed(2);
+        var dur=(Math.random()*6+5).toFixed(1),delay=(Math.random()*10).toFixed(1);
+        img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';
+        img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;
+        img.style.animation='wmFade '+dur+'s ease-in-out -'+delay+'s infinite alternate';
+      });
+    })();
+  </script>
 </body>
 </html>
 "##,
     ext = "html"
 )]
 struct ScanWaitTemplate {
+    version: &'static str,
     wait_id_json: String,
     project_path: String,
     csp_nonce: String,
@@ -9152,16 +9515,17 @@ struct ErrorTemplate {
     .rpt-btn{min-width:58px;justify-content:center;}
     .flex-row{display:flex;align-items:center;gap:8px;}
     .report-cell{overflow:visible;white-space:normal;}
-    #history-table col:nth-child(1){width:215px;}
-    #history-table col:nth-child(2){width:160px;}
-    #history-table col:nth-child(3){width:115px;}
-    #history-table col:nth-child(4){width:90px;}
-    #history-table col:nth-child(5){width:100px;}
-    #history-table col:nth-child(6){width:100px;}
-    #history-table col:nth-child(7){width:80px;}
-    #history-table col:nth-child(8){width:100px;}
-    #history-table col:nth-child(9){width:100px;}
-    #history-table col:nth-child(10){width:150px;}
+    #history-table col:nth-child(1){width:185px;}
+    #history-table col:nth-child(2){width:220px;}
+    #history-table col:nth-child(3){width:100px;}
+    #history-table col:nth-child(4){width:72px;}
+    #history-table col:nth-child(5){width:82px;}
+    #history-table col:nth-child(6){width:82px;}
+    #history-table col:nth-child(7){width:65px;}
+    #history-table col:nth-child(8){width:90px;}
+    #history-table col:nth-child(9){width:85px;}
+    #history-table col:nth-child(10){width:115px;}
+    #history-table td:nth-child(2){white-space:normal;word-break:break-word;overflow:visible;}
   </style>
 </head>
 <body>
@@ -9695,6 +10059,7 @@ struct HistoryTemplate {
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
     .sel-badge{display:block;width:22px;height:22px;margin:0 auto;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--surface-2);line-height:20px;text-align:center;font-size:11px;font-weight:900;color:var(--muted-2);transition:background .12s,border-color .12s;}
     tr.selected .sel-badge{background:var(--sel-border);border-color:var(--sel-border);color:#fff;}
+    #compare-table td:nth-child(3){white-space:normal;word-break:break-word;overflow:visible;}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn:hover{background:var(--line);}
     .btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
@@ -9820,20 +10185,20 @@ struct HistoryTemplate {
       <div class="table-wrap">
         <table id="compare-table">
           <colgroup>
-            <col style="width:44px">
-            <col style="width:165px">
-            <col style="width:180px">
-            <col style="width:110px">
-            <col style="width:100px">
-            <col style="width:80px">
-            <col style="width:100px">
+            <col style="width:32px">
+            <col style="width:150px">
+            <col style="width:220px">
+            <col style="width:95px">
+            <col style="width:70px">
+            <col style="width:70px">
+            <col style="width:75px">
+            <col style="width:65px">
             <col style="width:80px">
             <col style="width:90px">
-            <col style="width:100px">
           </colgroup>
           <thead>
             <tr id="compare-thead">
-              <th style="text-align:center;padding-left:8px;padding-right:8px;"><div class="col-resize-handle"></div></th>
+              <th style="text-align:center;padding-left:4px;padding-right:4px;"><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="timestamp" data-sort-type="str">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="project" data-sort-type="str">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th title="Internal scan ID generated by OxideSLOC">Run ID<div class="col-resize-handle"></div></th>
@@ -9856,7 +10221,7 @@ struct HistoryTemplate {
                 data-blank="{{ entry.blank_lines }}"
                 data-branch="{{ entry.git_branch }}"
                 data-commit="{{ entry.git_commit }}">
-              <td style="text-align:center;padding-left:8px;padding-right:8px;"><span class="sel-badge" id="badge-{{ entry.run_id }}"></span></td>
+              <td style="text-align:center;padding-left:4px;padding-right:4px;"><span class="sel-badge" id="badge-{{ entry.run_id }}"></span></td>
               <td>{{ entry.timestamp }}</td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
               <td><span class="run-id-chip" title="OxideSLOC internal scan ID">{{ entry.run_id_short }}</span></td>
@@ -10197,7 +10562,7 @@ struct CompareSelectTemplate {
     .hero-body{display:block;}
     .btn-back{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn-back:hover{background:var(--line);}
-    h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;}
+    h1{margin:0 0 6px;font-size:36px;font-weight:850;letter-spacing:-0.03em;}
     h2{margin:0 0 14px;font-size:18px;font-weight:750;}
     .muted{color:var(--muted);font-size:14px;}
     .version-pills{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;}
@@ -10207,15 +10572,15 @@ struct CompareSelectTemplate {
     .vpill-arrow{font-size:20px;color:var(--muted);}
     .meta-strip{display:grid;grid-template-columns:1fr 1fr;gap:14px;width:100%;margin-bottom:14px;}
     .delta-strip{display:grid;grid-template-columns:minmax(110px,1fr) minmax(110px,1fr) minmax(110px,1fr) minmax(180px,1.5fr);gap:12px;width:100%;}
-    .delta-card{background:var(--surface-2);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;justify-content:center;min-height:116px;position:relative;cursor:default;}
-    .delta-card.delta-card-wide{padding:14px 18px;}
+    .delta-card{background:var(--surface-2);border:1px solid var(--line);border-radius:14px;padding:22px 22px;display:flex;flex-direction:column;justify-content:center;min-height:150px;position:relative;cursor:default;}
+    .delta-card.delta-card-wide{padding:22px 24px;}
     .delta-card.delta-card-meta{border:1.5px solid var(--oxide);background:var(--surface);min-height:210px;justify-content:flex-start;padding:28px 30px;}
     body.dark-theme .delta-card.delta-card-meta{background:var(--surface-2);}
-    .delta-card-label{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted-2);margin-bottom:10px;}
-    .delta-card-from{font-size:12px;color:var(--muted);}
-    .delta-card-to{font-size:20px;font-weight:800;margin:2px 0;}
+    .delta-card-label{font-size:13px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted-2);margin-bottom:12px;}
+    .delta-card-from{font-size:15px;color:var(--muted);}
+    .delta-card-to{font-size:28px;font-weight:800;margin:4px 0;}
     .meta-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:12px;}
-    .meta-card-project{font-size:11px;font-weight:600;color:var(--muted);font-style:italic;text-align:right;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .meta-card-project{font-size:15px;font-weight:600;color:var(--muted);font-style:italic;text-align:right;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .meta-card-commit{display:block;font-family:ui-monospace,monospace;font-size:28px;font-weight:800;letter-spacing:-0.02em;line-height:1.1;color:var(--accent);text-decoration:none;margin-bottom:16px;word-break:break-all;}
     .meta-card-commit:hover{color:var(--oxide);}
     .meta-card-rows{display:flex;flex-direction:column;gap:6px;}
@@ -10228,11 +10593,11 @@ struct CompareSelectTemplate {
     .export-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);text-decoration:none;white-space:nowrap;transition:background .12s ease;}
     .export-btn:hover{background:var(--line);}
     .export-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
-    .delta-card-change{font-size:13px;font-weight:700;border-radius:6px;padding:1px 7px;display:inline-block;margin-top:2px;}
+    .delta-card-change{font-size:15px;font-weight:700;border-radius:6px;padding:2px 8px;display:inline-block;margin-top:4px;}
     .delta-card-change.pos{color:var(--pos);background:var(--pos-bg);}
     .delta-card-change.neg{color:var(--neg);background:var(--neg-bg);}
     .delta-card-change.zero{color:var(--muted);background:transparent;}
-    .delta-card-pct{font-size:11px;font-weight:700;margin-top:4px;letter-spacing:.01em;}
+    .delta-card-pct{font-size:14px;font-weight:700;margin-top:5px;letter-spacing:.01em;}
     .delta-card-pct.pos{color:var(--pos);}
     .delta-card-pct.neg{color:var(--neg);}
     .delta-card-pct.zero{color:var(--muted);}
@@ -10391,8 +10756,8 @@ struct CompareSelectTemplate {
         <div>
           <h1 style="margin:0 0 6px;">Scan Delta</h1>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <span class="muted" style="font-size:13px;">Comparing two scans of</span>
-            <a class="path-link" id="project-path-link" data-folder="{{ project_path }}" href="#" style="font-size:13px;font-weight:700;">{{ project_path }}</a>
+            <span class="muted" style="font-size:16px;">Comparing two scans of</span>
+            <a class="path-link" id="project-path-link" data-folder="{{ project_path }}" href="#" style="font-size:16px;font-weight:700;">{{ project_path }}</a>
           </div>
         </div>
         <a class="btn-back" href="/compare-scans">
@@ -10404,7 +10769,7 @@ struct CompareSelectTemplate {
       <div class="meta-strip">
         <div class="delta-card delta-card-meta">
           <div class="meta-card-header">
-            <div class="delta-card-label" style="margin-bottom:0;font-size:17px;letter-spacing:.04em;">Baseline</div>
+            <div class="delta-card-label" style="margin-bottom:0;font-size:26px;letter-spacing:.04em;">Baseline</div>
             <div class="meta-card-project">{{ project_name }}</div>
           </div>
           {% if !baseline_git_commit.is_empty() %}
@@ -10424,7 +10789,7 @@ struct CompareSelectTemplate {
         </div>
         <div class="delta-card delta-card-meta">
           <div class="meta-card-header">
-            <div class="delta-card-label" style="margin-bottom:0;font-size:17px;letter-spacing:.04em;">Current</div>
+            <div class="delta-card-label" style="margin-bottom:0;font-size:26px;letter-spacing:.04em;">Current</div>
             <div class="meta-card-project">{{ project_name }}</div>
           </div>
           {% if !current_git_commit.is_empty() %}
