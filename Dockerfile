@@ -1,9 +1,9 @@
 # Stage 1: build the release binary
-# Pin builder to rust:1.85-slim-bookworm so the toolchain and runtime both use
+# Pin builder to rust:1.95-slim-bookworm so the toolchain and runtime both use
 # Debian bookworm (glibc 2.36). rust:slim can resolve to a trixie-based digest
 # (glibc 2.39) while the runtime stage below is still bookworm-slim, causing
 # "GLIBC_2.39 not found" at container startup.
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.95-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -18,7 +18,6 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir -p .cargo
 COPY docker-cargo-config.toml .cargo/config.toml
 COPY crates/ crates/
-COPY docs/assets/ docs/assets/
 COPY vendor.tar.xz vendor.tar.xz.sha256 ./
 
 # Verify the vendor archive integrity and extract it.
@@ -57,19 +56,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copy binary and static assets. OXIDE_SLOC_ROOT=/app tells the web server to
-# look for docs/assets/ here — the image handler serves /images/:folder/:file
-# from OXIDE_SLOC_ROOT/docs/assets/:folder/:file.
 COPY --from=builder /app/target/release/oxide-sloc /usr/local/bin/oxide-sloc
-COPY --from=builder /app/docs/assets ./docs/assets
 
 # Create a non-root service account and ensure the output directory is writable by it.
 RUN groupadd -r sloc && useradd -r -g sloc -u 1001 sloc \
     && mkdir -p /app/out \
     && chown -R sloc:sloc /app/out
 
-# OXIDE_SLOC_ROOT tells the server where to find docs/assets/ and other assets,
-# overriding the runtime binary-location heuristic for container deployments.
 ENV OXIDE_SLOC_ROOT=/app
 
 # Point oxide-sloc at the system Chromium

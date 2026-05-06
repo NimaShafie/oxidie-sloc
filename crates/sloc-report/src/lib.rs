@@ -880,7 +880,7 @@ struct WarningOpportunityRow {
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
     .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap; margin-left: auto; }
-    .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); }
+    .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; }
     .theme-toggle { width: 38px; justify-content:center; padding:0; }
     .nav-dropdown-wrap { position: relative; }
     .nav-dropdown-trigger { }
@@ -896,26 +896,34 @@ struct WarningOpportunityRow {
     .summary-grid { display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap:14px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
-    .metric { padding: 18px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+    .metric { padding: 18px 18px 28px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 96px; }
     .metric:hover { transform: translateY(-3px); box-shadow: var(--shadow-strong); }
     .metric-label, .section-kicker { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
-    .metric-value { margin-top: 10px; font-size: 17px; font-weight: 700; color: var(--text); }
+    .metric-value { margin-top: 8px; }
+    .metric-big { display:block; font-size: 30px; font-weight: 800; color: var(--text); line-height: 1.15; letter-spacing: -0.02em; }
+    .metric-exact { position: absolute; bottom: 9px; right: 13px; font-size: 11px; font-weight: 600; color: var(--muted-2); font-family: ui-monospace, monospace; }
     .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.45; white-space: normal; max-width: 220px; text-align: center; pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.22); }
     .metric-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--text); }
     .metric:hover .metric-tooltip { opacity: 1; }
-    .hero { padding: 22px; margin-bottom: 18px; background: linear-gradient(180deg, rgba(255,255,255,0.34), transparent), var(--surface); }
+    .hero { padding: 24px 24px 20px; margin-bottom: 18px; background: linear-gradient(150deg, rgba(111,155,255,0.06) 0%, transparent 55%), var(--surface); border-top: 3px solid var(--accent); }
     .hero-top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
     .hero h1 { margin:0 0 8px; font-size: 28px; letter-spacing: -0.04em; }
-    .run-id-row { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:8px; margin-top:12px; }
+    .run-id-row { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:10px; margin-top:16px; }
     @media(max-width:960px) { .run-id-row { grid-template-columns: 1fr 1fr; } }
     @media(max-width:560px) { .run-id-row { grid-template-columns: 1fr; } }
-    .run-id-chip { display:flex; flex-direction:column; gap:3px; padding:8px 12px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); color:var(--text); }
-    .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted-2); }
-    .run-id-chip-value { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; word-break:break-all; }
+    .run-id-chip { display:flex; flex-direction:column; gap:5px; padding:12px 14px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent); color:var(--text); }
+    .run-id-chip.muted-chip { border-left-color:var(--line-strong); }
+    .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:var(--accent); }
+    .run-id-chip.muted-chip .run-id-chip-label { color:var(--muted-2); }
+    .run-id-chip-value { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
     .subtitle { margin: 10px 0 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
-    .meta { display:flex; flex-wrap:wrap; gap:10px; margin: 16px 0 18px; }
-    .meta-chip, .soft-chip { display:inline-flex; align-items:center; min-height: 32px; padding: 0 12px; border-radius: 999px; border:1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 13px; font-weight: 700; }
+    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 20px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+    .meta-chip { display:inline-flex; align-items:center; gap:5px; padding:0 14px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
+    .meta-chip:first-child { padding-left:0; }
+    .meta-chip:last-child { border-right:none; }
+    .meta-chip b { color:var(--text); font-weight:700; }
+    .soft-chip { display:inline-flex; align-items:center; min-height:32px; padding:0 12px; border-radius:999px; border:1px solid var(--line); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; }
     .toolbar { display:flex; flex-wrap:wrap; justify-content:space-between; gap: 12px; align-items: center; margin-bottom: 16px; }
     .toolbar-left { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .search { min-width: 280px; padding: 10px 12px; border-radius: 10px; border:1px solid var(--line-strong); background: var(--surface-2); color:var(--text); }
@@ -930,11 +938,17 @@ struct WarningOpportunityRow {
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; }
-    /* Resizable column headers for per-file and skipped tables */
+    /* Per-file detail table — fixed layout keeps all columns visible */
     .table-resizable { table-layout: fixed; }
-    .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; resize: horizontal; min-width: 60px; }
+    .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
     .table-resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .table-resizable td.mono { max-width: 0; }
+    #per-file-table { min-width: 900px; }
+    /* File column stays pinned so it never scrolls out of view */
+    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; min-width: 200px; background: var(--surface-2); }
+    #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); }
+    #per-file-table tbody tr:hover td:first-child { background: rgba(255,247,238,0.6); }
+    body.dark-theme #per-file-table tbody tr:hover td:first-child { background: rgba(255,255,255,0.03); }
+    .num-col { text-align: right !important; }
     tbody tr:hover { background: rgba(255, 247, 238, 0.6); }
     body.dark-theme tbody tr:hover { background: rgba(255,255,255,0.03); }
     tr:last-child td { border-bottom: none; }
@@ -1043,10 +1057,12 @@ struct WarningOpportunityRow {
         border: 1px solid #e0d0c0 !important;
         border-radius: 8px !important;
         break-inside: avoid !important;
-        padding: 10px 12px !important;
+        padding: 10px 12px 22px !important;
+        min-height: 0 !important;
       }
 
-      .metric-value { font-size: 20px !important; }
+      .metric-big { font-size: 20px !important; }
+      .metric-exact { font-size: 9px !important; bottom: 5px !important; right: 8px !important; }
       .metric-label { font-size: 10px !important; }
 
       /* Page break control — small atomic cards stay together; large panels
@@ -1056,12 +1072,21 @@ struct WarningOpportunityRow {
       section { break-inside: auto !important; }
       /* Keep the summary grid on the same page as the hero header when possible */
       .summary-grid { break-before: avoid !important; }
+      /* Section headings never orphan at the bottom of a page */
+      h2, h3 { break-after: avoid !important; orphans: 3; widows: 3; }
+      /* Keep the first few rows of a table with the header */
+      thead { break-after: avoid !important; }
+
+      /* Language charts — always side-by-side, never wrap */
+      #lang-overview-charts > div { overflow-x: visible !important; }
+      #lang-overview-charts > div > div { flex-wrap: nowrap !important; }
 
       /* Tables */
       .table-shell {
         max-height: none !important;
         overflow: visible !important;
         width: 100% !important;
+        break-inside: auto !important;
       }
 
       table {
@@ -1069,6 +1094,8 @@ struct WarningOpportunityRow {
         table-layout: auto !important;
         font-size: 10px !important;
         border-collapse: collapse !important;
+        orphans: 4 !important;
+        widows: 4 !important;
       }
 
       thead { display: table-header-group; }
@@ -1109,9 +1136,11 @@ struct WarningOpportunityRow {
       .hero-top { flex-direction: row !important; }
 
       .run-id-row { flex-wrap: wrap !important; gap: 4px !important; }
-      .run-id-chip { font-size: 9px !important; padding: 2px 6px !important; }
-      .meta { flex-wrap: wrap !important; gap: 4px !important; }
-      .meta-chip { font-size: 9px !important; padding: 2px 7px !important; }
+      .run-id-chip { font-size: 9px !important; padding: 4px 8px !important; border-left-width: 2px !important; }
+      .meta { flex-wrap: wrap !important; gap: 0 !important; padding: 4px 0 !important; border-top: 1px solid #ccc !important; border-bottom: 1px solid #ccc !important; }
+      .meta-chip { font-size: 9px !important; padding: 0 8px !important; border-right: 1px solid #ccc !important; }
+      .meta-chip:first-child { padding-left: 0 !important; }
+      .meta-chip:last-child { border-right: none !important; }
 
       .report-footer {
         border-top: 1px solid #ccc !important;
@@ -1167,7 +1196,6 @@ struct WarningOpportunityRow {
     body.dark-theme .config-pre { background: #0e0c0a; color: #b8f0b8; }
 
 
-    .top-nav,
     .page {
       position: relative;
       z-index: 1;
@@ -1231,12 +1259,12 @@ struct WarningOpportunityRow {
           <div class="section-kicker">Saved report artifact</div>
           <h1>{{ title }}</h1>
           <div class="run-id-row">
-            <span class="run-id-chip">
+            <span class="run-id-chip" title="{{ run.tool.run_id }}">
               <span class="run-id-chip-label">Run ID</span>
               <span class="run-id-chip-value">{{ run.tool.run_id }}</span>
             </span>
             {% if let Some(long_commit) = run.git_commit_long %}
-            <span class="run-id-chip">
+            <span class="run-id-chip" title="{{ long_commit }}">
               <span class="run-id-chip-label">Git Commit</span>
               <span class="run-id-chip-value">{{ long_commit }}</span>
             </span>
@@ -1247,7 +1275,7 @@ struct WarningOpportunityRow {
             </span>
             {% endif %}
             {% if let Some(branch) = run.git_branch %}
-            <span class="run-id-chip">
+            <span class="run-id-chip" title="{{ branch }}">
               <span class="run-id-chip-label">Branch</span>
               <span class="run-id-chip-value">{{ branch }}</span>
             </span>
@@ -1258,7 +1286,7 @@ struct WarningOpportunityRow {
             </span>
             {% endif %}
             {% if let Some(author) = run.git_commit_author %}
-            <span class="run-id-chip">
+            <span class="run-id-chip" title="{{ author }}">
               <span class="run-id-chip-label">Last Commit By</span>
               <span class="run-id-chip-value">{{ author }}</span>
             </span>
@@ -1273,24 +1301,25 @@ struct WarningOpportunityRow {
       </div>
 
       <div class="meta">
-        <span class="meta-chip">Scan performed by {{ scan_performed_by }}</span>
-        <span class="meta-chip">Time Scanned: {{ scan_time_pst }} (PST)</span>
-        <span class="meta-chip">Generated: {{ generated_display }}</span>
-        <span class="meta-chip">OS {{ run.environment.operating_system }} / {{ run.environment.architecture }}</span>
-        <span class="meta-chip">Files analyzed {{ run.summary_totals.files_analyzed }}</span>
-        <span class="meta-chip">Files skipped {{ run.summary_totals.files_skipped }}</span>
+        <span class="meta-chip">Scan by <b>{{ scan_performed_by }}</b></span>
+        <span class="meta-chip">Scanned <b>{{ scan_time_pst }} PST</b></span>
+        <span class="meta-chip">Generated <b>{{ generated_display }}</b></span>
+        <span class="meta-chip">OS <b>{{ run.environment.operating_system }} / {{ run.environment.architecture }}</b></span>
+        <span class="meta-chip">Files analyzed <b>{{ run.summary_totals.files_analyzed }}</b></span>
+        <span class="meta-chip">Files skipped <b>{{ run.summary_totals.files_skipped }}</b></span>
       </div>
 
       <div class="summary-grid">
-        <div class="metric"><div class="metric-tooltip">Total lines across all analyzed files, including code, comments, and blank lines.</div><div class="metric-label">Physical lines</div><div class="metric-value">{{ run.summary_totals.total_physical_lines }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Lines containing executable source code, excluding comments and blanks.</div><div class="metric-label">Code</div><div class="metric-value">{{ run.summary_totals.code_lines }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Lines consisting entirely of comments or inline documentation.</div><div class="metric-label">Comments</div><div class="metric-value">{{ run.summary_totals.comment_lines }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Empty or whitespace-only lines used for readability and spacing.</div><div class="metric-label">Blank</div><div class="metric-value">{{ run.summary_totals.blank_lines }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Lines that contain both code and a trailing comment, counted separately per the mixed-line policy.</div><div class="metric-label">Mixed separate</div><div class="metric-value">{{ run.summary_totals.mixed_lines_separate }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Best-effort count of function/method definitions detected across all source files.</div><div class="metric-label">Functions</div><div class="metric-value">{{ run.summary_totals.functions }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Best-effort count of class, struct, interface, and type definitions.</div><div class="metric-label">Classes / Types</div><div class="metric-value">{{ run.summary_totals.classes }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Best-effort count of variable and constant declarations.</div><div class="metric-label">Variables</div><div class="metric-value">{{ run.summary_totals.variables }}</div></div>
-        <div class="metric"><div class="metric-tooltip">Best-effort count of import, include, and module-use statements.</div><div class="metric-label">Imports</div><div class="metric-value">{{ run.summary_totals.imports }}</div></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.total_physical_lines }}"><div class="metric-tooltip">Total lines across all analyzed files, including code, comments, and blank lines.</div><div class="metric-label">Physical lines</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.code_lines }}"><div class="metric-tooltip">Lines containing executable source code, excluding comments and blanks.</div><div class="metric-label">Code</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.comment_lines }}"><div class="metric-tooltip">Lines consisting entirely of comments or inline documentation.</div><div class="metric-label">Comments</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.blank_lines }}"><div class="metric-tooltip">Empty or whitespace-only lines used for readability and spacing.</div><div class="metric-label">Blank</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.mixed_lines_separate }}"><div class="metric-tooltip">Lines that contain both code and a trailing comment, counted separately per the mixed-line policy.</div><div class="metric-label">Mixed separate</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.functions }}"><div class="metric-tooltip">Best-effort count of function/method definitions detected across all source files.</div><div class="metric-label">Functions</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.classes }}"><div class="metric-tooltip">Best-effort count of class, struct, interface, and type definitions.</div><div class="metric-label">Classes / Types</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.variables }}"><div class="metric-tooltip">Best-effort count of variable and constant declarations.</div><div class="metric-label">Variables</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.imports }}"><div class="metric-tooltip">Best-effort count of import, include, and module-use statements.</div><div class="metric-label">Imports</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-density><div class="metric-tooltip">Percentage of physical lines that contain executable source code — higher means a leaner, code-dense codebase.</div><div class="metric-label">Code density</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
       </div>
     </section>
 
@@ -1339,38 +1368,38 @@ struct WarningOpportunityRow {
       </section>
 
       <section class="panel stack">
-        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" onclick="exportReportCsv()">&#8595; CSV</button><button class="export-btn" onclick="exportReportXls()">&#8595; Excel</button></div></div></div>
+        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" onclick="resetPerFileTable()" title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" onclick="exportReportCsv()">&#8595; CSV</button><button class="export-btn" onclick="exportReportXls()">&#8595; Excel</button></div></div></div>
         <div class="table-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
-                <th data-sort-type="text" style="width:35%">File</th>
-                <th data-sort-type="text">Language</th>
-                <th data-sort-type="number">Physical</th>
-                <th data-sort-type="number">Code</th>
-                <th data-sort-type="number">Comments</th>
-                <th data-sort-type="number">Blank</th>
-                <th data-sort-type="number">Mixed separate</th>
-                <th data-sort-type="number">Functions</th>
-                <th data-sort-type="number">Classes</th>
-                <th data-sort-type="number">Variables</th>
-                <th data-sort-type="number">Imports</th>
+                <th data-sort-type="text">File</th>
+                <th data-sort-type="text" style="width:86px">Language</th>
+                <th data-sort-type="number" class="num-col" style="width:67px">Physical</th>
+                <th data-sort-type="number" class="num-col" style="width:56px">Code</th>
+                <th data-sort-type="number" class="num-col" style="width:74px">Comments</th>
+                <th data-sort-type="number" class="num-col" style="width:54px">Blank</th>
+                <th data-sort-type="number" class="num-col" style="width:64px">Mixed</th>
+                <th data-sort-type="number" class="num-col" style="width:70px">Functions</th>
+                <th data-sort-type="number" class="num-col" style="width:60px">Classes</th>
+                <th data-sort-type="number" class="num-col" style="width:70px">Variables</th>
+                <th data-sort-type="number" class="num-col" style="width:58px">Imports</th>
               </tr>
             </thead>
             <tbody>
               {% for row in file_rows %}
               <tr>
-                <td class="mono">{{ row.relative_path }}</td>
+                <td class="mono" title="{{ row.relative_path }}">{{ row.relative_path }}</td>
                 <td>{{ row.language }}</td>
-                <td>{{ row.total_physical_lines }}</td>
-                <td>{{ row.code_lines }}</td>
-                <td>{{ row.comment_lines }}</td>
-                <td>{{ row.blank_lines }}</td>
-                <td>{{ row.mixed_lines_separate }}</td>
-                <td>{{ row.functions }}</td>
-                <td>{{ row.classes }}</td>
-                <td>{{ row.variables }}</td>
-                <td>{{ row.imports }}</td>
+                <td class="num-col">{{ row.total_physical_lines }}</td>
+                <td class="num-col">{{ row.code_lines }}</td>
+                <td class="num-col">{{ row.comment_lines }}</td>
+                <td class="num-col">{{ row.blank_lines }}</td>
+                <td class="num-col">{{ row.mixed_lines_separate }}</td>
+                <td class="num-col">{{ row.functions }}</td>
+                <td class="num-col">{{ row.classes }}</td>
+                <td class="num-col">{{ row.variables }}</td>
+                <td class="num-col">{{ row.imports }}</td>
               </tr>
               {% endfor %}
             </tbody>
@@ -1402,10 +1431,18 @@ struct WarningOpportunityRow {
         </div>
       </section>
 
-      {% if !is_sub_report %}
       <section class="panel stack">
         <div>
-          <div class="toolbar"><div class="toolbar-left"><h2>Warnings and next improvements</h2></div><div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">{{ warning_count }} total warnings</span></div></div>
+          <div class="toolbar">
+            <div class="toolbar-left"><h2>Diagnostics &amp; Configuration</h2></div>
+            {% if !is_sub_report && has_run_warnings %}<div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">{{ warning_count }} total warnings</span></div>{% endif %}
+          </div>
+          <p class="effective-config-note">Warning summary, support improvement opportunities, raw diagnostic output, and the exact configuration in effect for this scan.</p>
+        </div>
+
+        {% if !is_sub_report %}
+        <div>
+          <h3 style="margin:0 0 10px;">Warnings overview</h3>
           {% if !has_run_warnings %}
             <div class="pill good">No top-level warnings.</div>
           {% else %}
@@ -1422,8 +1459,8 @@ struct WarningOpportunityRow {
         </div>
 
         <div>
-          <h2>High-value support opportunities</h2>
-          <p class="support-note">This groups the noisy unsupported warnings into the next format buckets most worth classifying or supporting in the analysis core.</p>
+          <h3 style="margin:0 0 6px;">High-value support opportunities</h3>
+          <p class="support-note">Groups the noisy unsupported warnings into the next format buckets most worth classifying or supporting in the analysis core.</p>
           {% if warning_opportunity_rows.is_empty() %}
             <div class="pill good">No unsupported text-format buckets detected.</div>
           {% else %}
@@ -1445,15 +1482,7 @@ struct WarningOpportunityRow {
           </div>
           {% endif %}
         </div>
-      </section>
-      {% endif %}
 
-      <section class="panel stack">
-        <div>
-          <h2>Diagnostics &amp; Configuration</h2>
-          <p class="effective-config-note">This section contains the raw diagnostic output from the analysis run and the exact configuration that was in effect. Use this to reproduce results, debug unexpected counts, or audit what settings were applied.</p>
-        </div>
-        {% if !is_sub_report %}
         <div>
           <details>
             <summary>Detailed run warnings ({{ warning_count }})</summary>
@@ -1478,7 +1507,7 @@ struct WarningOpportunityRow {
         <div>
           <div class="config-header">
             <div>
-              <h2 style="margin:0 0 4px;">Effective configuration</h2>
+              <h3 style="margin:0 0 4px;">Effective configuration</h3>
               <p style="margin:0;font-size:13px;color:var(--muted);">The merged, fully-resolved configuration snapshot used for this scan — includes all CLI overrides applied on top of the base config file. Use this to replay the exact run or verify what settings were active.</p>
             </div>
             <div class="config-actions">
@@ -1666,16 +1695,57 @@ struct WarningOpportunityRow {
         img.style.cssText = 'width:' + sz + 'px;top:' + pos[0].toFixed(1) + '%;left:' + pos[1].toFixed(1) + '%;transform:rotate(' + rot + 'deg);opacity:' + op + ';';
       });
     })();
+    // ── Metric number formatting ─────────────────────────────────────────────
+    (function () {
+      function fmtBig(n) {
+        if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+        if (n >= 1e4) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+        return n.toLocaleString();
+      }
+      function fmtExact(n) { return n.toLocaleString(); }
+      document.querySelectorAll('[data-metric-value]').forEach(function (el) {
+        var n = parseInt(el.getAttribute('data-metric-value'), 10);
+        if (isNaN(n)) return;
+        var big = el.querySelector('.metric-big');
+        var exact = el.querySelector('.metric-exact');
+        if (big) big.textContent = fmtBig(n);
+        if (exact) exact.textContent = n >= 1e4 ? fmtExact(n) : '';
+      });
+      var densityCard = document.querySelector('[data-metric-density]');
+      if (densityCard) {
+        var phys = 0, code = 0;
+        document.querySelectorAll('[data-metric-value]').forEach(function (el) {
+          var lbl = el.querySelector('.metric-label');
+          if (!lbl) return;
+          var t = lbl.textContent.trim().toLowerCase();
+          var v = parseInt(el.getAttribute('data-metric-value'), 10) || 0;
+          if (t === 'physical lines') phys = v;
+          if (t === 'code') code = v;
+        });
+        var pct = phys > 0 ? (code / phys * 100) : 0;
+        var big = densityCard.querySelector('.metric-big');
+        var exact = densityCard.querySelector('.metric-exact');
+        if (big) big.textContent = pct.toFixed(1) + '%';
+        if (exact) exact.textContent = pct.toFixed(2) + '%';
+      }
+    })();
     // ── Export helpers ────────────────────────────────────────────────────────
     function slocEscXml(v){return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
     function slocEscCsv(v){var s=String(v);return(s.indexOf(',')>=0||s.indexOf('"')>=0||s.indexOf('\n')>=0)?'"'+s.replace(/"/g,'""')+'"':s;}
     function slocDownload(data,name,mime){var b=new Blob([data],{type:mime});var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},200);}
     function slocCsv(fname,hdrs,rows){slocDownload([hdrs.map(slocEscCsv).join(',')].concat(rows.map(function(r){return r.map(slocEscCsv).join(',');})).join('\r\n'),fname,'text/csv;charset=utf-8;');}
-    function slocXls(fname,sheet,hdrs,rows){var hcells=hdrs.map(function(h){return'<Cell><Data ss:Type="String">'+slocEscXml(h)+'</Data></Cell>';}).join('');var rrows=rows.map(function(r){var cells=r.map(function(v){var n=String(v);var isNum=n!==''&&!isNaN(Number(n));return'<Cell><Data ss:Type="'+(isNum?'Number':'String')+'">'+slocEscXml(v)+'</Data></Cell>';}).join('');return'<Row>'+cells+'</Row>';}).join('');var x='<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="'+slocEscXml(sheet)+'"><Table><Row>'+hcells+'</Row>'+rrows+'</Table></Worksheet></Workbook>';slocDownload(x,fname,'application/vnd.ms-excel');}
+    function slocXls(fname,sheet,hdrs,rows){var enc=new TextEncoder();var CT=[];for(var _n=0;_n<256;_n++){var _c=_n;for(var _k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}function crc32(d){var v=0xFFFFFFFF;for(var i=0;i<d.length;i++)v=CT[(v^d[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}function u2(n){return[n&0xFF,(n>>8)&0xFF];}function u4(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}function xe(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}var ss=[],si={};function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}var rx='<row r="1">';hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});rx+='</row>';rows.forEach(function(row,ri){var rn=ri+2;rx+='<row r="'+rn+'">';row.forEach(function(cell,c){var ref=colRef(c,rn);var num=c>=2&&cell!==''&&cell!=null&&!isNaN(Number(cell));rx+=num?'<c r="'+ref+'" s="2"><v>'+xe(cell)+'</v></c>':'<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';});rx+='</row>';});var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';var wsh='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData>'+rx+'</sheetData></worksheet>';var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><b/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';var F={'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>','_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets><sheet name="'+xe(sheet)+'" sheetId="1" r:id="rId1"/></sheets></workbook>','xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>','xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':wsh};var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'];var zparts=[],zcds=[],zoff=0,znf=0;order.forEach(function(name){var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);zoff+=entry.length;znf++;});var cdSz=zcds.reduce(function(a,c){return a+c.length;},0);var ea=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(zoff)).concat([0,0]);var tot=zoff+cdSz+ea.length,zout=new Uint8Array(tot),zpos=0;zparts.forEach(function(p){zout.set(p,zpos);zpos+=p.length;});zcds.forEach(function(c){zout.set(c,zpos);zpos+=c.length;});zout.set(new Uint8Array(ea),zpos);slocDownload(zout,fname,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}
+    window.resetPerFileTable = function() {
+      var tbl = document.getElementById('per-file-table');
+      if (!tbl) return;
+      var shell = tbl.closest('.table-shell');
+      if (shell) shell.scrollLeft = 0;
+      Array.prototype.slice.call(tbl.querySelectorAll('th')).forEach(function(th) { th.style.width = ''; });
+    };
     var _rh=['File','Language','Physical Lines','Code Lines','Comments','Blank','Mixed Separate','Functions','Classes','Variables','Imports'];
     function getReportExportRows(){var r=[];document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<11)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim(),tds[3].textContent.trim(),tds[4].textContent.trim(),tds[5].textContent.trim(),tds[6].textContent.trim(),tds[7].textContent.trim(),tds[8].textContent.trim(),tds[9].textContent.trim(),tds[10].textContent.trim()]);});return r;}
     window.exportReportCsv=function(){slocCsv('report-per-file.csv',_rh,getReportExportRows());};
-    window.exportReportXls=function(){slocXls('report-per-file.xls','Per-File Detail',_rh,getReportExportRows());};
+    window.exportReportXls=function(){slocXls('report-per-file.xlsx','Per-File Detail',_rh,getReportExportRows());};
     // ── Language overview charts ─────────────────────────────────────────────
     (function(){
       var D={{ lang_chart_json|safe }};
@@ -1684,54 +1754,64 @@ struct WarningOpportunityRow {
       if(!el)return;
       var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
       var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082'];
+      var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
       function fmt(n){return Number(n).toLocaleString();}
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function px(n){return Math.round(n);}
-      // Code lines donut
+      // Code lines donut — larger radius and legend area for legibility
       var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
-      var cx=90,cy=90,Ro=70,Ri=38,DW=280,DH=Math.max(190,14+D.length*18);
+      var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
       var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
-      var ang=-Math.PI/2;
+      if(D.length===1){
+        // Single language: full-circle arc paths can degenerate in some renderers; use a stroked circle instead
+        var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
+        ds+='<circle cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
+      } else {
+        var ang=-Math.PI/2;
+        D.forEach(function(d,i){
+          var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
+          var x1=cx+Ro*Math.cos(ang),y1=cy+Ro*Math.sin(ang);
+          var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
+          var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
+          var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
+          ds+='<path d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
+          ang+=sw;
+        });
+      }
+      ds+='<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="22" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
+      ds+='<text x="'+cx+'" y="'+(cy+16)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
       D.forEach(function(d,i){
-        var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
-        var x1=cx+Ro*Math.cos(ang),y1=cy+Ro*Math.sin(ang);
-        var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
-        var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
-        var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
-        ds+='<path d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
-        ang+=sw;
-      });
-      ds+='<text x="'+cx+'" y="'+(cy-4)+'" text-anchor="middle" font-family="Calibri,Arial" font-size="18" font-weight="bold" fill="#333">'+fmt(tot)+'</text>';
-      ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="Calibri,Arial" font-size="9" fill="#888">code lines</text>';
-      D.forEach(function(d,i){
-        var ly=10+i*18;
-        if(ly+14>DH)return;
-        ds+='<rect x="'+(cx+Ro+10)+'" y="'+ly+'" width="10" height="10" fill="'+(COLS[i%COLS.length])+'" rx="1"/>';
-        ds+='<text x="'+(cx+Ro+23)+'" y="'+(ly+9)+'" font-family="Calibri,Arial" font-size="10" fill="#333">'+esc(d.lang)+'</text>';
+        var ly=12+i*22;
+        if(ly+16>DH)return;
+        ds+='<rect x="'+(cx+Ro+14)+'" y="'+ly+'" width="13" height="13" fill="'+(COLS[i%COLS.length])+'" rx="3"/>';
+        ds+='<text x="'+(cx+Ro+32)+'" y="'+(ly+11)+'" font-family="'+FONT+'" font-size="12" fill="#43342d">'+esc(d.lang)+'</text>';
       });
       ds+='</svg>';
-      // Per-language stacked bar
+      // Per-language stacked bar — wider bars and labels for legibility
       var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
-      var LW=82,BW=220,rHb=26,bH=20,SH=D.length*rHb+28;
-      var bs='<svg viewBox="0 0 '+(LW+BW+54)+' '+SH+'" width="'+(LW+BW+54)+'" height="'+SH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+      var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
+      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
       D.forEach(function(d,i){
         var y=10+i*rHb,x=LW;
         var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
-        bs+='<text x="'+(LW-4)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="Calibri,Arial" font-size="10" fill="#333">'+esc(d.lang)+'</text>';
+        bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
         if(cW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
         if(cmW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
         if(blW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-        bs+='<text x="'+(LW+BW+3)+'" y="'+(y+bH/2+4)+'" font-family="Calibri,Arial" font-size="9" fill="#666">'+fmt(d.code+d.comments+d.blanks)+'</text>';
+        bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
       });
-      var ly=SH-14;
-      bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+12)+'" y="'+(ly+9)+'" font-family="Calibri,Arial" font-size="9" font-weight="600" fill="#555">Code</text>';
-      bs+='<rect x="'+(LW+48)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+60)+'" y="'+(ly+9)+'" font-family="Calibri,Arial" font-size="9" font-weight="600" fill="#555">Comments</text>';
-      bs+='<rect x="'+(LW+130)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+142)+'" y="'+(ly+9)+'" font-family="Calibri,Arial" font-size="9" font-weight="600" fill="#555">Blanks</text>';
+      var ly=SH-16;
+      bs+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
+      bs+='<rect x="'+(LW+56)+'" y="'+ly+'" width="10" height="10" fill="'+GN+'"/><text x="'+(LW+70)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
+      bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
       bs+='</svg>';
-      el.innerHTML='<div style="display:flex;gap:32px;align-items:flex-start;">'+
-        '<div style="flex:0 0 auto;overflow:hidden;"><p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 8px;">Code Lines by Language</p>'+ds+'</div>'+
-        '<div style="flex:0 0 auto;overflow:hidden;"><p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 8px;">Line Mix per Language</p>'+bs+'</div>'+
-        '</div>';
+      var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
+      el.innerHTML='<div style="width:100%;overflow-x:auto;display:flex;justify-content:center;padding:6px 0;">'+
+        '<div style="display:inline-flex;gap:56px;align-items:flex-start;flex-wrap:nowrap;flex-shrink:0;">'+
+          '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
+          '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
+        '</div>'+
+      '</div>';
     })();
   </script>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>

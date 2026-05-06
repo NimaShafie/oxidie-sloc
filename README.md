@@ -11,24 +11,17 @@
 
 ## Quick Start
 
-**Install via Cargo (requires Rust):**
-
 ```bash
-cargo install oxide-sloc
-oxide-sloc serve          # web UI at http://127.0.0.1:4317
-oxide-sloc analyze ./my-repo --plain
+bash scripts/install.sh   # detects bundled binary or builds from vendor sources
+bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
 
-**Or use a pre-built binary:**
-
-| Platform | Install | Launch (localhost) | Launch (LAN server) |
+| Platform | Install | Launch | LAN server |
 |---|---|---|---|
-| **Windows 10/11** | `bash scripts/install.sh` (Git Bash) | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
+| **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-The install script uses a pre-built binary from `dist/` if present, or builds from vendored sources when Rust is available (will offer to install Rust via rustup if it isn't found). On success, the web UI opens at **http://127.0.0.1:4317**.
-
-For air-gapped setup, CI, and Docker, see [`docs/airgap.md`](./docs/airgap.md).
+**No internet connection required.** The repository is fully self-contained — `oxide-sloc.exe` is bundled in the repository root for Windows; `vendor.tar.xz` covers all Rust crate sources for a fully offline build. See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths including Linux without Rust.
 
 ---
 
@@ -117,22 +110,22 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ## Installation
 
-### Path A — Pre-built binary (no Rust required)
+### Path A — Bundled binary (no internet required)
 
 ```bash
 bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
 bash scripts/run.sh        # http://127.0.0.1:4317
 ```
 
-The script tries in order: existing binary → `dist/` bundle → offline Rust build.
+The script tries in order: binary in repo root → `dist/` bundle → offline vendor build. No internet required — all files are committed to this repository.
 
-> **Transferable bundle:** Run `make bundle` to produce `oxide-sloc-bundle.tar.gz` — drop it on a USB drive and run `bash scripts/install.sh` on the target machine.
+- **Windows:** `oxide-sloc.exe` is in the repository root. Clone and run — nothing to build.
+- **Linux:** the installer builds from the committed `vendor.tar.xz` when Rust is available, or extracts a pre-built binary from `dist/` if present. For Linux without Rust, see [`docs/airgap.md`](./docs/airgap.md) → Option D (airgap kit).
 
 ### Path B — Docker
 
 ```bash
-docker pull ghcr.io/nimashafie/oxide-sloc:latest
-# or build locally
+# Build locally from the committed Dockerfile (no registry pull needed):
 export SLOC_API_KEY=$(openssl rand -hex 32)
 docker compose up
 ```
@@ -524,7 +517,7 @@ git push origin v1.1.0
 
 ### Jenkins / GitLab CI
 
-A `Jenkinsfile` and `.gitlab-ci.yml` are included at the repo root. On self-hosted or air-gapped runners, download `vendor.tar.xz` from the release page, place it in the workspace, and the pipeline will decompress and cache `vendor/` between runs.
+A `Jenkinsfile` and `.gitlab-ci.yml` are included at the repo root. On self-hosted or air-gapped runners, `vendor.tar.xz` is committed to the repository — a `git clone` is all that is needed. The pipeline decompresses and caches `vendor/` between runs automatically.
 
 For detailed setup including Confluence publishing, see [`docs/ci-integrations.md`](./docs/ci-integrations.md).
 
@@ -579,7 +572,8 @@ docs/
   ci-integrations.md
   server-deployment.md
 examples/           # Runnable examples + sloc.example.toml config template
-scripts/            # install.sh, run.sh, airgap-build.sh, update-vendor.sh
+scripts/            # install.sh, run.sh, serve-server.sh  (user-facing entry points)
+scripts/internal/   # airgap-build.sh, make-airgap-kit.sh, update-vendor.sh, install-hooks.sh
 tests/
   fixtures/basic/   # Sample source files used by smoke tests
 ```

@@ -51,6 +51,9 @@ pub struct RegistryEntry {
     /// Comma-separated git tags pointing at HEAD at scan time.
     #[serde(default)]
     pub git_tags: Option<String>,
+    /// ISO 8601 author-date of the last git commit at scan time.
+    #[serde(default)]
+    pub git_commit_date: Option<String>,
 }
 
 /// Persistent on-disk index of all past scans for this workspace.

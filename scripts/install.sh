@@ -82,8 +82,8 @@ if command -v cargo &>/dev/null; then
             echo " [OK] Vendor sources ready."
         else
             echo " [ERROR] Neither vendor/ nor vendor.tar.xz found." >&2
-            echo "         Download vendor.tar.xz from the release page and place it" >&2
-            echo "         alongside the repository, or clone the full repository." >&2
+            echo "         vendor.tar.xz is committed to the repository — ensure you have" >&2
+            echo "         the complete repository, not just source files." >&2
             exit 1
         fi
     fi
@@ -114,72 +114,32 @@ EOF
     exit 1
 fi
 
-# ── 4. No Rust — offer to install it (networked) or give air-gap instructions ──
+# ── 4. No binary and no Rust toolchain ──────────────────────────────────────
 
 echo ""
-echo " No pre-built binary and no Rust toolchain found."
+echo " No pre-built binary found and no Rust toolchain detected."
 echo ""
-
-# Detect whether we can reach the internet (quick probe, ignore errors).
-_has_internet=false
-if command -v curl &>/dev/null && curl -sSf --max-time 4 https://sh.rustup.rs -o /dev/null 2>/dev/null; then
-    _has_internet=true
-elif command -v wget &>/dev/null && wget -q --timeout=4 --spider https://sh.rustup.rs 2>/dev/null; then
-    _has_internet=true
-fi
-
-if [[ "$_has_internet" == true ]] && [[ "$PLATFORM" == linux ]]; then
-    echo " Internet detected. Rust is required to build from source."
+echo " This repository is fully self-contained — no internet required."
+echo " Refer to docs/airgap.md for the correct path for your environment:"
+echo ""
+if [[ "$PLATFORM" == windows ]]; then
+    echo "  • oxide-sloc.exe should be present in the repository root."
+    echo "    Ensure you have the complete repository package (not just source files)."
+else
+    echo "  • Linux pre-built binary:"
+    echo "    Place dist/oxide-sloc-linux-x86_64.tar.gz alongside this repository"
+    echo "    (produced by CI or a networked build machine), then re-run:"
+    echo "    bash scripts/install.sh"
     echo ""
-    if [[ "$AUTO_RUSTUP" == true ]]; then
-        _install_rust=y
-    else
-        printf ' Install Rust toolchain now via rustup? [y/N] '
-        read -r _install_rust </dev/tty || _install_rust=n
-    fi
-
-    if [[ "${_install_rust,,}" == y* ]]; then
-        echo " Installing rustup (minimal profile, stable toolchain)..."
-        curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable --profile minimal -y
-        # Source the newly-installed cargo environment for this session
-        # shellcheck source=/dev/null
-        source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
-        echo " [OK] Rust installed. Re-running installer..."
-        exec bash "$SCRIPT_DIR/install.sh" "$@"
-    fi
-fi
-
-echo " Option A — pre-built binary (easiest, no Rust required):"
-echo "   Download from https://github.com/oxide-sloc/oxide-sloc/releases"
-echo "   Place the binary next to scripts/, then run:  bash scripts/install.sh"
-echo ""
-echo " Option B — install Rust and build from source:"
-if [[ "$PLATFORM" == linux ]]; then
-    echo "   curl -sSf https://sh.rustup.rs | sh"
-    echo "   source ~/.cargo/env"
-    echo "   bash scripts/install.sh"
-else
-    echo "   Download rustup-init.exe from https://rustup.rs and run it."
-    echo "   Open a new Git Bash terminal, then: bash scripts/install.sh"
+    echo "  • Linux source build (Rust not installed):"
+    echo "    Use the self-contained airgap kit. On a networked machine run:"
+    echo "    bash scripts/internal/make-airgap-kit.sh"
+    echo "    Transfer the resulting archive via USB or internal file server, then:"
+    echo "    tar xzf oxide-sloc-airgap-kit-*.tar.gz"
+    echo "    cd oxide-sloc-airgap-kit-*/"
+    echo "    bash install.sh"
 fi
 echo ""
-echo " Option C — build from source on an air-gapped machine:"
-echo "   On a NETWORKED machine, bundle the Rust toolchain:"
-echo ""
-if [[ "$PLATFORM" == linux ]]; then
-    echo "   curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable --no-modify-path"
-    echo "   tar -czf rust-toolchain-linux.tar.gz ~/.rustup ~/.cargo"
-    echo "   Transfer to this machine, then:"
-    echo "   tar xzf rust-toolchain-linux.tar.gz -C ~"
-    echo "   echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
-    echo "   bash scripts/install.sh"
-else
-    echo "   rustup-init.exe --default-toolchain stable --no-modify-path"
-    echo "   Compress-Archive \"\$env:USERPROFILE\.rustup\",\"\$env:USERPROFILE\.cargo\" rust-toolchain-windows.zip"
-    echo "   Transfer to this machine, then (PowerShell):"
-    echo "   Expand-Archive rust-toolchain-windows.zip -DestinationPath \$env:USERPROFILE"
-    echo "   [Environment]::SetEnvironmentVariable('PATH', \"\$env:USERPROFILE\.cargo\bin;\$env:PATH\", 'User')"
-    echo "   Open a new terminal, then:  bash scripts/install.sh"
-fi
+echo " Full deployment guide: docs/airgap.md"
 echo ""
 exit 1

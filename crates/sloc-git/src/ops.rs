@@ -74,11 +74,26 @@ pub fn list_refs(repo: &Path) -> Result<RepoRefs> {
 
 fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
     let fmt = "%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)";
-    let out = run_git(repo, &["branch", "-a", &format!("--format={fmt}")])?;
-    out.lines()
+    // Use -r (remote-tracking only) to avoid local/remote duplicates.
+    // Strip the leading remote name (e.g. "origin/") from each ref so the
+    // displayed name matches what the upstream repository calls the branch.
+    let out = run_git(repo, &["branch", "-r", &format!("--format={fmt}")])?;
+    let refs = out.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| parse_ref_line(l, GitRefKind::Branch))
-        .collect()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        // Drop symbolic HEAD pointers (e.g. origin/HEAD).
+        .filter(|r| r.name != "HEAD" && !r.name.ends_with("/HEAD"))
+        .map(|mut r| {
+            // Strip the remote prefix ("origin/", "upstream/", etc.).
+            if let Some(slash) = r.name.find('/') {
+                r.name = r.name[slash + 1..].to_owned();
+            }
+            r
+        })
+        .collect::<Vec<_>>();
+    Ok(refs)
 }
 
 fn list_tags(repo: &Path) -> Result<Vec<GitRef>> {
