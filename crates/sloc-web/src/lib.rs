@@ -180,15 +180,24 @@ mod win_dialog_focus {
 struct IpRateLimiter {
     window: Duration,
     max_requests: usize,
+    auth_lockout_threshold: u32,
+    auth_lockout_window: Duration,
     state: std::sync::Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     auth_failures: std::sync::Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
 
 impl IpRateLimiter {
-    fn new(window: Duration, max_requests: usize) -> Self {
+    fn new(
+        window: Duration,
+        max_requests: usize,
+        auth_lockout_threshold: u32,
+        auth_lockout_window: Duration,
+    ) -> Self {
         Self {
             window,
             max_requests,
+            auth_lockout_threshold,
+            auth_lockout_window,
             state: std::sync::Mutex::new(HashMap::new()),
             auth_failures: std::sync::Mutex::new(HashMap::new()),
         }
@@ -239,18 +248,31 @@ impl IpRateLimiter {
     }
 
     fn is_auth_locked_out(&self, ip: IpAddr) -> bool {
-        const LOCKOUT_THRESHOLD: u32 = 10;
-        const LOCKOUT_WINDOW: Duration = Duration::from_hours(1);
         let mut map = self
             .auth_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let expired = map.get(&ip).is_some_and(|e| e.1.elapsed() > LOCKOUT_WINDOW);
+        let expired = map
+            .get(&ip)
+            .is_some_and(|e| e.1.elapsed() > self.auth_lockout_window);
         if expired {
             map.remove(&ip);
             return false;
         }
-        map.get(&ip).is_some_and(|e| e.0 >= LOCKOUT_THRESHOLD)
+        map.get(&ip)
+            .is_some_and(|e| e.0 >= self.auth_lockout_threshold)
+    }
+
+    fn auth_lockout_remaining_secs(&self, ip: IpAddr) -> u64 {
+        let map = self
+            .auth_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.get(&ip).map_or(0, |e| {
+            self.auth_lockout_window
+                .checked_sub(e.1.elapsed())
+                .map_or(0, |r| r.as_secs())
+        })
     }
 }
 
@@ -358,6 +380,8 @@ fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/badge/{metric}", get(badge_handler))
         .route("/static/chart.js", get(chart_js_handler))
+        .route("/auth/login", get(auth_login_get))
+        .route("/auth/login", post(auth_login_post))
         // Webhook receivers are public (no API-key auth) — they use per-schedule HMAC secrets.
         .route("/webhooks/github", post(git_webhook::handle_github_webhook))
         .route("/webhooks/gitlab", post(git_webhook::handle_gitlab_webhook))
@@ -388,7 +412,12 @@ pub fn make_test_router() -> Router {
         server_mode: false,
         tls_enabled: false,
         api_keys: vec![],
-        rate_limiter: Arc::new(IpRateLimiter::new(Duration::from_secs(60), 600)),
+        rate_limiter: Arc::new(IpRateLimiter::new(
+            Duration::from_secs(60),
+            600,
+            10,
+            Duration::from_secs(3600),
+        )),
         trust_proxy: false,
         git_clones_dir: tmp.join("git-clones"),
         schedules: Arc::new(Mutex::new(ScheduleStore::default())),
@@ -458,8 +487,21 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         );
     }
 
+    let auth_lockout_threshold = std::env::var("SLOC_AUTH_LOCKOUT_FAILS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(10);
+    let auth_lockout_secs = std::env::var("SLOC_AUTH_LOCKOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(3600);
     // 600 req/min per IP across all routes (10/sec — suits local/air-gapped use).
-    let rate_limiter = Arc::new(IpRateLimiter::new(Duration::from_mins(1), 600));
+    let rate_limiter = Arc::new(IpRateLimiter::new(
+        Duration::from_mins(1),
+        600,
+        auth_lockout_threshold,
+        Duration::from_secs(auth_lockout_secs),
+    ));
 
     let git_clones_dir = resolve_git_clones_dir(&output_root);
     let schedules_path = std::env::var("SLOC_SCHEDULES_PATH")
@@ -702,40 +744,90 @@ async fn require_api_key(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if !state.api_keys.is_empty() {
-        let keys = &state.api_keys;
-        let provided = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .or_else(|| req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()));
+    if state.api_keys.is_empty() {
+        return next.run(req).await;
+    }
 
-        let peer_ip = req
-            .extensions()
-            .get::<axum::extract::ConnectInfo<SocketAddr>>()
-            .map_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |c| c.0.ip());
+    let keys = &state.api_keys;
+    let peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |c| c.0.ip());
 
-        if state.rate_limiter.is_auth_locked_out(peer_ip) {
-            tracing::warn!(event = "auth_lockout", peer_addr = %peer_ip,
-                "Authentication locked out after repeated failures");
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, "3600")],
-                "429 Too Many Requests — authentication temporarily locked\n",
-            )
-                .into_response();
-        }
+    // Collect credentials from all three sources: Bearer header, X-API-Key, session cookie.
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let x_api_key = req
+        .headers()
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let session_cookie = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_session_cookie)
+        .map(str::to_owned);
 
-        if provided.is_some_and(|k| {
+    let any_credential_provided =
+        auth_header.is_some() || x_api_key.is_some() || session_cookie.is_some();
+
+    let valid = [&auth_header, &x_api_key, &session_cookie]
+        .iter()
+        .filter_map(|o| o.as_deref())
+        .any(|k| {
             keys.iter().any(|expected| {
                 use secrecy::ExposeSecret;
                 ct_eq(k, expected.expose_secret())
             })
-        }) {
-            return next.run(req).await;
-        }
+        });
 
+    if valid {
+        return next.run(req).await;
+    }
+
+    if state.rate_limiter.is_auth_locked_out(peer_ip) {
+        tracing::warn!(event = "auth_lockout", peer_addr = %peer_ip,
+            "Authentication locked out after repeated failures");
+        let remaining = state.rate_limiter.auth_lockout_remaining_secs(peer_ip);
+        let retry_after = HeaderValue::from_str(&remaining.to_string())
+            .unwrap_or(HeaderValue::from_static("3600"));
+        if is_browser_request(&req) {
+            let minutes = remaining.div_ceil(60).max(1);
+            let s = if minutes == 1 { "" } else { "s" };
+            let body = format!(
+                r#"<!doctype html><html><head><meta charset="utf-8">
+<title>Locked Out — OxideSLOC</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}}
+h1{{color:#b85d33}}p{{line-height:1.6}}code{{background:#f3e9e0;padding:2px 6px;border-radius:4px}}</style>
+</head><body>
+<h1>Too many failed sign-in attempts</h1>
+<p>Access from your IP is temporarily locked. Lockout expires in approximately
+<strong>{minutes} minute{s}</strong>.</p>
+<p>To clear immediately, restart the server.</p>
+<p>For trusted LAN testing, leave <code>SLOC_API_KEY</code> unset, or raise the
+threshold via <code>SLOC_AUTH_LOCKOUT_FAILS</code> / <code>SLOC_AUTH_LOCKOUT_SECS</code>.</p>
+</body></html>"#
+            );
+            let mut resp = (StatusCode::TOO_MANY_REQUESTS, Html(body)).into_response();
+            resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
+            return resp;
+        }
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("429 Too Many Requests — locked out, retry in {remaining}s\n"),
+        )
+            .into_response();
+        resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
+        return resp;
+    }
+
+    if any_credential_provided {
+        // A credential was supplied but didn't match — record the failure.
         state.rate_limiter.record_auth_failure(peer_ip);
         let path = req.uri().path().to_owned();
         tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = %path,
@@ -747,12 +839,167 @@ async fn require_api_key(
         )
             .into_response();
     }
-    next.run(req).await
+
+    // No credential supplied at all.  Redirect browsers to the login form; return
+    // a plain 401 for API clients (without recording a failure — unauthenticated
+    // browser page loads should not burn the lockout counter).
+    if is_browser_request(&req) {
+        let next_path = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
+        let login_url = format!("/auth/login?next={}", urlencode_path(next_path));
+        let location = HeaderValue::from_str(&login_url)
+            .unwrap_or_else(|_| HeaderValue::from_static("/auth/login"));
+        let mut resp = StatusCode::FOUND.into_response();
+        resp.headers_mut().insert(header::LOCATION, location);
+        return resp;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
+        "401 Unauthorized\n",
+    )
+        .into_response()
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+fn extract_session_cookie(cookie_header: &str) -> Option<&str> {
+    cookie_header.split(';').find_map(|pair| {
+        let pair = pair.trim();
+        let (k, v) = pair.split_once('=')?;
+        if k.trim() == "sloc_session" {
+            Some(v.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn is_browser_request(req: &Request<Body>) -> bool {
+    req.headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"))
+}
+
+fn urlencode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'/'
+            | b'?'
+            | b'='
+            | b'&'
+            | b'#' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                write!(&mut out, "%{b:02X}").ok();
+            }
+        }
+    }
+    out
+}
+
+// ── Login form handlers ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct LoginQuery {
+    next: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct LoginFormData {
+    key: String,
+    next: Option<String>,
+}
+
+async fn auth_login_get(
+    State(state): State<AppState>,
+    Query(query): Query<LoginQuery>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+) -> Response {
+    if state.api_keys.is_empty() {
+        let mut resp = StatusCode::FOUND.into_response();
+        resp.headers_mut()
+            .insert(header::LOCATION, HeaderValue::from_static("/"));
+        return resp;
+    }
+    let has_error = query.error.as_deref() == Some("1");
+    let next_url = query.next.unwrap_or_default();
+    let lockout_threshold = state.rate_limiter.auth_lockout_threshold;
+    Html(
+        LoginTemplate {
+            csp_nonce,
+            has_error,
+            next_url,
+            lockout_threshold,
+        }
+        .render()
+        .unwrap_or_else(|e| format!("<pre>Template error: {e}</pre>")),
+    )
+    .into_response()
+}
+
+async fn auth_login_post(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
+    Form(form): Form<LoginFormData>,
+) -> Response {
+    let peer_ip = peer_addr.ip();
+    let next_url = form
+        .next
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/");
+    let safe_next = if next_url.starts_with('/') {
+        next_url
+    } else {
+        "/"
+    };
+
+    let valid = state.api_keys.iter().any(|expected| {
+        use secrecy::ExposeSecret;
+        ct_eq(&form.key, expected.expose_secret())
+    });
+
+    if valid {
+        let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
+        let cookie_value = format!(
+            "sloc_session={}; Path=/; HttpOnly; SameSite=Strict{}",
+            form.key, secure_flag,
+        );
+        let location =
+            HeaderValue::from_str(safe_next).unwrap_or_else(|_| HeaderValue::from_static("/"));
+        let cookie_hv = HeaderValue::from_str(&cookie_value)
+            .unwrap_or_else(|_| HeaderValue::from_static("sloc_session=; Path=/; HttpOnly"));
+        let mut resp = StatusCode::FOUND.into_response();
+        resp.headers_mut().insert(header::LOCATION, location);
+        resp.headers_mut().insert(header::SET_COOKIE, cookie_hv);
+        resp
+    } else {
+        state.rate_limiter.record_auth_failure(peer_ip);
+        tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = "/auth/login",
+            "Login form authentication failed");
+        let error_url = format!("/auth/login?next={}&error=1", urlencode_path(safe_next));
+        let location = HeaderValue::from_str(&error_url)
+            .unwrap_or_else(|_| HeaderValue::from_static("/auth/login?error=1"));
+        let mut resp = StatusCode::FOUND.into_response();
+        resp.headers_mut().insert(header::LOCATION, location);
+        resp
+    }
 }
 
 fn build_cors_layer(server_mode: bool) -> CorsLayer {
@@ -2223,7 +2470,7 @@ async fn async_run_status_handler(
     State(state): State<AppState>,
     AxumPath(wait_id): AxumPath<String>,
 ) -> Response {
-    // Basic input validation — wait_id is a UUID we generated, so these are defence-in-depth.
+    // wait_id comes from our own UUID generator; reject any structurally malformed value.
     if wait_id.len() > 128 || wait_id.contains('/') || wait_id.contains('\\') {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -8588,9 +8835,9 @@ struct ScanSetupTemplate {
         <div style="overflow:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
         <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:700px;">
           <colgroup>
-            <col style="width:18%"><col style="width:30%">
-            <col style="width:7%"><col style="width:9%"><col style="width:7%">
-            <col style="width:10%"><col style="width:7%"><col style="width:12%">
+            <col style="width:14%"><col style="width:40%">
+            <col style="width:6%"><col style="width:8%"><col style="width:6%">
+            <col style="width:8%"><col style="width:6%"><col style="width:12%">
           </colgroup>
           <thead>
             <tr>
@@ -8608,7 +8855,7 @@ struct ScanSetupTemplate {
             {% for row in submodule_rows %}
             <tr>
               <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);word-break:break-all;"><code style="font-size:12px;">{{ row.relative_path }}</code></td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.relative_path }}"><code style="font-size:12px;">{{ row.relative_path }}</code></td>
               <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.files_analyzed }}</td>
               <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.total_physical_lines }}</td>
               <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.code_lines }}</td>
@@ -11235,13 +11482,13 @@ struct CompareSelectTemplate {
       <div class="table-wrap">
       <table id="delta-table">
         <colgroup>
-          <col style="width:44%">
-          <col style="width:8%">
-          <col style="width:8%">
-          <col style="width:16%">
-          <col style="width:8%">
-          <col style="width:8%">
-          <col style="width:8%">
+          <col style="width:55%">
+          <col style="width:7%">
+          <col style="width:7%">
+          <col style="width:12%">
+          <col style="width:6%">
+          <col style="width:6%">
+          <col style="width:7%">
         </colgroup>
         <thead>
           <tr id="delta-thead">
@@ -11859,4 +12106,83 @@ struct CompareTemplate {
     /// True when `scope=super` is active — viewing super-repo only (no submodule files).
     super_scope_active: bool,
     csp_nonce: String,
+}
+
+// ── LoginTemplate ──────────────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(
+    source = r##"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OxideSLOC | Sign In</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{{ csp_nonce }}">
+    :root {
+      --bg:#f5efe8; --surface:#fbf7f2; --line:#e6d0bf; --line-strong:#d8bfad;
+      --text:#2f241c; --muted:#7b675b; --nav:#b85d33; --nav-2:#7a371b;
+      --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 8px 32px rgba(77,44,20,.10);
+      --err-bg:#fdf0f0; --err-border:#e8b4b4; --err-text:#8b2020;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
+    .top-nav{background:linear-gradient(180deg,var(--nav),var(--nav-2));padding:0 24px;min-height:56px;display:flex;align-items:center;box-shadow:0 4px 14px rgba(0,0,0,.18);}
+    .brand{display:flex;align-items:center;gap:12px;text-decoration:none;}
+    .brand-logo{width:38px;height:42px;object-fit:contain;filter:drop-shadow(0 4px 10px rgba(0,0,0,.22));}
+    .brand-title{color:#fff;font-size:17px;font-weight:800;margin:0;}
+    .page{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 56px);padding:24px;}
+    .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:40px;max-width:420px;width:100%;box-shadow:var(--shadow);}
+    h1{margin:0 0 6px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}
+    .subtitle{color:var(--muted);font-size:14px;margin:0 0 28px;}
+    .error{background:var(--err-bg);border:1px solid var(--err-border);color:var(--err-text);border-radius:8px;padding:12px 16px;font-size:14px;margin-bottom:20px;}
+    label{display:block;font-size:13px;font-weight:700;margin-bottom:6px;}
+    input[type=password]{width:100%;padding:10px 14px;border:1px solid var(--line-strong);border-radius:8px;background:#fff;color:var(--text);font-size:14px;font-family:ui-monospace,monospace;outline:none;transition:border-color .15s;}
+    input[type=password]:focus{border-color:var(--oxide);}
+    .btn{width:100%;padding:11px;border:none;border-radius:8px;background:var(--oxide-2);color:#fff;font-size:15px;font-weight:700;cursor:pointer;margin-top:20px;transition:opacity .15s;}
+    .btn:hover{opacity:.88;}
+    .hint{color:var(--muted);font-size:12px;margin-top:20px;line-height:1.6;}
+    code{background:#f3e9e0;padding:1px 5px;border-radius:4px;font-size:11px;}
+  </style>
+</head>
+<body>
+<nav class="top-nav">
+  <a class="brand" href="/">
+    <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC">
+    <span class="brand-title">OxideSLOC</span>
+  </a>
+</nav>
+<main class="page">
+  <div class="card">
+    <h1>Sign In</h1>
+    <p class="subtitle">Enter the API key printed when the server started.</p>
+    {% if has_error %}
+    <div class="error">Incorrect API key — please try again.</div>
+    {% endif %}
+    <form method="POST" action="/auth/login">
+      <input type="hidden" name="next" value="{{ next_url|e }}">
+      <label for="key">API Key</label>
+      <input id="key" type="password" name="key" autocomplete="current-password"
+             placeholder="Paste your API key here" autofocus>
+      <button type="submit" class="btn">Sign In</button>
+    </form>
+    <p class="hint">
+      The API key was printed in the terminal when the server started.<br>
+      To skip auth on a trusted LAN: leave <code>SLOC_API_KEY</code> unset.<br>
+      Note: {{ lockout_threshold }} failed attempts from the same IP triggers a temporary lockout.
+    </p>
+  </div>
+</main>
+</body>
+</html>
+"##,
+    ext = "html"
+)]
+struct LoginTemplate {
+    csp_nonce: String,
+    has_error: bool,
+    next_url: String,
+    lockout_threshold: u32,
 }

@@ -8,7 +8,7 @@ This crate runs the localhost web UI:
 
 - **`serve(config) -> Result<()>`** — starts an Axum HTTP/HTTPS server (default port 4317)
 - **Routes**: `GET /`, `POST /analyze`, `GET /preview`, `GET /pick-directory`, `GET /runs/:id/:artifact`, `GET /view-reports`, `GET /compare-scans`, `GET /embed/summary`, `GET /healthz`
-- **Security**: IP sliding-window rate limiter (60 req/60 s), optional bearer-token auth (`SLOC_API_KEY`), optional TLS (`SLOC_TLS_CERT` / `SLOC_TLS_KEY`), CORS, security headers
+- **Rate limiting and auth**: IP sliding-window rate limiter (60 req/60 s), optional bearer-token auth (`SLOC_API_KEY`), optional TLS (`SLOC_TLS_CERT` / `SLOC_TLS_KEY`), CORS, response headers
 - **Native file picker** via `rfd` — works on Windows and Linux
 - Artifacts persisted to disk with UUID-based run IDs
 

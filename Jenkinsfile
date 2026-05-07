@@ -391,9 +391,9 @@ CARGOEOF
                 script {
                     // CSP is set via ci/jenkins/init.groovy.d/relax-csp.groovy (drop into $JENKINS_HOME/init.groovy.d/)
 
-                    // Input validation — allowlist-check choice and free-text parameters.
-                    // Free-text values are always passed to the shell via withEnv (environment
-                    // variables), never via Groovy string interpolation, to prevent injection.
+                    // Allowlist-check choice and free-text parameters before use.
+                    // Free-text values are passed to the shell via withEnv (environment
+                    // variables), not Groovy string interpolation.
                     def allowedPolicies = ['code-only', 'code-and-comment', 'comment-only', 'separate-mixed-category']
                     def allowedPresets  = ['none', 'default', 'strict', 'full-scope']
                     if (!allowedPolicies.contains(params.MIXED_LINE_POLICY)) {

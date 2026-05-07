@@ -896,9 +896,9 @@ struct WarningOpportunityRow {
     .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap; margin-left: auto; }
     .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; }
     .theme-toggle { width: 38px; justify-content:center; padding:0; }
-    .nav-dropdown-wrap { position: relative; }
+    .nav-dropdown-wrap { position: relative; padding-bottom: 6px; }
     .nav-dropdown-trigger { }
-    .nav-dropdown-menu { display: none; position: absolute; top: calc(100% + 6px); right: 0; background: var(--nav-2); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; min-width: 140px; padding: 6px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.28); }
+    .nav-dropdown-menu { display: none; position: absolute; top: 100%; right: 0; background: var(--nav-2); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; min-width: 140px; padding: 6px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.28); }
     .nav-dropdown-wrap:hover .nav-dropdown-menu, .nav-dropdown-wrap:focus-within .nav-dropdown-menu { display: flex; flex-direction: column; gap: 2px; }
     .nav-dropdown-item { display: block; width: 100%; padding: 8px 12px; border: none; border-radius: 7px; background: transparent; color: #fff; font-size: 13px; font-weight: 700; text-align: left; cursor: pointer; }
     .nav-dropdown-item:hover { background: rgba(255,255,255,0.12); }
@@ -956,6 +956,7 @@ struct WarningOpportunityRow {
     .table-resizable { table-layout: fixed; }
     .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
     .table-resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #skipped-table th, #skipped-table td { padding: 7px 10px; }
     /* Column resize handle */
     .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
     .col-resize-handle:hover, .col-resize-handle.dragging { background: rgba(211,122,76,0.3); }
@@ -1009,7 +1010,7 @@ struct WarningOpportunityRow {
     }
     /* ── Print & PDF export ──────────────────────────────────────────── */
     @page {
-      size: A4 portrait;
+      size: A4 landscape;
       margin: 0.4in 0.45in;
     }
 
@@ -1121,6 +1122,12 @@ struct WarningOpportunityRow {
         widows: 4 !important;
       }
 
+      /* Remove the screen-layout min-width so tables scale to page width */
+      #per-file-table, #skipped-table { min-width: 0 !important; }
+      /* Release sticky column positioning (not meaningful on paper) */
+      #per-file-table th:first-child,
+      #per-file-table td:first-child { position: static !important; }
+
       thead { display: table-header-group; }
       tr { break-inside: avoid !important; }
 
@@ -1129,7 +1136,7 @@ struct WarningOpportunityRow {
         font-size: 9px !important;
         padding: 5px 8px !important;
         background: rgba(211,122,76,0.12) !important;
-        white-space: nowrap;
+        white-space: normal !important;
       }
 
       td {
@@ -1437,7 +1444,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." data-table-filter="skipped-table" /></div></div>
-        <div class="table-shell" style="margin-top:6px;max-height:630px;">
+        <div class="table-shell" style="margin-top:6px;max-height:441px;">
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
@@ -1872,13 +1879,11 @@ struct WarningOpportunityRow {
       bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
       bs+='</svg>';
       var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
-      el.innerHTML='<div style="overflow-x:auto;text-align:center;padding:6px 0;">'+
-        '<table style="display:inline-table;border-collapse:separate;border-spacing:56px 0;margin:0 auto;">'+
-          '<tr>'+
-            '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</td>'+
-            '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</td>'+
-          '</tr>'+
-        '</table>'+
+      el.innerHTML='<div style="overflow-x:auto;padding:6px 0;">'+
+        '<div style="display:flex;flex-wrap:nowrap;justify-content:center;align-items:flex-start;gap:64px;padding:0 24px;">'+
+          '<div style="flex-shrink:0;text-align:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
+          '<div style="flex-shrink:0;text-align:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
+        '</div>'+
       '</div>';
       // Donut segment: entry fade-in + hover scale/brighten
       el.querySelectorAll('.donut-seg').forEach(function(seg,i){

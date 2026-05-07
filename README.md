@@ -40,7 +40,7 @@ Make oxide-sloc reachable from any device on the same network.
 bash scripts/serve-server.sh
 ```
 
-Auto-generates an API key, prints every LAN address the server is reachable on, and gives you a ready-made `curl` test command. If another device times out, your firewall is dropping port 4317 — the script tells you exactly what to run.
+Auto-generates an API key, prints every LAN address the server is reachable on, and gives you a ready-made `curl` test command. If another device times out, your firewall is dropping port 4317 — the script tells you exactly what to run, or pass `--open-firewall` to have it open the port automatically (requires `sudo` on Linux).
 
 **Or run the binary directly:**
 
@@ -51,7 +51,14 @@ oxide-sloc serve --server          # binds to 0.0.0.0:4317
 
 Then open `http://<your-ip>:4317` from any device on the same network (`hostname -I` on Linux, `ipconfig` on Windows).
 
-When an API key is set, requests must include it:
+> **Browsers and the API key:** when `SLOC_API_KEY` is set, every request needs the
+> `Authorization: Bearer <key>` header — browsers don't send this on their own.
+> Instead, navigate to `http://<your-ip>:4317/auth/login` and paste the key into the
+> sign-in form (the server sets an `HttpOnly` session cookie for subsequent requests).
+> Alternatively: leave `SLOC_API_KEY` unset for a quick trusted-LAN test (all endpoints
+> become unauthenticated), or use a header-injecting extension (ModHeader / Requestly).
+
+When an API key is set, CLI/curl callers must include it:
 
 ```bash
 curl -H "Authorization: Bearer $SLOC_API_KEY" http://<your-ip>:4317/healthz
