@@ -63,10 +63,19 @@ free_port() {
 }
 
 # Print the local LAN IP if available (best-effort; no failure on error).
+# On Linux, prefers the default-route interface over docker bridge addresses.
 print_lan_ip() {
     local ip=""
     if [[ "$PLATFORM" == linux ]]; then
-        ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+        # Try the address on the default route first (avoids picking a docker bridge)
+        if command -v ip &>/dev/null; then
+            ip="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1)" || true
+        fi
+        if [[ -z "$ip" ]]; then
+            ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | \
+                grep -vE '^(127\.|172\.(1[6-9]|2[0-9]|3[01])\.|10\.(88|244)\.|169\.254\.|$)' | \
+                head -1)" || true
+        fi
     else
         ip="$(powershell -NoProfile -Command \
             "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -notmatch '^127\.' -and \$_.IPAddress -notmatch '^169\.254\.' } | Select-Object -First 1).IPAddress" \
@@ -75,16 +84,62 @@ print_lan_ip() {
     [[ -n "$ip" ]] && printf '  LAN address \xe2\x86\x92 http://%s:%s\n' "$ip" "$SLOC_PORT"
 }
 
+# ── Firewall preflight (Linux only) ───────────────────────────────────────────
+FIREWALL_STATUS="unknown"
+FIREWALL_FIX=""
+
+check_firewall() {
+    [[ "$PLATFORM" != linux ]] && return
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+        if firewall-cmd --query-port="${SLOC_PORT}/tcp" &>/dev/null 2>&1; then
+            FIREWALL_STATUS="open (firewalld)"
+        else
+            FIREWALL_STATUS="BLOCKED (firewalld active, port not permitted)"
+            FIREWALL_FIX="sudo firewall-cmd --add-port=${SLOC_PORT}/tcp --permanent && sudo firewall-cmd --reload"
+        fi
+    elif command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        if ufw status | grep -qE "^${SLOC_PORT}(/tcp)?[[:space:]]+ALLOW"; then
+            FIREWALL_STATUS="open (ufw)"
+        else
+            FIREWALL_STATUS="BLOCKED (ufw active, port not permitted)"
+            FIREWALL_FIX="sudo ufw allow ${SLOC_PORT}/tcp"
+        fi
+    else
+        FIREWALL_STATUS="no managed firewall detected"
+    fi
+}
+
+# Abort if the port is still in use after free_port — e.g. owned by another user.
+assert_port_free() {
+    [[ "$PLATFORM" == windows ]] && return
+    command -v ss &>/dev/null || return
+    if ss -tln 2>/dev/null | grep -qE ":${SLOC_PORT}\b"; then
+        printf '\nERROR: could not free port %s; another oxide-sloc may be running as a different user.\n' "$SLOC_PORT" >&2
+        printf '  Check: ss -tlnp | grep %s\n\n' "$SLOC_PORT" >&2
+        exit 1
+    fi
+}
+
 launch() {
     free_port
+    assert_port_free
     [[ "$PLATFORM" == linux ]] && chmod +x "$1"
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
     if [[ "$HOST_MODE" == "1" ]]; then
+        check_firewall
         printf '\n  oxide-sloc starting in LAN server mode\n  Local   \xe2\x86\x92 http://127.0.0.1:%s\n' "$SLOC_PORT"
         print_lan_ip
-        printf '  Press Ctrl+C to stop.\n\n'
+        if [[ "$PLATFORM" == linux ]]; then
+            printf '  Firewall: %s\n' "$FIREWALL_STATUS"
+            if [[ -n "$FIREWALL_FIX" ]]; then
+                printf '    Other LAN hosts cannot reach this server until you run:\n'
+                printf '      %s\n' "$FIREWALL_FIX"
+            fi
+        fi
+        printf '\n'
         [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
+        printf '  Press Ctrl+C to stop.\n\n'
         "$1" serve --server
     else
         printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT"
@@ -94,14 +149,24 @@ launch() {
 
 launch_cargo() {
     free_port
+    assert_port_free
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
     export CARGO_INCREMENTAL=0
     if [[ "$HOST_MODE" == "1" ]]; then
+        check_firewall
         printf '\n  oxide-sloc starting in LAN server mode\n  Local   \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n' "$SLOC_PORT" "$SLOC_PORT"
         print_lan_ip
-        printf '  Press Ctrl+C to stop.\n\n'
+        if [[ "$PLATFORM" == linux ]]; then
+            printf '  Firewall: %s\n' "$FIREWALL_STATUS"
+            if [[ -n "$FIREWALL_FIX" ]]; then
+                printf '    Other LAN hosts cannot reach this server until you run:\n'
+                printf '      %s\n' "$FIREWALL_FIX"
+            fi
+        fi
+        printf '\n'
         [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
+        printf '  Press Ctrl+C to stop.\n\n'
         cargo run -p oxide-sloc -- serve --server
     else
         printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT" "$SLOC_PORT"

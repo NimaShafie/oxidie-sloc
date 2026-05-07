@@ -14,7 +14,7 @@
 #   - Dedicated entrypoint — purpose is obvious from the filename
 #   - Generates a random SLOC_API_KEY if one is not already set
 #   - Prints all LAN addresses and a ready-made curl example
-#   - Warns about firewall if needed
+#   - Detects firewall status and provides the exact fix command if blocked
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,6 +74,39 @@ get_lan_ips() {
     fi
 }
 
+# IP on the default route — the address the kernel would use to reach the internet.
+# Returns empty string if ip(8) is unavailable or the route cannot be determined.
+get_primary_ip() {
+    [[ "$PLATFORM" != linux ]] && return
+    command -v ip &>/dev/null || return
+    ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1 || true
+}
+
+# ── Firewall preflight (Linux only) ───────────────────────────────────────────
+FIREWALL_STATUS="unknown"
+FIREWALL_FIX=""
+
+check_firewall() {
+    [[ "$PLATFORM" != linux ]] && return
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+        if firewall-cmd --query-port="${SLOC_PORT}/tcp" &>/dev/null 2>&1; then
+            FIREWALL_STATUS="open (firewalld)"
+        else
+            FIREWALL_STATUS="BLOCKED (firewalld active, port not permitted)"
+            FIREWALL_FIX="sudo firewall-cmd --add-port=${SLOC_PORT}/tcp --permanent && sudo firewall-cmd --reload"
+        fi
+    elif command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        if ufw status | grep -qE "^${SLOC_PORT}(/tcp)?[[:space:]]+ALLOW"; then
+            FIREWALL_STATUS="open (ufw)"
+        else
+            FIREWALL_STATUS="BLOCKED (ufw active, port not permitted)"
+            FIREWALL_FIX="sudo ufw allow ${SLOC_PORT}/tcp"
+        fi
+    else
+        FIREWALL_STATUS="no managed firewall detected"
+    fi
+}
+
 # ── Kill any process already holding the port ──────────────────────────────────
 free_port() {
     if [[ "$PLATFORM" == windows ]]; then
@@ -97,10 +130,37 @@ free_port() {
     fi
 }
 
+# Abort if the port is still in use after free_port — e.g. owned by another user.
+assert_port_free() {
+    [[ "$PLATFORM" == windows ]] && return
+    command -v ss &>/dev/null || return
+    if ss -tln 2>/dev/null | grep -qE ":${SLOC_PORT}\b"; then
+        printf '\nERROR: could not free port %s; another oxide-sloc may be running as a different user.\n' "$SLOC_PORT" >&2
+        printf '  Check: ss -tlnp | grep %s\n\n' "$SLOC_PORT" >&2
+        exit 1
+    fi
+}
+
 # ── Print startup banner ───────────────────────────────────────────────────────
 print_banner() {
-    local lan_ips
-    lan_ips="$(get_lan_ips)"
+    local all_ips primary_ip real_ips docker_ips first_ip
+    all_ips="$(get_lan_ips)"
+    primary_ip="$(get_primary_ip)"
+    # Real LAN IPs: exclude docker/podman/flannel bridge ranges and link-local
+    real_ips="$(echo "$all_ips" | grep -vE '^(172\.(1[6-9]|2[0-9]|3[01])\.|10\.(88|244)\.|169\.254\.)' || true)"
+    # Docker / virtual bridge IPs — shown under a separate sub-heading
+    docker_ips="$(echo "$all_ips" | grep -E '^(172\.(1[6-9]|2[0-9]|3[01])\.|10\.(88|244)\.|169\.254\.)' || true)"
+
+    # Best single IP for the curl example: primary route > first real LAN > first of all
+    if [[ -n "$primary_ip" ]]; then
+        first_ip="$primary_ip"
+    elif [[ -n "$real_ips" ]]; then
+        first_ip="$(echo "$real_ips" | head -1)"
+    elif [[ -n "$all_ips" ]]; then
+        first_ip="$(echo "$all_ips" | head -1)"
+    else
+        first_ip=""
+    fi
 
     printf '\n'
     printf '  ╔══════════════════════════════════════════════════╗\n'
@@ -108,11 +168,23 @@ print_banner() {
     printf '  ╚══════════════════════════════════════════════════╝\n'
     printf '\n'
     printf '  Local   → http://127.0.0.1:%s\n' "$SLOC_PORT"
-    if [[ -n "$lan_ips" ]]; then
+
+    if [[ -n "$all_ips" ]]; then
+        # Primary (default-route) IP listed first
+        [[ -n "$primary_ip" ]] && printf '  Network → http://%s:%s\n' "$primary_ip" "$SLOC_PORT"
+        # Other real LAN IPs (not the primary)
         while IFS= read -r ip; do
-            [[ -z "$ip" ]] && continue
+            [[ -z "$ip" || "$ip" == "$primary_ip" ]] && continue
             printf '  Network → http://%s:%s\n' "$ip" "$SLOC_PORT"
-        done <<< "$lan_ips"
+        done <<< "$real_ips"
+        # Docker / virtual bridge IPs under a clearly labelled sub-heading
+        if [[ -n "$docker_ips" ]]; then
+            printf '  (docker / virtual interfaces):\n'
+            while IFS= read -r ip; do
+                [[ -z "$ip" || "$ip" == "$primary_ip" ]] && continue
+                printf '    http://%s:%s\n' "$ip" "$SLOC_PORT"
+            done <<< "$docker_ips"
+        fi
     else
         printf '  Network → (could not detect LAN IP — run hostname -I or ipconfig)\n'
     fi
@@ -130,9 +202,7 @@ print_banner() {
     fi
     printf '\n'
 
-    if [[ -n "$lan_ips" ]]; then
-        local first_ip
-        first_ip="$(echo "$lan_ips" | head -1)"
+    if [[ -n "$first_ip" ]]; then
         printf '  Test from another device:\n'
         printf '    curl -H "Authorization: Bearer %s" http://%s:%s/healthz\n' \
                "$SLOC_API_KEY" "$first_ip" "$SLOC_PORT"
@@ -140,9 +210,11 @@ print_banner() {
     printf '\n'
 
     if [[ "$PLATFORM" == linux ]]; then
-        printf '  Firewall: ensure port %s/tcp is open.\n' "$SLOC_PORT"
-        printf '    sudo ufw allow %s/tcp    (UFW)\n' "$SLOC_PORT"
-        printf '    sudo firewall-cmd --add-port=%s/tcp --permanent  (firewalld)\n' "$SLOC_PORT"
+        printf '  Firewall: %s\n' "$FIREWALL_STATUS"
+        if [[ -n "$FIREWALL_FIX" ]]; then
+            printf '    Other LAN hosts cannot reach this server until you run:\n'
+            printf '      %s\n' "$FIREWALL_FIX"
+        fi
         printf '\n'
     fi
 
@@ -153,7 +225,9 @@ print_banner() {
 do_launch_binary() {
     local bin="$1"
     free_port
+    assert_port_free
     [[ "$PLATFORM" == linux ]] && chmod +x "$bin"
+    check_firewall
     print_banner
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
@@ -162,6 +236,8 @@ do_launch_binary() {
 
 do_launch_cargo() {
     free_port
+    assert_port_free
+    check_firewall
     print_banner
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
