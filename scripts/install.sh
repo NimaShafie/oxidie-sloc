@@ -5,6 +5,10 @@
 #   bash scripts/install.sh           # auto-detects best path
 #   bash scripts/install.sh --rebuild # force a fresh build even if binary exists
 #   bash scripts/install.sh --auto    # install rustup automatically if needed (no prompt)
+#   bash scripts/install.sh --offline # skip GitHub Release download (true air-gap mode)
+#
+# Environment:
+#   OXIDE_SLOC_NO_DOWNLOAD=1  same as --offline
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,12 +16,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 FORCE_REBUILD=false
 AUTO_RUSTUP=false
+OFFLINE=false
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true ;;
         --auto) AUTO_RUSTUP=true ;;
+        --offline) OFFLINE=true ;;
     esac
 done
+[[ "${OXIDE_SLOC_NO_DOWNLOAD:-}" == "1" ]] && OFFLINE=true
 
 # Detect Windows (Git Bash / MSYS2 / Cygwin)
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
@@ -28,7 +35,12 @@ if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" ==
 else
     PLATFORM=linux
     EXE="$REPO_ROOT/oxide-sloc"
-    DIST_ARCHIVE="$REPO_ROOT/dist/oxide-sloc-linux-x86_64.tar.gz"
+    # Detect host architecture so we fetch the right release asset
+    case "$(uname -m 2>/dev/null)" in
+        aarch64|arm64) LINUX_ARCH=arm64 ;;
+        *)             LINUX_ARCH=x86_64 ;;
+    esac
+    DIST_ARCHIVE="$REPO_ROOT/dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
@@ -65,6 +77,55 @@ if [[ -f "$DIST_ARCHIVE" ]]; then
     fi
     if [[ -f "$EXE" ]]; then
         [[ "$PLATFORM" == linux ]] && chmod +x "$EXE"
+        echo " [OK] Extracted $(basename "$EXE")"
+        echo ""
+        echo " Start the web UI:  bash scripts/run.sh"
+        exit 0
+    fi
+    echo " [WARN] Extraction completed but binary not found — archive may be corrupt."
+fi
+
+# ── 2.5. Download release binary from GitHub (Linux, internet available) ────
+if [[ "$PLATFORM" == linux ]] && [[ "$OFFLINE" == false ]] && ! command -v cargo &>/dev/null; then
+    if command -v curl &>/dev/null; then
+        VER=$(grep -m1 '^version = ' "$REPO_ROOT/Cargo.toml" 2>/dev/null | sed 's/version = "\(.*\)"/\1/')
+        if [[ -n "$VER" ]]; then
+            RELEASE_URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/v${VER}/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
+            SUMS_URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/v${VER}/SHA256SUMS.txt"
+            echo " Downloading release binary v${VER} (${LINUX_ARCH}) from GitHub..."
+            mkdir -p "$REPO_ROOT/dist"
+            if curl -fsSL --connect-timeout 10 --max-time 120 -o "$DIST_ARCHIVE" "$RELEASE_URL"; then
+                # Verify SHA256 when sha256sum is available
+                SUMS_TMP=$(mktemp)
+                if command -v sha256sum &>/dev/null && \
+                   curl -fsSL --connect-timeout 10 --max-time 30 -o "$SUMS_TMP" "$SUMS_URL" 2>/dev/null; then
+                    EXPECTED=$(grep "oxide-sloc-linux-${LINUX_ARCH}.tar.gz" "$SUMS_TMP" 2>/dev/null | awk '{print $1}')
+                    ACTUAL=$(sha256sum "$DIST_ARCHIVE" | awk '{print $1}')
+                    rm -f "$SUMS_TMP"
+                    if [[ -n "$EXPECTED" ]] && [[ "$EXPECTED" != "$ACTUAL" ]]; then
+                        echo " [ERROR] SHA256 mismatch — download may be corrupt or tampered." >&2
+                        rm -f "$DIST_ARCHIVE"
+                    else
+                        echo " [OK] Downloaded and verified."
+                    fi
+                else
+                    rm -f "$SUMS_TMP"
+                    echo " [OK] Downloaded (sha256sum not available — skipping checksum verification)."
+                fi
+            else
+                echo " [WARN] Could not reach GitHub Releases — continuing without download."
+                rm -f "$DIST_ARCHIVE"
+            fi
+        fi
+    fi
+fi
+
+# Re-check dist/ archive after potential download
+if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
+    echo " Extracting pre-built binary from dist/..."
+    tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
+    if [[ -f "$EXE" ]]; then
+        chmod +x "$EXE"
         echo " [OK] Extracted $(basename "$EXE")"
         echo ""
         echo " Start the web UI:  bash scripts/run.sh"
@@ -119,24 +180,26 @@ fi
 echo ""
 echo " No pre-built binary found and no Rust toolchain detected."
 echo ""
-echo " This repository is fully self-contained — no internet required."
-echo " Refer to docs/airgap.md for the correct path for your environment:"
-echo ""
 if [[ "$PLATFORM" == windows ]]; then
-    echo "  • oxide-sloc.exe should be present in the repository root."
-    echo "    Ensure you have the complete repository package (not just source files)."
+    echo " oxide-sloc.exe should be present in the repository root."
+    echo " Ensure you have the complete repository package (not just source files)."
+    echo " Full deployment guide: docs/airgap.md"
 else
-    echo "  • Linux pre-built binary:"
-    echo "    Place dist/oxide-sloc-linux-x86_64.tar.gz alongside this repository"
-    echo "    (produced by CI or a networked build machine), then re-run:"
+    echo " Options (see docs/airgap.md for details):"
+    echo ""
+    echo "  • Internet available (automatic — just re-run without --offline):"
+    echo "    install.sh fetches the release binary from GitHub automatically"
+    echo "    when curl is present and no Rust toolchain is detected."
+    echo "    curl is required. To skip: bash scripts/install.sh --offline"
+    echo ""
+    echo "  • Pre-staged dist/ bundle (Option B — no internet on target machine):"
+    echo "    Place dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz here, then re-run:"
     echo "    bash scripts/install.sh"
     echo ""
-    echo "  • Linux source build (Rust not installed):"
-    echo "    Use the self-contained airgap kit. On a networked machine run:"
-    echo "    bash scripts/internal/make-airgap-kit.sh"
-    echo "    Transfer the resulting archive via USB or internal file server, then:"
-    echo "    tar xzf oxide-sloc-airgap-kit-*.tar.gz"
-    echo "    cd oxide-sloc-airgap-kit-*/"
+    echo "  • Full air-gap kit (Option D — no internet, no Rust, no curl):"
+    echo "    On a networked machine: bash scripts/internal/make-airgap-kit.sh"
+    echo "    Transfer the kit archive, then:"
+    echo "    tar xzf oxide-sloc-airgap-kit-*.tar.gz && cd oxide-sloc-airgap-kit-*/"
     echo "    bash install.sh"
 fi
 echo ""

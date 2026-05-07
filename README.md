@@ -21,7 +21,13 @@ bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**No internet connection required.** The repository is fully self-contained — `oxide-sloc.exe` is bundled in the repository root for Windows; `vendor.tar.xz` covers all Rust crate sources for a fully offline build. See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths including Linux without Rust.
+**Internet requirements depend on your platform:**
+- **Windows** — no internet needed; `oxide-sloc.exe` is bundled in the repository root.
+- **Linux with Rust** — no internet needed; `vendor.tar.xz` covers all crate sources for a fully offline build.
+- **Linux without Rust, internet available** — `install.sh` fetches the release binary from GitHub automatically when `curl` is present.
+- **Linux without Rust, no internet** — use a pre-staged `dist/` bundle or the Option D air-gap kit.
+
+See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths.
 
 ---
 
@@ -36,6 +42,7 @@ bash scripts/serve-server.sh
 ```
 
 This auto-generates an API key, prints every LAN address the server is reachable on, and gives you a ready-made `curl` test command.
+If `curl` from another device times out, the server is bound but your firewall is dropping 4317. The script will tell you exactly what to run.
 
 **Or use the regular launcher with the `--host` flag:**
 
@@ -117,10 +124,12 @@ bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
 bash scripts/run.sh        # http://127.0.0.1:4317
 ```
 
-The script tries in order: binary in repo root → `dist/` bundle → offline vendor build. No internet required — all files are committed to this repository.
+The script tries in order: binary in repo root → `dist/` bundle → GitHub Release download → offline vendor build.
 
-- **Windows:** `oxide-sloc.exe` is in the repository root. Clone and run — nothing to build.
-- **Linux:** the installer builds from the committed `vendor.tar.xz` when Rust is available, or extracts a pre-built binary from `dist/` if present. For Linux without Rust, see [`docs/airgap.md`](./docs/airgap.md) → Option D (airgap kit).
+- **Windows:** `oxide-sloc.exe` is in the repository root. Clone and run — nothing to build, no internet required.
+- **Linux with Rust:** builds from the committed `vendor.tar.xz` — no internet required.
+- **Linux without Rust, internet available:** `install.sh` automatically downloads the matching release binary from GitHub (requires `curl`). Pass `--offline` or set `OXIDE_SLOC_NO_DOWNLOAD=1` to skip.
+- **Linux without Rust, no internet:** place `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) alongside the repo, or use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 
