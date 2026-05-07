@@ -590,6 +590,18 @@ jobs:
               -exec cp -v {} artifacts/ \;
           fi
 
+      - name: Create Linux tarball archives
+        shell: bash
+        run: |
+          for arch in x86_64 arm64; do
+            binary="artifacts/oxide-sloc-linux-${arch}"
+            if [[ -f "$binary" ]]; then
+              tar czf "artifacts/oxide-sloc-linux-${arch}.tar.gz" \
+                -C artifacts "oxide-sloc-linux-${arch}"
+              echo "Created oxide-sloc-linux-${arch}.tar.gz"
+            fi
+          done
+
       - name: Generate SHA-256 checksums
         shell: bash
         run: |

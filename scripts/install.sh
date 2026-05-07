@@ -2,10 +2,11 @@
 # oxide-sloc installer
 #
 # Usage:
-#   bash scripts/install.sh           # auto-detects best path
+#   bash scripts/install.sh           # auto-detects best path (offline by default)
 #   bash scripts/install.sh --rebuild # force a fresh build even if binary exists
 #   bash scripts/install.sh --auto    # install rustup automatically if needed (no prompt)
-#   bash scripts/install.sh --offline # skip GitHub Release download (true air-gap mode)
+#   bash scripts/install.sh --offline # explicit offline mode (now the default; kept for compatibility)
+#   bash scripts/install.sh --online  # allow downloading release binary from GitHub if needed
 #
 # Environment:
 #   OXIDE_SLOC_NO_DOWNLOAD=1  same as --offline
@@ -16,12 +17,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 FORCE_REBUILD=false
 AUTO_RUSTUP=false
-OFFLINE=false
+OFFLINE=true   # default: no internet required; use --online to opt in
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true ;;
         --auto) AUTO_RUSTUP=true ;;
         --offline) OFFLINE=true ;;
+        --online) OFFLINE=false ;;
     esac
 done
 [[ "${OXIDE_SLOC_NO_DOWNLOAD:-}" == "1" ]] && OFFLINE=true
@@ -85,7 +87,7 @@ if [[ -f "$DIST_ARCHIVE" ]]; then
     echo " [WARN] Extraction completed but binary not found — archive may be corrupt."
 fi
 
-# ── 2.5. Download release binary from GitHub (Linux, internet available) ────
+# ── 2.5. Download release binary from GitHub (Linux, --online requested) ────
 if [[ "$PLATFORM" == linux ]] && [[ "$OFFLINE" == false ]] && ! command -v cargo &>/dev/null; then
     if command -v curl &>/dev/null; then
         VER=$(grep -m1 '^version = ' "$REPO_ROOT/Cargo.toml" 2>/dev/null | sed 's/version = "\(.*\)"/\1/')
@@ -97,20 +99,23 @@ if [[ "$PLATFORM" == linux ]] && [[ "$OFFLINE" == false ]] && ! command -v cargo
             if curl -fsSL --connect-timeout 10 --max-time 120 -o "$DIST_ARCHIVE" "$RELEASE_URL"; then
                 # Verify SHA256 when sha256sum is available
                 SUMS_TMP=$(mktemp)
+                ASSET="oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
                 if command -v sha256sum &>/dev/null && \
                    curl -fsSL --connect-timeout 10 --max-time 30 -o "$SUMS_TMP" "$SUMS_URL" 2>/dev/null; then
-                    EXPECTED=$(grep "oxide-sloc-linux-${LINUX_ARCH}.tar.gz" "$SUMS_TMP" 2>/dev/null | awk '{print $1}')
+                    EXPECTED=$(grep "$ASSET" "$SUMS_TMP" 2>/dev/null | awk '{print $1}' || true)
                     ACTUAL=$(sha256sum "$DIST_ARCHIVE" | awk '{print $1}')
                     rm -f "$SUMS_TMP"
                     if [[ -n "$EXPECTED" ]] && [[ "$EXPECTED" != "$ACTUAL" ]]; then
                         echo " [ERROR] SHA256 mismatch — download may be corrupt or tampered." >&2
                         rm -f "$DIST_ARCHIVE"
+                    elif [[ -z "$EXPECTED" ]]; then
+                        echo " [OK] Downloaded (no entry for ${ASSET} in SHA256SUMS.txt — skipping verification)."
                     else
                         echo " [OK] Downloaded and verified."
                     fi
                 else
                     rm -f "$SUMS_TMP"
-                    echo " [OK] Downloaded (sha256sum not available — skipping checksum verification)."
+                    echo " [OK] Downloaded (checksum file unavailable — skipping verification)."
                 fi
             else
                 echo " [WARN] Could not reach GitHub Releases — continuing without download."
@@ -187,10 +192,10 @@ if [[ "$PLATFORM" == windows ]]; then
 else
     echo " Options (see docs/airgap.md for details):"
     echo ""
-    echo "  • Internet available (automatic — just re-run without --offline):"
+    echo "  • Internet available (opt-in — re-run with --online):"
     echo "    install.sh fetches the release binary from GitHub automatically"
     echo "    when curl is present and no Rust toolchain is detected."
-    echo "    curl is required. To skip: bash scripts/install.sh --offline"
+    echo "    curl is required. Run: bash scripts/install.sh --online"
     echo ""
     echo "  • Pre-staged dist/ bundle (Option B — no internet on target machine):"
     echo "    Place dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz here, then re-run:"
