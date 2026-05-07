@@ -388,7 +388,7 @@ pub fn make_test_router() -> Router {
         server_mode: false,
         tls_enabled: false,
         api_keys: vec![],
-        rate_limiter: Arc::new(IpRateLimiter::new(Duration::from_secs(60), 60)),
+        rate_limiter: Arc::new(IpRateLimiter::new(Duration::from_secs(60), 600)),
         trust_proxy: false,
         git_clones_dir: tmp.join("git-clones"),
         schedules: Arc::new(Mutex::new(ScheduleStore::default())),
@@ -458,8 +458,8 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         );
     }
 
-    // 60 req/min per IP across all routes.
-    let rate_limiter = Arc::new(IpRateLimiter::new(Duration::from_mins(1), 60));
+    // 600 req/min per IP across all routes (10/sec — suits local/air-gapped use).
+    let rate_limiter = Arc::new(IpRateLimiter::new(Duration::from_mins(1), 600));
 
     let git_clones_dir = resolve_git_clones_dir(&output_root);
     let schedules_path = std::env::var("SLOC_SCHEDULES_PATH")
@@ -3064,6 +3064,8 @@ struct HistoryEntryRow {
     has_json: bool,
     has_pdf: bool,
     submodule_links: Vec<SubmoduleLinkRow>,
+    /// Comma-separated submodule names used as a `data-submodules` HTML attribute.
+    submodule_names_csv: String,
 }
 
 fn fmt_pst(dt: chrono::DateTime<chrono::Utc>) -> String {
@@ -3081,36 +3083,15 @@ fn fmt_git_date(iso: &str) -> Option<String> {
 fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
     reg.entries
         .iter()
-        .map(|e| HistoryEntryRow {
-            run_id: e.run_id.clone(),
-            run_id_short: e
-                .run_id
-                .split('-')
-                .next_back()
-                .unwrap_or(&e.run_id)
-                .chars()
-                .take(7)
-                .collect(),
-            timestamp: fmt_pst(e.timestamp_utc),
-            project_label: e.project_label.clone(),
-            project_path: e
-                .input_roots
-                .first()
-                .map(|s| sanitize_path_str(s))
-                .unwrap_or_default(),
-            files_analyzed: e.summary.files_analyzed,
-            files_skipped: e.summary.files_skipped,
-            code_lines: e.summary.code_lines,
-            comment_lines: e.summary.comment_lines,
-            blank_lines: e.summary.blank_lines,
-            git_branch: e.git_branch.clone().unwrap_or_default(),
-            git_commit: e.git_commit.clone().unwrap_or_default(),
-            has_html: e.html_path.as_ref().is_some_and(|p| p.exists()),
-            has_json: e.json_path.as_ref().is_some_and(|p| p.exists()),
-            has_pdf: e.pdf_path.as_ref().is_some_and(|p| p.exists()),
-            submodule_links: {
+        .map(|e| {
+            let submodule_links = {
                 let mut links: Vec<SubmoduleLinkRow> = vec![];
-                if let Some(dir) = e.html_path.as_ref().and_then(|p| p.parent()) {
+                let sub_dir = e
+                    .html_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .or_else(|| e.json_path.as_ref().and_then(|p| p.parent()));
+                if let Some(dir) = sub_dir {
                     if let Ok(rd) = std::fs::read_dir(dir) {
                         for entry_res in rd.flatten() {
                             let fname = entry_res.file_name();
@@ -3128,7 +3109,42 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                 }
                 links.sort_by(|a, b| a.name.cmp(&b.name));
                 links
-            },
+            };
+            let submodule_names_csv = submodule_links
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            HistoryEntryRow {
+                run_id: e.run_id.clone(),
+                run_id_short: e
+                    .run_id
+                    .split('-')
+                    .next_back()
+                    .unwrap_or(&e.run_id)
+                    .chars()
+                    .take(7)
+                    .collect(),
+                timestamp: fmt_pst(e.timestamp_utc),
+                project_label: e.project_label.clone(),
+                project_path: e
+                    .input_roots
+                    .first()
+                    .map(|s| sanitize_path_str(s))
+                    .unwrap_or_default(),
+                files_analyzed: e.summary.files_analyzed,
+                files_skipped: e.summary.files_skipped,
+                code_lines: e.summary.code_lines,
+                comment_lines: e.summary.comment_lines,
+                blank_lines: e.summary.blank_lines,
+                git_branch: e.git_branch.clone().unwrap_or_default(),
+                git_commit: e.git_commit.clone().unwrap_or_default(),
+                has_html: e.html_path.as_ref().is_some_and(|p| p.exists()),
+                has_json: e.json_path.as_ref().is_some_and(|p| p.exists()),
+                has_pdf: e.pdf_path.as_ref().is_some_and(|p| p.exists()),
+                submodule_links,
+                submodule_names_csv,
+            }
         })
         .collect()
 }
@@ -3201,6 +3217,8 @@ struct CompareQuery {
     b: Option<String>,
     /// Optional submodule name to scope the comparison to one submodule.
     sub: Option<String>,
+    /// "super" to exclude all submodule files and show only the super-repo.
+    scope: Option<String>,
 }
 
 struct CompareFileDeltaRow {
@@ -3416,27 +3434,23 @@ async fn compare_handler(
     };
 
     let active_submodule = query.sub.clone();
+    let super_scope_active = query.scope.as_deref() == Some("super");
 
-    // Build the intersection of submodule names present in both runs.
-    // Only populated when submodule_breakdown was enabled for both scans.
+    // Build the union of submodule names present in either run so users can
+    // scope to a submodule even when it only exists in one of the two scans.
     let submodule_options = {
-        let base_names: Vec<&str> = baseline_run
-            .submodule_summaries
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
-        let mut opts: Vec<String> = current_run
-            .submodule_summaries
-            .iter()
-            .filter(|s| base_names.contains(&s.name.as_str()))
-            .map(|s| s.name.clone())
-            .collect();
-        opts.sort();
-        opts
+        let mut names = std::collections::BTreeSet::new();
+        for s in &baseline_run.submodule_summaries {
+            names.insert(s.name.clone());
+        }
+        for s in &current_run.submodule_summaries {
+            names.insert(s.name.clone());
+        }
+        names.into_iter().collect::<Vec<_>>()
     };
+    let has_any_submodule_data = !submodule_options.is_empty();
 
-    // When a submodule scope is active, narrow per_file_records to that submodule
-    // and recompute summary totals so the delta cards reflect submodule-only counts.
+    // Narrow per_file_records when a scope is active, then recompute totals.
     let (effective_baseline, effective_current) = if let Some(ref sub_name) = active_submodule {
         let mut b = baseline_run.clone();
         let mut c = current_run.clone();
@@ -3444,6 +3458,14 @@ async fn compare_handler(
             .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
         c.per_file_records
             .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+        recompute_summary_from_records(&mut b);
+        recompute_summary_from_records(&mut c);
+        (b, c)
+    } else if super_scope_active {
+        let mut b = baseline_run.clone();
+        let mut c = current_run.clone();
+        b.per_file_records.retain(|f| f.submodule.is_none());
+        c.per_file_records.retain(|f| f.submodule.is_none());
         recompute_summary_from_records(&mut b);
         recompute_summary_from_records(&mut c);
         (b, c)
@@ -3483,13 +3505,17 @@ async fn compare_handler(
         .unwrap_or_default();
     let lines_added = sum_added_code_lines(&comparison);
     let lines_removed = sum_removed_code_lines(&comparison);
+    // True when the selected scope had no files in the baseline — e.g. comparing a submodule
+    // that only exists in the current scan or using Super-repo only on an older scan.
+    let new_scope = comparison.summary.baseline_code == 0 && comparison.summary.current_code > 0;
     let churn_pct = if comparison.summary.baseline_code > 0 {
         (lines_added + lines_removed) as f64 / comparison.summary.baseline_code as f64 * 100.0
     } else {
         0.0
     };
-    let scope_flag = comparison.summary.baseline_code > 0
-        && lines_added as f64 / comparison.summary.baseline_code as f64 > 0.20;
+    let scope_flag = new_scope
+        || (comparison.summary.baseline_code > 0
+            && lines_added as f64 / comparison.summary.baseline_code as f64 > 0.20);
     let s = &comparison.summary;
     let template = CompareTemplate {
         version: env!("CARGO_PKG_VERSION"),
@@ -3534,12 +3560,15 @@ async fn compare_handler(
         comment_lines_pct_str: fmt_pct(s.comment_lines_delta, s.baseline_comments),
         code_lines_added: lines_added,
         code_lines_removed: lines_removed,
-        churn_rate_str: if s.baseline_code > 0 {
+        new_scope,
+        churn_rate_str: if new_scope {
+            "New".to_string()
+        } else if s.baseline_code > 0 {
             format!("{churn_pct:.1}%")
         } else {
             "—".to_string()
         },
-        churn_rate_class: if churn_pct > 20.0 {
+        churn_rate_class: if new_scope || churn_pct > 20.0 {
             "high".into()
         } else if churn_pct > 5.0 {
             "med".into()
@@ -3572,7 +3601,9 @@ async fn compare_handler(
             .unwrap_or(&project_path)
             .to_string(),
         submodule_options,
+        has_any_submodule_data,
         active_submodule,
+        super_scope_active,
         csp_nonce,
     };
 
@@ -8555,29 +8586,34 @@ struct ScanSetupTemplate {
           <div class="pill-row"><span class="soft-chip">{{ submodule_rows.len() }} submodule{% if submodule_rows.len() != 1 %}s{% endif %}</span></div>
         </div>
         <div style="overflow:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;">
+        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:700px;">
+          <colgroup>
+            <col style="width:18%"><col style="width:30%">
+            <col style="width:7%"><col style="width:9%"><col style="width:7%">
+            <col style="width:10%"><col style="width:7%"><col style="width:12%">
+          </colgroup>
           <thead>
             <tr>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;">Submodule</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;">Path</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;">Files</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;">Physical</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;">Code</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;">Comments</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;">Blank</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;">Report</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Path</th>
+              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
+              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
+              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
+              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Comments</th>
+              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Blank</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
             </tr>
           </thead>
           <tbody>
             {% for row in submodule_rows %}
             <tr>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;"><strong>{{ row.name }}</strong></td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);"><code style="font-size:12px;">{{ row.relative_path }}</code></td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:right;">{{ row.files_analyzed }}</td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:right;">{{ row.total_physical_lines }}</td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:right;">{{ row.code_lines }}</td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:right;">{{ row.comment_lines }}</td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:right;">{{ row.blank_lines }}</td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);word-break:break-all;"><code style="font-size:12px;">{{ row.relative_path }}</code></td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.files_analyzed }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.total_physical_lines }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.code_lines }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.comment_lines }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.blank_lines }}</td>
               <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:center;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 12px;min-height:0;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
@@ -8874,7 +8910,7 @@ struct ScanSetupTemplate {
         function px(n){return Math.round(n);}
         var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
         var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
-        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
         if(D.length===1){
           var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
           ds+='<circle cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
@@ -8901,7 +8937,7 @@ struct ScanSetupTemplate {
         ds+='</svg>';
         var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
         var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
-        var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="max-width:100%;display:block;" xmlns="http://www.w3.org/2000/svg">';
+        var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
         D.forEach(function(d,i){
           var y=10+i*rHb,x=LW;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
@@ -8917,11 +8953,13 @@ struct ScanSetupTemplate {
         bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
         bs+='</svg>';
         var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
-        el.innerHTML='<div style="width:100%;overflow-x:auto;display:flex;justify-content:center;padding:6px 0;">'+
-          '<div style="display:inline-flex;gap:56px;align-items:flex-start;flex-wrap:nowrap;flex-shrink:0;">'+
-            '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
-            '<div style="display:flex;flex-direction:column;align-items:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
-          '</div>'+
+        el.innerHTML='<div style="overflow-x:auto;text-align:center;padding:6px 0;">'+
+          '<table style="display:inline-table;border-collapse:separate;border-spacing:56px 0;margin:0 auto;">'+
+            '<tr>'+
+              '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</td>'+
+              '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</td>'+
+            '</tr>'+
+          '</table>'+
         '</div>';
       })();
 
@@ -9632,8 +9670,7 @@ struct ErrorTemplate {
     .submod-details{margin-top:6px;font-size:12px;color:var(--muted);}
     .submod-details summary{cursor:pointer;font-weight:600;user-select:none;list-style:none;padding:2px 0;}
     .submod-details summary::-webkit-details-marker{display:none;}
-    .submod-spacer{margin-top:6px;height:21px;}
-    .submod-link-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;}
+.submod-link-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;}
     .submod-view-btn{display:inline-flex;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(111,155,255,0.10);border:1px solid rgba(111,155,255,0.22);color:var(--accent-2);text-decoration:none;white-space:nowrap;}
     .submod-view-btn:hover{background:rgba(111,155,255,0.22);}
     body.dark-theme .submod-view-btn{background:rgba(111,155,255,0.14);border-color:rgba(111,155,255,0.28);color:var(--accent);}
@@ -9791,8 +9828,6 @@ struct ErrorTemplate {
                     {% endfor %}
                   </div>
                 </details>
-                {% else %}
-                <div class="submod-spacer"></div>
                 {% endif %}
               </td>
             </tr>
@@ -10183,12 +10218,15 @@ struct HistoryTemplate {
     .sel-badge{display:block;width:22px;height:22px;margin:0 auto;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--surface-2);line-height:20px;text-align:center;font-size:11px;font-weight:900;color:var(--muted-2);transition:background .12s,border-color .12s;}
     tr.selected .sel-badge{background:var(--sel-border);border-color:var(--sel-border);color:#fff;}
     #compare-table td:nth-child(3){white-space:normal;word-break:break-word;overflow:visible;}
-    .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
+    .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn:hover{background:var(--line);}
     .btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
     .btn.primary:hover{opacity:.9;}
     .btn:disabled{opacity:.35;cursor:default;pointer-events:none;}
-    #reset-view-btn{padding:5px 14px;}
+    .filter-row{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
+    .filter-row>*{height:30px;box-sizing:border-box;}
+    .submod-chips-cell{display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-height:50px;overflow:hidden;}
+    .submod-overflow-badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px;background:var(--surface);border:1px solid var(--line-strong);color:var(--muted);white-space:nowrap;}
     .btn-back{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;}
     .btn-back:hover{background:var(--line);}
     .empty-state{text-align:center;padding:48px 24px;color:var(--muted);}
@@ -10219,6 +10257,24 @@ struct HistoryTemplate {
     .sel-count{font-size:11px;background:rgba(255,255,255,0.22);border-radius:999px;padding:1px 8px;font-weight:800;letter-spacing:.02em;margin-left:2px;}
     .instruction-bar{background:rgba(111,155,255,0.08);border:1px solid rgba(111,155,255,0.22);border-radius:10px;padding:8px 14px;font-size:13px;color:var(--accent-2);display:inline-flex;align-items:center;gap:8px;margin-bottom:14px;width:fit-content;max-width:100%;}
     body.dark-theme .instruction-bar{background:rgba(111,155,255,0.12);color:var(--accent);}
+    .submod-chip{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;background:rgba(111,155,255,0.10);border:1px solid rgba(111,155,255,0.25);color:var(--accent-2);margin:1px 2px 1px 0;white-space:nowrap;}
+    body.dark-theme .submod-chip{background:rgba(111,155,255,0.16);border-color:rgba(111,155,255,0.32);color:var(--accent);}
+    #compare-table td:nth-child(11){white-space:normal;overflow:visible;}
+    .hidden{display:none!important;}
+    .scope-panel{background:rgba(111,155,255,0.06);border:1.5px solid rgba(111,155,255,0.28);border-radius:12px;padding:12px 16px;margin-bottom:14px;animation:fadeIn .15s ease;}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
+    body.dark-theme .scope-panel{background:rgba(111,155,255,0.09);border-color:rgba(111,155,255,0.32);}
+    .scope-panel-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+    .scope-panel-label svg{stroke:currentColor;fill:none;stroke-width:2;}
+    .scope-options{display:flex;flex-wrap:wrap;gap:8px;}
+    .scope-option{display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface);cursor:pointer;font-size:12px;font-weight:700;color:var(--text);transition:border-color .12s,background .12s,color .12s;user-select:none;}
+    .scope-option:hover{background:var(--line);}
+    .scope-option.selected{border-color:var(--accent-2);background:rgba(111,155,255,0.12);color:var(--accent-2);}
+    body.dark-theme .scope-option.selected{background:rgba(111,155,255,0.18);color:var(--accent);}
+    .scope-option-radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--surface-2);flex:0 0 auto;position:relative;transition:border-color .12s;}
+    .scope-option.selected .scope-option-radio{border-color:var(--accent-2);}
+    .scope-option.selected .scope-option-radio::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--accent-2);}
+    .scope-option-sep{width:1px;height:16px;background:rgba(111,155,255,0.28);margin:0 2px;flex-shrink:0;}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
@@ -10294,30 +10350,36 @@ struct HistoryTemplate {
         Run your first analysis from the <a href="/scan">scan page</a>.
       </div>
       {% else %}
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
-        <div class="instruction-bar" style="margin-bottom:0;flex-shrink:0;">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-          Click any two rows to select them, then press <strong>Compare</strong> to view the scan delta.
+      <div class="instruction-bar">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+        Click any two rows to select them, then press <strong>Compare</strong> to view the scan delta.
+      </div>
+      <div class="filter-row">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
+        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
+        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
+      </div>
+      <div class="scope-panel hidden" id="scope-panel">
+        <div class="scope-panel-label">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
+          Compare scope — choose what to include
         </div>
-        <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-          <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
-          <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
-          <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
-        </div>
+        <div class="scope-options" id="scope-options"></div>
       </div>
       <div class="table-wrap">
         <table id="compare-table">
           <colgroup>
-            <col style="width:32px">
-            <col style="width:150px">
-            <col style="width:220px">
-            <col style="width:95px">
-            <col style="width:70px">
-            <col style="width:70px">
-            <col style="width:75px">
-            <col style="width:65px">
-            <col style="width:80px">
-            <col style="width:90px">
+            <col style="width:3%">
+            <col style="width:12%">
+            <col style="width:13%">
+            <col style="width:9%">
+            <col style="width:6%">
+            <col style="width:9%">
+            <col style="width:8%">
+            <col style="width:6%">
+            <col style="width:8%">
+            <col style="width:14%">
+            <col style="width:12%">
           </colgroup>
           <thead>
             <tr id="compare-thead">
@@ -10331,11 +10393,12 @@ struct HistoryTemplate {
               <th class="sortable" data-sort-col="blank" data-sort-type="num">Blank<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="branch" data-sort-type="str">Branch<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="commit" data-sort-type="str">Commit<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th>Submodules<div class="col-resize-handle"></div></th>
             </tr>
           </thead>
           <tbody id="compare-tbody">
             {% for entry in entries %}
-            <tr class="compare-row" data-run="{{ entry.run_id }}"
+            <tr class="compare-row" data-run="{{ entry.run_id }}" data-vid="{{ entry.run_id }}"
                 data-timestamp="{{ entry.timestamp }}"
                 data-project="{{ entry.project_label }}"
                 data-files="{{ entry.files_analyzed }}"
@@ -10343,7 +10406,8 @@ struct HistoryTemplate {
                 data-comments="{{ entry.comment_lines }}"
                 data-blank="{{ entry.blank_lines }}"
                 data-branch="{{ entry.git_branch }}"
-                data-commit="{{ entry.git_commit }}">
+                data-commit="{{ entry.git_commit }}"
+                data-submodules="{{ entry.submodule_names_csv }}">
               <td style="text-align:center;padding-left:4px;padding-right:4px;"><span class="sel-badge" id="badge-{{ entry.run_id }}"></span></td>
               <td>{{ entry.timestamp }}</td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
@@ -10354,6 +10418,7 @@ struct HistoryTemplate {
               <td><span class="metric-num">{{ entry.blank_lines }}</span></td>
               <td>{% if !entry.git_branch.is_empty() %}<span class="git-chip">{{ entry.git_branch }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
               <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip">{{ entry.git_commit }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
+              <td style="white-space:normal;vertical-align:middle;">{% if !entry.submodule_links.is_empty() %}<div class="submod-chips-cell">{% for sub in entry.submodule_links %}<span class="submod-chip">{{ sub.name }}</span>{% endfor %}</div>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -10553,30 +10618,85 @@ struct HistoryTemplate {
         if (cnt) cnt.textContent = selected.length + '/2';
       }
 
-      function toggleRow(row, runId) {
-        var idx = selected.indexOf(runId);
+      function toggleRow(row) {
+        var vid = row.dataset.vid || row.dataset.run;
+        var idx = selected.indexOf(vid);
         if (idx >= 0) {
           selected.splice(idx, 1);
           row.classList.remove('selected');
-          var b = document.getElementById('badge-' + runId);
+          var b = document.getElementById('badge-' + vid);
           if (b) b.textContent = '';
         } else {
           if (selected.length >= 2) return;
-          selected.push(runId);
+          selected.push(vid);
           row.classList.add('selected');
-          var b = document.getElementById('badge-' + runId);
-          if (b) b.textContent = selected.length;
         }
-        selected.forEach(function(id, i) {
-          var b = document.getElementById('badge-' + id);
+        selected.forEach(function(v, i) {
+          var b = document.getElementById('badge-' + v);
           if (b) b.textContent = i + 1;
         });
         updateCompareBtn();
+        buildScopePanel();
+      }
+
+      // ── Scope panel ───────────────────────────────────────────────────────
+      var selectedScope = 'all';
+
+      function buildScopePanel() {
+        var panel = document.getElementById('scope-panel');
+        var opts = document.getElementById('scope-options');
+        if (!panel || !opts) return;
+        if (selected.length !== 2) { panel.classList.add('hidden'); selectedScope = 'all'; return; }
+
+        // Collect union of submodules from both selected rows.
+        var allSubs = {};
+        selected.forEach(function(vid) {
+          var row = document.querySelector('#compare-tbody .compare-row[data-vid="' + vid + '"]');
+          if (!row) return;
+          (row.dataset.submodules || '').split(',').filter(Boolean).forEach(function(s) { allSubs[s] = true; });
+        });
+        var subList = Object.keys(allSubs).sort();
+        if (subList.length === 0) { panel.classList.add('hidden'); selectedScope = 'all'; return; }
+
+        panel.classList.remove('hidden');
+        opts.innerHTML = '';
+
+        function makeOption(value, label, title) {
+          var div = document.createElement('div');
+          div.className = 'scope-option' + (selectedScope === value ? ' selected' : '');
+          div.dataset.scopeValue = value;
+          if (title) div.title = title;
+          var radio = document.createElement('span');
+          radio.className = 'scope-option-radio';
+          var lbl = document.createElement('span');
+          lbl.textContent = label;
+          div.appendChild(radio);
+          div.appendChild(lbl);
+          div.addEventListener('click', function() {
+            selectedScope = value;
+            opts.querySelectorAll('.scope-option').forEach(function(o) {
+              o.classList.toggle('selected', o.dataset.scopeValue === value);
+            });
+          });
+          return div;
+        }
+
+        opts.appendChild(makeOption('all', 'Full scan', 'All files — super-repo and submodules combined'));
+        var sep = document.createElement('span');
+        sep.className = 'scope-option-sep';
+        opts.appendChild(sep);
+        opts.appendChild(makeOption('super', 'Super-repo only', 'Only files not belonging to any submodule'));
+        subList.forEach(function(s) {
+          opts.appendChild(makeOption('sub:' + s, 'Submodule: ' + s, 'Only files belonging to submodule “' + s + '”'));
+        });
       }
 
       function doCompare() {
         if (selected.length !== 2) return;
-        window.location.href = '/compare?a=' + encodeURIComponent(selected[0]) + '&b=' + encodeURIComponent(selected[1]);
+        var url = '/compare?a=' + encodeURIComponent(selected[0]) + '&b=' + encodeURIComponent(selected[1]);
+        if (selectedScope === 'super') url += '&scope=super';
+        else if (selectedScope.indexOf('sub:') === 0) url += '&sub=' + encodeURIComponent(selectedScope.slice(4));
+        window.location.href = url;
       }
 
       // ── Event wiring (CSP-safe: no inline handlers) ───────────────────────
@@ -10594,7 +10714,7 @@ struct HistoryTemplate {
       var cmpTbody = document.getElementById('compare-tbody');
       if (cmpTbody) cmpTbody.addEventListener('click', function(e) {
         var row = e.target.closest('.compare-row');
-        if (row) toggleRow(row, row.dataset.run);
+        if (row) toggleRow(row);
       });
 
       (function randomizeWatermarks() {
@@ -10627,6 +10747,20 @@ struct HistoryTemplate {
           })(i);
         }
       })();
+
+      // ── Submodule chip truncation ─────────────────────────────────────────
+      document.querySelectorAll('.submod-chips-cell').forEach(function(cell) {
+        var chips = cell.querySelectorAll('.submod-chip');
+        var MAX = 4;
+        if (chips.length <= MAX) return;
+        for (var i = MAX; i < chips.length; i++) chips[i].style.display = 'none';
+        var badge = document.createElement('span');
+        badge.className = 'submod-overflow-badge';
+        badge.title = Array.from(chips).slice(MAX).map(function(c){return c.textContent;}).join(', ');
+        badge.textContent = '+' + (chips.length - MAX) + ' more';
+        cell.appendChild(badge);
+        cell.style.maxHeight = 'none';
+      });
     })();
   </script>
 </body>
@@ -10703,7 +10837,15 @@ struct CompareSelectTemplate {
     .delta-card-from{font-size:15px;color:var(--muted);}
     .delta-card-to{font-size:28px;font-weight:800;margin:4px 0;}
     .meta-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:12px;}
-    .meta-card-project{font-size:15px;font-weight:600;color:var(--muted);font-style:italic;text-align:right;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .meta-card-project-col{display:flex;flex-direction:column;align-items:flex-end;gap:6px;max-width:55%;min-width:0;}
+    .meta-card-project{font-size:15px;font-weight:600;color:var(--muted);font-style:italic;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
+    .meta-scope-tag{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;padding:3px 10px;border-radius:6px;white-space:nowrap;letter-spacing:.03em;text-transform:uppercase;}
+    .meta-scope-tag svg{flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:2.2;}
+    .scope-full{background:rgba(160,136,120,0.10);border:1px solid rgba(160,136,120,0.28);color:var(--muted-2);}
+    .scope-super{background:rgba(211,122,76,0.10);border:1px solid rgba(211,122,76,0.32);color:var(--oxide-2);}
+    .scope-sub{background:rgba(111,155,255,0.12);border:1px solid rgba(111,155,255,0.32);color:var(--accent-2);}
+    body.dark-theme .scope-sub{background:rgba(111,155,255,0.18);border-color:rgba(111,155,255,0.38);color:var(--accent);}
+    body.dark-theme .scope-super{background:rgba(211,122,76,0.16);border-color:rgba(211,122,76,0.36);color:var(--oxide);}
     .meta-card-commit{display:block;font-family:ui-monospace,monospace;font-size:28px;font-weight:800;letter-spacing:-0.02em;line-height:1.1;color:var(--accent);text-decoration:none;margin-bottom:16px;word-break:break-all;}
     .meta-card-commit:hover{color:var(--oxide);}
     .meta-card-rows{display:flex;flex-direction:column;gap:6px;}
@@ -10832,11 +10974,14 @@ struct CompareSelectTemplate {
     body.dark-theme .tab-btn.tab-added{background:#163927;color:#8fe2a8;border-color:#2a6b4a;}
     body.dark-theme .tab-btn.tab-removed{background:#3d1c1c;color:#f5a3a3;border-color:#7a3a3a;}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
-    .submod-scope-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 16px;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;margin-bottom:18px;}
-    .submod-scope-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);flex-shrink:0;white-space:nowrap;}
-    .submod-scope-btn{padding:5px 14px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:background .12s ease,border-color .12s ease;}
+    .submod-scope-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 16px;background:var(--surface-2);border:1.5px solid var(--line-strong);border-radius:12px;margin:12px 0 18px;}
+    .submod-scope-divider{width:1px;height:18px;background:var(--line-strong);margin:0 4px;flex-shrink:0;}
+    .submod-scope-label{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);flex-shrink:0;white-space:nowrap;}
+    .submod-scope-label svg{stroke:currentColor;fill:none;stroke-width:2;}
+    .submod-scope-btn{padding:5px 13px;border-radius:7px;border:1.5px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:background .12s ease,border-color .12s ease,color .12s ease;}
     .submod-scope-btn:hover{background:var(--line);}
     .submod-scope-btn.active{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
+    .submod-scope-hint{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap;}
   </style>
 </head>
 <body>
@@ -10885,9 +11030,11 @@ struct CompareSelectTemplate {
           <h1 style="margin:0 0 6px;">Scan Delta</h1>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             {% if let Some(sub) = active_submodule %}
-            <span class="muted" style="font-size:16px;">Comparing submodule <strong>{{ sub }}</strong> across two scans of</span>
+            <span class="muted" style="font-size:16px;">Submodule <strong>{{ sub }}</strong> — two scans of</span>
+            {% else if super_scope_active %}
+            <span class="muted" style="font-size:16px;">Super-repo only (submodules excluded) — two scans of</span>
             {% else %}
-            <span class="muted" style="font-size:16px;">Comparing two scans of</span>
+            <span class="muted" style="font-size:16px;">Full scan — two scans of</span>
             {% endif %}
             <a class="path-link" id="project-path-link" data-folder="{{ project_path }}" href="#" style="font-size:16px;font-weight:700;">{{ project_path }}</a>
           </div>
@@ -10897,12 +11044,43 @@ struct CompareSelectTemplate {
           Compare Scans
         </a>
       </div>
+      {% if has_any_submodule_data %}
+      <div class="submod-scope-bar">
+        <span class="submod-scope-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
+          Scope:
+        </span>
+        <div class="submod-scope-divider"></div>
+        <a class="submod-scope-btn{% if active_submodule.is_none() && !super_scope_active %} active{% endif %}"
+           href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}"
+           title="All files — super-repo and all submodules combined">Full scan</a>
+        <a class="submod-scope-btn{% if super_scope_active %} active{% endif %}"
+           href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}&amp;scope=super"
+           title="Only files that are not part of any submodule">Super-repo only</a>
+        {% for sub in submodule_options %}
+        <a class="submod-scope-btn{% if active_submodule.as_deref() == Some(sub.as_str()) %} active{% endif %}"
+           href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}&amp;sub={{ sub }}"
+           title="Only files belonging to submodule {{ sub }}">{{ sub }}</a>
+        {% endfor %}
+      </div>
+      {% endif %}
       <div class="hero-body">
       <div class="meta-strip">
         <div class="delta-card delta-card-meta">
           <div class="meta-card-header">
             <div class="delta-card-label" style="margin-bottom:0;font-size:26px;letter-spacing:.04em;">Baseline</div>
-            <div class="meta-card-project">{{ project_name }}</div>
+            <div class="meta-card-project-col">
+              <div class="meta-card-project">{{ project_name }}</div>
+              {% if has_any_submodule_data %}
+              {% if let Some(sub) = active_submodule %}
+              <span class="meta-scope-tag scope-sub"><svg width="11" height="11" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>{{ sub }}</span>
+              {% else if super_scope_active %}
+              <span class="meta-scope-tag scope-super"><svg width="11" height="11" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>Super-repo only</span>
+              {% else %}
+              <span class="meta-scope-tag scope-full"><svg width="11" height="11" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>Full scan</span>
+              {% endif %}
+              {% endif %}
+            </div>
           </div>
           {% if !baseline_git_commit.is_empty() %}
           <a class="meta-card-commit" href="/runs/{{ baseline_run_id }}/html" target="_blank">{{ baseline_git_commit }}</a>
@@ -10922,7 +11100,18 @@ struct CompareSelectTemplate {
         <div class="delta-card delta-card-meta">
           <div class="meta-card-header">
             <div class="delta-card-label" style="margin-bottom:0;font-size:26px;letter-spacing:.04em;">Current</div>
-            <div class="meta-card-project">{{ project_name }}</div>
+            <div class="meta-card-project-col">
+              <div class="meta-card-project">{{ project_name }}</div>
+              {% if has_any_submodule_data %}
+              {% if let Some(sub) = active_submodule %}
+              <span class="meta-scope-tag scope-sub"><svg width="11" height="11" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>{{ sub }}</span>
+              {% else if super_scope_active %}
+              <span class="meta-scope-tag scope-super"><svg width="11" height="11" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>Super-repo only</span>
+              {% else %}
+              <span class="meta-scope-tag scope-full"><svg width="11" height="11" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>Full scan</span>
+              {% endif %}
+              {% endif %}
+            </div>
           </div>
           {% if !current_git_commit.is_empty() %}
           <a class="meta-card-commit" href="/runs/{{ current_run_id }}/html" target="_blank">{{ current_git_commit }}</a>
@@ -10999,31 +11188,19 @@ struct CompareSelectTemplate {
           <div class="dc-tip up">Measures total editing activity relative to codebase size. Formula: (lines added + lines removed) ÷ baseline code lines × 100%. Above 20% = high activity, 5–20% = normal velocity, below 5% = stable.</div>
           <div class="insight-label">Churn Rate</div>
           <div class="insight-val {{ churn_rate_class }}">{{ churn_rate_str }}</div>
-          <div class="insight-sub">{% if churn_rate_class == "high" %}High activity — verify scope{% else if churn_rate_class == "med" %}Normal development velocity{% else %}Stable baseline{% endif %} · (added + removed) ÷ baseline</div>
+          <div class="insight-sub">{% if new_scope %}No prior baseline for this scope{% else if churn_rate_class == "high" %}High activity — verify scope{% else if churn_rate_class == "med" %}Normal development velocity{% else %}Stable baseline{% endif %} · (added + removed) ÷ baseline</div>
         </div>
         {% if scope_flag %}
         <div class="insight-card insight-flag">
-          <div class="dc-tip up">Triggered when net code growth exceeds 20% of the baseline. This often signals a large feature branch, a bulk import, or a generated-file inclusion. Review the file-level delta below to confirm scope.</div>
+          <div class="dc-tip up">{% if new_scope %}This scope had no files in the baseline scan — all content is new. Switch to Full scan to compare against the parent repository.{% else %}Triggered when net code growth exceeds 20% of the baseline. This often signals a large feature branch, a bulk import, or a generated-file inclusion. Review the file-level delta below to confirm scope.{% endif %}</div>
           <div class="insight-label flag">Scope Signal</div>
-          <div class="insight-val high">{{ code_lines_pct_str }}</div>
-          <div class="insight-sub">Added &gt; 20% of baseline — large feature addition detected</div>
+          <div class="insight-val high">{% if new_scope %}New{% else %}{{ code_lines_pct_str }}{% endif %}</div>
+          <div class="insight-sub">{% if new_scope %}New scope — no prior baseline for this selection{% else %}Added &gt; 20% of baseline — large feature addition detected{% endif %}</div>
         </div>
         {% endif %}
       </div>
       </div>
     </section>
-
-    {% if !submodule_options.is_empty() %}
-    <div class="submod-scope-bar">
-      <span class="submod-scope-label">Scope:</span>
-      <a class="submod-scope-btn{% if active_submodule.is_none() %} active{% endif %}"
-         href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}">Full Repo</a>
-      {% for sub in submodule_options %}
-      <a class="submod-scope-btn{% if active_submodule.as_deref() == Some(sub.as_str()) %} active{% endif %}"
-         href="/compare?a={{ baseline_run_id }}&amp;b={{ current_run_id }}&amp;sub={{ sub }}">{{ sub }}</a>
-      {% endfor %}
-    </div>
-    {% endif %}
 
     <section class="panel">
       <h2>File-level delta</h2>
@@ -11058,13 +11235,13 @@ struct CompareSelectTemplate {
       <div class="table-wrap">
       <table id="delta-table">
         <colgroup>
-          <col style="width:35%">
-          <col style="width:15%">
-          <col style="width:12%">
+          <col style="width:44%">
+          <col style="width:8%">
+          <col style="width:8%">
           <col style="width:16%">
           <col style="width:8%">
-          <col style="width:7%">
-          <col style="width:7%">
+          <col style="width:8%">
+          <col style="width:8%">
         </colgroup>
         <thead>
           <tr id="delta-thead">
@@ -11654,6 +11831,8 @@ struct CompareTemplate {
     comment_lines_pct_str: String,
     code_lines_added: i64,
     code_lines_removed: i64,
+    /// True when baseline had 0 code lines — the scope is entirely new in the current scan.
+    new_scope: bool,
     churn_rate_str: String,
     churn_rate_class: String,
     scope_flag: bool,
@@ -11671,9 +11850,13 @@ struct CompareTemplate {
     baseline_git_commit_date: Option<String>,
     current_git_commit_date: Option<String>,
     project_name: String,
-    /// Submodule names present in both runs (empty when submodule_breakdown was not enabled).
+    /// Submodule names present in either run (empty when neither scan used submodule breakdown).
     submodule_options: Vec<String>,
+    /// True when either run has submodule data — controls whether the scope bar is shown.
+    has_any_submodule_data: bool,
     /// The submodule currently being compared, if the `sub` query param was provided.
     active_submodule: Option<String>,
+    /// True when `scope=super` is active — viewing super-repo only (no submodule files).
+    super_scope_active: bool,
     csp_nonce: String,
 }

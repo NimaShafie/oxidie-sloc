@@ -951,7 +951,7 @@ struct WarningOpportunityRow {
     .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; }
+    th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
     /* Per-file detail table — fixed layout keeps all columns visible */
     .table-resizable { table-layout: fixed; }
     .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
@@ -1025,13 +1025,17 @@ struct WarningOpportunityRow {
         width: 100% !important;
       }
 
-      /* Hide all interactive / UI-chrome elements */
-      .top-nav, .toolbar, .hero-actions,
-      .background-watermarks, .search,
+      /* Hide interactive UI-chrome; keep section heading text visible */
+      .top-nav, .hero-actions,
+      .background-watermarks,
       .header-button, .theme-toggle,
       .nav-dropdown-wrap, .config-actions,
       .warnings-show-link, .warning-console-actions,
+      .toolbar .pill-row, .toolbar .export-group,
       input[type="search"], button { display: none !important; }
+      /* Show toolbar as a plain block so h2 headings are visible */
+      .toolbar { display: block !important; margin-bottom: 8px !important; }
+      .toolbar-left { display: block !important; }
 
       /* Remove page-level layout constraints */
       .page {
@@ -1433,7 +1437,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." data-table-filter="skipped-table" /></div></div>
-        <div class="table-shell" style="margin-top:6px;">
+        <div class="table-shell" style="margin-top:6px;max-height:630px;">
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
@@ -1773,7 +1777,7 @@ struct WarningOpportunityRow {
         var big = densityCard.querySelector('.metric-big');
         var exact = densityCard.querySelector('.metric-exact');
         if (big) big.textContent = pct.toFixed(1) + '%';
-        if (exact) exact.textContent = pct.toFixed(2) + '%';
+        if (exact) exact.textContent = '';
       }
     })();
     // ── Export helpers ────────────────────────────────────────────────────────
@@ -1806,14 +1810,22 @@ struct WarningOpportunityRow {
       function fmt(n){return Number(n).toLocaleString();}
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function px(n){return Math.round(n);}
+      // Floating tooltip (adapts to light/dark theme via CSS variables)
+      var tt=document.createElement('div');
+      tt.style.cssText='display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:9999;max-width:240px;color:var(--text);';
+      document.body.appendChild(tt);
+      function showTT(e,html){tt.innerHTML=html;tt.style.display='block';moveTT(e);}
+      function moveTT(e){var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}
+      function hideTT(){tt.style.display='none';}
       // Code lines donut — larger radius and legend area for legibility
       var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
       var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
-      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
+      // overflow:visible lets scale(1.06) hover expand beyond the SVG bounds
+      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
       if(D.length===1){
         // Single language: full-circle arc paths can degenerate in some renderers; use a stroked circle instead
         var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
-        ds+='<circle cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
+        ds+='<circle class="donut-seg" data-lang="'+esc(D[0].lang)+'" data-code="'+D[0].code+'" data-pct="100" cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'" style="cursor:pointer;"/>';
       } else {
         var ang=-Math.PI/2;
         D.forEach(function(d,i){
@@ -1822,7 +1834,8 @@ struct WarningOpportunityRow {
           var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
           var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
           var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
-          ds+='<path d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
+          var pct=Math.round(d.code/tot*100);
+          ds+='<path class="donut-seg" data-lang="'+esc(d.lang)+'" data-code="'+d.code+'" data-pct="'+pct+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2" style="cursor:pointer;"/>';
           ang+=sw;
         });
       }
@@ -1838,15 +1851,20 @@ struct WarningOpportunityRow {
       // Per-language stacked bar — wider bars and labels for legibility
       var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
       var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
-      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
+      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
       D.forEach(function(d,i){
         var y=10+i*rHb,x=LW;
         var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+        bs+='<g class="bar-row" data-lang="'+esc(d.lang)+'" data-code="'+d.code+'" data-comments="'+d.comments+'" data-blanks="'+d.blanks+'">';
+        bs+='<rect class="bar-hover-bg" x="0" y="'+y+'" width="'+(LW+BW+62)+'" height="'+rHb+'" fill="transparent" rx="3"/>';
         bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-        if(cW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
-        if(cmW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
-        if(blW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+        bs+='<g class="bar-anim" data-bar-x="'+LW+'">';
+        if(cW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="2"/>';x+=cW;
+        if(cmW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="2"/>';x+=cmW;
+        if(blW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="2"/>';
+        bs+='</g>';
         bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
+        bs+='</g>';
       });
       var ly=SH-16;
       bs+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
@@ -1862,6 +1880,67 @@ struct WarningOpportunityRow {
           '</tr>'+
         '</table>'+
       '</div>';
+      // Donut segment: entry fade-in + hover scale/brighten
+      el.querySelectorAll('.donut-seg').forEach(function(seg,i){
+        // transform-box:view-box makes transform-origin relative to the SVG viewBox,
+        // so scale() expands each segment outward from the donut centre (cx,cy)
+        seg.style.transformBox='view-box';
+        seg.style.transformOrigin=cx+'px '+cy+'px';
+        seg.style.opacity='0';
+        setTimeout(function(){
+          seg.style.transition='opacity 0.3s ease,transform 0.15s ease,filter 0.15s ease';
+          seg.style.opacity='1';
+        },60+i*55);
+        setTimeout(function(){
+          seg.style.transition='transform 0.15s ease,filter 0.15s ease';
+        },60+i*55+380);
+        seg.addEventListener('mouseover',function(e){
+          this.style.transform='scale(1.06)';
+          this.style.filter='brightness(1.18)';
+          showTT(e,'<strong style="display:block;font-size:13px;margin-bottom:3px;">'+this.dataset.lang+'</strong>'+fmt(Number(this.dataset.code))+' code lines<br><span style="opacity:0.65">('+this.dataset.pct+'% of total)</span>');
+        });
+        seg.addEventListener('mouseout',function(){
+          this.style.transform='';
+          this.style.filter='';
+          hideTT();
+        });
+        seg.addEventListener('mousemove',moveTT);
+      });
+      // Bar row: entry grow-from-left + hover highlight + tooltip
+      el.querySelectorAll('.bar-anim').forEach(function(g,i){
+        // transform-origin at the left edge of the bar area so scaleX grows rightward
+        g.style.transformBox='view-box';
+        g.style.transformOrigin=g.dataset.barX+'px 0px';
+        g.style.transform='scaleX(0)';
+        setTimeout(function(){
+          g.style.transition='transform 0.45s cubic-bezier(0.25,0.46,0.45,0.94)';
+          g.style.transform='scaleX(1)';
+        },80+i*55);
+        setTimeout(function(){
+          g.style.transition='';
+        },80+i*55+500);
+      });
+      el.querySelectorAll('.bar-row').forEach(function(row){
+        var bg=row.querySelector('.bar-hover-bg');
+        var segs=row.querySelectorAll('.bar-anim rect');
+        row.style.cursor='default';
+        row.addEventListener('mouseover',function(e){
+          if(bg)bg.setAttribute('fill','rgba(184,93,51,0.07)');
+          segs.forEach(function(r){r.style.filter='brightness(1.12)';});
+          showTT(e,
+            '<strong style="display:block;font-size:13px;margin-bottom:4px;">'+row.dataset.lang+'</strong>'+
+            '<span style="color:'+OX+'">&#9632;</span> Code: <strong>'+fmt(Number(row.dataset.code))+'</strong><br>'+
+            '<span style="color:'+GN+'">&#9632;</span> Comments: <strong>'+fmt(Number(row.dataset.comments))+'</strong><br>'+
+            '<span style="color:'+GY+'">&#9632;</span> Blanks: <strong>'+fmt(Number(row.dataset.blanks))+'</strong>'
+          );
+        });
+        row.addEventListener('mouseout',function(){
+          if(bg)bg.setAttribute('fill','transparent');
+          segs.forEach(function(r){r.style.filter='';});
+          hideTT();
+        });
+        row.addEventListener('mousemove',moveTT);
+      });
     })();
   </script>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
