@@ -21,11 +21,10 @@ bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**Internet requirements depend on your platform:**
+**Internet requirements:**
 - **Windows** — no internet needed; `oxide-sloc.exe` is bundled in the repository root.
 - **Linux with Rust** — no internet needed; `vendor.tar.xz` covers all crate sources for a fully offline build.
-- **Linux without Rust, internet available** — `install.sh` fetches the release binary from GitHub automatically when `curl` is present.
-- **Linux without Rust, no internet** — use a pre-staged `dist/` bundle or the Option D air-gap kit.
+- **Linux without Rust** — place `dist/oxide-sloc-linux-x86_64.tar.gz` alongside the repo (no internet needed), or run `bash scripts/install.sh --online` to download it from GitHub when `curl` is available.
 
 See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths.
 
@@ -33,23 +32,15 @@ See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths.
 
 ## Host on your LAN
 
-Make oxide-sloc reachable from any device on the same network (teammates, phones, test VMs).
+Make oxide-sloc reachable from any device on the same network.
 
-**Quickest path — dedicated server script:**
+**Quickest path:**
 
 ```bash
 bash scripts/serve-server.sh
 ```
 
-This auto-generates an API key, prints every LAN address the server is reachable on, and gives you a ready-made `curl` test command.
-If `curl` from another device times out, the server is bound but your firewall is dropping 4317. The script will tell you exactly what to run.
-
-**Or use the regular launcher with the `--host` flag:**
-
-```bash
-bash scripts/run.sh --host
-# equivalent: SLOC_HOST=1 bash scripts/run.sh
-```
+Auto-generates an API key, prints every LAN address the server is reachable on, and gives you a ready-made `curl` test command. If another device times out, your firewall is dropping port 4317 — the script tells you exactly what to run.
 
 **Or run the binary directly:**
 
@@ -58,16 +49,9 @@ export SLOC_API_KEY=$(openssl rand -hex 32)
 oxide-sloc serve --server          # binds to 0.0.0.0:4317
 ```
 
-**Find your LAN IP:**
+Then open `http://<your-ip>:4317` from any device on the same network (`hostname -I` on Linux, `ipconfig` on Windows).
 
-| Platform | Command |
-|---|---|
-| Linux / macOS | `hostname -I` |
-| Windows | `ipconfig` (look for IPv4 Address) |
-
-Then open `http://<your-ip>:4317` from any device on the same network.
-
-**Authentication:** when an API key is set, every request must include it:
+When an API key is set, requests must include it:
 
 ```bash
 curl -H "Authorization: Bearer $SLOC_API_KEY" http://<your-ip>:4317/healthz
@@ -88,30 +72,12 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ## Features
 
-- **CLI** — `analyze / report / diff / serve / send / init / git-scan / git-compare / watch` with a full flag set
-- **Localhost web UI** — guided 4-step flow with light/dark theme, auto browser-open
-- **Quick Scan** — one-click scan from step 1 using all defaults
-- **Server mode** — `--server` binds to `0.0.0.0`, suppresses browser auto-open
-- **IEEE 1045-1992 physical SLOC** — configurable counting parameters: mixed-line policy, continuation lines, compiler directives, blank-in-comment classification
-- **Symbol counting** — lexical detection of functions, classes, variables, and imports per file
-- **Rich HTML reports** — per-file breakdown, language charts, warning analysis
-- **PDF export** — background generation via locally installed Chromium
-- **CSV / Excel export** — from CLI flags or the report nav bar (4-sheet workbook)
-- **Scan history & delta tracking** — every run is saved; re-scan to see lines added/removed
-- **Side-by-side diff view** — compare any two scans with 4 chart types at `/compare`
-- **Git browser UI** — browse branches, tags, and commits of any remote repo; one-click scan or two-ref comparison at `/git-browser`
-- **Automated scanning** — attach GitHub, GitLab, or Bitbucket webhooks to trigger scans on push; or configure interval-based polling at `/webhook-setup`
-- **Point-in-time comparison** — `git-scan` and `git-compare` CLI commands check out any ref via git worktree and produce delta reports (JSON / CSV)
-- **Jenkins Git-Ref stages** — `GIT_REF`, `COMPARE_TO_REF`, `COMPARE_TO_PREV_TAG` parameters with dedicated scan and compare stages
-- **Git submodule support** — per-submodule HTML sub-reports
-- **Metrics API** — JSON endpoints for CI/CD dashboards
-- **SVG badge endpoint** — embed live code-line counts in READMEs or Confluence
-- **Embeddable summary widget** — `<iframe>` drop-in for internal wikis
-- **Report delivery** — `send` command: SMTP email or JSON webhook POST
-- **CI/CD ready** — Jenkinsfile, GitHub Actions, GitLab CI included; SonarQube integration via `clippy_to_sonar.py`
-- **Docker image** — auto-published to GHCR on `main` and release tags
-- **Air-gap / offline** — all crate dependencies vendored; Chart.js compiled in; no CDN calls
-- **Confluence integration** — push HTML reports via REST API
+- **CLI + web UI** — `analyze / report / diff / serve / send / init / git-scan / git-compare` commands; guided 4-step web flow with light/dark theme and one-click Quick Scan
+- **IEEE 1045-1992 physical SLOC** — configurable mixed-line policy, continuation lines, compiler directives, and blank-in-comment classification; symbol counting (functions, classes, variables, imports)
+- **Flexible output** — HTML reports with per-file breakdown and language charts; PDF, CSV, and 4-sheet Excel export; re-render any saved JSON result
+- **Git integration** — browser UI for branches/tags/commits, GitHub/GitLab/Bitbucket webhook and polling automation, point-in-time comparison via git worktree, submodule breakdown
+- **CI/CD and integrations** — Jenkinsfile, GitHub Actions, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable `<iframe>` widget, SMTP/webhook report delivery, Confluence push
+- **Offline-first deployment** — vendored Rust deps, Chart.js compiled in, no CDN calls; Docker image on GHCR; LAN server mode with API key auth and optional TLS
 
 ---
 
@@ -124,12 +90,13 @@ bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
 bash scripts/run.sh        # http://127.0.0.1:4317
 ```
 
-The script tries in order: binary in repo root → `dist/` bundle → GitHub Release download → offline vendor build.
+The script tries in order: binary in repo root → `dist/` bundle → offline vendor build. **No network calls are made by default.**
 
 - **Windows:** `oxide-sloc.exe` is in the repository root. Clone and run — nothing to build, no internet required.
 - **Linux with Rust:** builds from the committed `vendor.tar.xz` — no internet required.
-- **Linux without Rust, internet available:** `install.sh` automatically downloads the matching release binary from GitHub (requires `curl`). Pass `--offline` or set `OXIDE_SLOC_NO_DOWNLOAD=1` to skip.
-- **Linux without Rust, no internet:** place `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) alongside the repo, or use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
+- **Linux without Rust, pre-staged bundle:** place `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) alongside the repo and re-run — no internet required.
+- **Linux without Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch and extract the release binary automatically. Pass `--offline` or set `OXIDE_SLOC_NO_DOWNLOAD=1` to explicitly suppress network calls (now the default, kept for compatibility).
+- **Linux without Rust, no internet:** use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 
@@ -269,13 +236,11 @@ CLI flags always override config file values.
 
 ## Scan history and delta tracking
 
-Every web UI scan is recorded in `out/web/registry.json`. Re-running the same project path shows an inline delta — the same data the `diff` command writes to JSON/CSV/Excel.
-
-Navigate to `/history` to browse past scans, or `/compare?a=<run_id>&b=<run_id>` for a side-by-side file-level diff with four chart types.
+Every web UI scan is recorded in `out/web/registry.json`. Re-running the same project path shows an inline delta. Navigate to `/history` to browse past scans, or `/compare?a=<run_id>&b=<run_id>` for a side-by-side diff with four chart types.
 
 ### Comparison metrics
 
-When two scans of the same project are compared (different commits, branches, or dates), oxide-sloc surfaces the following metrics at both the project level and per-language:
+Five metrics are surfaced at the project level and per-language:
 
 | Metric | What it measures |
 |---|---|
@@ -285,27 +250,18 @@ When two scans of the same project are compared (different commits, branches, or
 | **Modified** | Lines that changed in files present in both scans (content diff, not just count) |
 | **Unmodified** | Lines carried over from the baseline with no change |
 
-These five values satisfy the identity: `SLOC (new) = Unmodified + Modified + Added`.
-
-**CLI diff output:**
+These satisfy the identity `SLOC (new) = Unmodified + Modified + Added`.
 
 ```bash
-# Print delta to terminal
 oxide-sloc diff baseline.json current.json
-
-# Export delta to all formats
 oxide-sloc diff baseline.json current.json -j delta.json -c delta.csv -x delta.xlsx
 ```
-
-**Web UI:** navigate to `/compare?a=<run_id>&b=<run_id>` — the comparison view renders all five metrics with bar charts, a per-file breakdown table, and filter controls.
 
 ---
 
 ## Symbol counting
 
-oxide-sloc performs best-effort lexical detection of structural symbols across 10+ languages. Counts are surfaced in the JSON output (`functions`, `classes`, `variables`, `imports` fields) and in the HTML report.
-
-Supported languages: C, C++, C#, Go, Java, JavaScript, Rust, Shell, PowerShell, TypeScript.
+Best-effort lexical detection of `functions`, `classes`, `variables`, and `imports` per file, surfaced in the JSON output and HTML report. Supported languages: C, C++, C#, Go, Java, JavaScript, Rust, Shell, PowerShell, TypeScript.
 
 ---
 
@@ -443,15 +399,9 @@ In Docker, Chromium is bundled — no extra setup needed.
 
 ## CSV and Excel export
 
-Every HTML report has **Export CSV** and **Export Excel** buttons in the nav bar. The Excel workbook contains four sheets: **Summary**, **By Language**, **Per File**, and **Skipped Files** — no plugins required, works in Excel, LibreOffice, and Google Sheets.
+Every HTML report has **Export CSV** and **Export Excel** buttons in the nav bar. The Excel workbook has four sheets: Summary, By Language, Per File, and Skipped Files — works in Excel, LibreOffice, and Google Sheets.
 
-The same exports are available from the CLI:
-
-```bash
-oxide-sloc analyze ./my-repo -c result.csv -x result.xlsx
-oxide-sloc report result.json -c result.csv -x result.xlsx
-oxide-sloc diff baseline.json current.json -c delta.csv -x delta.xlsx
-```
+CLI flags: `-c result.csv -x result.xlsx` on `analyze`, `report`, and `diff`.
 
 ---
 

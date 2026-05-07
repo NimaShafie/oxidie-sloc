@@ -10,7 +10,7 @@ below maps each scenario to the right option — pick the row that matches your 
 | **[Option A — Windows bundled binary](#option-a--windows-bundled-binary)** | Git Bash | Windows: `oxide-sloc.exe` is in the repo root |
 | **[Option B — Linux pre-built binary](#option-b--linux-pre-built-binary-dist)** | `bash`, `tar` | Linux binary placed by CI into `dist/` |
 | **[Option C — Vendor source build](#option-c--vendor-only-source-build)** | Rust toolchain already installed | Rust is already on the machine |
-| **[Option E — Auto-download (Linux, no Rust, has internet)](#option-e--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, internet reachable — install.sh fetches the release binary automatically |
+| **[Option E — Download from GitHub (Linux, no Rust, has internet)](#option-e--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, internet available — pass `--online` to fetch the release binary from GitHub |
 | **[Option D — Airgap kit (Linux, no Rust)](#option-d--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust, no internet |
 
 In all cases, start with:
@@ -20,9 +20,10 @@ bash scripts/install.sh   # auto-detects the best available path
 bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
 
-Options A, B, C, and D require no internet on the target machine. Option E uses internet to
-download the release binary automatically — pass `--offline` (or set `OXIDE_SLOC_NO_DOWNLOAD=1`)
-to force air-gap behaviour and skip the download step.
+All options make no network calls by default — `install.sh` is offline-first. Option E
+additionally downloads the release binary from GitHub when you explicitly pass `--online`.
+`--offline` (and `OXIDE_SLOC_NO_DOWNLOAD=1`) are kept for backward compatibility; they are
+now no-ops since offline is the default.
 
 ---
 
@@ -99,26 +100,23 @@ bash scripts/run.sh
 
 ---
 
-## Option E — Auto-download (Linux, no Rust, has internet)
+## Option E — Download from GitHub (Linux, no Rust, has internet)
 
-When `curl` is available and no Rust toolchain is detected, `install.sh` automatically fetches
-the matching release binary from GitHub Releases and drops it into `dist/` before extracting.
+When `curl` is available and no Rust toolchain is detected, pass `--online` to have
+`install.sh` fetch the matching release binary from GitHub Releases and drop it into `dist/`
+before extracting.
 
 ```bash
-bash scripts/install.sh   # detects curl, downloads release binary, extracts
+bash scripts/install.sh --online   # downloads release binary, extracts
 bash scripts/run.sh
 ```
 
 The downloaded archive is verified against `SHA256SUMS.txt` from the same release when
 `sha256sum` is available.
 
-To force offline behaviour (skip the download):
-
-```bash
-bash scripts/install.sh --offline
-# or
-OXIDE_SLOC_NO_DOWNLOAD=1 bash scripts/install.sh
-```
+The default (without `--online`) makes no network calls. `--offline` and
+`OXIDE_SLOC_NO_DOWNLOAD=1` are retained for backward compatibility and behave identically to
+the default.
 
 **System requirements:** `bash`, `tar`, `curl`. `sha256sum` is used for verification when present.
 
