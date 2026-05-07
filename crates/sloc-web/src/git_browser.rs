@@ -725,7 +725,7 @@ pub(super) struct CompareRefsQuery {
       // Before the page enters BFCache, reset loading state so it's never
       // cached mid-load and shown to the user on back-navigation.
       window.addEventListener('pagehide', resetLoadingState);
-      // Belt-and-suspenders: reset again on any page show (fresh load or BFCache restore).
+      // Also reset on pageshow to cover fresh loads and BFCache restores.
       window.addEventListener('pageshow', resetLoadingState);
 
       applyTheme();

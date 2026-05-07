@@ -10,6 +10,93 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.3] — 2026-05-07
+
+### Added
+
+- **Browser-based login form** (`/auth/login`): New GET/POST route that lets browsers
+  authenticate with the API key via a sign-in form. A successful sign-in sets an
+  `HttpOnly; SameSite=Strict` session cookie (`sloc_session`) so subsequent page loads
+  don't require header injection. Unauthenticated browser requests are now redirected to
+  `/auth/login` instead of returning a bare `401`.
+- **Configurable auth lockout** (`SLOC_AUTH_LOCKOUT_FAILS`, `SLOC_AUTH_LOCKOUT_SECS`):
+  Auth-failure lockout threshold and window are now configurable via environment variables
+  (defaults: 10 failures / 3600 s). The `Retry-After` response header on lockout replies
+  now reflects the actual remaining seconds rather than a hardcoded value.
+- **Firewall auto-open** (`--open-firewall`, `scripts/serve-server.sh`): New flag that
+  automatically opens the server port via `firewall-cmd` or `ufw` (using `sudo`) when a
+  blocking Linux firewall rule is detected.
+- **Chart hover tooltips and entry animations** (`sloc-report/lib.rs`): Donut segments and
+  bar chart rows animate on page load and display a floating, theme-aware tooltip (language
+  name, code lines, percentage) on hover. SVG charts set `overflow:visible` so hover
+  scaling remains fully visible.
+
+### Fixed
+
+- **PDF print layout** (`sloc-report/lib.rs`): Changed `@page` CSS to A4 landscape for
+  better table rendering; released sticky column positioning in print media; set
+  `min-width:0` on per-file and skipped-files tables so they scale to page width; set
+  label `white-space:normal` to prevent line-content truncation in print.
+- **Nav dropdown gap** (`sloc-report/lib.rs`): Added `padding-bottom:6px` to
+  `.nav-dropdown-wrap` and changed menu `top` from `calc(100% + 6px)` to `100%`, removing
+  the mouse-gap that caused the dropdown to close before the cursor reached it.
+- **install.sh offline by default** (`scripts/install.sh`): Network access now requires
+  the explicit `--online` flag; `--offline` is kept as a backward-compatible no-op. Fixed a
+  `set -euo pipefail` × `grep` interaction that could silently abort the script when
+  `SHA256SUMS.txt` contained no matching entry.
+- **docker-compose.yml YAML** (`docker-compose.yml`): Switched `environment` block from
+  list to map syntax to fix a parse error on Compose v2.
+
+### Changed
+
+- **`serve-server.sh` banner** (`scripts/serve-server.sh`): Banner now shows the browser
+  URL, the login-form URL (when `SLOC_API_KEY` is set), lockout configuration hints, and
+  the `curl` test command using the real LAN IP.
+- **Super-repo compare scope** (`/compare-scans`): New `?scope=super` query parameter
+  filters the diff to super-repo files only (excludes submodule files). The `/view-reports`
+  page shows a scope pre-selection panel when two rows with submodule data are selected.
+- **Submodule chips in history table** (`sloc-web/lib.rs`): Submodule names shown as chips
+  in the history table; overflow truncated to 4 + "+N more".
+- **LAN diagnostics** (`scripts/serve-server.sh`): `check_firewall()` probes `firewall-cmd`
+  then `ufw` and prints the exact fix command when port `4317/tcp` is blocked;
+  `get_primary_ip()` now uses `ip route get 1.1.1.1` to select the default-route interface
+  IP, keeping Docker/Podman bridge addresses in a separate banner section.
+
+---
+
+## [1.4.2] — 2026-05-06
+
+### Added
+
+- **Async scan loading modal** (`sloc-web/lib.rs`): Redesigned loading overlay with elapsed
+  timer, analysis phase indicator, error/retry UI, and dismiss button. The `analyze_handler`
+  now returns an `X-Wait-Id` response header for client-side async tracking.
+- **PDF status polling** (`/api/runs/{run_id}/pdf-status`): New endpoint for clients to poll
+  PDF generation progress. The PDF button shows a spinner while generating and swaps to a
+  live download link on completion.
+- **Language icons** (`crates/sloc-web/assets/`): Added icons for Assembly, Go, R, XML,
+  Groovy, Dockerfile, Makefile, and Perl. All icons and logos are now compiled into the
+  binary via `include_bytes!()`, eliminating the runtime file-serving dependency.
+- **Result page UX** (`sloc-report/lib.rs`): Dark/light theme toggle, floating code
+  particles, background watermarks, and version footer added to the analysis result page.
+
+### Fixed
+
+- **PDF path on Windows** (`sloc-report/lib.rs`): PDF output now writes to a short temp
+  path in `%TEMP%` then renames to the final destination, avoiding `MAX_PATH` failures on
+  Windows.
+
+### Changed
+
+- **Dockerfile** updated from `rust:1.85` to `rust:1.95-slim-bookworm`.
+- **Report UI polish** (`sloc-report/lib.rs`): Metric card and hero section redesigned with
+  larger numbers and accent borders. Per-file table min-width increased to 1150 px with
+  adjusted column widths.
+- **Dependencies**: `tree-sitter` bumped to 0.26.8; `toml` bumped to 1.1.2 (TOML 1.1
+  spec).
+
+---
+
 ## [1.4.1] — 2026-05-04
 
 ### Added
@@ -130,7 +217,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SMTP TLS**: Replaced implicit `starttls_relay` builder with an explicit `TlsParameters`
   builder + `Tls::Required`, ensuring certificate validation is enforced and the TLS
   handshake behaviour is unambiguous.
-- **Webhook URL validation**: Extended IPv6 SSRF blocklist to cover ULA ranges (`fc00::/7`)
+- **Webhook URL validation**: Extended IPv6 blocklist to cover ULA ranges (`fc00::/7`)
   and link-local addresses (`fe80::/10`), which were previously not blocked.
 - **PDF temp-dir cleanup**: Replaced manual `create_dir_all` / `remove_dir_all` pair with
   `tempfile::Builder::tempdir()` so the browser profile directory is always cleaned up on
@@ -252,12 +339,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - `count_compiler_directives` / `--no-count-compiler-directives` — IEEE §4.2: `#include`, `#define`, `#ifdef`, and other C/C++/Objective-C preprocessor directive lines are now tracked separately as `compiler_directive_lines` in the raw JSON output; passing `--no-count-compiler-directives` (or setting `count_compiler_directives = false`) excludes them from effective code SLOC while keeping the raw count intact
   - All three parameters are settable in `.oxide-sloc.toml` under `[analysis]` and via CLI flags on `analyze`
 
-**Web server security hardening**
+**Web server hardening**
 - IP-based sliding-window rate limiter (60 requests / 60 seconds per client IP) across all routes — no external crate required; uses only `std` + `Instant`
 - Bearer-token authentication via `SLOC_API_KEY` env var — when set, all requests must supply a matching `Authorization: Bearer <key>` or `X-API-Key: <key>` header; startup warning logged when running in server mode without a key
 - Native TLS termination via `SLOC_TLS_CERT` / `SLOC_TLS_KEY` PEM env vars (powered by `tokio-rustls` + `rustls`); startup warning logged when `--server` is used without TLS configured
 - CORS headers via `tower-http::CorsLayer`
-- Security response headers middleware (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, etc.)
+- Response headers middleware (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, etc.)
 - Graceful shutdown on `Ctrl+C` (both local and server modes)
 
 **New web routes**
@@ -265,18 +352,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - `GET /compare-scans` — side-by-side scan comparison UI
 - `GET /embed/summary` — embeddable summary widget (iframe-friendly)
 
-**Webhook security**
-- `validate_webhook_url()` now enforces HTTPS and blocks SSRF targets (loopback, RFC-1918 private ranges, link-local, cloud metadata endpoints: `169.254.169.254`, `metadata.google.internal`, `*.local`)
+**Webhook URL validation**
+- `validate_webhook_url()` now enforces HTTPS and blocks loopback, RFC-1918 private ranges, link-local, and cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`, `*.local`)
 
 **SMTP credential safety**
 - `--smtp-pass` on the `send` command now emits a visible warning when used directly; use `SLOC_SMTP_PASS` env var instead to keep credentials out of process listings
 
-**CI/CD hardening**
+**CI/CD build configuration**
 - Docker builder and runtime images pinned to SHA-256 digests (`rust:slim@sha256:…`, `debian:bookworm-slim@sha256:…`) — prevents silent base-image substitution
 - GitLab CI pipeline switched from curl-piped rustup to the official `rust:slim` pinned image
 - `vendor.tar.xz` integrity verified via `sha256sum -c vendor.tar.xz.sha256` before extraction in Dockerfile, GitLab CI, and Jenkinsfile
 - Docker image signed with `cosign` (keyless OIDC) and SBOM attached via `docker/build-push-action`; `id-token: write` permission added to `docker.yml`
-- Jenkins parameter injection hardening: `SCAN_PATH`, `REPORT_TITLE`, `MIXED_LINE_POLICY` passed through `withEnv` (shell variables, not Groovy interpolation); allowlist validation added for choice and free-text parameters (`MIXED_LINE_POLICY`, `CI_PRESET`, `OUTPUT_SUBDIR`, glob patterns, language names)
+- Jenkins parameters `SCAN_PATH`, `REPORT_TITLE`, `MIXED_LINE_POLICY` passed through `withEnv` (shell variables, not Groovy interpolation); allowlist validation added for choice and free-text parameters (`MIXED_LINE_POLICY`, `CI_PRESET`, `OUTPUT_SUBDIR`, glob patterns, language names)
 - Jenkins CSP relaxation rationale documented inline; alternative of serving HTML from a separate origin noted for high-assurance environments
 
 **Docker**

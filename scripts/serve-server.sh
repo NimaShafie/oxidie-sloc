@@ -8,6 +8,7 @@
 # Usage:
 #   bash scripts/serve-server.sh
 #   bash scripts/serve-server.sh --port 8080
+#   bash scripts/serve-server.sh --open-firewall
 #   SLOC_API_KEY=mysecret bash scripts/serve-server.sh
 #
 # What this does vs. run.sh --host:
@@ -35,8 +36,10 @@ else
 fi
 
 # Parse flags
+OPEN_FIREWALL=false
 for arg in "$@"; do
     case "$arg" in
+        --open-firewall) OPEN_FIREWALL=true ;;
         --port) ;;            # next arg consumed below
         --port=*) SLOC_PORT="${arg#--port=}" ;;
         *) ;;
@@ -85,6 +88,22 @@ get_primary_ip() {
 # ── Firewall preflight (Linux only) ───────────────────────────────────────────
 FIREWALL_STATUS="unknown"
 FIREWALL_FIX=""
+
+# If --open-firewall is set and a blocking rule was detected, run the fix via sudo.
+maybe_open_firewall() {
+    [[ "$PLATFORM" != linux ]] && return
+    [[ "$OPEN_FIREWALL" != true ]] && return
+    [[ -z "$FIREWALL_FIX" ]] && return
+    printf '  Opening port %s/tcp via sudo...\n' "$SLOC_PORT"
+    if sudo -n true 2>/dev/null; then
+        eval "$FIREWALL_FIX"
+    else
+        sudo bash -c "$FIREWALL_FIX"
+    fi
+    # Re-evaluate after the fix so the banner shows the updated status.
+    FIREWALL_FIX=""
+    check_firewall
+}
 
 check_firewall() {
     [[ "$PLATFORM" != linux ]] && return
@@ -203,9 +222,25 @@ print_banner() {
     printf '\n'
 
     if [[ -n "$first_ip" ]]; then
-        printf '  Test from another device:\n'
+        printf '  Open in a browser (any device on this LAN):\n'
+        printf '    http://%s:%s/\n' "$first_ip" "$SLOC_PORT"
+        printf '\n'
+        if [[ -n "${SLOC_API_KEY:-}" ]]; then
+            printf '  API key is set — open the login page to sign in:\n'
+            printf '    http://%s:%s/auth/login\n' "$first_ip" "$SLOC_PORT"
+            printf '\n'
+            printf '  For a quick LAN test without auth:\n'
+            printf '    unset SLOC_API_KEY && bash scripts/serve-server.sh\n'
+            printf '  (warning: all endpoints become unauthenticated)\n'
+            printf '\n'
+            printf '  Auth lockout: %d failed attempts from the same IP triggers a\n' "${SLOC_AUTH_LOCKOUT_FAILS:-10}"
+            printf '  temporary lockout (SLOC_AUTH_LOCKOUT_SECS=%s). Restart the server\n' "${SLOC_AUTH_LOCKOUT_SECS:-3600}"
+            printf '  to clear it immediately.\n'
+            printf '\n'
+        fi
+        printf '  CLI test:\n'
         printf '    curl -H "Authorization: Bearer %s" http://%s:%s/healthz\n' \
-               "$SLOC_API_KEY" "$first_ip" "$SLOC_PORT"
+               "${SLOC_API_KEY:-<no-key>}" "$first_ip" "$SLOC_PORT"
     fi
     printf '\n'
 
@@ -228,6 +263,7 @@ do_launch_binary() {
     assert_port_free
     [[ "$PLATFORM" == linux ]] && chmod +x "$bin"
     check_firewall
+    maybe_open_firewall
     print_banner
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
@@ -238,6 +274,7 @@ do_launch_cargo() {
     free_port
     assert_port_free
     check_firewall
+    maybe_open_firewall
     print_banner
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
