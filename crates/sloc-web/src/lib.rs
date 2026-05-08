@@ -291,6 +291,7 @@ struct RunResultContext {
 enum AsyncRunState {
     Running {
         started_at: std::time::Instant,
+        cancel_token: Arc<std::sync::atomic::AtomicBool>,
     },
     /// run_id so the status endpoint can redirect to /runs/{run_id}/result.
     Complete {
@@ -299,6 +300,7 @@ enum AsyncRunState {
     Failed {
         message: String,
     },
+    Cancelled,
 }
 
 /// A saved scan configuration profile — stores the form parameters so users can
@@ -383,6 +385,7 @@ fn build_router(state: AppState) -> Router {
         .route("/scan", get(index))
         .route("/analyze", post(analyze_handler))
         .route("/preview", get(preview_handler))
+        .route("/api/suggest-coverage", get(api_suggest_coverage))
         .route("/pick-directory", get(pick_directory_handler))
         .route("/open-path", get(open_path_handler))
         .route("/pick-file", get(pick_file_handler))
@@ -396,10 +399,15 @@ fn build_router(state: AppState) -> Router {
         .route("/api/metrics/latest", get(api_metrics_latest_handler))
         .route("/api/metrics/{run_id}", get(api_metrics_run_handler))
         .route("/api/metrics/history", get(api_metrics_history_handler))
+        .route(
+            "/api/metrics/submodules",
+            get(api_metrics_submodules_handler),
+        )
         .route("/api/ingest", post(api_ingest_handler))
         .route("/api/project-history", get(project_history_handler))
         .route("/trend-report", get(trend_report_handler))
         .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
+        .route("/api/runs/{wait_id}/cancel", post(cancel_run_handler))
         .route("/api/runs/{run_id}/pdf-status", get(pdf_status_handler))
         .route("/runs/{run_id}/result", get(async_run_result_handler))
         .route("/embed/summary", get(embed_handler))
@@ -1500,9 +1508,11 @@ async fn pick_directory_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    let is_coverage = query.kind.as_deref() == Some("coverage");
     let title = match query.kind.as_deref() {
         Some("output") => "Select output directory",
         Some("reports") => "Select folder containing saved reports",
+        Some("coverage") => "Select LCOV coverage file",
         _ => "Select project directory",
     }
     .to_owned();
@@ -1528,7 +1538,13 @@ async fn pick_directory_handler(
                 dialog = dialog.set_directory(seed_dir);
             }
         }
-        let result = dialog.pick_folder();
+        let result = if is_coverage {
+            dialog
+                .add_filter("LCOV coverage", &["info", "lcov"])
+                .pick_file()
+        } else {
+            dialog.pick_folder()
+        };
 
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
         win_dialog_focus::detach_from_foreground(_fg_tid);
@@ -1796,6 +1812,20 @@ async fn locate_report_handler(
     )
 }
 
+/// Returns the first `result*.json` file found directly inside `dir`, or `None`.
+fn find_result_json_in_dir(dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".json"))
+        })
+}
+
 #[derive(Deserialize)]
 struct LocateReportsDirForm {
     folder_path: String,
@@ -1803,7 +1833,6 @@ struct LocateReportsDirForm {
 
 async fn locate_reports_dir_handler(
     State(state): State<AppState>,
-    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Form(form): Form<LocateReportsDirForm>,
 ) -> impl IntoResponse {
     if state.server_mode {
@@ -1811,24 +1840,31 @@ async fn locate_reports_dir_handler(
     }
     let folder = match fs::canonicalize(PathBuf::from(&form.folder_path)) {
         Ok(p) => strip_unc_prefix(p),
-        Err(_) => return locate_report_error("Folder not found or path is invalid.", &csp_nonce),
+        Err(_) => {
+            return axum::response::Redirect::to(
+                "/view-reports?error=Folder+not+found+or+path+is+invalid.",
+            )
+            .into_response();
+        }
     };
     if !folder.is_dir() {
-        return locate_report_error("Selected path is not a directory.", &csp_nonce);
+        return axum::response::Redirect::to(
+            "/view-reports?error=Selected+path+is+not+a+directory.",
+        )
+        .into_response();
     }
 
-    // Collect result.json candidates: the folder itself and one level of subdirectories.
+    // Collect result*.json candidates: the folder itself and one level of subdirectories.
+    // Filenames use the pattern result_<project>_<commit>.json — match by prefix/suffix.
     let mut candidates: Vec<PathBuf> = Vec::new();
-    let top = folder.join("result.json");
-    if top.exists() {
-        candidates.push(top);
+    if let Some(j) = find_result_json_in_dir(&folder) {
+        candidates.push(j);
     }
     if let Ok(dir_entries) = fs::read_dir(&folder) {
         for entry in dir_entries.flatten() {
             let sub = entry.path();
             if sub.is_dir() {
-                let j = sub.join("result.json");
-                if j.exists() {
+                if let Some(j) = find_result_json_in_dir(&sub) {
                     candidates.push(j);
                 }
             }
@@ -1836,10 +1872,10 @@ async fn locate_reports_dir_handler(
     }
 
     if candidates.is_empty() {
-        return locate_report_error(
-            "No result.json files found in the selected folder or its subdirectories.",
-            &csp_nonce,
-        );
+        return axum::response::Redirect::to(
+            "/view-reports?error=No+result+JSON+files+found+in+the+selected+folder+or+its+subdirectories.",
+        )
+        .into_response();
     }
 
     let mut linked_count: usize = 0;
@@ -1910,11 +1946,10 @@ async fn locate_reports_dir_handler(
     drop(reg);
 
     if linked_count == 0 {
-        return locate_report_error(
-            "No new reports were loaded. The selected folder may already be fully indexed, \
-             or the result.json files could not be parsed.",
-            &csp_nonce,
-        );
+        return axum::response::Redirect::to(
+            "/view-reports?error=No+new+reports+were+loaded.+The+folder+may+already+be+indexed+or+files+could+not+be+parsed.",
+        )
+        .into_response();
     }
     axum::response::Redirect::to(&format!("/view-reports?linked={linked_count}")).into_response()
 }
@@ -2042,6 +2077,30 @@ async fn preview_handler(
             escape_html(&err.to_string())
         )),
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SuggestCoverageQuery {
+    path: Option<String>,
+}
+
+async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl IntoResponse {
+    const CANDIDATES: &[&str] = &[
+        "coverage/lcov.info",
+        "lcov.info",
+        "target/llvm-cov/lcov.info",
+        "target/coverage/lcov.info",
+        "coverage/coverage.lcov",
+        "build/coverage/lcov.info",
+        "reports/lcov.info",
+    ];
+    let root = resolve_input_path(query.path.as_deref().unwrap_or(""));
+    let found = CANDIDATES
+        .iter()
+        .map(|rel| root.join(rel))
+        .find(|p| p.is_file())
+        .map(|p| display_path(&p));
+    Json(serde_json::json!({ "found": found }))
 }
 
 /// Validate a scan path in server mode. Returns `Err(response)` if rejected.
@@ -2354,6 +2413,9 @@ async fn analyze_handler(
     let wait_id = uuid::Uuid::new_v4().to_string();
     let wait_id_json = serde_json::to_string(&wait_id).unwrap_or_else(|_| "\"\"".to_owned());
 
+    // Cancel token: set to true by the cancel endpoint to abort the running analysis.
+    let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Clone everything the background task needs before moving into the spawn.
     let project_path_bg = form.path.clone();
     let output_dir_bg = form.output_dir.clone();
@@ -2364,6 +2426,7 @@ async fn analyze_handler(
     let clones_dir = state.git_clones_dir.clone();
     let wait_id_bg = wait_id.clone();
     let state_bg = state.clone();
+    let cancel_bg = Arc::clone(&cancel_token);
 
     {
         let mut runs = state.async_runs.lock().await;
@@ -2371,6 +2434,7 @@ async fn analyze_handler(
             wait_id.clone(),
             AsyncRunState::Running {
                 started_at: std::time::Instant::now(),
+                cancel_token,
             },
         );
     }
@@ -2382,6 +2446,7 @@ async fn analyze_handler(
         // Clone before moving into spawn_blocking so we can use them again afterwards.
         let git_repo_sb = git_repo_bg.clone();
         let git_ref_sb = git_ref_bg.clone();
+        let cancel_sb = Arc::clone(&cancel_bg);
         let analysis_result =
             tokio::task::spawn_blocking(move || -> Result<(sloc_core::AnalysisRun, String)> {
                 if let (Some(repo), Some(refname)) = (&git_repo_sb, &git_ref_sb) {
@@ -2390,7 +2455,7 @@ async fn analyze_handler(
                     let wt = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
                     sloc_git::create_worktree(&dest, refname, &wt)?;
                     config.discovery.root_paths = vec![wt.clone()];
-                    let run = analyze(&config, "serve");
+                    let run = analyze(&config, "serve", Some(&cancel_sb));
                     let _ = sloc_git::destroy_worktree(&dest, &wt);
                     let mut run = run?;
                     if run.git_branch.is_none() {
@@ -2399,7 +2464,7 @@ async fn analyze_handler(
                     let html = render_html(&run)?;
                     return Ok((run, html));
                 }
-                let run = analyze(&config, "serve")?;
+                let run = analyze(&config, "serve", Some(&cancel_sb))?;
                 let html = render_html(&run)?;
                 Ok((run, html))
             })
@@ -2407,18 +2472,33 @@ async fn analyze_handler(
             .map_err(|err| anyhow::anyhow!(err.to_string()))
             .and_then(|result| result);
 
+        // If cancelled while running, discard results and mark as cancelled.
+        if cancel_bg.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut runs = state_bg.async_runs.lock().await;
+            // Only overwrite if still Running (don't clobber a Complete that snuck in).
+            if matches!(
+                runs.get(&wait_id_bg),
+                Some(AsyncRunState::Running { .. }) | Some(AsyncRunState::Cancelled)
+            ) {
+                runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
+            }
+            return;
+        }
+
         let (run, report_html) = match analysis_result {
             Ok(v) => v,
             Err(err) => {
+                // Distinguish user-cancelled from real failure.
+                let message = if err.to_string().contains("analysis cancelled") {
+                    let mut runs = state_bg.async_runs.lock().await;
+                    runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
+                    return;
+                } else {
+                    "Analysis failed. Check that the path exists and is readable.".to_string()
+                };
                 eprintln!("[oxide-sloc][analyze] analysis failed: {err:#}");
                 let mut runs = state_bg.async_runs.lock().await;
-                runs.insert(
-                    wait_id_bg.clone(),
-                    AsyncRunState::Failed {
-                        message: "Analysis failed. Check that the path exists and is readable."
-                            .to_string(),
-                    },
-                );
+                runs.insert(wait_id_bg.clone(), AsyncRunState::Failed { message });
                 return;
             }
         };
@@ -2618,6 +2698,7 @@ enum AsyncRunStatusResponse {
     Running { elapsed_secs: u64 },
     Complete { run_id: String },
     Failed { message: String },
+    Cancelled,
 }
 
 async fn async_run_status_handler(
@@ -2634,7 +2715,7 @@ async fn async_run_status_handler(
     };
     match run_state {
         None => StatusCode::NOT_FOUND.into_response(),
-        Some(AsyncRunState::Running { started_at }) => {
+        Some(AsyncRunState::Running { started_at, .. }) => {
             // Treat runs older than 2 h as timed out (analysis should finish well under that).
             if started_at.elapsed() > std::time::Duration::from_secs(7200) {
                 let mut runs = state.async_runs.lock().await;
@@ -2660,6 +2741,26 @@ async fn async_run_status_handler(
         Some(AsyncRunState::Failed { message }) => {
             Json(AsyncRunStatusResponse::Failed { message }).into_response()
         }
+        Some(AsyncRunState::Cancelled) => Json(AsyncRunStatusResponse::Cancelled).into_response(),
+    }
+}
+
+async fn cancel_run_handler(
+    State(state): State<AppState>,
+    AxumPath(wait_id): AxumPath<String>,
+) -> Response {
+    if wait_id.len() > 128 || wait_id.contains('/') || wait_id.contains('\\') {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let mut runs = state.async_runs.lock().await;
+    match runs.get(&wait_id) {
+        Some(AsyncRunState::Running { cancel_token, .. }) => {
+            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
+            runs.insert(wait_id, AsyncRunState::Cancelled);
+            StatusCode::OK.into_response()
+        }
+        Some(AsyncRunState::Cancelled) => StatusCode::OK.into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -3634,6 +3735,7 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
 #[derive(Deserialize, Default)]
 struct HistoryQuery {
     linked: Option<String>,
+    error: Option<String>,
 }
 
 async fn history_handler(
@@ -3652,11 +3754,13 @@ async fn history_handler(
         .as_deref()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
+    let browse_error = query.error.filter(|s| !s.is_empty());
     let template = HistoryTemplate {
         version: env!("CARGO_PKG_VERSION"),
         entries,
         total_scans,
         linked_count,
+        browse_error,
         csp_nonce,
     };
     Html(
@@ -4411,6 +4515,9 @@ async fn project_history_handler(
 struct MetricsHistoryQuery {
     root: Option<String>,
     limit: Option<usize>,
+    /// When set, metrics are sourced from the matching SubmoduleSummary within each scan's
+    /// JSON artifact rather than from the project-level ScanSummarySnapshot.
+    submodule: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -4434,7 +4541,9 @@ async fn api_metrics_history_handler(
     Query(query): Query<MetricsHistoryQuery>,
 ) -> Response {
     let limit = query.limit.unwrap_or(50).min(500);
-    let entries: Vec<MetricsHistoryEntry> = {
+    let submodule_filter = query.submodule.as_deref().map(str::to_lowercase);
+
+    let candidate_entries: Vec<sloc_core::history::RegistryEntry> = {
         let reg = state.registry.lock().await;
         reg.entries
             .iter()
@@ -4448,38 +4557,123 @@ async fn api_metrics_history_handler(
                 }
             })
             .take(limit)
-            .map(|e| {
-                let s = &e.summary;
-                MetricsHistoryEntry {
-                    run_id: e.run_id.clone(),
-                    timestamp: e.timestamp_utc.to_rfc3339(),
-                    commit: e.git_commit.clone(),
-                    branch: e.git_branch.clone(),
-                    tags: e
-                        .git_tags
-                        .as_deref()
-                        .map(|s| {
-                            s.split(',')
-                                .map(|t| t.trim().to_string())
-                                .filter(|t| !t.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    code_lines: s.code_lines,
-                    comment_lines: s.comment_lines,
-                    blank_lines: s.blank_lines,
-                    physical_lines: s.total_physical_lines,
-                    files_analyzed: s.files_analyzed,
-                    project_label: e.project_label.clone(),
-                    html_url: e
-                        .html_path
-                        .as_ref()
-                        .map(|_| format!("/view-reports?run_id={}", e.run_id)),
-                }
-            })
+            .cloned()
             .collect()
     };
+
+    let entries: Vec<MetricsHistoryEntry> = candidate_entries
+        .into_iter()
+        .filter_map(|e| {
+            let tags = e
+                .git_tags
+                .as_deref()
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let html_url = e
+                .html_path
+                .as_ref()
+                .map(|_| format!("/view-reports?run_id={}", e.run_id));
+            let base = MetricsHistoryEntry {
+                run_id: e.run_id.clone(),
+                timestamp: e.timestamp_utc.to_rfc3339(),
+                commit: e.git_commit.clone(),
+                branch: e.git_branch.clone(),
+                tags,
+                code_lines: e.summary.code_lines,
+                comment_lines: e.summary.comment_lines,
+                blank_lines: e.summary.blank_lines,
+                physical_lines: e.summary.total_physical_lines,
+                files_analyzed: e.summary.files_analyzed,
+                project_label: e.project_label.clone(),
+                html_url,
+            };
+            if let Some(ref filter) = submodule_filter {
+                // Read the full JSON artifact to get per-submodule metrics.
+                let json_path = e.json_path.as_ref()?;
+                let json_str = std::fs::read_to_string(json_path).ok()?;
+                let run: sloc_core::AnalysisRun = serde_json::from_str(&json_str).ok()?;
+                let sub = run.submodule_summaries.iter().find(|s| {
+                    s.name.to_lowercase() == *filter || s.relative_path.to_lowercase() == *filter
+                })?;
+                Some(MetricsHistoryEntry {
+                    code_lines: sub.code_lines,
+                    comment_lines: sub.comment_lines,
+                    blank_lines: sub.blank_lines,
+                    physical_lines: sub.total_physical_lines,
+                    files_analyzed: sub.files_analyzed,
+                    ..base
+                })
+            } else {
+                Some(base)
+            }
+        })
+        .collect();
+
     Json(entries).into_response()
+}
+
+// GET /api/metrics/submodules?root=<path>
+// Returns the union of distinct submodule names found across all saved scan JSON artifacts
+// for the given project root (or all roots if omitted).
+#[derive(Deserialize)]
+struct MetricsSubmodulesQuery {
+    root: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SubmoduleEntry {
+    name: String,
+    relative_path: String,
+}
+
+async fn api_metrics_submodules_handler(
+    State(state): State<AppState>,
+    Query(query): Query<MetricsSubmodulesQuery>,
+) -> Response {
+    let json_paths: Vec<std::path::PathBuf> = {
+        let reg = state.registry.lock().await;
+        reg.entries
+            .iter()
+            .filter(|e| {
+                if let Some(root) = &query.root {
+                    let resolved = resolve_input_path(root);
+                    let root_str = resolved.to_string_lossy().replace('\\', "/");
+                    e.input_roots.iter().any(|r| r == &root_str)
+                } else {
+                    true
+                }
+            })
+            .filter_map(|e| e.json_path.clone())
+            .collect()
+    };
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<SubmoduleEntry> = Vec::new();
+
+    for path in &json_paths {
+        let Ok(json_str) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(run): Result<sloc_core::AnalysisRun, _> = serde_json::from_str(&json_str) else {
+            continue;
+        };
+        for sub in &run.submodule_summaries {
+            if seen.insert(sub.name.clone()) {
+                result.push(SubmoduleEntry {
+                    name: sub.name.clone(),
+                    relative_path: sub.relative_path.clone(),
+                });
+            }
+        }
+    }
+
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(result).into_response()
 }
 
 // ── CI ingest endpoint ────────────────────────────────────────────────────────
@@ -4657,8 +4851,9 @@ async fn trend_report_handler(
     .chart-hint-inline svg{{width:12px;height:12px;stroke:var(--muted-2);fill:none;stroke-width:2;flex:0 0 auto;}}
     .chart-hint-inline .dot{{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin:0 1px;}}
     .chart-section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
-    .data-table{{width:100%;border-collapse:collapse;font-size:13px;}}
-    .data-table th,.data-table td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);}}
+    .data-table{{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}}
+    .data-table th,.data-table td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
+    .data-table td:nth-child(5){{white-space:normal;}}
     .data-table th{{color:var(--muted);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.06em;background:var(--surface-2);}}
     .data-table tbody tr:hover{{background:rgba(255,247,238,0.6);cursor:pointer;}}
     body.dark-theme .data-table tbody tr:hover{{background:rgba(255,255,255,0.03);}}
@@ -4704,7 +4899,8 @@ async fn trend_report_handler(
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -4766,6 +4962,11 @@ async fn trend_report_handler(
             <option value="time">By Time</option>
             <option value="commit">By Commit</option>
             <option value="tag">Tags Only</option>
+          </select>
+        </label>
+        <label id="submodule-label" style="display:none;">Submodule:
+          <select class="chart-select" id="sub-sel">
+            <option value="">All (project total)</option>
           </select>
         </label>
       </div>
@@ -4843,7 +5044,8 @@ async fn trend_report_handler(
     var rootSel = document.getElementById('root-sel');
     ROOTS.forEach(function(r){{ var o=document.createElement('option');o.value=r;o.textContent=r;rootSel.appendChild(o); }});
 
-    function fmt(n){{ return Number(n).toLocaleString(); }}
+    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
+    function fmtFull(n){{return Number(n).toLocaleString();}}
     function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }}
 
     // Tooltip
@@ -4871,9 +5073,35 @@ async fn trend_report_handler(
         '<div class="stat-chip"><div class="stat-chip-tip">Number of distinct project roots tracked across all scans</div><div class="stat-chip-val">'+Object.keys(projs).length+'</div><div class="stat-chip-label">Projects</div></div>';
     }}
 
+    var subSel = document.getElementById('sub-sel');
+    var subLabel = document.getElementById('submodule-label');
+
+    function populateSubmodules(root){{
+      if(!subSel||!subLabel)return;
+      while(subSel.options.length>1)subSel.remove(1);
+      subSel.value='';
+      if(!root){{subLabel.style.display='none';return;}}
+      fetch('/api/metrics/submodules?root='+encodeURIComponent(root))
+        .then(function(r){{return r.json();}})
+        .then(function(subs){{
+          if(!subs||!subs.length){{subLabel.style.display='none';return;}}
+          subs.forEach(function(s){{
+            var o=document.createElement('option');
+            o.value=s.name;
+            o.textContent=s.name+(s.relative_path&&s.relative_path!==s.name?' ('+s.relative_path+')':'');
+            subSel.appendChild(o);
+          }});
+          subLabel.style.display='';
+        }})
+        .catch(function(){{subLabel.style.display='none';}});
+    }}
+
     function loadAndRender(){{
       var root = rootSel.value;
-      var url = '/api/metrics/history?limit=100' + (root ? '&root='+encodeURIComponent(root) : '');
+      var sub = subSel ? subSel.value : '';
+      var url = '/api/metrics/history?limit=100'
+        + (root ? '&root='+encodeURIComponent(root) : '')
+        + (sub  ? '&submodule='+encodeURIComponent(sub) : '');
       fetch(url).then(function(r){{return r.json();}}).then(function(data){{
         allData = data;
         render(data);
@@ -4971,7 +5199,7 @@ async fn trend_report_handler(
           var tagsHtml=d.tags&&d.tags.length?'<br>Tags: '+d.tags.map(function(t){{return'<span style="background:var(--info-bg);color:var(--info-text);padding:1px 6px;border-radius:999px;font-size:10px;margin-right:3px;">'+esc(t)+'</span>';}}).join(''):'';
           showTT(e,
             '<strong style="display:block;font-size:13px;margin-bottom:3px;">'+esc(d.project_label)+'</strong>'+
-            (Y_LABELS[yKey]||yKey)+': <strong>'+fmt(Number(d[yKey]))+'</strong><br>'+
+            (Y_LABELS[yKey]||yKey)+': <strong>'+fmtFull(Number(d[yKey]))+'</strong><br>'+
             'Date: '+d.timestamp.substring(0,10)+(d.commit?'<br>Commit: <code>'+esc(d.commit.substring(0,12))+'</code>':'')+
             (d.branch?'<br>Branch: '+esc(d.branch):'')+tagsHtml
           );
@@ -4998,7 +5226,7 @@ async fn trend_report_handler(
         var link = d.html_url?'<a class="run-link" href="'+esc(d.html_url)+'" target="_blank">View</a>':'—';
         return '<tr'+(d.html_url?' style="cursor:pointer;" onclick="window.open(\''+esc(d.html_url)+'\',\'_blank\')"':'')+' title='+(d.html_url?'"Click to open report"':'"No report saved for this scan"')+'><td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td><td>'+esc(d.project_label)+'</td><td class="mono">'+(d.commit?esc(d.commit.substring(0,8)):'—')+'</td><td>'+(d.branch?esc(d.branch):'—')+'</td><td>'+tags+'</td><td class="num">'+fmt(Number(d[yKey]))+'</td><td>'+link+'</td></tr>';
       }}).join('');
-      wrap.innerHTML = '<div class="chart-section-header">Scan History</div><table class="data-table"><thead><tr><th>Date</th><th>Project</th><th>Commit</th><th>Branch</th><th>Tags</th><th class="num">'+esc(yLabel)+'</th><th>Report</th></tr></thead><tbody>'+rows+'</tbody></table>';
+      wrap.innerHTML = '<div class="chart-section-header">Scan History</div><table class="data-table"><thead><tr><th style="width:148px">Date</th><th>Project</th><th style="width:78px">Commit</th><th style="width:95px">Branch</th><th style="width:100px">Tags</th><th class="num" style="width:90px">'+esc(yLabel)+'</th><th style="width:65px">Report</th></tr></thead><tbody>'+rows+'</tbody></table>';
     }}
 
     function exportXLSX(){{
@@ -5266,17 +5494,22 @@ async fn trend_report_handler(
       img.src=url;
     }}
 
-    ['root-sel','y-sel','x-sel'].forEach(function(id){{
+    ['y-sel','x-sel'].forEach(function(id){{
       var el=document.getElementById(id);
       if(el)el.addEventListener('change',function(){{render(allData);updateStats(allData);}});
     }});
-    rootSel.addEventListener('change',loadAndRender);
+    rootSel.addEventListener('change',function(){{
+      populateSubmodules(rootSel.value);
+      loadAndRender();
+    }});
+    if(subSel)subSel.addEventListener('change',loadAndRender);
 
     var xlsxBtn=document.getElementById('export-xlsx-btn');
     if(xlsxBtn)xlsxBtn.addEventListener('click',exportXLSX);
     var pngBtn=document.getElementById('export-png-btn');
     if(pngBtn)pngBtn.addEventListener('click',exportPNG);
 
+    populateSubmodules(rootSel.value);
     loadAndRender();
 
     (function randomizeWatermarks() {{
@@ -5769,7 +6002,7 @@ pub(crate) fn scan_path_to_artifacts(
     let mut config = base_config.clone();
     config.discovery.root_paths = vec![scan_path.to_path_buf()];
     config.reporting.report_title = label.to_owned();
-    let run = analyze(&config, "git")?;
+    let run = analyze(&config, "git", None)?;
     let html = render_html(&run)?;
     let run_id = run.tool.run_id.clone();
     let project_label = sanitize_project_label(label);
@@ -6088,6 +6321,30 @@ fn build_preview_html(
     write!(out, r#"<button type="button" class="scope-stat-button unsupported" data-filter="unsupported" data-tooltip="Files outside the supported language set — listed but not counted. Click to filter to unsupported files."><span class="scope-stat-label">Unsupported files</span><span class="scope-stat-value">{}</span></button>"#, stats.unsupported).ok();
     out.push_str(r#"<button type="button" class="scope-stat-button reset" data-filter="reset-view" data-tooltip="Clear all filters and return to the full project view."><span class="scope-stat-label">Reset view</span><span class="scope-stat-value">All</span></button>"#);
     out.push_str(r"</div>");
+
+    let submodules = sloc_core::detect_submodules(root);
+    if !submodules.is_empty() {
+        let count = submodules.len();
+        out.push_str(r#"<div class="submodule-preview-strip">"#);
+        write!(
+            out,
+            r#"<div class="submodule-preview-label"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="6" cy="6" r="3"/></svg><strong>{}</strong>&nbsp;git&nbsp;submodule{}&nbsp;detected</div>"#,
+            count,
+            if count == 1 { "" } else { "s" }
+        )
+        .ok();
+        out.push_str(r#"<div class="submodule-preview-chips">"#);
+        for (name, path) in &submodules {
+            write!(
+                out,
+                r#"<span class="submodule-preview-chip" title="path: {}">{}</span>"#,
+                escape_html(&path.to_string_lossy()),
+                escape_html(name)
+            )
+            .ok();
+        }
+        out.push_str(r"</div></div>");
+    }
 
     out.push_str(r#"<div class="scope-info-row">"#);
     out.push_str(r#"<div class="explorer-language-strip"><div class="meta-label">Detected languages</div><div class="language-pill-row iconified">"#);
@@ -6965,7 +7222,7 @@ struct SubmoduleRow {
     .output-field-row .field { margin: 0; }
     .output-field-aside { padding: 16px 18px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); font-size: 14px; color: var(--muted); line-height: 1.6; }
     .output-field-aside strong { display:block; font-size: 13px; font-weight: 800; letter-spacing: 0.04em; color: var(--text); margin-bottom: 6px; }
-    .step3-subtitle { margin-bottom: 28px; }
+    .step3-subtitle { margin-bottom: 10px; max-width: none; }
     .counting-intro { margin-bottom: 8px; max-width: none; }
     .ieee-note { margin-bottom: 22px; padding: 9px 14px; border-left: 3px solid var(--oxide); background: linear-gradient(180deg, rgba(184,93,51,0.07), transparent), var(--surface-2); border-radius: 0 8px 8px 0; font-size: 13px; color: var(--muted); line-height: 1.5; font-style: italic; }
     .counting-top-grid { gap: 20px; margin-top: 12px; align-items: start; }
@@ -7111,6 +7368,14 @@ struct SubmoduleRow {
     .tree-date-cell, .tree-type-cell { color: var(--muted); font-size: 13px; }
     .tree-status-cell { display:flex; justify-content:flex-start; }
     .preview-error { color: var(--danger-text); background: var(--danger-bg); border:1px solid #efc2c2; padding: 12px; border-radius: 12px; }
+    .preview-hint { color: var(--muted); background: var(--surface-2); border:1px solid var(--line); padding: 18px 20px; border-radius: 12px; font-size:14px; text-align:center; }
+    .coverage-suggest-badge { display:flex; align-items:center; gap:10px; margin-top:8px; padding:9px 14px; border-radius:10px; background:rgba(37,99,235,0.07); border:1px solid rgba(37,99,235,0.18); font-size:13px; }
+    .coverage-suggest-badge .csb-label { flex:1; min-width:0; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .coverage-suggest-badge .csb-label strong { color:var(--accent-2); }
+    .coverage-suggest-badge .csb-use { appearance:none; padding:4px 12px; border-radius:999px; border:1px solid var(--accent-2); background:transparent; color:var(--accent-2); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
+    .coverage-suggest-badge .csb-use:hover { background:rgba(37,99,235,0.1); }
+    .coverage-suggest-badge .csb-dismiss { appearance:none; padding:2px 8px; border-radius:999px; border:none; background:transparent; color:var(--muted); font-size:14px; cursor:pointer; line-height:1; }
+    body.dark-theme .coverage-suggest-badge { background:rgba(37,99,235,0.12); border-color:rgba(111,155,255,0.25); }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
     .loading-card { width: min(560px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 28px 32px; }
@@ -7131,8 +7396,20 @@ struct SubmoduleRow {
     .lc-err { background:rgba(180,40,40,0.08);border:1px solid rgba(180,40,40,0.25);border-radius:8px;padding:12px 16px;margin-top:14px; }
     .lc-err strong { display:block;color:#8b1f1f;margin-bottom:4px;font-size:13px; }
     .lc-err p { margin:0;font-size:12px;color:var(--muted); }
+    .lc-cancelled { background:rgba(100,100,100,0.08);border:1px solid rgba(100,100,100,0.22);border-radius:8px;padding:12px 16px;margin-top:14px; }
+    .lc-cancelled strong { display:block;color:var(--muted);margin-bottom:2px;font-size:13px; }
     .lc-actions { display:flex;gap:10px;flex-wrap:wrap;margin-top:14px; }
     .lc-outline-btn { display:inline-flex;align-items:center;padding:9px 20px;border-radius:999px;background:transparent;color:var(--nav,#b85d33);border:2px solid var(--nav,#b85d33);font-size:13px;font-weight:700;text-decoration:none;cursor:pointer; }
+    .quick-excl-chip { display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;background:rgba(37,99,235,0.07);border:1px solid rgba(37,99,235,0.2);color:var(--accent-2);font-size:11px;font-weight:700;cursor:pointer;transition:background .12s,border-color .12s; }
+    .quick-excl-chip:hover { background:rgba(37,99,235,0.15);border-color:rgba(37,99,235,0.4); }
+    .quick-excl-chip.active { background:rgba(37,99,235,0.18);border-color:rgba(37,99,235,0.55);opacity:0.6;cursor:default; }
+    .quick-excl-chip-all { background:rgba(180,80,20,0.08);border-color:rgba(180,80,20,0.25);color:var(--nav,#b85d33); }
+    .quick-excl-chip-all:hover { background:rgba(180,80,20,0.16);border-color:rgba(180,80,20,0.45); }
+    body.dark-theme .quick-excl-chip { background:rgba(111,155,255,0.1);border-color:rgba(111,155,255,0.25); }
+    body.dark-theme .quick-excl-chip-all { background:rgba(210,120,60,0.1);border-color:rgba(210,120,60,0.3); }
+    .lc-cancel-btn { display:inline-flex;align-items:center;gap:6px;margin-top:14px;padding:8px 18px;border-radius:999px;background:transparent;color:var(--muted);border:1.5px solid rgba(150,150,150,0.35);font-size:12px;font-weight:700;cursor:pointer;transition:color .15s,border-color .15s; }
+    .lc-cancel-btn:hover { color:#c0392b;border-color:#c0392b; }
+    body.dark-theme .lc-cancelled { background:rgba(80,80,80,0.12);border-color:rgba(150,150,150,0.2); }
     .hidden { display:none !important; }
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
@@ -7141,6 +7418,13 @@ struct SubmoduleRow {
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .submodule-preview-strip { display:flex; align-items:center; gap:14px; padding:12px 16px; border:1px solid rgba(37,99,235,0.2); border-radius:12px; background:linear-gradient(180deg,rgba(37,99,235,0.05),transparent),var(--surface-2); flex-wrap:wrap; }
+    .submodule-preview-label { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--text); white-space:nowrap; }
+    .submodule-preview-label svg { width:15px; height:15px; stroke:var(--accent-2); fill:none; stroke-width:2; flex:0 0 auto; }
+    .submodule-preview-chips { display:flex; flex-wrap:wrap; gap:8px; }
+    .submodule-preview-chip { display:inline-flex; align-items:center; padding:3px 11px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(37,99,235,0.09); border:1px solid rgba(37,99,235,0.22); color:var(--accent-2); cursor:default; }
+    body.dark-theme .submodule-preview-strip { border-color:rgba(111,155,255,0.22); background:linear-gradient(180deg,rgba(37,99,235,0.09),transparent),var(--surface-2); }
+    body.dark-theme .submodule-preview-chip { background:rgba(37,99,235,0.18); border-color:rgba(111,155,255,0.3); }
   </style>
 </head>
 <body>
@@ -7189,7 +7473,8 @@ struct SubmoduleRow {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -7209,21 +7494,26 @@ struct SubmoduleRow {
 
   <div class="loading" id="loading">
     <div class="loading-card">
-      <div class="lc-badge"><span class="lc-dot"></span>Analysis running</div>
-      <h2 class="lc-title">Analyzing your project…</h2>
+      <div class="lc-badge" id="lc-badge"><span class="lc-dot"></span>Analysis running</div>
+      <h2 class="lc-title" id="lc-title">Analyzing your project…</h2>
       <p class="lc-sub">Results are saved automatically — you can leave this page.</p>
       <div class="lc-path" id="lc-path"></div>
-      <div class="lc-metrics">
+      <div class="lc-metrics" id="lc-metrics">
         <div class="lc-metric"><div class="lc-metric-label">Elapsed</div><div class="lc-metric-value" id="lc-elapsed">0s</div></div>
         <div class="lc-metric"><div class="lc-metric-label">Phase</div><div class="lc-metric-value" id="lc-phase">Starting</div></div>
       </div>
-      <div class="progress-bar"><span></span></div>
+      <div class="progress-bar" id="lc-progress-bar"><span></span></div>
       <div class="lc-warn hidden" id="lc-warn">This is taking longer than usual. Large repositories can take several minutes — the analysis is still running.</div>
       <div class="lc-err hidden" id="lc-err"><strong>Analysis failed</strong><p id="lc-err-msg">An unexpected error occurred. Check that the path exists and is readable.</p></div>
+      <div class="lc-cancelled hidden" id="lc-cancelled"><strong>Scan cancelled</strong></div>
       <div class="lc-actions hidden" id="lc-actions">
         <button class="primary" id="lc-dismiss" type="button">Try Again</button>
         <a href="/view-reports" class="lc-outline-btn">View Reports</a>
       </div>
+      <button class="lc-cancel-btn" id="lc-cancel-btn" type="button">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        Cancel scan
+      </button>
     </div>
   </div>
 
@@ -7397,7 +7687,7 @@ struct SubmoduleRow {
                       <input type="hidden" name="git_repo" value="{{ git_repo }}" />
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
-                      <input id="path" name="path" type="text" value="tmp-sloc" placeholder="/path/to/repository" required />
+                      <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
                       <button type="button" class="mini-button oxide" id="browse-path">Browse</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
                       {% endif %}
@@ -7425,43 +7715,6 @@ struct SubmoduleRow {
                 </div>
               </div>
 
-              <div class="section">
-                <div class="field-grid">
-                  <div class="field">
-                    <label for="include_globs">Include globs</label>
-                    <textarea id="include_globs" name="include_globs" placeholder="examples:&#10;src/**/*.py&#10;scripts/*.sh"></textarea>
-                    <div class="hint">Use line-separated or comma-separated patterns when you want to narrow the scan to only certain folders or file types. If you leave this empty, everything under the project path is eligible first, and then exclude rules trim it down.</div>
-                  </div>
-                  <div class="field">
-                    <label for="exclude_globs">Exclude globs</label>
-                    <textarea id="exclude_globs" name="exclude_globs" placeholder="examples:&#10;vendor/**&#10;**/*.min.js"></textarea>
-                    <div class="hint">Use this to remove noisy areas from the scope such as dependency trees, generated output, build folders, snapshots, or minified assets.</div>
-                  </div>
-                </div>
-                <div class="glob-guidance-grid">
-                  <div class="glob-guidance-card">
-                    <strong>How to read them</strong>
-                    <p><code>*</code> matches within a name, <code>**</code> reaches across nested folders, and patterns are usually written relative to the selected project path.</p>
-                  </div>
-                  <div class="glob-guidance-card">
-                    <strong>Common include examples</strong>
-                    <p><code>src/**/*.rs</code> only Rust sources in src, <code>scripts/*</code> top-level scripts folder, <code>tests/**</code> everything under tests.</p>
-                  </div>
-                  <div class="glob-guidance-card">
-                    <strong>Common exclude examples</strong>
-                    <p><code>vendor/**</code> third-party code, <code>target/**</code> build output, <code>**/*.min.js</code> minified assets, <code>**/generated/**</code> generated files.</p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="section" style="margin-top:14px;">
-                <div class="field">
-                  <label for="coverage_file">Coverage file <span style="font-weight:400;color:var(--muted);font-size:12px;">(optional)</span></label>
-                  <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. /path/to/lcov.info or coverage/lcov.info" />
-                  <div class="hint">Path to an LCOV <code>.info</code> file generated by <code>lcov</code>, <code>gcov</code>, <code>cargo-llvm-cov --lcov</code>, or any compatible tool. When provided, line and function coverage percentages are added to each file in the report.</div>
-                </div>
-              </div>
-
               <div class="section" style="margin-top:14px;">
                 <div class="preset-inline-row git-inline-row">
                   <div class="toggle-card" style="margin:0;">
@@ -7486,6 +7739,62 @@ struct SubmoduleRow {
     path = libs/ui
     url  = https://github.com/org/ui.git</div>
                   </div>
+                </div>
+              </div>
+
+              <div class="section">
+                <div class="field-grid">
+                  <div class="field">
+                    <label for="include_globs">Include globs</label>
+                    <textarea id="include_globs" name="include_globs" placeholder="examples:&#10;src/**/*.py&#10;scripts/*.sh"></textarea>
+                    <div class="hint">Use line-separated or comma-separated patterns when you want to narrow the scan to only certain folders or file types. If you leave this empty, everything under the project path is eligible first, and then exclude rules trim it down.</div>
+                  </div>
+                  <div class="field">
+                    <label for="exclude_globs">Exclude globs</label>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;" id="quick-exclude-chips">
+                      <button type="button" class="quick-excl-chip" data-pattern="third_party/**">+ third_party/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="vendor/**">+ vendor/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="node_modules/**">+ node_modules/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="build/**">+ build/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="target/**">+ target/**</button>
+                      <button type="button" class="quick-excl-chip quick-excl-chip-all" data-pattern="third_party/**&#10;vendor/**&#10;node_modules/**&#10;build/**&#10;target/**&#10;dist/**">⚡ Skip all deps</button>
+                    </div>
+                    <textarea id="exclude_globs" name="exclude_globs" placeholder="examples:&#10;vendor/**&#10;**/*.min.js"></textarea>
+                    <div class="hint">Use this to remove noisy areas from the scope such as dependency trees, generated output, build folders, snapshots, or minified assets. Use the chips above to quickly add common patterns — this is the fastest way to reduce scan time for large repos with many third-party dependencies.</div>
+                  </div>
+                </div>
+                <div class="glob-guidance-grid">
+                  <div class="glob-guidance-card">
+                    <strong>How to read them</strong>
+                    <p><code>*</code> matches within a name, <code>**</code> reaches across nested folders, and patterns are usually written relative to the selected project path.</p>
+                  </div>
+                  <div class="glob-guidance-card">
+                    <strong>Common include examples</strong>
+                    <p><code>src/**/*.rs</code> only Rust sources in src, <code>scripts/*</code> top-level scripts folder, <code>tests/**</code> everything under tests.</p>
+                  </div>
+                  <div class="glob-guidance-card">
+                    <strong>Common exclude examples</strong>
+                    <p><code>vendor/**</code> third-party code, <code>target/**</code> build output, <code>**/*.min.js</code> minified assets, <code>**/generated/**</code> generated files.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="section" style="margin-top:14px;">
+                <div class="field">
+                  <label for="coverage_file">Coverage file <span style="font-weight:400;color:var(--muted);font-size:12px;">(optional)</span></label>
+                  <div class="input-group compact">
+                    <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. /path/to/lcov.info or coverage/lcov.info" />
+                    <button type="button" class="mini-button oxide" id="browse-coverage">Browse</button>
+                  </div>
+                  <div id="coverage-suggest-badge" class="coverage-suggest-badge" style="display:none"></div>
+                  <div class="hint">Path to an LCOV <code>.info</code> file produced by <code>lcov</code>&ensp;&middot;&ensp;<code>gcov</code>&ensp;&middot;&ensp;<code>cargo&nbsp;llvm-cov&nbsp;--lcov</code>&ensp;&middot;&ensp;or any compatible LCOV-format tool.<br>When provided, line and function coverage percentages are overlaid on each file in the report alongside the SLOC totals.</div>
+                  <div class="code-sample" style="margin-top:8px;font-size:12px;"># Rust — cargo-llvm-cov
+cargo llvm-cov --lcov --output-path coverage/lcov.info
+
+# C / C++ — gcov + lcov
+lcov --capture --directory . --output-file coverage/lcov.info
+
+# Pass the file path here:  coverage/lcov.info  or  /tmp/cov/myproject.info</div>
                 </div>
               </div>
 
@@ -7704,7 +8013,7 @@ struct SubmoduleRow {
                 <div class="output-field-row">
                   <div class="field">
                     <label for="report_title">Report title</label>
-                    <input id="report_title" name="report_title" type="text" value="tmp-sloc" placeholder="Project report title" />
+                    <input id="report_title" name="report_title" type="text" value="" placeholder="Project report title" />
                     <div class="hint">Appears in HTML and PDF output headers.</div>
                   </div>
                   <div class="output-field-aside">
@@ -7863,6 +8172,10 @@ struct SubmoduleRow {
       var useDefaultOutput = document.getElementById("use-default-output");
       var browsePath = document.getElementById("browse-path");
       var browseOutputDir = document.getElementById("browse-output-dir");
+      var browseCoverage = document.getElementById("browse-coverage");
+      var coverageInput = document.getElementById("coverage_file");
+      var coverageSuggestBadge = document.getElementById("coverage-suggest-badge");
+      var coverageSuggestTimer = null;
       var themeToggle = document.getElementById("theme-toggle");
       var mixedLinePolicy = document.getElementById("mixed_line_policy");
       var pythonDocstrings = document.getElementById("python_docstrings_as_comments");
@@ -7871,6 +8184,29 @@ struct SubmoduleRow {
       var artifactPreset = document.getElementById("artifact_preset");
       var includeGlobsInput = document.getElementById("include_globs");
       var excludeGlobsInput = document.getElementById("exclude_globs");
+
+      // Quick-exclude chips — append pattern to exclude_globs textarea.
+      document.querySelectorAll(".quick-excl-chip").forEach(function(chip) {
+        chip.addEventListener("click", function() {
+          var pattern = chip.getAttribute("data-pattern") || "";
+          if (!pattern || !excludeGlobsInput) return;
+          var current = excludeGlobsInput.value.trim();
+          // For the "skip all" chip, replace any existing dep patterns cleanly.
+          var patterns = pattern.split("\n");
+          var lines = current ? current.split("\n").map(function(l) { return l.trim(); }).filter(Boolean) : [];
+          var added = false;
+          patterns.forEach(function(p) {
+            p = p.trim();
+            if (p && lines.indexOf(p) === -1) { lines.push(p); added = true; }
+          });
+          if (added) {
+            excludeGlobsInput.value = lines.join("\n");
+            excludeGlobsInput.dispatchEvent(new Event("input"));
+          }
+          chip.classList.add("active");
+        });
+      });
+
       var liveReportTitle = document.getElementById("live-report-title");
       var navProjectPill = document.getElementById("nav-project-pill");
       var navProjectTitle = document.getElementById("nav-project-title");
@@ -7887,12 +8223,17 @@ struct SubmoduleRow {
 
       function dismissAnalysisModal() {
         if (loading) loading.classList.remove("active");
-        ["lc-err","lc-warn","lc-actions"].forEach(function(id) {
+        ["lc-err","lc-warn","lc-actions","lc-cancelled"].forEach(function(id) {
           var el = document.getElementById(id);
           if (el) el.classList.add("hidden");
         });
+        var cancelBtn = document.getElementById("lc-cancel-btn");
+        if (cancelBtn) { cancelBtn.style.display = ""; cancelBtn.disabled = false; cancelBtn.textContent = "✕ Cancel scan"; }
         var el = document.getElementById("lc-elapsed"); if (el) el.textContent = "0s";
         var ph = document.getElementById("lc-phase"); if (ph) ph.textContent = "Starting";
+        var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "";
+        var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "";
+        var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
         if (submitButton) { submitButton.disabled = false; submitButton.textContent = "Run analysis"; }
         if (quickScanBtn) { quickScanBtn.disabled = false; quickScanBtn.textContent = "Quick Scan"; }
       }
@@ -7909,10 +8250,15 @@ struct SubmoduleRow {
         var pathEl = document.getElementById("lc-path");
         if (pathEl) pathEl.textContent = displayPath;
 
-        ["lc-err","lc-warn","lc-actions"].forEach(function(id) {
+        ["lc-err","lc-warn","lc-actions","lc-cancelled"].forEach(function(id) {
           var el = document.getElementById(id);
           if (el) el.classList.add("hidden");
         });
+        var cancelBtn = document.getElementById("lc-cancel-btn");
+        if (cancelBtn) { cancelBtn.style.display = ""; cancelBtn.disabled = false; }
+        var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "";
+        var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "";
+        var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
         var elapsed0 = document.getElementById("lc-elapsed"); if (elapsed0) elapsed0.textContent = "0s";
         var phase0   = document.getElementById("lc-phase");   if (phase0)   phase0.textContent   = "Starting";
 
@@ -7925,9 +8271,35 @@ struct SubmoduleRow {
           if (el) el.textContent = s < 60 ? s + "s" : Math.floor(s/60) + "m " + (s%60) + "s";
         }, 1000);
 
-        var warnShown = false, pollRetries = 0;
+        var warnShown = false, pollRetries = 0, activeWaitId = null;
 
         function lcSetPhase(txt) { var el = document.getElementById("lc-phase"); if (el) el.textContent = txt; }
+
+        function lcShowCancelled() {
+          clearInterval(elapsedTimer);
+          var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "none";
+          var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "none";
+          var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "none";
+          var warnEl = document.getElementById("lc-warn"); if (warnEl) warnEl.classList.add("hidden");
+          var cancelledEl = document.getElementById("lc-cancelled"); if (cancelledEl) cancelledEl.classList.remove("hidden");
+          var actEl = document.getElementById("lc-actions"); if (actEl) actEl.classList.remove("hidden");
+          var cancelBtn = document.getElementById("lc-cancel-btn"); if (cancelBtn) cancelBtn.style.display = "none";
+          var titleEl = document.getElementById("lc-title"); if (titleEl) titleEl.textContent = "Scan cancelled";
+          if (submitButton) { submitButton.disabled = false; submitButton.textContent = "Run analysis"; }
+          if (quickScanBtn) { quickScanBtn.disabled = false; quickScanBtn.textContent = "Quick Scan"; }
+        }
+
+        var lcCancelBtn = document.getElementById("lc-cancel-btn");
+        if (lcCancelBtn) {
+          lcCancelBtn.onclick = function() {
+            if (!activeWaitId) { dismissAnalysisModal(); return; }
+            lcCancelBtn.disabled = true;
+            lcCancelBtn.textContent = "Cancelling…";
+            fetch("/api/runs/" + encodeURIComponent(activeWaitId) + "/cancel", { method: "POST" })
+              .then(function() { lcShowCancelled(); })
+              .catch(function() { lcShowCancelled(); });
+          };
+        }
 
         function lcShowError(msg) {
           clearInterval(elapsedTimer);
@@ -7956,6 +8328,8 @@ struct SubmoduleRow {
                 window.location.href = "/runs/" + encodeURIComponent(data.run_id) + "/result";
               } else if (data.state === "failed") {
                 lcShowError(data.message);
+              } else if (data.state === "cancelled") {
+                lcShowCancelled();
               } else {
                 var s = Math.floor((Date.now() - startTime) / 1000);
                 if (s > 90 && !warnShown) {
@@ -7982,6 +8356,7 @@ struct SubmoduleRow {
           .then(function(r) {
             var waitId = r.headers.get("x-wait-id");
             if (!waitId) { window.location.href = "/scan"; return; }
+            activeWaitId = waitId;
             setTimeout(function() { lcPoll(waitId); }, 1500);
           })
           .catch(function(err) {
@@ -8189,7 +8564,7 @@ struct SubmoduleRow {
       }
 
       function updateReportTitleFromPath() {
-        var inferred = (GIT_MODE && GIT_LABEL) ? GIT_LABEL : inferTitleFromPath(pathInput.value || "tmp-sloc");
+        var inferred = (GIT_MODE && GIT_LABEL) ? GIT_LABEL : inferTitleFromPath(pathInput.value || "");
         if (!reportTitleTouched) {
           reportTitleInput.value = inferred;
         }
@@ -8296,7 +8671,7 @@ struct SubmoduleRow {
         var sideOutputPreview = document.getElementById("side-output-preview");
         var sideTitlePreview = document.getElementById("side-title-preview");
 
-        if (sidePathPreview) { sidePathPreview.textContent = pathInput.value || "tmp-sloc"; }
+        if (sidePathPreview) { sidePathPreview.textContent = pathInput.value || "(no path)"; }
         if (sideOutputPreview) { sideOutputPreview.textContent = outputDirInput.value || "out/web"; }
         if (sideTitlePreview) {
           var rt = document.getElementById("report_title");
@@ -8304,7 +8679,7 @@ struct SubmoduleRow {
         }
 
         scanSummary.innerHTML = ""
-          + "<li>Path: " + escapeHtml(pathInput.value || "tmp-sloc") + "</li>"
+          + "<li>Path: " + escapeHtml(pathInput.value || "(no path set)") + "</li>"
           + "<li>Include filters: " + escapeHtml(includeText || "none") + "</li>"
           + "<li>Exclude filters: " + escapeHtml(excludeText || "none") + "</li>";
 
@@ -8325,7 +8700,7 @@ struct SubmoduleRow {
 
         outputSummary.innerHTML = ""
           + "<li>Output directory: " + escapeHtml(outputDirInput.value || "out/web") + "</li>"
-          + "<li>Report title: " + escapeHtml(reportTitleInput.value || inferTitleFromPath(pathInput.value || "tmp-sloc")) + "</li>";
+          + "<li>Report title: " + escapeHtml(reportTitleInput.value || inferTitleFromPath(pathInput.value) || "project") + "</li>";
 
         if (previewSummary) {
           if (GIT_MODE) {
@@ -8640,7 +9015,11 @@ struct SubmoduleRow {
           previewPanel.innerHTML = '<div class="preview-error" style="color:var(--muted);font-style:italic;">Preview is not available for remote git refs. The scan will check out the source at runtime.</div>';
           return;
         }
-        var path = pathInput.value || "tmp-sloc";
+        var path = pathInput.value.trim();
+        if (!path) {
+          previewPanel.innerHTML = '<div class="preview-hint">Enter a project path above to preview the files that will be in scope.</div>';
+          return;
+        }
         var includeValue = includeGlobsInput ? includeGlobsInput.value : "";
         var excludeValue = excludeGlobsInput ? excludeGlobsInput.value : "";
         previewPanel.innerHTML = '<div class="preview-error">Refreshing preview...</div>';
@@ -8742,8 +9121,9 @@ struct SubmoduleRow {
 
       if (useSamplePath) {
         useSamplePath.addEventListener("click", function () {
-          pathInput.value = "tmp-sloc";
+          pathInput.value = "tests/fixtures/basic";
           updateReportTitleFromPath();
+          autoSetOutputDir("tests/fixtures/basic");
           loadPreview();
         });
       }
@@ -8758,6 +9138,53 @@ struct SubmoduleRow {
 
       if (browsePath) browsePath.addEventListener("click", function () { pickDirectory(pathInput, "project"); });
       if (browseOutputDir) browseOutputDir.addEventListener("click", function () { pickDirectory(outputDirInput, "output"); });
+      if (browseCoverage) {
+        browseCoverage.addEventListener("click", function () {
+          browseCoverage.disabled = true;
+          var currentVal = coverageInput ? coverageInput.value : "";
+          fetch("/pick-directory?kind=coverage&current=" + encodeURIComponent(currentVal))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d && d.selected_path && coverageInput) {
+                coverageInput.value = d.selected_path;
+                if (coverageSuggestBadge) coverageSuggestBadge.style.display = "none";
+              }
+            })
+            .catch(function () {})
+            .finally(function () { browseCoverage.disabled = false; });
+        });
+      }
+
+      function suggestCoverageFile(projectPath) {
+        if (!coverageInput || !coverageSuggestBadge) return;
+        if (coverageInput.value.trim()) { coverageSuggestBadge.style.display = "none"; return; }
+        clearTimeout(coverageSuggestTimer);
+        if (!projectPath || !projectPath.trim()) { coverageSuggestBadge.style.display = "none"; return; }
+        coverageSuggestTimer = setTimeout(function () {
+          fetch("/api/suggest-coverage?path=" + encodeURIComponent(projectPath))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d && d.found && !coverageInput.value.trim()) {
+                coverageSuggestBadge.innerHTML =
+                  '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:var(--accent-2);fill:none;stroke-width:2;flex:0 0 auto;" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
+                  + '<span class="csb-label">Coverage file found: <strong>' + escapeHtml(d.found) + '</strong></span>'
+                  + '<button type="button" class="csb-use" data-path="' + escapeHtml(d.found) + '">Use this</button>'
+                  + '<button type="button" class="csb-dismiss" title="Dismiss">&times;</button>';
+                coverageSuggestBadge.style.display = "flex";
+                coverageSuggestBadge.querySelector(".csb-use").addEventListener("click", function () {
+                  coverageInput.value = this.dataset.path;
+                  coverageSuggestBadge.style.display = "none";
+                });
+                coverageSuggestBadge.querySelector(".csb-dismiss").addEventListener("click", function () {
+                  coverageSuggestBadge.style.display = "none";
+                });
+              } else {
+                coverageSuggestBadge.style.display = "none";
+              }
+            })
+            .catch(function () {});
+        }, 600);
+      }
 
       if (refreshPreviewInline) refreshPreviewInline.addEventListener("click", loadPreview);
 
@@ -8861,7 +9288,7 @@ struct SubmoduleRow {
                 historyBadge.textContent = data.scan_count + " previous scan" +
                   (data.scan_count === 1 ? "" : "s") + " found" + branch + ". " +
                   "Last: " + (data.last_scan_timestamp || "—") +
-                  " — " + (data.last_scan_code_lines ? Number(data.last_scan_code_lines).toLocaleString() : "?") + " code lines.";
+                  " — " + (data.last_scan_code_lines ? (function(v){return v>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M':v>=1e4?Math.round(v/1e3)+'K':Number(v).toLocaleString();})(data.last_scan_code_lines) : "?") + " code lines.";
                 historyBadge.className = "path-history-badge found";
                 historyBadge.style.display = "";
               }
@@ -8881,6 +9308,7 @@ struct SubmoduleRow {
         historyTimer = setTimeout(function () { fetchProjectHistory(val); }, 400);
         if (previewTimer) clearTimeout(previewTimer);
         previewTimer = setTimeout(loadPreview, 280);
+        suggestCoverageFile(val);
       }
 
       if (pathInput) {
@@ -8928,6 +9356,12 @@ struct SubmoduleRow {
           updateReview();
         });
       });
+
+      if (coverageInput && coverageSuggestBadge) {
+        coverageInput.addEventListener("input", function () {
+          if (coverageInput.value.trim()) coverageSuggestBadge.style.display = "none";
+        });
+      }
 
       if (form && loading && submitButton) {
         form.addEventListener("submit", function (e) {
@@ -9275,7 +9709,8 @@ struct IndexTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -9700,7 +10135,8 @@ struct SplashTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
@@ -10192,6 +10628,10 @@ struct ScanSetupTemplate {
     .r-lang-overview{display:flex;gap:40px;align-items:flex-start;justify-content:center;flex-wrap:wrap;padding:8px 0 16px;}
     .r-lang-overview-cell{display:flex;flex-direction:column;align-items:center;gap:8px;flex:1 1 280px;max-width:480px;}
     .r-lang-overview-cell p{margin:0;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);text-align:center;}
+    .r-viz-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;}
+    @media(max-width:820px){.r-viz-grid{grid-template-columns:1fr;}}
+    .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:var(--surface-2);}
+    .r-viz-card-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;}
   </style>
 </head>
 <body>
@@ -10237,7 +10677,8 @@ struct ScanSetupTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -10431,17 +10872,17 @@ struct ScanSetupTemplate {
           </div>
           <div class="pill-row"><span class="soft-chip">{{ submodule_rows.len() }} submodule{% if submodule_rows.len() != 1 %}s{% endif %}</span></div>
         </div>
-        <div style="overflow:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:700px;">
+        <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
+        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:auto;">
           <colgroup>
-            <col style="width:14%"><col style="width:40%">
-            <col style="width:6%"><col style="width:8%"><col style="width:6%">
-            <col style="width:8%"><col style="width:6%"><col style="width:12%">
+            <col><col>
+            <col style="width:1px"><col style="width:1px"><col style="width:1px">
+            <col style="width:1px"><col style="width:1px"><col style="width:80px">
           </colgroup>
           <thead>
             <tr>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Path</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Submodule</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Path</th>
               <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
               <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
               <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
@@ -10453,14 +10894,14 @@ struct ScanSetupTemplate {
           <tbody>
             {% for row in submodule_rows %}
             <tr>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.relative_path }}"><code style="font-size:12px;">{{ row.relative_path }}</code></td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.files_analyzed }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.total_physical_lines }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.code_lines }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.comment_lines }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;">{{ row.blank_lines }}</td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:center;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 12px;min-height:0;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;white-space:nowrap;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);" title="{{ row.relative_path }}"><code style="font-size:12px;white-space:nowrap;word-break:normal;overflow-wrap:normal;">{{ row.relative_path }}</code></td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.files_analyzed }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.total_physical_lines }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.code_lines }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.comment_lines }}</td>
+              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.blank_lines }}</td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 12px;min-height:0;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -10695,64 +11136,62 @@ struct ScanSetupTemplate {
         </table>
     </section>
 
-    <section class="panel r-chart-section">
-      <div class="toolbar-row" style="margin-bottom:8px;">
+    <section class="panel r-chart-section" style="margin-top:32px;">
+      <div class="toolbar-row" style="margin-bottom:16px;">
         <div>
           <h2>Visualizations</h2>
           <p class="muted">Interactive charts for this scan — use the controls to switch views.</p>
         </div>
       </div>
 
-      <div class="r-chart-grid-2">
-        <div>
-          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 8px;">Language Composition</p>
+      <div class="r-viz-grid">
+        <div class="r-viz-card">
+          <p class="r-viz-card-title">Language Composition</p>
           <div class="r-chart-tab-bar">
             <button class="r-chart-tab active" data-rcomp="abs">Absolute</button>
             <button class="r-chart-tab" data-rcomp="pct">100% Normalized</button>
           </div>
           <div class="r-chart-container" id="r-composition-chart"></div>
         </div>
-        <div>
-          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 8px;">Files vs Code Lines</p>
+        <div class="r-viz-card">
+          <p class="r-viz-card-title">Files vs Code Lines</p>
           <div class="r-chart-container" id="r-scatter-chart"></div>
         </div>
-      </div>
-
-      {% if has_semantic_data %}
-      <div style="margin-top:18px;">
-        <div class="r-chart-controls">
-          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0;">Semantic Metrics</p>
-          <select class="r-chart-select" id="r-semantic-metric">
-            <option value="functions">Functions</option>
-            <option value="classes">Classes</option>
-            <option value="variables">Variables</option>
-            <option value="imports">Imports</option>
-          </select>
+        {% if has_semantic_data %}
+        <div class="r-viz-card">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+            <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Semantic Metrics</p>
+            <select class="r-chart-select" id="r-semantic-metric">
+              <option value="functions">Functions</option>
+              <option value="classes">Classes</option>
+              <option value="variables">Variables</option>
+              <option value="imports">Imports</option>
+            </select>
+          </div>
+          <div class="r-chart-container" id="r-semantic-chart"></div>
         </div>
-        <div class="r-chart-container" id="r-semantic-chart"></div>
-      </div>
-      {% endif %}
-
-      {% if has_submodule_data %}
-      <div style="margin-top:18px;">
-        <div class="r-chart-controls">
-          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0;">Submodule Breakdown</p>
-          <select class="r-chart-select" id="r-sub-metric">
-            <option value="code">Code Lines</option>
-            <option value="comment">Comments</option>
-            <option value="blank">Blank Lines</option>
-            <option value="physical">Physical Lines</option>
-            <option value="files">Files</option>
-          </select>
-          <select class="r-chart-select" id="r-sub-sort">
-            <option value="desc">Value ↓</option>
-            <option value="asc">Value ↑</option>
-            <option value="name">Name A→Z</option>
-          </select>
+        {% endif %}
+        {% if has_submodule_data %}
+        <div class="r-viz-card">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+            <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Submodule Breakdown</p>
+            <select class="r-chart-select" id="r-sub-metric">
+              <option value="code">Code Lines</option>
+              <option value="comment">Comments</option>
+              <option value="blank">Blank Lines</option>
+              <option value="physical">Physical Lines</option>
+              <option value="files">Files</option>
+            </select>
+            <select class="r-chart-select" id="r-sub-sort">
+              <option value="desc">Value ↓</option>
+              <option value="asc">Value ↑</option>
+              <option value="name">Name A→Z</option>
+            </select>
+          </div>
+          <div class="r-chart-container" id="r-submodule-chart"></div>
         </div>
-        <div class="r-chart-container" id="r-submodule-chart"></div>
+        {% endif %}
       </div>
-      {% endif %}
 
     </section>
 
@@ -10831,7 +11270,7 @@ struct ScanSetupTemplate {
         var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
         var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082'];
         var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-        function fmt(n){return Number(n).toLocaleString();}
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
         function tt(label,val){return' class="rchit" onmouseover="rTT.s(event,\'<strong>'+label.replace(/'/g,'\\x27')+'<\\/strong><br>'+String(val).replace(/'/g,'\\x27')+'\')" onmousemove="rTT.m(event)" onmouseout="rTT.h()"';}
@@ -10901,7 +11340,7 @@ struct ScanSetupTemplate {
         var SUB_D={{ submodule_chart_json|safe }};
         var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082','#1F6E6E','#8B4513','#4169E1','#228B22','#8B008B','#FF6347','#708090','#DAA520'];
         var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-        function fmt(n){return Number(n).toLocaleString();}
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
         function tt(label,val){
@@ -11354,7 +11793,7 @@ struct ResultTemplate {
     .wait-sub{color:var(--muted);font-size:0.95rem;margin-bottom:24px;}
     .path-block{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.85rem;color:var(--muted);word-break:break-all;margin-bottom:24px;}
     .metrics-row{display:flex;gap:20px;margin-bottom:24px;flex-wrap:wrap;}
-    .metric-card{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:12px 18px;min-width:140px;}
+    .metric-card{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:12px 18px;min-width:140px;flex:1;text-align:center;}
     .metric-label{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;}
     .metric-value{font-size:1.1rem;font-weight:700;color:var(--text);}
     .progress-bar-wrap{background:var(--surface-2);border-radius:999px;height:6px;overflow:hidden;margin-bottom:24px;}
@@ -11416,7 +11855,8 @@ struct ResultTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -11705,7 +12145,8 @@ struct ScanWaitTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -11923,6 +12364,8 @@ struct ErrorTemplate {
     .locate-label{font-size:13px;color:var(--muted);white-space:nowrap;}
     .toast-success{display:flex;align-items:center;gap:10px;background:#e8f5ed;border:1px solid #a3d9b1;border-radius:10px;padding:10px 16px;margin-bottom:14px;font-size:13px;color:#1a5c35;font-weight:600;}
     body.dark-theme .toast-success{background:rgba(26,143,71,0.12);border-color:rgba(163,217,177,0.3);color:#6fcf97;}
+    .toast-error{display:flex;align-items:center;gap:10px;background:#fde8e8;border:1px solid #f5a3a3;border-radius:10px;padding:10px 16px;margin-bottom:14px;font-size:13px;color:#7a1a1a;font-weight:600;}
+    body.dark-theme .toast-error{background:rgba(180,30,30,0.12);border-color:rgba(245,163,163,0.3);color:#f08080;}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
@@ -11984,7 +12427,8 @@ struct ErrorTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -12003,6 +12447,12 @@ struct ErrorTemplate {
   </div>
 
   <div class="page">
+    {% if let Some(err) = browse_error %}
+    <div class="toast-error">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+      {{ err }}
+    </div>
+    {% endif %}
     {% if linked_count > 0 %}
     <div class="toast-success">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="20 6 9 17 4 12"></polyline></svg>
@@ -12169,9 +12619,10 @@ struct ErrorTemplate {
       // Aggregate stats from first (most recent) row
       if (allRows.length) {
         var first = allRows[0];
-        var ce = document.getElementById('agg-code'); if (ce) ce.textContent = Number(first.dataset.code).toLocaleString();
-        var fe = document.getElementById('agg-files'); if (fe) fe.textContent = first.dataset.files;
-        var se = document.getElementById('agg-skipped'); if (se) se.textContent = first.dataset.skipped;
+        function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        var ce = document.getElementById('agg-code'); if (ce) ce.textContent = slocFmt(first.dataset.code);
+        var fe = document.getElementById('agg-files'); if (fe) fe.textContent = slocFmt(first.dataset.files);
+        var se = document.getElementById('agg-skipped'); if (se) se.textContent = slocFmt(first.dataset.skipped);
       }
 
       // ── Branch filter population ──────────────────────────────────────────
@@ -12454,6 +12905,7 @@ struct HistoryTemplate {
     entries: Vec<HistoryEntryRow>,
     total_scans: usize,
     linked_count: usize,
+    browse_error: Option<String>,
     csp_nonce: String,
 }
 
@@ -12632,7 +13084,8 @@ struct HistoryTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -12815,10 +13268,11 @@ struct HistoryTemplate {
           var ts = r.dataset.timestamp || '';
           if (!latestRow || ts > latestTs) { latestTs = ts; latestRow = r; }
         });
+        function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
         var pe = document.getElementById('agg-projects'); if (pe) pe.textContent = Object.keys(projects).filter(Boolean).length;
         if (latestRow) {
-          var ce = document.getElementById('agg-code'); if (ce) ce.textContent = Number(latestRow.dataset.code).toLocaleString();
-          var fe = document.getElementById('agg-files'); if (fe) fe.textContent = latestRow.dataset.files;
+          var ce = document.getElementById('agg-code'); if (ce) ce.textContent = slocFmt(latestRow.dataset.code);
+          var fe = document.getElementById('agg-files'); if (fe) fe.textContent = slocFmt(latestRow.dataset.files);
         }
       })();
 
@@ -13392,7 +13846,8 @@ struct CompareSelectTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -14041,7 +14496,7 @@ struct CompareSelectTemplate {
       var OX='#C45C10', GN='#2A6846', RD='#B23030', GY='#AAAAAA', LGY='#DDDDDD';
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
-      function fmt(n){return Number(n).toLocaleString();}
+      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
       function px(n){return Math.round(n);}
       var el=document.querySelector('[data-folder]'), proj=el?el.getAttribute('data-folder'):'';
       // Language map
@@ -14596,7 +15051,8 @@ struct LoginTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">

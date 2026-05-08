@@ -14,6 +14,7 @@ pub use history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -254,6 +255,7 @@ fn walk_root(
     analyzed: &mut Vec<FileRecord>,
     skipped: &mut Vec<FileRecord>,
     warnings: &mut Vec<String>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<()> {
     let mut builder = WalkBuilder::new(root);
     builder
@@ -265,6 +267,8 @@ fn walk_root(
         .git_global(config.discovery.honor_ignore_files)
         .git_exclude(config.discovery.honor_ignore_files);
 
+    // Phase 1: collect candidate paths (sequential dir walk is cheap).
+    let mut paths = Vec::new();
     for entry in builder.build() {
         let entry = match entry {
             Ok(entry) => entry,
@@ -273,21 +277,64 @@ fn walk_root(
                 continue;
             }
         };
-
         let path = entry.into_path();
         if path.is_dir() || !seen_paths.insert(path.clone()) {
             continue;
         }
+        paths.push(path);
+    }
 
-        if let Some(record) = analyze_candidate_file(
-            &path,
-            root,
-            config,
-            include_globs,
-            exclude_globs,
-            enabled_languages,
-        )? {
-            push_record(record, analyzed, skipped, warnings);
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    // Phase 2: analyze files in parallel using scoped threads.
+    // Each thread gets a contiguous slice; results are merged afterwards.
+    let thread_count = std::thread::available_parallelism()
+        .map(|n| n.get().min(16))
+        .unwrap_or(4);
+    let chunk_size = paths.len().div_ceil(thread_count);
+
+    let chunk_results: Vec<Vec<Result<Option<FileRecord>>>> =
+        std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
+            let handles: Vec<_> = paths
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    s.spawn(move || -> Vec<Result<Option<FileRecord>>> {
+                        let mut results = Vec::with_capacity(chunk.len());
+                        for path in chunk {
+                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                                results.push(Err(anyhow::anyhow!("analysis cancelled")));
+                                break;
+                            }
+                            results.push(analyze_candidate_file(
+                                path,
+                                root,
+                                config,
+                                include_globs,
+                                exclude_globs,
+                                enabled_languages,
+                            ));
+                        }
+                        results
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .map_err(|_| anyhow::anyhow!("analysis thread panicked"))
+                })
+                .collect()
+        })?;
+
+    for chunk in chunk_results {
+        for result in chunk {
+            if let Some(record) = result? {
+                push_record(record, analyzed, skipped, warnings);
+            }
         }
     }
 
@@ -387,7 +434,11 @@ fn assemble_run(
 /// Returns an error if the config is invalid, root paths cannot be walked, or any file
 /// analysis step fails in a way that cannot be recovered from.
 #[allow(clippy::too_many_lines)]
-pub fn analyze(config: &AppConfig, runtime_mode: &str) -> Result<AnalysisRun> {
+pub fn analyze(
+    config: &AppConfig,
+    runtime_mode: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<AnalysisRun> {
     config.validate()?;
 
     if config.discovery.root_paths.is_empty() {
@@ -404,6 +455,10 @@ pub fn analyze(config: &AppConfig, runtime_mode: &str) -> Result<AnalysisRun> {
     let mut seen_paths = HashSet::new();
 
     for root in &config.discovery.root_paths {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            anyhow::bail!("analysis cancelled");
+        }
+
         let root = root.canonicalize().unwrap_or_else(|_| root.clone());
 
         if root.is_file() {
@@ -430,6 +485,7 @@ pub fn analyze(config: &AppConfig, runtime_mode: &str) -> Result<AnalysisRun> {
             &mut analyzed,
             &mut skipped,
             &mut warnings,
+            cancel,
         )?;
     }
 

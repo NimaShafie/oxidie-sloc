@@ -96,15 +96,19 @@ use super::{AppState, CspNonce};
     .info-tip::before{content:'';position:absolute;bottom:100%;left:8px;border:5px solid transparent;border-bottom-color:var(--line-strong);}
     .info-btn:hover .info-tip,.info-btn:focus .info-tip{display:block;}
     body.dark-theme .info-tip{background:var(--surface-2);box-shadow:0 6px 18px rgba(0,0,0,0.36);}
+    /* Integrations module */
+    .integrations-module{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:28px;overflow:hidden;}
+    .integrations-header{padding:26px 28px 20px;}
+    .integrations-header h1{margin-bottom:6px;}
+    .integrations-header .subtitle{margin-bottom:0;}
     /* Tab bar */
-    .tab-bar{display:flex;gap:6px;margin:0 auto 32px;width:fit-content;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:6px;box-shadow:0 2px 10px rgba(77,44,20,0.09);}
-    body.dark-theme .tab-bar{box-shadow:0 2px 10px rgba(0,0,0,0.28);}
-    .tab-btn{background:transparent;border:none;padding:14px 52px;font-size:15px;font-weight:700;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:9px;border-radius:9px;transition:color 0.15s,background 0.15s;}
-    .tab-btn svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
-    .tab-btn:hover{color:var(--text);background:rgba(0,0,0,0.06);}
-    body.dark-theme .tab-btn:hover{background:rgba(255,255,255,0.08);}
-    .tab-btn.active{color:var(--oxide-2);background:var(--surface-2);box-shadow:0 1px 4px rgba(77,44,20,0.10);}
-    body.dark-theme .tab-btn.active{box-shadow:0 1px 4px rgba(0,0,0,0.28);}
+    .tab-bar{display:flex;border-top:1px solid var(--line);background:var(--surface-2);}
+    .tab-btn{background:transparent;border:none;border-bottom:3px solid transparent;padding:14px 44px;font-size:14px;font-weight:700;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:9px;transition:color 0.15s,border-color 0.15s,background 0.15s;}
+    .tab-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .tab-btn:hover{color:var(--text);background:rgba(0,0,0,0.05);}
+    body.dark-theme .tab-btn:hover{background:rgba(255,255,255,0.06);}
+    .tab-btn.active{color:var(--oxide-2);border-bottom-color:var(--oxide-2);background:rgba(184,93,51,0.06);}
+    body.dark-theme .tab-btn.active{background:rgba(184,93,51,0.10);}
     .tab-pane{display:none;}
     .tab-pane.active{display:block;}
     /* Shared misc */
@@ -158,7 +162,8 @@ use super::{AppState, CspNonce};
           <button class="nav-dropdown-btn" type="button" style="background:rgba(255,255,255,0.22);">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -177,18 +182,21 @@ use super::{AppState, CspNonce};
   </nav>
 
   <div class="page">
-    <h1>Integrations</h1>
-    <p class="subtitle">Connect OxideSLOC to external platforms — automate scanning via webhooks, or publish results directly to Atlassian Confluence.</p>
-
-    <div class="tab-bar">
-      <button class="tab-btn" data-tab="webhooks" type="button">
-        <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
-        Webhooks
-      </button>
-      <button class="tab-btn" data-tab="confluence" type="button">
-        <svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
-        Confluence
-      </button>
+    <div class="integrations-module">
+      <div class="integrations-header">
+        <h1>Integrations</h1>
+        <p class="subtitle">Connect OxideSLOC to external platforms — automate scanning via webhooks, or publish results directly to Atlassian Confluence.</p>
+      </div>
+      <div class="tab-bar">
+        <button class="tab-btn" data-tab="webhooks" type="button">
+          <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
+          Webhooks
+        </button>
+        <button class="tab-btn" data-tab="confluence" type="button">
+          <svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+          Confluence
+        </button>
+      </div>
     </div>
 
     <!-- ── Webhooks tab ─────────────────────────────────────────────────────── -->
