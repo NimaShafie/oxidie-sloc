@@ -131,12 +131,12 @@ async fn git_browser_returns_html_with_csp() {
 
 #[tokio::test]
 async fn webhook_setup_returns_html_with_csp() {
-    let (status, headers, body) = get("/webhook-setup").await;
+    let (status, headers, body) = get("/integrations").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(has_csp(&headers), "missing CSP header on /webhook-setup");
+    assert!(has_csp(&headers), "missing CSP header on /integrations");
     assert!(
         body.contains("<html"),
-        "expected HTML body on /webhook-setup"
+        "expected HTML body on /integrations"
     );
 }
 

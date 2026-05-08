@@ -1032,15 +1032,15 @@ struct WarningOpportunityRow {
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; }
-    .summary-grid { display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap:14px; }
+    .summary-grid { display:grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:10px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
-    .metric { padding: 18px 18px 28px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 96px; }
+    .metric { padding: 11px 12px 20px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 70px; }
     .metric:hover { transform: translateY(-3px); box-shadow: var(--shadow-strong); }
-    .metric-label, .section-kicker { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
-    .metric-value { margin-top: 8px; }
-    .metric-big { display:block; font-size: 30px; font-weight: 800; color: var(--text); line-height: 1.15; letter-spacing: -0.02em; }
-    .metric-exact { position: absolute; bottom: 9px; right: 13px; font-size: 11px; font-weight: 600; color: var(--muted-2); font-family: ui-monospace, monospace; }
+    .metric-label, .section-kicker { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
+    .metric-value { margin-top: 6px; }
+    .metric-big { display:block; font-size: 24px; font-weight: 800; color: var(--text); line-height: 1.15; letter-spacing: -0.02em; }
+    .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 10px; font-weight: 600; color: var(--muted-2); font-family: ui-monospace, monospace; }
     .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.45; white-space: normal; max-width: 220px; text-align: center; pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.22); }
     .metric-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--text); }
     .metric:hover .metric-tooltip { opacity: 1; }
@@ -1073,7 +1073,7 @@ struct WarningOpportunityRow {
     .export-group { display:flex; gap:6px; align-items:center; }
     .export-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
     .export-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; }
+    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; contain: layout; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
@@ -1082,16 +1082,23 @@ struct WarningOpportunityRow {
     .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
     .table-resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .table-resizable td.mono { overflow: visible; text-overflow: unset; white-space: nowrap; }
-    #skipped-table th, #skipped-table td { padding: 7px 10px; }
+    #skipped-table { table-layout: fixed; width: 100%; }
+    #skipped-table th, #skipped-table td { padding: 7px 8px; }
+    #skipped-table td:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     /* Column resize handle */
     .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
     .col-resize-handle:hover, .col-resize-handle.dragging { background: rgba(211,122,76,0.3); }
-    #per-file-table { min-width: 1200px; }
-    /* Numeric columns get more breathing room */
-    #per-file-table th, #per-file-table td { padding: 11px 14px; }
-    /* File column stays pinned so it never scrolls out of view */
-    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; min-width: 200px; background: var(--surface-2); padding: 11px 10px 11px 14px; }
-    #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); padding: 11px 10px 11px 14px; }
+    /* Per-file table: fixed layout so all columns fit without horizontal scroll */
+    #per-file-table { table-layout: fixed; width: 100%; min-width: 0; }
+    #per-file-table th, #per-file-table td { padding: 8px 6px; }
+    /* File column: pinned, capped at 22%, truncates long paths */
+    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; width: 22%; background: var(--surface-2); padding: 8px 6px; overflow: hidden; text-overflow: ellipsis; }
+    #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); padding: 8px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #per-file-table th:nth-child(2) { width: 9%; }
+    /* 10 numeric columns share the remaining ~69% */
+    #per-file-table th:nth-child(n+3) { width: 6.9%; }
+    /* Override mono class overflow so file paths truncate */
+    #per-file-table td.mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #per-file-table tbody tr:hover td:first-child { background: rgba(255,247,238,0.6); }
     body.dark-theme #per-file-table tbody tr:hover td:first-child { background: rgba(255,255,255,0.03); }
     .num-col { text-align: right !important; }
@@ -1380,8 +1387,11 @@ struct WarningOpportunityRow {
     .chart-select:focus { border-color:var(--accent); }
     .chart-container { width:100%; overflow-x:auto; }
     .chart-container svg { display:block; width:100%; height:auto; }
-    .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; }
-    .charts-grid > .panel { margin:0; }
+    .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:stretch; }
+    .charts-grid > .panel { margin:0; display:flex; flex-direction:column; }
+    .charts-grid .chart-section > div { display:flex; flex-direction:column; flex:1; }
+    .charts-grid .chart-container { flex:1; min-height:180px; }
+    #submodule-chart { max-height: 360px; overflow-y: auto; }
     @media (max-width:820px) { .charts-grid { grid-template-columns:1fr; } }
     .chart-tab-bar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
     .chart-tab { padding:5px 16px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer; transition:background 0.12s,color 0.12s,border-color 0.12s; }
@@ -1750,9 +1760,9 @@ struct WarningOpportunityRow {
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
-                <th data-sort-type="text" style="width:55%">File</th>
-                <th data-sort-type="text" style="width:18%">Status</th>
-                <th data-sort-type="text">Warnings</th>
+                <th data-sort-type="text" style="width:42%">File</th>
+                <th data-sort-type="text" style="width:20%">Status</th>
+                <th data-sort-type="text" style="width:38%">Warnings</th>
               </tr>
             </thead>
             <tbody>
@@ -1977,8 +1987,8 @@ struct WarningOpportunityRow {
             var tbody = table.tBodies[0];
             var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
             rows.sort(function (a, b) {
-              var av = detectType(a.children[idx].innerText || a.children[idx].textContent || '');
-              var bv = detectType(b.children[idx].innerText || b.children[idx].textContent || '');
+              var av = detectType((a.children[idx].textContent || '').trim());
+              var bv = detectType((b.children[idx].textContent || '').trim());
               if (av < bv) return -1 * direction;
               if (av > bv) return 1 * direction;
               return 0;
@@ -2014,12 +2024,21 @@ struct WarningOpportunityRow {
       document.querySelectorAll('[data-table-filter]').forEach(function (input) {
         var table = document.getElementById(input.getAttribute('data-table-filter'));
         if (!table) return;
+        var filterTimer = null;
+        var rowCache = null;
         input.addEventListener('input', function () {
+          clearTimeout(filterTimer);
           var q = input.value.toLowerCase();
-          Array.prototype.slice.call(table.tBodies[0].rows).forEach(function (row) {
-            var text = row.innerText.toLowerCase();
-            row.style.display = text.indexOf(q) >= 0 ? '' : 'none';
-          });
+          filterTimer = setTimeout(function () {
+            if (!rowCache) {
+              rowCache = Array.prototype.map.call(table.tBodies[0].rows, function (row) {
+                return { row: row, text: row.textContent.toLowerCase() };
+              });
+            }
+            rowCache.forEach(function (item) {
+              item.row.style.display = q === '' || item.text.indexOf(q) >= 0 ? '' : 'none';
+            });
+          }, 200);
         });
       });
     })();
@@ -2130,7 +2149,7 @@ struct WarningOpportunityRow {
       var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
       var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
       // overflow:visible lets scale(1.06) hover expand beyond the SVG bounds
-      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" style="display:block;overflow:visible;width:100%;height:auto;" xmlns="http://www.w3.org/2000/svg">';
       if(D.length===1){
         // Single language: full-circle arc paths can degenerate in some renderers; use a stroked circle instead
         var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
@@ -2160,7 +2179,7 @@ struct WarningOpportunityRow {
       // Per-language stacked bar — wider bars and labels for legibility
       var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
       var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
-      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" style="display:block;overflow:visible;width:100%;height:auto;" xmlns="http://www.w3.org/2000/svg">';
       D.forEach(function(d,i){
         var y=10+i*rHb,x=LW;
         var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
@@ -2181,11 +2200,9 @@ struct WarningOpportunityRow {
       bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
       bs+='</svg>';
       var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
-      el.innerHTML='<div style="overflow-x:auto;padding:6px 0;">'+
-        '<div style="display:flex;flex-wrap:nowrap;justify-content:center;align-items:flex-start;gap:64px;padding:0 24px;">'+
-          '<div style="flex-shrink:0;text-align:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
-          '<div style="flex-shrink:0;text-align:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
-        '</div>'+
+      el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">'+
+        '<div style="min-width:0;text-align:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
+        '<div style="min-width:0;text-align:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
       '</div>';
       // Donut segment: entry fade-in + hover scale/brighten
       el.querySelectorAll('.donut-seg').forEach(function(seg,i){
@@ -2350,20 +2367,21 @@ struct WarningOpportunityRow {
         if(sortMode==='desc')data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
         else if(sortMode==='asc')data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
         else data.sort(function(a,b){return a.name.localeCompare(b.name);});
+        data=data.slice(0,30);
         var col=SUB_COLOR_MAP[yKey]||OX;
         var el=document.getElementById('submodule-chart');
         if(!el)return;
         var maxV=Math.max.apply(null,data.map(function(d){return d[yKey]||0;}))||1;
-        var LW=130, BW=340, rH=34, SH=data.length*rH+44;
+        var LW=130, BW=320, rH=24, SH=data.length*rH+32;
         var W=LW+BW+90;
         var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
         data.forEach(function(d,i){
           var y=10+i*rH, v=d[yKey]||0, bW=Math.round(v/maxV*BW);
           svg+='<g class="sub-row" data-name="'+esc(d.name)+'" data-path="'+esc(d.path)+'" data-code="'+d.code+'" data-comment="'+d.comment+'" data-blank="'+d.blank+'" data-physical="'+d.physical+'" data-files="'+d.files+'" style="cursor:default;">';
           svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
-          svg+='<text x="'+(LW-8)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" font-weight="600" fill="#43342d">'+esc(d.name)+'</text>';
-          if(bW>0)svg+='<rect class="sub-fill" x="'+LW+'" y="'+(y+6)+'" width="'+bW+'" height="'+(rH-12)+'" fill="'+col+'" rx="3"/>';
-          svg+='<text x="'+(LW+bW+7)+'" y="'+(y+rH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(v)+'</text>';
+          svg+='<text x="'+(LW-8)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" font-weight="600" fill="#43342d">'+esc(d.name)+'</text>';
+          if(bW>0)svg+='<rect class="sub-fill" x="'+LW+'" y="'+(y+4)+'" width="'+bW+'" height="'+(rH-8)+'" fill="'+col+'" rx="2"/>';
+          svg+='<text x="'+(LW+bW+6)+'" y="'+(y+rH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(v)+'</text>';
           svg+='</g>';
         });
         // Legend
