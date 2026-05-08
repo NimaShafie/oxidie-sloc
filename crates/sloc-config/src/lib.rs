@@ -127,10 +127,63 @@ pub struct AnalysisConfig {
     /// Applies to C, C++, and Objective-C. Default: true (directives count toward code SLOC).
     #[serde(default = "default_true")]
     pub count_compiler_directives: bool,
+    /// Optional SLOC budget thresholds. When set, `--fail-on-budget` exits non-zero if
+    /// any threshold is exceeded. Configured under `[analysis.budget]` in the TOML.
+    #[serde(default)]
+    pub budget: Option<BudgetConfig>,
+    /// Path to an LCOV `.info` file produced by lcov, gcov, cargo-llvm-cov, etc.
+    /// When set, oxide-sloc attaches per-file line/function coverage to each `FileRecord`.
+    /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_file: Option<PathBuf>,
 }
 
 const fn default_true() -> bool {
     true
+}
+
+/// Validates that `s` is a CSS hex colour: `#RGB` or `#RRGGBB`.
+pub fn validate_hex_color(s: &str) -> Result<()> {
+    let hex = s
+        .strip_prefix('#')
+        .ok_or_else(|| anyhow::anyhow!("must start with '#'"))?;
+    if !matches!(hex.len(), 3 | 6) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("must be a 3- or 6-digit hex colour (e.g. #3b82f6)");
+    }
+    Ok(())
+}
+
+/// Per-language and total SLOC thresholds. Used with `--fail-on-budget` in CI.
+///
+/// Keys in `per_language` are case-insensitive language display names
+/// (e.g. `"rust"`, `"typescript"`). Zero means unlimited.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BudgetConfig {
+    /// Maximum total code lines across all languages (0 = unlimited).
+    #[serde(default)]
+    pub total_max: u64,
+    /// Per-language code-line ceilings. Key is the language display name, lowercase.
+    #[serde(default)]
+    pub per_language: BTreeMap<String, u64>,
+}
+
+impl BudgetConfig {
+    /// Returns `true` if no limits are configured.
+    pub fn is_empty(&self) -> bool {
+        self.total_max == 0 && self.per_language.is_empty()
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if any budget threshold is zero (which would always fail).
+    pub fn validate(&self) -> Result<()> {
+        for (lang, &limit) in &self.per_language {
+            if limit == 0 {
+                anyhow::bail!("per_language[\"{lang}\"] limit must be > 0");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for AnalysisConfig {
@@ -151,6 +204,8 @@ impl Default for AnalysisConfig {
             continuation_line_policy: ContinuationLinePolicy::EachPhysicalLine,
             blank_in_block_comment_policy: BlankInBlockCommentPolicy::CountAsComment,
             count_compiler_directives: true,
+            budget: None,
+            coverage_file: None,
         }
     }
 }
@@ -163,6 +218,21 @@ pub struct ReportingConfig {
     pub include_skipped_files_section: bool,
     pub include_warnings_section: bool,
     pub theme: String,
+    /// Optional company or team name shown in the report header instead of "OxideSLOC".
+    #[serde(default)]
+    pub company_name: Option<String>,
+    /// Path to a PNG/SVG logo file to embed in the report header.
+    /// If unset, the default OxideSLOC logo is used.
+    #[serde(default)]
+    pub logo_path: Option<std::path::PathBuf>,
+    /// CSS hex colour (e.g. `#3b82f6`) used as the primary accent throughout the report.
+    /// Must start with `#` and be a valid 3- or 6-digit hex colour.
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    /// Text printed in a header and footer strip on every page of the HTML/PDF report.
+    /// Use for company name, project identifier, or scanner identification.
+    #[serde(default)]
+    pub report_header_footer: Option<String>,
 }
 
 impl Default for ReportingConfig {
@@ -174,6 +244,10 @@ impl Default for ReportingConfig {
             include_skipped_files_section: true,
             include_warnings_section: true,
             theme: "auto".into(),
+            company_name: None,
+            logo_path: None,
+            accent_color: None,
+            report_header_footer: None,
         }
     }
 }
@@ -196,12 +270,55 @@ impl Default for WebConfig {
     }
 }
 
+/// A named configuration profile.  All sub-config sections are optional; any
+/// present section *replaces* the corresponding base config section in full.
+/// Commonly used to represent different scanning contexts in the same repo
+/// (e.g. `[profile.frontend]`, `[profile.backend]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    #[serde(default)]
+    pub discovery: Option<DiscoveryConfig>,
+    #[serde(default)]
+    pub analysis: Option<AnalysisConfig>,
+    #[serde(default)]
+    pub reporting: Option<ReportingConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub discovery: DiscoveryConfig,
     pub analysis: AnalysisConfig,
     pub reporting: ReportingConfig,
     pub web: WebConfig,
+    /// Named profiles that override base config sections when selected via `--profile`.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ProfileConfig>,
+}
+
+impl AppConfig {
+    /// Apply the named profile overrides on top of this config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no profile with that name exists or if the resulting
+    /// config fails validation.
+    pub fn apply_profile(&mut self, name: &str) -> Result<()> {
+        let profile = self
+            .profiles
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("profile '{name}' not found in config"))?
+            .clone();
+        if let Some(d) = profile.discovery {
+            self.discovery = d;
+        }
+        if let Some(a) = profile.analysis {
+            self.analysis = a;
+        }
+        if let Some(r) = profile.reporting {
+            self.reporting = r;
+        }
+        self.validate()
+    }
 }
 
 impl AppConfig {
@@ -228,6 +345,15 @@ impl AppConfig {
 
         if self.web.bind_address.trim().is_empty() {
             anyhow::bail!("web.bind_address must not be empty");
+        }
+
+        if let Some(color) = &self.reporting.accent_color {
+            validate_hex_color(color)
+                .with_context(|| format!("reporting.accent_color is invalid: {color}"))?;
+        }
+
+        if let Some(budget) = &self.analysis.budget {
+            budget.validate().context("analysis.budget is invalid")?;
         }
 
         Ok(())

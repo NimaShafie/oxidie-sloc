@@ -2,8 +2,12 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod baseline;
+pub mod coverage;
 pub mod delta;
 pub mod history;
+pub use baseline::{check_against_baseline, resolve_baselines_path, BaselineEntry, BaselineStore};
+pub use coverage::{aggregate_line_coverage, lookup_coverage, parse_lcov, FileCoverage};
 pub use delta::{compute_delta, FileChangeStatus, FileDelta, ScanComparison, SummaryDelta};
 pub use history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot};
 
@@ -93,6 +97,8 @@ pub struct SummaryTotals {
     pub variables: u64,
     #[serde(default)]
     pub imports: u64,
+    #[serde(default)]
+    pub test_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +118,8 @@ pub struct LanguageSummary {
     pub variables: u64,
     #[serde(default)]
     pub imports: u64,
+    #[serde(default)]
+    pub test_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +139,9 @@ pub struct FileRecord {
     pub parse_mode: Option<ParseMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submodule: Option<String>,
+    /// Line/function/branch coverage from an external LCOV file, when provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<FileCoverage>,
 }
 
 /// Per-submodule aggregated stats produced when `submodule_breakdown` is enabled.
@@ -431,6 +442,28 @@ pub fn analyze(config: &AppConfig, runtime_mode: &str) -> Result<AnalysisRun> {
     } else {
         Vec::new()
     };
+
+    // Coverage attachment: if a coverage file is configured, parse it once and attach
+    // per-file metrics to each analyzed FileRecord.
+    if let Some(cov_path) =
+        coverage::resolve_coverage_file(config.analysis.coverage_file.as_deref())
+    {
+        match fs::read_to_string(&cov_path) {
+            Ok(content) => {
+                let cov_map = coverage::parse_lcov(&content);
+                for record in &mut analyzed {
+                    record.coverage =
+                        coverage::lookup_coverage(&cov_map, &record.relative_path).cloned();
+                }
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "coverage file '{}' could not be read: {e}",
+                    cov_path.display()
+                ));
+            }
+        }
+    }
 
     Ok(assemble_run(
         config,
@@ -798,6 +831,7 @@ fn analyze_candidate_file(
         vendor,
         parse_mode: Some(analysis.parse_mode),
         submodule: None,
+        coverage: None,
     }))
 }
 
@@ -860,6 +894,7 @@ fn build_summary(analyzed: &[FileRecord], skipped: &[FileRecord]) -> SummaryTota
         summary.classes += record.raw_line_categories.classes;
         summary.variables += record.raw_line_categories.variables;
         summary.imports += record.raw_line_categories.imports;
+        summary.test_count += record.raw_line_categories.test_count;
     }
 
     summary
@@ -883,6 +918,7 @@ fn build_language_summaries(analyzed: &[FileRecord]) -> Vec<LanguageSummary> {
             classes: 0,
             variables: 0,
             imports: 0,
+            test_count: 0,
         });
         entry.files += 1;
         entry.total_physical_lines += record.raw_line_categories.total_physical_lines;
@@ -894,6 +930,7 @@ fn build_language_summaries(analyzed: &[FileRecord]) -> Vec<LanguageSummary> {
         entry.classes += record.raw_line_categories.classes;
         entry.variables += record.raw_line_categories.variables;
         entry.imports += record.raw_line_categories.imports;
+        entry.test_count += record.raw_line_categories.test_count;
     }
 
     by_language.into_values().collect()
@@ -921,6 +958,7 @@ fn skipped_record(
         vendor: false,
         parse_mode: None,
         submodule: None,
+        coverage: None,
     }
 }
 
@@ -1027,6 +1065,7 @@ fn build_language_summaries_from_slice(files: &[&FileRecord]) -> Vec<LanguageSum
                     classes: 0,
                     variables: 0,
                     imports: 0,
+                    test_count: 0,
                 });
             entry.files += 1;
             let r = &file.raw_line_categories;
@@ -1035,6 +1074,7 @@ fn build_language_summaries_from_slice(files: &[&FileRecord]) -> Vec<LanguageSum
             entry.comment_lines += file.effective_counts.comment_lines;
             entry.blank_lines += file.effective_counts.blank_lines;
             entry.mixed_lines_separate += file.effective_counts.mixed_lines_separate;
+            entry.test_count += r.test_count;
         }
     }
     map.into_values().collect()

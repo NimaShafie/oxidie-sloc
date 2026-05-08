@@ -23,8 +23,10 @@ static IMG_ICON_DOCKERFILE: &[u8] = include_bytes!("../assets/icons/docker.png")
 static IMG_ICON_MAKEFILE: &[u8] = include_bytes!("../assets/icons/makefile.svg");
 static IMG_ICON_PERL: &[u8] = include_bytes!("../assets/icons/perl.svg");
 
+pub(crate) mod confluence;
 pub(crate) mod git_browser;
 pub(crate) mod git_webhook;
+pub(crate) mod integrations;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -299,6 +301,40 @@ enum AsyncRunState {
     },
 }
 
+/// A saved scan configuration profile — stores the form parameters so users can
+/// re-run a favourite scan with one click.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScanProfile {
+    id: String,
+    name: String,
+    created_at: String,
+    /// The raw scan-form parameters serialized as JSON.
+    params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ScanProfileStore {
+    profiles: Vec<ScanProfile>,
+}
+
+impl ScanProfileStore {
+    fn load(path: &std::path::Path) -> Self {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     base_config: AppConfig,
@@ -317,6 +353,12 @@ struct AppState {
     /// Persisted list of webhook / poll schedules.
     schedules: Arc<Mutex<ScheduleStore>>,
     schedules_path: PathBuf,
+    /// Named scan profiles saved by the user via the web UI.
+    scan_profiles: Arc<Mutex<ScanProfileStore>>,
+    scan_profiles_path: PathBuf,
+    /// Persisted Confluence integration settings.
+    confluence: Arc<Mutex<confluence::ConfluenceConfigStore>>,
+    confluence_path: PathBuf,
 }
 
 type PendingPdf = Option<(PathBuf, PathBuf, bool)>;
@@ -353,7 +395,10 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/{run_id}/{artifact}", get(artifact_handler))
         .route("/api/metrics/latest", get(api_metrics_latest_handler))
         .route("/api/metrics/{run_id}", get(api_metrics_run_handler))
+        .route("/api/metrics/history", get(api_metrics_history_handler))
+        .route("/api/ingest", post(api_ingest_handler))
         .route("/api/project-history", get(project_history_handler))
+        .route("/trend-report", get(trend_report_handler))
         .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
         .route("/api/runs/{run_id}/pdf-status", get(pdf_status_handler))
         .route("/runs/{run_id}/result", get(async_run_result_handler))
@@ -363,14 +408,54 @@ fn build_router(state: AppState) -> Router {
         .route("/api/git/refs", get(git_browser::api_list_refs))
         .route("/api/git/scan-ref", get(git_browser::api_scan_ref))
         .route("/api/git/compare-refs", get(git_browser::api_compare_refs))
-        // ── Webhook + schedule management ──────────────────────────────────────
-        .route("/webhook-setup", get(git_webhook::webhook_setup_handler))
+        // ── Config export / import ─────────────────────────────────────────────
+        .route("/export-config", get(export_config_handler))
+        .route("/import-config", post(import_config_handler))
+        // ── Scan profiles ──────────────────────────────────────────────────────
+        .route("/api/scan-profiles", get(api_list_scan_profiles))
+        .route("/api/scan-profiles", post(api_save_scan_profile))
+        .route(
+            "/api/scan-profiles/{id}",
+            axum::routing::delete(api_delete_scan_profile),
+        )
+        // ── Integrations (webhooks + Confluence) ──────────────────────────────
+        .route("/integrations", get(integrations::integrations_handler))
+        .route(
+            "/webhook-setup",
+            get(|| async { axum::response::Redirect::permanent("/integrations#webhooks") }),
+        )
+        .route(
+            "/confluence-setup",
+            get(|| async { axum::response::Redirect::permanent("/integrations#confluence") }),
+        )
         .route("/api/schedules", get(git_webhook::api_list_schedules))
         .route("/api/schedules", post(git_webhook::api_create_schedule))
         .route(
             "/api/schedules",
             axum::routing::delete(git_webhook::api_delete_schedule),
         )
+        .route(
+            "/api/confluence/config",
+            get(confluence::api_get_confluence_config),
+        )
+        .route(
+            "/api/confluence/config",
+            post(confluence::api_save_confluence_config),
+        )
+        .route(
+            "/api/confluence/test",
+            post(confluence::api_test_confluence),
+        )
+        .route(
+            "/api/confluence/post",
+            post(confluence::api_post_to_confluence),
+        )
+        .route(
+            "/api/confluence/wiki-markup",
+            get(confluence::api_wiki_markup),
+        )
+        // ── REST API reference page ────────────────────────────────────────────
+        .route("/api-docs", get(api_docs_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -422,6 +507,10 @@ pub fn make_test_router() -> Router {
         git_clones_dir: tmp.join("git-clones"),
         schedules: Arc::new(Mutex::new(ScheduleStore::default())),
         schedules_path: tmp.join("schedules.json"),
+        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
+        scan_profiles_path: tmp.join("scan_profiles.json"),
+        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
+        confluence_path: tmp.join("confluence_config.json"),
     };
     build_router(state)
 }
@@ -507,6 +596,14 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let schedules_path = std::env::var("SLOC_SCHEDULES_PATH")
         .map_or_else(|_| output_root.join("schedules.json"), PathBuf::from);
     let schedules = ScheduleStore::load(&schedules_path);
+    let scan_profiles_path = std::env::var("SLOC_SCAN_PROFILES_PATH")
+        .map_or_else(|_| output_root.join("scan_profiles.json"), PathBuf::from);
+    let scan_profiles = ScanProfileStore::load(&scan_profiles_path);
+    let confluence_path = std::env::var("SLOC_CONFLUENCE_CONFIG_PATH").map_or_else(
+        |_| output_root.join("confluence_config.json"),
+        PathBuf::from,
+    );
+    let confluence = confluence::ConfluenceConfigStore::load(&confluence_path);
 
     let state = AppState {
         base_config: config,
@@ -523,6 +620,10 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         git_clones_dir,
         schedules: Arc::new(Mutex::new(schedules)),
         schedules_path,
+        scan_profiles: Arc::new(Mutex::new(scan_profiles)),
+        scan_profiles_path,
+        confluence: Arc::new(Mutex::new(confluence)),
+        confluence_path,
     };
 
     restart_poll_schedules(&state).await;
@@ -1268,6 +1369,22 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+async fn api_docs_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+) -> impl IntoResponse {
+    let has_api_key = !state.api_keys.is_empty();
+    Html(
+        ApiDocsTemplate {
+            has_api_key,
+            csp_nonce,
+            version: env!("CARGO_PKG_VERSION"),
+        }
+        .render()
+        .unwrap_or_else(|e| format!("<pre>{e}</pre>")),
+    )
+}
+
 async fn chart_js_handler() -> impl IntoResponse {
     (
         [(
@@ -1292,11 +1409,13 @@ struct AnalyzeForm {
     binary_file_behavior: Option<BinaryFileBehavior>,
     output_dir: Option<String>,
     report_title: Option<String>,
+    report_header_footer: Option<String>,
     generate_html: Option<String>,
     generate_pdf: Option<String>,
     include_globs: Option<String>,
     exclude_globs: Option<String>,
     submodule_breakdown: Option<String>,
+    coverage_file: Option<String>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1523,6 +1642,27 @@ fn registry_entry_from_run(
         git_tags: None,
         git_commit_date: None,
     }
+}
+
+/// Register a webhook/poll-triggered scan in the live registry so it appears in /view-reports
+/// immediately without requiring a server restart.
+pub(crate) async fn register_artifacts_in_registry(
+    state: &AppState,
+    label: &str,
+    run: &AnalysisRun,
+    artifacts: &RunArtifacts,
+) {
+    let Some(json_path) = artifacts.json_path.clone() else {
+        return;
+    };
+    let Some(html_path) = artifacts.html_path.clone() else {
+        return;
+    };
+    let mut entry = registry_entry_from_run(run, json_path, html_path);
+    entry.project_label = label.to_owned();
+    let mut reg = state.registry.lock().await;
+    reg.add_entry(entry);
+    let _ = reg.save(&state.registry_path);
 }
 
 /// Validate the locate-report form: check extension, resolve the canonical path, enforce
@@ -2056,9 +2196,23 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
             config.reporting.report_title = trimmed.to_string();
         }
     }
+    if let Some(hf) = form.report_header_footer.as_deref() {
+        let trimmed = hf.trim();
+        config.reporting.report_header_footer = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
     config.discovery.include_globs = split_patterns(form.include_globs.as_deref());
     config.discovery.exclude_globs = split_patterns(form.exclude_globs.as_deref());
     config.discovery.submodule_breakdown = form.submodule_breakdown.as_deref() == Some("enabled");
+    if let Some(cov) = &form.coverage_file {
+        let trimmed = cov.trim();
+        if !trimmed.is_empty() {
+            config.analysis.coverage_file = Some(std::path::PathBuf::from(trimmed));
+        }
+    }
 }
 
 /// Fire-and-forget: generate the PDF in a background task if one is pending.
@@ -2574,7 +2728,12 @@ async fn async_run_result_handler(
         }
     };
 
-    render_result_page(&run, &artifacts, &run_id, &csp_nonce)
+    let confluence_configured = {
+        let store = state.confluence.lock().await;
+        store.is_configured()
+    };
+
+    render_result_page(&run, &artifacts, &run_id, &csp_nonce, confluence_configured)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2583,6 +2742,7 @@ fn render_result_page(
     artifacts: &RunArtifacts,
     run_id: &str,
     csp_nonce: &str,
+    confluence_configured: bool,
 ) -> Response {
     let ctx = &artifacts.result_context;
     let prev_entry = &ctx.prev_entry;
@@ -2782,14 +2942,84 @@ fn render_result_page(
                         .replace('\\', "\\\\")
                         .replace('"', "\\\"");
                     format!(
-                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{}}}"#,
-                        name, l.code_lines, l.comment_lines, l.blank_lines,
+                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
+                        name,
+                        l.code_lines,
+                        l.comment_lines,
+                        l.blank_lines,
+                        l.functions,
+                        l.classes,
+                        l.variables,
+                        l.imports,
+                        l.files,
                     )
                 })
                 .collect();
             format!("[{}]", entries.join(","))
         },
+        scatter_chart_json: {
+            let entries: Vec<String> = run
+                .totals_by_language
+                .iter()
+                .map(|l| {
+                    let name = l
+                        .language
+                        .display_name()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    format!(
+                        r#"{{"lang":"{}","files":{},"code":{},"physical":{}}}"#,
+                        name, l.files, l.code_lines, l.total_physical_lines,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        semantic_chart_json: {
+            let entries: Vec<String> = run
+                .totals_by_language
+                .iter()
+                .filter(|l| l.functions > 0 || l.classes > 0 || l.variables > 0 || l.imports > 0)
+                .map(|l| {
+                    let name = l
+                        .language
+                        .display_name()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    format!(
+                        r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{}}}"#,
+                        name, l.functions, l.classes, l.variables, l.imports,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        submodule_chart_json: {
+            let entries: Vec<String> = run
+                .submodule_summaries
+                .iter()
+                .map(|s| {
+                    let name = s.name.replace('\\', "\\\\").replace('"', "\\\"");
+                    format!(
+                        r#"{{"name":"{}","code":{},"comment":{},"blank":{},"physical":{},"files":{}}}"#,
+                        name,
+                        s.code_lines,
+                        s.comment_lines,
+                        s.blank_lines,
+                        s.total_physical_lines,
+                        s.files_analyzed,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        has_submodule_data: !run.submodule_summaries.is_empty(),
+        has_semantic_data: run
+            .totals_by_language
+            .iter()
+            .any(|l| l.functions > 0 || l.classes > 0),
         csp_nonce: csp_nonce.to_owned(),
+        confluence_configured,
     };
 
     Html(
@@ -3115,7 +3345,7 @@ async fn artifact_handler(
                      <style nonce=\"{csp_nonce}\">\
                      :root{{--radius:18px;--bg:#f5efe8;--surface:rgba(255,255,255,0.86);--surface-2:#fbf7f2;\
                      --line:#e6d0bf;--line-strong:#dcb89f;--text:#43342d;--muted:#7b675b;\
-                     --nav:#b85d33;--nav-2:#7a371b;--oxide-2:#b85d33;--shadow:0 18px 42px rgba(77,44,20,0.12);}}\
+                     --nav:#283790;--nav-2:#013e6b;--oxide-2:#b85d33;--shadow:0 18px 42px rgba(77,44,20,0.12);}}\
                      body.dark-theme{{--bg:#1b1511;--surface:#261c17;--surface-2:#2d221d;\
                      --line:#524238;--line-strong:#6b5548;--text:#f5ece6;--muted:#c7b7aa;}}\
                      *{{box-sizing:border-box;}}html,body{{margin:0;min-height:100vh;\
@@ -3174,7 +3404,12 @@ async fn artifact_handler(
                        </a>\
                        <div class=\"nav-right\">\
                          <a class=\"nav-pill\" href=\"/\">Home</a>\
-                         <a class=\"nav-pill\" href=\"/view-reports\">View Reports</a>\
+                         <div class=\"nav-dropdown\">\
+                           <a href=\"/view-reports\" class=\"nav-dropdown-btn\">View Reports <svg width=\"10\" height=\"10\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"6 9 12 15 18 9\"></polyline></svg></a>\
+                           <div class=\"nav-dropdown-menu\">\
+                             <a href=\"/trend-report\"><svg viewBox=\"0 0 24 24\"><polyline points=\"23 6 13.5 15.5 8.5 10.5 1 18\"></polyline><polyline points=\"17 6 23 6 23 12\"></polyline></svg>Trend Report</a>\
+                           </div>\
+                         </div>\
                          <button type=\"button\" class=\"theme-toggle\" id=\"theme-toggle\" aria-label=\"Toggle theme\">\
                            <svg class=\"icon-moon\" viewBox=\"0 0 24 24\"><path d=\"M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z\"></path></svg>\
                            <svg class=\"icon-sun\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"4.2\"></circle>\
@@ -4166,6 +4401,959 @@ async fn project_history_handler(
     .into_response()
 }
 
+// ── Metrics history API ───────────────────────────────────────────────────────
+// Protected. Returns a JSON array of lightweight scan snapshots for plotting
+// trend charts.
+//
+// GET /api/metrics/history?root=<path>&limit=<n>
+
+#[derive(Deserialize)]
+struct MetricsHistoryQuery {
+    root: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct MetricsHistoryEntry {
+    run_id: String,
+    timestamp: String,
+    commit: Option<String>,
+    branch: Option<String>,
+    tags: Vec<String>,
+    code_lines: u64,
+    comment_lines: u64,
+    blank_lines: u64,
+    physical_lines: u64,
+    files_analyzed: u64,
+    project_label: String,
+    html_url: Option<String>,
+}
+
+async fn api_metrics_history_handler(
+    State(state): State<AppState>,
+    Query(query): Query<MetricsHistoryQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50).min(500);
+    let entries: Vec<MetricsHistoryEntry> = {
+        let reg = state.registry.lock().await;
+        reg.entries
+            .iter()
+            .filter(|e| {
+                if let Some(root) = &query.root {
+                    let resolved = resolve_input_path(root);
+                    let root_str = resolved.to_string_lossy().replace('\\', "/");
+                    e.input_roots.iter().any(|r| r == &root_str)
+                } else {
+                    true
+                }
+            })
+            .take(limit)
+            .map(|e| {
+                let s = &e.summary;
+                MetricsHistoryEntry {
+                    run_id: e.run_id.clone(),
+                    timestamp: e.timestamp_utc.to_rfc3339(),
+                    commit: e.git_commit.clone(),
+                    branch: e.git_branch.clone(),
+                    tags: e
+                        .git_tags
+                        .as_deref()
+                        .map(|s| {
+                            s.split(',')
+                                .map(|t| t.trim().to_string())
+                                .filter(|t| !t.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    code_lines: s.code_lines,
+                    comment_lines: s.comment_lines,
+                    blank_lines: s.blank_lines,
+                    physical_lines: s.total_physical_lines,
+                    files_analyzed: s.files_analyzed,
+                    project_label: e.project_label.clone(),
+                    html_url: e
+                        .html_path
+                        .as_ref()
+                        .map(|_| format!("/view-reports?run_id={}", e.run_id)),
+                }
+            })
+            .collect()
+    };
+    Json(entries).into_response()
+}
+
+// ── CI ingest endpoint ────────────────────────────────────────────────────────
+// Protected. Accepts a pre-computed AnalysisRun JSON posted by a CI job so the
+// server stores and displays results without cloning or scanning anything itself.
+//
+// POST /api/ingest?label=<optional_display_name>
+// Body: AnalysisRun JSON produced by `oxide-sloc analyze --json-out`
+// Send: `oxide-sloc send result.json --webhook-url <server>/api/ingest [--webhook-token <key>]`
+
+#[derive(Deserialize)]
+struct IngestQuery {
+    label: Option<String>,
+}
+
+async fn api_ingest_handler(
+    State(state): State<AppState>,
+    Query(q): Query<IngestQuery>,
+    Json(run): Json<sloc_core::AnalysisRun>,
+) -> Response {
+    let label = q.label.unwrap_or_else(|| {
+        run.input_roots
+            .first()
+            .map(|r| sanitize_project_label(r))
+            .unwrap_or_else(|| "ingested".to_owned())
+    });
+
+    let label_for_task = label.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let html = render_html(&run)?;
+        let run_id = run.tool.run_id.clone();
+        let project_label = sanitize_project_label(&label_for_task);
+        let output_dir = resolve_output_root(None).join(format!("{project_label}_{run_id}"));
+        let file_stem = match run.git_commit_short.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => format!("{project_label}_{c}"),
+            _ => project_label.clone(),
+        };
+        let (artifacts, _pending_pdf) = persist_run_artifacts(
+            &run,
+            &html,
+            &output_dir,
+            true,
+            true,
+            false,
+            &label_for_task,
+            &file_stem,
+            RunResultContext::default(),
+        )?;
+        Ok::<_, anyhow::Error>((run_id, artifacts, run))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((run_id, artifacts, run))) => {
+            register_artifacts_in_registry(&state, &label, &run, &artifacts).await;
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "run_id": run_id,
+                    "view_url": format!("/view-reports?run_id={run_id}"),
+                })),
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+// ── Trend report page ─────────────────────────────────────────────────────────
+// Protected. Interactive time-series chart page that loads scan history via
+// /api/metrics/history and renders a vanilla-SVG line chart.
+//
+// GET /trend-report
+
+async fn trend_report_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+) -> Response {
+    // Collect distinct project roots for the root selector dropdown.
+    let roots: Vec<String> = {
+        let reg = state.registry.lock().await;
+        let mut seen = std::collections::BTreeSet::new();
+        reg.entries
+            .iter()
+            .flat_map(|e| e.input_roots.iter().cloned())
+            .filter(|r| seen.insert(r.clone()))
+            .collect()
+    };
+
+    let roots_json = serde_json::to_string(&roots).unwrap_or_else(|_| "[]".to_string());
+    let nonce = &csp_nonce;
+    let version = env!("CARGO_PKG_VERSION");
+
+    let html = format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OxideSLOC | Trend Report</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{nonce}">
+    :root {{
+      --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.82); --surface-2:#fbf7f2;
+      --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
+      --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
+      --info-bg:#eef3ff; --info-text:#4467d8;
+    }}
+    body.dark-theme {{ --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }}
+    *{{box-sizing:border-box;}} html,body{{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}}
+    .background-watermarks{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}
+    .background-watermarks img{{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}}
+    .code-particles{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}.code-particle{{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}}
+    @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
+    .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
+    .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
+    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
+    .brand-copy{{display:flex;flex-direction:column;justify-content:center;min-width:0;}}
+    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}}
+    .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;}}
+    @media (max-width:1400px) {{ .nav-right {{ gap:6px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 10px; }} }}
+    @media (max-width:1150px) {{ .nav-right {{ gap:4px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 8px;font-size:11px;min-height:34px; }} .brand-subtitle {{ display:none; }} .server-online-pill {{ width:34px;padding:0;justify-content:center;font-size:0;gap:0;min-height:34px; }} }}
+    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
+    .nav-pill:hover{{background:rgba(255,255,255,0.18);transform:translateY(-1px);}}
+    .theme-toggle{{width:38px;justify-content:center;padding:0;cursor:pointer;}} .theme-toggle:hover{{transform:translateY(-1px);background:rgba(255,255,255,0.16);}}
+    .theme-toggle svg{{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}}
+    .theme-toggle .icon-sun{{display:none;}} body.dark-theme .theme-toggle .icon-sun{{display:block;}} body.dark-theme .theme-toggle .icon-moon{{display:none;}}
+    .status-dot{{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}}
+    .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{{display:block;}}
+    .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
+    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
+    .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
+    .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
+    .settings-close{{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}}
+    .settings-close:hover{{color:var(--text);background:var(--surface-2);}} .settings-close svg{{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}}
+    .settings-modal-body{{padding:14px 16px 16px;}} .settings-modal-label{{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}}
+    .scheme-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}}
+    .scheme-swatch{{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}}
+    .scheme-swatch:hover{{border-color:var(--line-strong);transform:translateY(-1px);}} .scheme-swatch.active{{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}}
+    .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}} .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
+    .page{{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}}
+    .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
+    h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
+    .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
+    .trend-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;}}
+    .trend-title-block{{flex:1;min-width:0;}}
+    .controls-centered{{display:flex;justify-content:center;align-items:center;gap:20px;flex-wrap:wrap;padding:13px 0 15px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:16px;}}
+    .controls-centered label{{font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:7px;}}
+    .chart-select{{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:5px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}}
+    .chart-select:focus{{border-color:var(--accent);}}
+    .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
+    @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
+    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}}
+    .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}}
+    .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
+    .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
+    .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
+    .stat-chip:hover .stat-chip-tip{{opacity:1;}}
+    .stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}
+    body.dark-theme .stat-delta-up{{color:#5aba8a;}}body.dark-theme .stat-delta-down{{color:#e07070;}}
+    .chart-wrap{{width:100%;overflow-x:auto;}} .chart-wrap svg{{display:block;margin:0 auto;}}
+    .empty-state{{padding:32px;text-align:center;color:var(--muted);font-size:14px;border:1px dashed var(--line-strong);border-radius:12px;}}
+    .chart-hint-inline{{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap;margin-top:8px;}}
+    .chart-hint-inline svg{{width:12px;height:12px;stroke:var(--muted-2);fill:none;stroke-width:2;flex:0 0 auto;}}
+    .chart-hint-inline .dot{{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin:0 1px;}}
+    .chart-section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
+    .data-table{{width:100%;border-collapse:collapse;font-size:13px;}}
+    .data-table th,.data-table td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);}}
+    .data-table th{{color:var(--muted);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.06em;background:var(--surface-2);}}
+    .data-table tbody tr:hover{{background:rgba(255,247,238,0.6);cursor:pointer;}}
+    body.dark-theme .data-table tbody tr:hover{{background:rgba(255,255,255,0.03);}}
+    .num{{text-align:right;font-variant-numeric:tabular-nums;}}
+    .tag-chip{{display:inline-flex;padding:2px 8px;border-radius:999px;background:var(--info-bg);color:var(--info-text);font-size:11px;font-weight:700;margin-right:4px;}}
+    .mono{{font-family:ui-monospace,monospace;font-size:11px;}}
+    a.run-link{{color:var(--accent-2);font-weight:700;text-decoration:none;}}
+    a.run-link:hover{{text-decoration:underline;}}
+    .chart-actions{{display:flex;justify-content:flex-end;gap:7px;margin-bottom:10px;}}
+    .export-btn{{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .12s ease;text-decoration:none;}}
+    .export-btn:hover{{background:var(--line);}}
+    .export-btn svg{{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.2;}}
+    .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
+    .site-footer a{{color:var(--muted);}}
+  </style>
+</head>
+<body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  <div class="top-nav">
+    <div class="top-nav-inner">
+      <a class="brand" href="/">
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Trend report</div></div>
+      </a>
+      <div class="nav-right">
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+          </div>
+        </div>
+        <div class="server-status-wrap">
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="summary-strip" id="trend-stats"></div>
+    <div class="panel">
+      <div class="trend-header">
+        <div class="trend-title-block">
+          <h1>Trend Report</h1>
+          <p class="muted">Plot any SLOC metric over time. Each data point is a saved scan. Select a project root, choose a metric and X-axis mode, then explore how your codebase has changed across commits, tags, or time.</p>
+          <span class="chart-hint-inline">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+            Click a dot or row to view its full report &nbsp;·&nbsp; <span class="dot" style="background:#C45C10;"></span>&thinsp;regular scan &nbsp;<span class="dot" style="background:#4472C4;"></span>&thinsp;tagged release
+          </span>
+        </div>
+        <div class="chart-actions">
+          <button type="button" class="export-btn" id="export-xlsx-btn" title="Download scan history as Excel workbook (.xlsx)">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export Excel
+          </button>
+          <button type="button" class="export-btn" id="export-png-btn" title="Save chart as PNG image">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Export PNG
+          </button>
+        </div>
+      </div>
+
+      <div class="controls-centered">
+        <label>Project Root:
+          <select class="chart-select" id="root-sel">
+            <option value="">All projects</option>
+          </select>
+        </label>
+        <label>Y Metric:
+          <select class="chart-select" id="y-sel">
+            <option value="code_lines">Code Lines</option>
+            <option value="comment_lines">Comment Lines</option>
+            <option value="blank_lines">Blank Lines</option>
+            <option value="physical_lines">Physical Lines</option>
+            <option value="files_analyzed">Files Analyzed</option>
+          </select>
+        </label>
+        <label>X Axis:
+          <select class="chart-select" id="x-sel">
+            <option value="time">By Time</option>
+            <option value="commit">By Commit</option>
+            <option value="tag">Tags Only</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="chart-wrap" class="chart-wrap"></div>
+      <div id="data-table-wrap"></div>
+    </div>
+  </div>
+
+  <script nonce="{nonce}">
+    (function() {{
+      // Theme persistence
+      var b = document.body;
+      try {{ var s = localStorage.getItem('oxide-theme'); if (s === 'dark') b.classList.add('dark-theme'); }} catch(e) {{}}
+      var tgl = document.getElementById('theme-toggle');
+      if (tgl) tgl.addEventListener('click', function() {{
+        var d = b.classList.toggle('dark-theme');
+        try {{ localStorage.setItem('oxide-theme', d ? 'dark' : 'light'); }} catch(e) {{}}
+      }});
+
+      // Watermark randomizer
+      (function() {{
+        var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+        if (!wms.length) return;
+        var placed = [];
+        function tooClose(t,l){{for(var i=0;i<placed.length;i++){{if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}}return false;}}
+        function pick(lb){{for(var a=0;a<50;a++){{var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){{placed.push([t,l]);return[t,l];}}}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}}
+        var half=Math.floor(wms.length/2);
+        wms.forEach(function(img,i){{var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.width=sz+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;}});
+      }})();
+
+      // Code particles
+      (function() {{
+        var container = document.getElementById('code-particles');
+        if (!container) return;
+        var snippets = ['1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312','// comment','pub fn run','use std::fs','Result<()>','let mut n = 0','git main','#[derive]','impl Scan','3,841 physical','files: 60','450 comments','cargo build','Ok(run)','Vec<String>','match lang','fn main()','​.rs .go .py','sloc_core','render_html','2,163 code'];
+        for (var i = 0; i < 38; i++) {{
+          (function(idx) {{
+            var el = document.createElement('span');
+            el.className = 'code-particle';
+            el.textContent = snippets[idx % snippets.length];
+            var left = Math.random() * 94 + 2, top = Math.random() * 88 + 6;
+            var dur = (Math.random() * 10 + 9).toFixed(1), delay = (Math.random() * 18).toFixed(1);
+            var rot = (Math.random() * 26 - 13).toFixed(1), op = (Math.random() * 0.09 + 0.06).toFixed(3);
+            el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
+            container.appendChild(el);
+          }})(i);
+        }}
+      }})();
+
+      // Settings / color-scheme modal
+      (function() {{
+        var S=[{{n:'Classic',a:'#b85d33',b:'#7a371b'}},{{n:'Navy',a:'#283790',b:'#1e1e24'}},{{n:'Ember',a:'#ce5d3d',b:'#1e1e24'}},{{n:'Ocean',a:'#1f439b',b:'#1e1e24'}},{{n:'Royal',a:'#003184',b:'#1e1e24'}}];
+        function ap(s){{document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{{localStorage.setItem('sloc-ns',JSON.stringify(s));}}catch(e){{}}document.querySelectorAll('.scheme-swatch').forEach(function(x){{x.classList.toggle('active',x.dataset.n===s.n);}});}}
+        try{{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){{ap(sv);}}else{{ap(S[0]);}}}}catch(e){{ap(S[0]);}}
+        var btn=document.getElementById('settings-btn');if(!btn)return;
+        var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+        document.body.appendChild(m);
+        var g=document.getElementById('scheme-grid');
+        if(g)S.forEach(function(s){{var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}}catch(e){{}}el.addEventListener('click',function(){{ap(s);}});g.appendChild(el);}});
+        var cl=document.getElementById('settings-close');
+        btn.addEventListener('click',function(e){{e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');}});
+        if(cl)cl.addEventListener('click',function(){{m.classList.remove('open');}});
+        document.addEventListener('click',function(e){{if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');}});
+      }})();
+    }})();
+
+    var ROOTS = {roots_json};
+    var FONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+    var COLS = ['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E'];
+    var allData = [];
+
+    // Populate root selector
+    var rootSel = document.getElementById('root-sel');
+    ROOTS.forEach(function(r){{ var o=document.createElement('option');o.value=r;o.textContent=r;rootSel.appendChild(o); }});
+
+    function fmt(n){{ return Number(n).toLocaleString(); }}
+    function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }}
+
+    // Tooltip
+    var tt = document.createElement('div');
+    tt.style.cssText = 'display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:9999;max-width:280px;color:var(--text);';
+    document.body.appendChild(tt);
+    function showTT(e,html){{tt.innerHTML=html;tt.style.display='block';moveTT(e);}}
+    function moveTT(e){{var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}}
+    function hideTT(){{tt.style.display='none';}}
+
+    function updateStats(data){{
+      var statsEl=document.getElementById('trend-stats');
+      if(!statsEl)return;
+      if(!data||!data.length){{statsEl.innerHTML='';return;}}
+      var yKey=document.getElementById('y-sel').value;
+      var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comment Lines',blank_lines:'Blank Lines',physical_lines:'Physical Lines',files_analyzed:'Files Analyzed'}};
+      var sorted=data.slice().sort(function(a,b){{return a.timestamp.localeCompare(b.timestamp);}});
+      var firstVal=Number(sorted[0][yKey])||0,lastVal=Number(sorted[sorted.length-1][yKey])||0;
+      var delta=lastVal-firstVal,sign=delta>=0?'+':'',cls=delta>=0?'stat-delta-up':'stat-delta-down';
+      var projs={{}};data.forEach(function(d){{projs[d.project_label]=1;}});
+      statsEl.innerHTML=
+        '<div class="stat-chip"><div class="stat-chip-tip">Total scan runs recorded in this workspace</div><div class="stat-chip-val">'+data.length+'</div><div class="stat-chip-label">Total Scans</div></div>'+
+        '<div class="stat-chip"><div class="stat-chip-tip">The most recent recorded value for the selected metric</div><div class="stat-chip-val">'+fmt(lastVal)+'</div><div class="stat-chip-label">Latest '+(Y_LABELS[yKey]||yKey)+'</div></div>'+
+        '<div class="stat-chip"><div class="stat-chip-tip">Change in the selected metric from the earliest to the latest scan</div><div class="stat-chip-val '+cls+'">'+sign+fmt(delta)+'</div><div class="stat-chip-label">Net Change</div></div>'+
+        '<div class="stat-chip"><div class="stat-chip-tip">Number of distinct project roots tracked across all scans</div><div class="stat-chip-val">'+Object.keys(projs).length+'</div><div class="stat-chip-label">Projects</div></div>';
+    }}
+
+    function loadAndRender(){{
+      var root = rootSel.value;
+      var url = '/api/metrics/history?limit=100' + (root ? '&root='+encodeURIComponent(root) : '');
+      fetch(url).then(function(r){{return r.json();}}).then(function(data){{
+        allData = data;
+        render(data);
+        updateStats(data);
+      }}).catch(function(){{
+        document.getElementById('chart-wrap').innerHTML='<div class="empty-state">Failed to load scan history. Make sure the server is running and has recorded at least one scan.</div>';
+      }});
+    }}
+
+    function render(data){{
+      var yKey = document.getElementById('y-sel').value;
+      var xMode = document.getElementById('x-sel').value;
+
+      // Filter for tag mode
+      var pts = data;
+      if(xMode === 'tag') pts = data.filter(function(d){{return d.tags&&d.tags.length>0;}});
+
+      // Sort oldest-first for the line chart
+      pts = pts.slice().sort(function(a,b){{return a.timestamp.localeCompare(b.timestamp);}});
+
+      var wrap = document.getElementById('chart-wrap');
+      if(!pts.length){{
+        wrap.innerHTML='<div class="empty-state">No scan data found for the selected filters.</div>';
+        renderTable([]);
+        return;
+      }}
+
+      var W=900,H=380,PL=80,PR=40,PT=30,PB=60,CW=W-PL-PR,CH=H-PT-PB;
+      var maxY = Math.max.apply(null,pts.map(function(d){{return Number(d[yKey])||0;}}))||1;
+
+      var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comment Lines',blank_lines:'Blank Lines',physical_lines:'Physical Lines',files_analyzed:'Files Analyzed'}};
+
+      var svg='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;overflow:visible;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+      svg+='<defs><linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#C45C10" stop-opacity="0.18"/><stop offset="100%" stop-color="#C45C10" stop-opacity="0"/></linearGradient></defs>';
+
+      // Grid + Y axis ticks
+      for(var ti=0;ti<=5;ti++){{
+        var gy=PT+CH-Math.round(ti/5*CH);
+        var gv=Math.round(ti/5*maxY);
+        svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(PL+CW)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
+        svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(gv)+'</text>';
+      }}
+
+      // X axis labels (every N-th point to avoid crowding)
+      var labelEvery=Math.max(1,Math.ceil(pts.length/10));
+      pts.forEach(function(d,i){{
+        var x=PL+Math.round(i/(Math.max(pts.length-1,1))*CW);
+        if(i%labelEvery===0||i===pts.length-1){{
+          var lbl=xMode==='commit'&&d.commit?d.commit.substring(0,7):(d.tags&&d.tags[0]?d.tags[0]:d.timestamp.substring(0,10));
+          svg+='<text x="'+x+'" y="'+(PT+CH+18)+'" text-anchor="middle" transform="rotate(30,'+x+','+(PT+CH+18)+')" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+esc(lbl)+'</text>';
+        }}
+      }});
+
+      // Axis label
+      svg+='<text x="'+(PL+CW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+(xMode==='time'?'Scan Date':(xMode==='tag'?'Tag':'Commit'))+'</text>';
+      svg+='<text x="14" y="'+(PT+CH/2)+'" text-anchor="middle" transform="rotate(-90,14,'+(PT+CH/2)+')" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+(Y_LABELS[yKey]||yKey)+'</text>';
+
+      // Area fill + line path
+      var pathD='';
+      pts.forEach(function(d,i){{
+        var x=PL+Math.round(i/(Math.max(pts.length-1,1))*CW);
+        var y=PT+CH-Math.round((Number(d[yKey])||0)/maxY*CH);
+        pathD+=(i===0?'M':'L')+x+','+y;
+      }});
+      if(pts.length>1){{
+        var x0=PL,xN=PL+Math.round((pts.length-1)/(Math.max(pts.length-1,1))*CW);
+        var y0=PT+CH-Math.round((Number(pts[0][yKey])||0)/maxY*CH);
+        var yN=PT+CH-Math.round((Number(pts[pts.length-1][yKey])||0)/maxY*CH);
+        svg+='<path d="M'+x0+','+(PT+CH)+' '+pathD.substring(1)+' L'+xN+','+(PT+CH)+'Z" fill="url(#areaFill)" pointer-events="none"/>';
+      }}
+      svg+='<path d="'+pathD+'" fill="none" stroke="#C45C10" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+
+      // Data points (clickable) + permanent value labels
+      var showLabels = pts.length <= 40;
+      var labelEveryN = pts.length > 20 ? 2 : 1;
+      pts.forEach(function(d,i){{
+        var x=PL+Math.round(i/(Math.max(pts.length-1,1))*CW);
+        var y=PT+CH-Math.round((Number(d[yKey])||0)/maxY*CH);
+        var hasTags=d.tags&&d.tags.length>0;
+        var r=hasTags?7:5;
+        svg+='<circle class="trend-pt" cx="'+x+'" cy="'+y+'" r="'+r+'" fill="'+(hasTags?'#4472C4':'#C45C10')+'" stroke="white" stroke-width="2" style="cursor:pointer;" data-idx="'+i+'"/>';
+        if(showLabels && i%labelEveryN===0){{
+          var lx=x, ly=y-r-5;
+          svg+='<text x="'+lx+'" y="'+ly+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#7b675b" pointer-events="none">'+fmt(Number(d[yKey]))+'</text>';
+        }}
+      }});
+
+      svg+='</svg>';
+      wrap.innerHTML=svg;
+
+      // Attach point tooltips
+      wrap.querySelectorAll('.trend-pt').forEach(function(c){{
+        c.addEventListener('mouseover',function(e){{
+          var d=pts[parseInt(this.dataset.idx)];
+          var tagsHtml=d.tags&&d.tags.length?'<br>Tags: '+d.tags.map(function(t){{return'<span style="background:var(--info-bg);color:var(--info-text);padding:1px 6px;border-radius:999px;font-size:10px;margin-right:3px;">'+esc(t)+'</span>';}}).join(''):'';
+          showTT(e,
+            '<strong style="display:block;font-size:13px;margin-bottom:3px;">'+esc(d.project_label)+'</strong>'+
+            (Y_LABELS[yKey]||yKey)+': <strong>'+fmt(Number(d[yKey]))+'</strong><br>'+
+            'Date: '+d.timestamp.substring(0,10)+(d.commit?'<br>Commit: <code>'+esc(d.commit.substring(0,12))+'</code>':'')+
+            (d.branch?'<br>Branch: '+esc(d.branch):'')+tagsHtml
+          );
+          this.setAttribute('r','8');
+        }});
+        c.addEventListener('mouseout',function(){{hideTT();this.setAttribute('r',(pts[parseInt(this.dataset.idx)].tags&&pts[parseInt(this.dataset.idx)].tags.length)?'7':'5');}});
+        c.addEventListener('mousemove',moveTT);
+        c.addEventListener('click',function(){{
+          var d=pts[parseInt(this.dataset.idx)];
+          if(d.html_url) window.open(d.html_url,'_blank');
+        }});
+      }});
+
+      renderTable(pts, yKey);
+    }}
+
+    function renderTable(pts, yKey){{
+      var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comments',blank_lines:'Blanks',physical_lines:'Physical',files_analyzed:'Files'}};
+      var wrap = document.getElementById('data-table-wrap');
+      if(!pts||!pts.length){{wrap.innerHTML='';return;}}
+      var yLabel = Y_LABELS[yKey]||yKey||'';
+      var rows = pts.slice().reverse().map(function(d){{
+        var tags = (d.tags&&d.tags.length)?d.tags.map(function(t){{return'<span class="tag-chip">'+esc(t)+'</span>';}}).join(''):'—';
+        var link = d.html_url?'<a class="run-link" href="'+esc(d.html_url)+'" target="_blank">View</a>':'—';
+        return '<tr'+(d.html_url?' style="cursor:pointer;" onclick="window.open(\''+esc(d.html_url)+'\',\'_blank\')"':'')+' title='+(d.html_url?'"Click to open report"':'"No report saved for this scan"')+'><td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td><td>'+esc(d.project_label)+'</td><td class="mono">'+(d.commit?esc(d.commit.substring(0,8)):'—')+'</td><td>'+(d.branch?esc(d.branch):'—')+'</td><td>'+tags+'</td><td class="num">'+fmt(Number(d[yKey]))+'</td><td>'+link+'</td></tr>';
+      }}).join('');
+      wrap.innerHTML = '<div class="chart-section-header">Scan History</div><table class="data-table"><thead><tr><th>Date</th><th>Project</th><th>Commit</th><th>Branch</th><th>Tags</th><th class="num">'+esc(yLabel)+'</th><th>Report</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    }}
+
+    function exportXLSX(){{
+      if(!allData||!allData.length){{alert('No data to export yet.');return;}}
+      var sorted=allData.slice().sort(function(a,b){{return b.timestamp.localeCompare(a.timestamp);}});
+      var s1H=['Date','Project','Commit','Branch','Tags','Code Lines','Comment Lines','Blank Lines','Physical Lines','Files Analyzed','Report URL'];
+      var s1R=sorted.map(function(d){{
+        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',d.commit||'',d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||''];
+      }});
+      var pm={{}};
+      sorted.forEach(function(d){{var p=d.project_label||'Unknown';if(!pm[p])pm[p]=[];pm[p].push(d);}});
+      var s2H=['Project','Scan Count','First Scan','Latest Scan','Latest Code Lines','Latest Comment Lines','Latest Blank Lines','Latest Physical Lines','Latest Files','Min Code Lines','Max Code Lines','Avg Code Lines'];
+      var s2R=Object.keys(pm).map(function(p){{
+        var sc=pm[p].slice().sort(function(a,b){{return a.timestamp.localeCompare(b.timestamp);}});
+        var lat=sc[sc.length-1],fst=sc[0];
+        var codes=sc.map(function(s){{return+(s.code_lines)||0;}});
+        var mn=Math.min.apply(null,codes),mx=Math.max.apply(null,codes),av=Math.round(codes.reduce(function(a,b){{return a+b;}},0)/codes.length);
+        return[p,sc.length,fst.timestamp.substring(0,16).replace('T',' '),lat.timestamp.substring(0,16).replace('T',' '),+(lat.code_lines)||0,+(lat.comment_lines)||0,+(lat.blank_lines)||0,+(lat.physical_lines)||0,+(lat.files_analyzed)||0,mn,mx,av];
+      }});
+      var buf=buildXLSX([{{name:'Scan History',headers:s1H,rows:s1R}},{{name:'By Project',headers:s2H,rows:s2R}}],s1R,s2R);
+      var a=document.createElement('a');a.download='oxide-sloc-trend.xlsx';
+      a.href=URL.createObjectURL(new Blob([buf],{{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}}));
+      a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},1000);
+    }}
+
+    function buildXLSX(sheets,chartRows,chartRows2){{
+      function s2b(s){{return new TextEncoder().encode(s);}}
+      function xe(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
+      function col2l(n){{var s='';while(n>0){{var r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26);}}return s;}}
+      function crc32(d){{
+        if(!crc32.t){{crc32.t=new Uint32Array(256);for(var i=0;i<256;i++){{var c=i;for(var j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);crc32.t[i]=c;}}}}
+        var c=0xFFFFFFFF;for(var i=0;i<d.length;i++)c=crc32.t[(c^d[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0;
+      }}
+      function buildSheet(hdr,rows,drawRid,withCtrl){{
+        var ns='xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+        if(drawRid){{ns+=' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';}}
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet '+ns+'><sheetData>';
+        x+='<row r="1">';
+        hdr.forEach(function(h,ci){{x+='<c r="'+col2l(ci+1)+'1" t="inlineStr" s="1"><is><t>'+xe(h)+'</t></is></c>';}});
+        if(withCtrl){{x+='<c r="M1" t="inlineStr" s="1"><is><t>&#8595; Metric Selector</t></is></c><c r="N1" t="inlineStr"><is><t>Code Lines</t></is></c>';}}
+        x+='</row>';
+        rows.forEach(function(row,ri){{
+          var rn=ri+2;
+          x+='<row r="'+rn+'">';
+          row.forEach(function(cell,ci){{
+            var addr=col2l(ci+1)+rn;
+            if(typeof cell==='number'){{x+='<c r="'+addr+'"><v>'+cell+'</v></c>';}}
+            else{{x+='<c r="'+addr+'" t="inlineStr"><is><t>'+xe(String(cell))+'</t></is></c>';}}
+          }});
+          if(withCtrl){{x+='<c r="M'+rn+'"><f>CHOOSE(MATCH($N$1,{{"Code Lines","Comment Lines","Blank Lines","Physical Lines"}},0),F'+rn+',G'+rn+',H'+rn+',I'+rn+')</f><v>'+Number(row[5])+'</v></c>';}}
+          x+='</row>';
+        }});
+        x+='</sheetData>';
+        if(withCtrl){{x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="N1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines"</formula1></dataValidation></dataValidations>';}}
+        if(drawRid){{x+='<drawing r:id="'+drawRid+'"/>';}}
+        return x+'</worksheet>';
+      }}
+      function buildChartXML(rows){{
+        var sn="'Scan History'";
+        var nr=rows.length,er=nr+1;
+        var sd=[{{name:'Code Lines',col:'F',di:5,clr:'C45C10'}},{{name:'Comment Lines',col:'G',di:6,clr:'4472C4'}},{{name:'Blank Lines',col:'H',di:7,clr:'70AD47'}},{{name:'Physical Lines',col:'I',di:8,clr:'7030A0'}}];
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>';
+        x+='<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>';
+        sd.forEach(function(s,i){{
+          x+='<c:ser><c:idx val="'+i+'"/><c:order val="'+i+'"/>';
+          x+='<c:tx><c:strRef><c:f>'+sn+'!$'+s.col+'$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>'+xe(s.name)+'</c:v></c:pt></c:strCache></c:strRef></c:tx>';
+          x+='<c:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr>';
+          x+='<c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr></c:marker>';
+          var dlp=(i===2)?'b':'t';
+          x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="'+dlp+'"/></c:dLbls>';
+          x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
+          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
+          x+='</c:strCache></c:strRef></c:cat>';
+          x+='<c:val><c:numRef><c:f>'+sn+'!$'+s.col+'$2:$'+s.col+'$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
+          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[s.di])+'</c:v></c:pt>';}});
+          x+='</c:numCache></c:numRef></c:val><c:smooth val="0"/></c:ser>';
+        }});
+        x+='<c:axId val="1"/><c:axId val="2"/></c:lineChart>';
+        x+='<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="2"/></c:catAx>';
+        x+='<c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:tickLblPos val="nextTo"/><c:crossAx val="1"/><c:crossBetween val="between"/></c:valAx>';
+        x+='</c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
+        return x;
+      }}
+      function buildChartXML2(rows){{
+        var sn="'By Project'";
+        var nr=rows.length,er=nr+1;
+        var sd=[{{name:'Latest Code Lines',col:'E',di:4,clr:'C45C10'}},{{name:'Latest Comment Lines',col:'F',di:5,clr:'4472C4'}},{{name:'Latest Blank Lines',col:'G',di:6,clr:'70AD47'}},{{name:'Latest Physical Lines',col:'H',di:7,clr:'7030A0'}}];
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>';
+        x+='<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>';
+        sd.forEach(function(s,i){{
+          x+='<c:ser><c:idx val="'+i+'"/><c:order val="'+i+'"/>';
+          x+='<c:tx><c:strRef><c:f>'+sn+'!$'+s.col+'$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>'+xe(s.name)+'</c:v></c:pt></c:strCache></c:strRef></c:tx>';
+          x+='<c:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr>';
+          x+='<c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr></c:marker>';
+          var dlp=(i===2)?'b':'t';
+          x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="'+dlp+'"/></c:dLbls>';
+          x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
+          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
+          x+='</c:strCache></c:strRef></c:cat>';
+          x+='<c:val><c:numRef><c:f>'+sn+'!$'+s.col+'$2:$'+s.col+'$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
+          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[s.di])+'</c:v></c:pt>';}});
+          x+='</c:numCache></c:numRef></c:val><c:smooth val="0"/></c:ser>';
+        }});
+        x+='<c:axId val="3"/><c:axId val="4"/></c:lineChart>';
+        x+='<c:catAx><c:axId val="3"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="4"/></c:catAx>';
+        x+='<c:valAx><c:axId val="4"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:tickLblPos val="nextTo"/><c:crossAx val="3"/><c:crossBetween val="between"/></c:valAx>';
+        x+='</c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
+        return x;
+      }}
+      function buildChartXML3(rows){{
+        var sn="'Scan History'";
+        var nr=rows.length,er=nr+1;
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="0"/><c:plotArea>';
+        x+='<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>';
+        x+='<c:ser><c:idx val="0"/><c:order val="0"/>';
+        x+='<c:tx><c:strRef><c:f>'+sn+'!$N$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Code Lines</c:v></c:pt></c:strCache></c:strRef></c:tx>';
+        x+='<c:spPr><a:ln w="31750"><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill></a:ln></c:spPr>';
+        x+='<c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill></a:ln></c:spPr></c:marker>';
+        x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="t"/></c:dLbls>';
+        x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
+        rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
+        x+='</c:strCache></c:strRef></c:cat>';
+        x+='<c:val><c:numRef><c:f>'+sn+'!$M$2:$M$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
+        rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[5])+'</c:v></c:pt>';}});
+        x+='</c:numCache></c:numRef></c:val><c:smooth val="0"/></c:ser>';
+        x+='<c:axId val="5"/><c:axId val="6"/></c:lineChart>';
+        x+='<c:catAx><c:axId val="5"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="6"/></c:catAx>';
+        x+='<c:valAx><c:axId val="6"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:tickLblPos val="nextTo"/><c:crossAx val="5"/><c:crossBetween val="between"/></c:valAx>';
+        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Focus View — change N1 to switch metric</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
+        return x;
+      }}
+      var hasChart=!!(chartRows&&chartRows.length);
+      var nr=hasChart?chartRows.length:0;
+      var hasChart2=!!(chartRows2&&chartRows2.length);
+      var nr2=hasChart2?chartRows2.length:0;
+      var styl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
+      var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
+      sheets.forEach(function(s,i){{ct+='<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}});
+      if(hasChart){{ct+='<Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/charts/chart3.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';}}
+      if(hasChart2){{ct+='<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';}}
+      ct+='<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
+      var dotrels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+      var wbr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+      sheets.forEach(function(s,i){{wbr+='<Relationship Id="rId'+(i+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}});
+      wbr+='<Relationship Id="rId'+(sheets.length+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+      var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>';
+      sheets.forEach(function(s,i){{wbx+='<sheet name="'+xe(s.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}});
+      wbx+='</sheets></workbook>';
+      var files=[
+        {{name:'[Content_Types].xml',data:s2b(ct)}},
+        {{name:'_rels/.rels',data:s2b(dotrels)}},
+        {{name:'xl/workbook.xml',data:s2b(wbx)}},
+        {{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},
+        {{name:'xl/styles.xml',data:s2b(styl)}}
+      ];
+      // Chart embedded directly in Scan History (sheet1); By Project is plain
+      sheets.forEach(function(s,i){{
+        files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(buildSheet(s.headers,s.rows,(hasChart&&i===0)?'rId1':(hasChart2&&i===1)?'rId1':null,(hasChart&&i===0)))}});
+      }});
+      if(hasChart){{
+        var fromRow=nr+4,toRow=nr+24;
+        files.push({{name:'xl/worksheets/_rels/sheet1.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')}});
+        var drx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        drx+='<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx+='<xdr:twoCellAnchor editAs="twoCell">';
+        drx+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+fromRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
+        drx+='<xdr:to><xdr:col>10</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
+        drx+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
+        drx+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>';
+        drx+='</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>';
+        var focRow=toRow+2,focRowEnd=toRow+22;
+        drx+='<xdr:twoCellAnchor editAs="twoCell">';
+        drx+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
+        drx+='<xdr:to><xdr:col>10</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRowEnd+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="4" name="Chart 3"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
+        drx+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
+        drx+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId2"/>';
+        drx+='</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>';
+        files.push({{name:'xl/drawings/drawing1.xml',data:s2b(drx)}});
+        files.push({{name:'xl/drawings/_rels/drawing1.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart3.xml"/></Relationships>')}});
+        files.push({{name:'xl/charts/chart1.xml',data:s2b(buildChartXML(chartRows))}});
+        files.push({{name:'xl/charts/chart3.xml',data:s2b(buildChartXML3(chartRows))}});
+      }}
+      if(hasChart2){{
+        var fromRow2=nr2+4,toRow2=nr2+24;
+        files.push({{name:'xl/worksheets/_rels/sheet2.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/></Relationships>')}});
+        var drx2='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        drx2+='<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx2+='<xdr:twoCellAnchor editAs="twoCell">';
+        drx2+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+fromRow2+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
+        drx2+='<xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow2+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx2+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="Chart 2"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
+        drx2+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
+        drx2+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx2+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>';
+        drx2+='<\/a:graphicData><\/a:graphic><\/xdr:graphicFrame><xdr:clientData\/><\/xdr:twoCellAnchor><\/xdr:wsDr>';
+        files.push({{name:'xl/drawings/drawing2.xml',data:s2b(drx2)}});
+        files.push({{name:'xl/drawings/_rels/drawing2.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/></Relationships>')}});
+        files.push({{name:'xl/charts/chart2.xml',data:s2b(buildChartXML2(chartRows2))}});
+      }}
+      var parts=[],offsets=[],total=0;
+      files.forEach(function(f){{
+        offsets.push(total);
+        var nb=s2b(f.name),crc=crc32(f.data);
+        var h=new DataView(new ArrayBuffer(30+nb.length));
+        h.setUint32(0,0x04034B50,true);h.setUint16(4,20,true);h.setUint16(6,0,true);h.setUint16(8,0,true);
+        h.setUint16(10,0,true);h.setUint16(12,0,true);h.setUint32(14,crc,true);
+        h.setUint32(18,f.data.length,true);h.setUint32(22,f.data.length,true);
+        h.setUint16(26,nb.length,true);h.setUint16(28,0,true);
+        for(var i=0;i<nb.length;i++)h.setUint8(30+i,nb[i]);
+        parts.push(new Uint8Array(h.buffer));parts.push(f.data);
+        total+=30+nb.length+f.data.length;
+      }});
+      var cdStart=total;
+      files.forEach(function(f,fi){{
+        var nb=s2b(f.name),crc=crc32(f.data);
+        var cd=new DataView(new ArrayBuffer(46+nb.length));
+        cd.setUint32(0,0x02014B50,true);cd.setUint16(4,20,true);cd.setUint16(6,20,true);
+        cd.setUint16(8,0,true);cd.setUint16(10,0,true);cd.setUint16(12,0,true);cd.setUint16(14,0,true);
+        cd.setUint32(16,crc,true);cd.setUint32(20,f.data.length,true);cd.setUint32(24,f.data.length,true);
+        cd.setUint16(28,nb.length,true);cd.setUint16(30,0,true);cd.setUint16(32,0,true);
+        cd.setUint16(34,0,true);cd.setUint16(36,0,true);cd.setUint32(38,0,true);cd.setUint32(42,offsets[fi],true);
+        for(var i=0;i<nb.length;i++)cd.setUint8(46+i,nb[i]);
+        parts.push(new Uint8Array(cd.buffer));total+=46+nb.length;
+      }});
+      var cdSz=total-cdStart;
+      var eocd=new DataView(new ArrayBuffer(22));
+      eocd.setUint32(0,0x06054B50,true);eocd.setUint16(4,0,true);eocd.setUint16(6,0,true);
+      eocd.setUint16(8,files.length,true);eocd.setUint16(10,files.length,true);
+      eocd.setUint32(12,cdSz,true);eocd.setUint32(16,cdStart,true);eocd.setUint16(20,0,true);
+      parts.push(new Uint8Array(eocd.buffer));
+      var sz=parts.reduce(function(a,p){{return a+p.length;}},0);
+      var out=new Uint8Array(sz);var off=0;
+      parts.forEach(function(p){{out.set(p,off);off+=p.length;}});
+      return out.buffer;
+    }}
+
+    function exportPNG(){{
+      var svgEl=document.querySelector('#chart-wrap svg');
+      if(!svgEl){{alert('No chart to export yet.');return;}}
+      var svgStr=new XMLSerializer().serializeToString(svgEl);
+      var vb=svgEl.viewBox.baseVal,scale=2;
+      var w=(vb.width||900)*scale,h=(vb.height||380)*scale;
+      var blob=new Blob([svgStr],{{type:'image/svg+xml'}});
+      var url=URL.createObjectURL(blob);
+      var img=new Image();
+      img.onload=function(){{
+        var canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+        var ctx=canvas.getContext('2d');
+        var bg=getComputedStyle(document.body).getPropertyValue('--bg').trim()||'#f5efe8';
+        ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);
+        ctx.scale(scale,scale);ctx.drawImage(img,0,0);
+        URL.revokeObjectURL(url);
+        var a=document.createElement('a');a.download='oxide-sloc-trend.png';a.href=canvas.toDataURL('image/png');a.click();
+      }};
+      img.src=url;
+    }}
+
+    ['root-sel','y-sel','x-sel'].forEach(function(id){{
+      var el=document.getElementById(id);
+      if(el)el.addEventListener('change',function(){{render(allData);updateStats(allData);}});
+    }});
+    rootSel.addEventListener('change',loadAndRender);
+
+    var xlsxBtn=document.getElementById('export-xlsx-btn');
+    if(xlsxBtn)xlsxBtn.addEventListener('click',exportXLSX);
+    var pngBtn=document.getElementById('export-png-btn');
+    if(pngBtn)pngBtn.addEventListener('click',exportPNG);
+
+    loadAndRender();
+
+    (function randomizeWatermarks() {{
+      var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+      if (!wms.length) return;
+      var placed = [];
+      function tooClose(top, left) {{
+        for (var i = 0; i < placed.length; i++) {{
+          var dt = Math.abs(placed[i][0] - top), dl = Math.abs(placed[i][1] - left);
+          if (dt < 16 && dl < 12) return true;
+        }}
+        return false;
+      }}
+      function pick(leftBand) {{
+        for (var attempt = 0; attempt < 50; attempt++) {{
+          var top = Math.random() * 88 + 2;
+          var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+          if (!tooClose(top, left)) {{ placed.push([top, left]); return [top, left]; }}
+        }}
+        var top = Math.random() * 88 + 2;
+        var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+        placed.push([top, left]); return [top, left];
+      }}
+      var half = Math.floor(wms.length / 2);
+      wms.forEach(function (img, i) {{
+        var pos = pick(i < half);
+        var size = Math.floor(Math.random() * 100 + 120);
+        var rot = (Math.random() * 360).toFixed(1);
+        var op = (Math.random() * 0.08 + 0.12).toFixed(2);
+        img.style.width=size+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;
+      }});
+    }})();
+    (function spawnCodeParticles() {{
+      var container = document.getElementById('code-particles');
+      if (!container) return;
+      var snippets = [
+        '1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312',
+        '// comment','pub fn run','use std::fs','Result<()>','let mut n = 0',
+        'git main','#[derive]','impl Scan','3,841 physical','files: 60',
+        '450 comments','cargo build','Ok(run)','Vec<String>','match lang',
+        'fn main() {{','.rs .go .py','sloc_core','render_html','2,163 code'
+      ];
+      var count = 38;
+      for (var i = 0; i < count; i++) {{
+        (function(idx) {{
+          var el = document.createElement('span');
+          el.className = 'code-particle';
+          el.textContent = snippets[idx % snippets.length];
+          var left = Math.random() * 94 + 2;
+          var top = Math.random() * 88 + 6;
+          var dur = (Math.random() * 10 + 9).toFixed(1);
+          var delay = (Math.random() * 18).toFixed(1);
+          var rot = (Math.random() * 26 - 13).toFixed(1);
+          var op = (Math.random() * 0.09 + 0.06).toFixed(3);
+          el.style.cssText = 'left:'+left.toFixed(1)+'%;top:'+top.toFixed(1)+'%;--rot:'+rot+'deg;--op:'+op+';animation-duration:'+dur+'s;animation-delay:-'+delay+'s;';
+          container.appendChild(el);
+        }})(i);
+      }}
+    }})();
+  </script>
+  <footer class="site-footer">
+    oxide-sloc v{version} — local source line analysis workbench &nbsp;·&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
+</body>
+</html>"##,
+        nonce = nonce,
+        roots_json = roots_json,
+        version = version,
+    );
+
+    Html(html).into_response()
+}
+
 // ── Embeddable widget ─────────────────────────────────────────────────────────
 // Protected. Returns a self-contained HTML page suitable for iframing inside
 // Jenkins build summaries, Confluence iframe macros, or Jira panels.
@@ -4415,6 +5603,123 @@ fn find_scan_config_in_dir(dir: &Path) -> Option<PathBuf> {
     })
 }
 
+// ── Config export / import ────────────────────────────────────────────────────
+
+async fn export_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let toml_str = match toml::to_string_pretty(&state.base_config) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+                .into_response();
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/toml; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\".oxide-sloc.toml\"",
+            ),
+        ],
+        toml_str,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ImportConfigBody {
+    toml: String,
+}
+
+async fn import_config_handler(Json(body): Json<ImportConfigBody>) -> impl IntoResponse {
+    match toml::from_str::<sloc_config::AppConfig>(&body.toml) {
+        Ok(config) => {
+            if let Err(e) = config.validate() {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+            Json(serde_json::json!({ "ok": true, "config": config })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("TOML parse error: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+// ── Scan profiles API ─────────────────────────────────────────────────────────
+
+async fn api_list_scan_profiles(State(state): State<AppState>) -> impl IntoResponse {
+    let store = state.scan_profiles.lock().await;
+    Json(serde_json::json!({ "profiles": store.profiles }))
+}
+
+#[derive(Deserialize)]
+struct SaveScanProfileBody {
+    name: String,
+    params: serde_json::Value,
+}
+
+async fn api_save_scan_profile(
+    State(state): State<AppState>,
+    Json(body): Json<SaveScanProfileBody>,
+) -> impl IntoResponse {
+    if body.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "name must not be empty" })),
+        )
+            .into_response();
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let profile = ScanProfile {
+        id: id.clone(),
+        name: body.name.trim().to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        params: body.params,
+    };
+
+    let mut store = state.scan_profiles.lock().await;
+    store.profiles.push(profile);
+    if let Err(e) = store.save(&state.scan_profiles_path) {
+        tracing::warn!("failed to persist scan profiles: {e}");
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "ok": true, "id": id })),
+    )
+        .into_response()
+}
+
+async fn api_delete_scan_profile(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let mut store = state.scan_profiles.lock().await;
+    let before = store.profiles.len();
+    store.profiles.retain(|p| p.id != id);
+    if store.profiles.len() == before {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "profile not found" })),
+        )
+            .into_response();
+    }
+    if let Err(e) = store.save(&state.scan_profiles_path) {
+        tracing::warn!("failed to persist scan profiles: {e}");
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
 fn resolve_output_root(raw: Option<&str>) -> PathBuf {
     let value = raw.unwrap_or("out/web").trim();
     let path = if value.is_empty() {
@@ -4549,6 +5854,7 @@ fn build_sub_run(
             classes: 0,
             variables: 0,
             imports: 0,
+            test_count: 0,
         },
         totals_by_language: sub.language_summaries.clone(),
         per_file_records: sub_files,
@@ -5440,7 +6746,7 @@ struct SubmoduleRow {
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100vh; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
     html { overflow-y: scroll; }
-    body { overflow-x: hidden; transition: background 0.18s ease, color 0.18s ease; display: flex; flex-direction: column; }
+    body { overflow-x: clip; transition: background 0.18s ease, color 0.18s ease; display: flex; flex-direction: column; }
     .top-nav, .page, .loading { position: relative; z-index: 2; }
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
     .background-watermarks img { position: absolute; opacity: 0.16; filter: blur(0.3px); user-select: none; max-width: none; }
@@ -5456,7 +6762,9 @@ struct SubmoduleRow {
     .nav-project-pill.visible { display:inline-flex; }
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
     .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .nav-status { display: flex; align-items: center; justify-content:flex-end; gap: 10px; flex-wrap: wrap; }
+    .nav-status { display: flex; align-items: center; justify-content:flex-end; gap: 10px; flex-wrap: nowrap; min-width: 0; }
+    @media (max-width: 1400px) { .nav-status { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-status { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); text-decoration:none; transition:background .15s ease,transform .15s ease; }
     a.nav-pill:hover { background:rgba(255,255,255,0.18); transform:translateY(-1px); }
     .nav-pill code { color: #fff; background: rgba(0,0,0,0.28); border: 1px solid rgba(255,255,255,0.10); padding: 3px 8px; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -5466,6 +6774,20 @@ struct SubmoduleRow {
     .theme-toggle .icon-sun { display:none; }
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; flex: 1; width: 100%; }
@@ -5476,8 +6798,8 @@ struct SubmoduleRow {
     .wb-stats { flex: 4 1 0; display:flex; flex-direction:column; overflow: visible; min-width: 0; }
     .wb-stats-header { padding: 10px 24px 0; }
     .wb-stats-title { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted-2); }
-    .ws-left { display:flex; align-items:center; gap:12px; flex:1 1 auto; flex-wrap:wrap; padding: 14px 20px 18px; overflow: visible; }
-    .ws-stat { display:flex; flex-direction:column; gap: 6px; flex:0 0 auto; min-width:110px; padding: 12px 18px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); }
+    .ws-left { display:flex; align-items:stretch; gap:12px; flex:1 1 auto; flex-wrap:wrap; padding: 14px 20px 18px; overflow: visible; }
+    .ws-stat { display:flex; flex-direction:column; justify-content:center; gap: 6px; flex:0 0 auto; min-width:110px; padding: 12px 18px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); }
     body.dark-theme .ws-stat { background: rgba(211,122,76,0.08); border-color: rgba(211,122,76,0.20); }
     .ws-label { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.10em; color: var(--muted-2); }
     .ws-value { font-size: 13px; font-weight: 700; color: var(--text); }
@@ -5544,10 +6866,10 @@ struct SubmoduleRow {
     .summary-body { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .coverage-pills { display:flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
     .coverage-pill, .language-pill, .soft-chip { display:inline-flex; align-items:center; min-height: 32px; padding: 0 12px; border-radius: 999px; border:1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 13px; font-weight: 700; }
-    .layout { display:grid; grid-template-columns: 218px minmax(0, 1fr); gap: 18px; align-items:stretch; min-height: calc(100vh - 57px); }
-    .layout[data-active-step="4"] { align-items: start; min-height: auto; }
-    .side-stack { display:grid; gap: 16px; align-items:start; align-self: stretch; width: 218px; max-width: 218px; }
-    .step-nav { padding: 20px 16px; position: sticky; top: 57px; z-index: 25; }
+    .layout { display:grid; grid-template-columns: 218px minmax(0, 1fr); gap: 18px; align-items:start; min-height: calc(100vh - 57px); }
+    .side-stack { display:grid; gap: 16px; align-items:start; align-self: start; position: sticky; top: 73px; max-height: calc(100vh - 90px); overflow-y: auto; width: 218px; max-width: 218px; scrollbar-width: none; }
+    .side-stack::-webkit-scrollbar { display: none; }
+    .step-nav { padding: 20px 16px; }
     .step-nav h3 { margin: 6px 4px 20px; font-size: 16px; font-weight: 850; letter-spacing: -0.01em; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
     .step-button { width:100%; display:flex; align-items:center; gap:12px; border:none; background:transparent; border-radius: 12px; padding: 14px 12px; color: var(--text); cursor:pointer; text-align:left; font-size:15px; font-weight:700; transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease; animation: stepEntrance 0.3s ease both; }
     .step-button:hover { background: var(--surface-2); }
@@ -5576,6 +6898,11 @@ struct SubmoduleRow {
     .step-nav > button:nth-child(3) { animation-delay: 0.09s; }
     .step-nav > button:nth-child(4) { animation-delay: 0.14s; }
     .step-nav > button:nth-child(5) { animation-delay: 0.19s; }
+    .step-check { margin-left:auto; width:14px; height:14px; stroke:#16a34a; fill:none; opacity:0; transition:opacity 0.22s ease; flex-shrink:0; }
+    .step-button.done .step-check { opacity:1; }
+    .step-button.done .step-num { background:rgba(34,197,94,0.16); color:#16a34a; }
+    .sidebar-kbd-hint { margin:14px 4px 0; font-size:10px; color:var(--muted-2); line-height:1.55; text-align:center; }
+    .sidebar-kbd-key { display:inline-block; padding:1px 5px; border-radius:4px; background:var(--surface-3); border:1px solid var(--line); font-size:9px; font-weight:700; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
     .card-header { padding: 22px 22px 18px; border-bottom:1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,0.30), transparent), var(--surface); position: sticky; top: 57px; z-index: 20; border-radius: var(--radius) var(--radius) 0 0; }
     body.dark-theme .card-header { background: linear-gradient(180deg, rgba(255,255,255,0.04), transparent), var(--surface); }
     .card-title-row { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
@@ -5813,7 +7140,7 @@ struct SubmoduleRow {
     @media (max-width: 980px) { .field-grid, .artifact-grid, .review-grid, .scope-stats, .explorer-meta-grid, .explorer-meta-grid.split, .glob-guidance-grid { grid-template-columns: 1fr; } .layout { grid-template-columns: 1fr; } .side-stack { width: auto; max-width: none; } .step-nav { position:static; } .top-nav-inner { grid-template-columns: 1fr; justify-items: stretch; } .nav-project-slot, .nav-status { justify-content:flex-start; } .input-group { grid-template-columns: 1fr 1fr; } .input-group.compact { grid-template-columns: 1fr 1fr; } .better-spacing { justify-content:flex-start; } .file-explorer-controls { flex-direction: column; align-items:flex-start; flex-wrap: wrap; } .file-explorer-search-row { margin-left: 0; flex-wrap: wrap; width: 100%; } .explorer-search { min-width: 0; width: 100%; } .file-explorer-header, .tree-row { grid-template-columns: minmax(0, 1fr) 110px 110px 140px; } .advanced-rule-row, .advanced-rule-row.static-note, .output-identity-grid, .counting-top-grid, .preset-inline-row { grid-template-columns: 1fr; } .wizard-progress { max-width: none; } .path-row-grid { grid-template-columns: 1fr; } .ws-left { flex-wrap: wrap; } .scan-pills-row { flex-wrap: wrap; } }
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -5851,19 +7178,27 @@ struct SubmoduleRow {
       </div>
       <div class="nav-status">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
           <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme" title="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 1 0 9.8 9.8z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="M4.9 4.9l1.4 1.4"></path><path d="M17.7 17.7l1.4 1.4"></path><path d="M4.9 19.1l1.4-1.4"></path><path d="M17.7 6.3l1.4-1.4"></path></svg>
@@ -5990,14 +7325,20 @@ struct SubmoduleRow {
       <aside class="side-stack">
         <section class="step-nav">
         <h3>Guided scan setup</h3>
-        <button type="button" class="step-button active" data-step-target="1"><span class="step-num">1</span><span>Select project</span></button>
-        <button type="button" class="step-button" data-step-target="2"><span class="step-num">2</span><span>Counting rules</span></button>
-        <button type="button" class="step-button" data-step-target="3"><span class="step-num">3</span><span>Outputs and reports</span></button>
-        <button type="button" class="step-button" data-step-target="4"><span class="step-num">4</span><span>Review and run</span></button>
+        <button type="button" class="step-button active" data-step-target="1"><span class="step-num">1</span><span>Select project</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+        <button type="button" class="step-button" data-step-target="2"><span class="step-num">2</span><span>Counting rules</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+        <button type="button" class="step-button" data-step-target="3"><span class="step-num">3</span><span>Outputs and reports</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+        <button type="button" class="step-button" data-step-target="4"><span class="step-num">4</span><span>Review and run</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
 
         <div class="step-nav-info" id="step-nav-info">
           <div class="step-nav-info-label" id="step-nav-info-label">Step 1 of 4</div>
           <div class="step-nav-info-desc" id="step-nav-info-desc">Choose a project folder, apply scope filters, and preview which files will be counted.</div>
+        </div>
+
+        <div class="step-nav-summary" id="sidebar-summary" style="display:none">
+          <div class="step-nav-sum-row"><span class="step-nav-sum-key">Path</span><span class="step-nav-sum-val" id="sum-path">—</span></div>
+          <div class="step-nav-sum-row"><span class="step-nav-sum-key">Preset</span><span class="step-nav-sum-val" id="sum-preset">—</span></div>
+          <div class="step-nav-sum-row"><span class="step-nav-sum-key">Output</span><span class="step-nav-sum-val" id="sum-output">—</span></div>
         </div>
 
         <div class="quick-scan-divider"></div>
@@ -6009,6 +7350,8 @@ struct SubmoduleRow {
           </button>
           <div class="quick-scan-hint">Scan immediately with default settings — skips steps 2–4.</div>
         </div>
+
+        <div class="sidebar-kbd-hint"><span class="sidebar-kbd-key">←</span> Back &nbsp;&nbsp; <span class="sidebar-kbd-key">→</span> Next</div>
         </section>
 
       </aside>
@@ -6108,6 +7451,14 @@ struct SubmoduleRow {
                     <strong>Common exclude examples</strong>
                     <p><code>vendor/**</code> third-party code, <code>target/**</code> build output, <code>**/*.min.js</code> minified assets, <code>**/generated/**</code> generated files.</p>
                   </div>
+                </div>
+              </div>
+
+              <div class="section" style="margin-top:14px;">
+                <div class="field">
+                  <label for="coverage_file">Coverage file <span style="font-weight:400;color:var(--muted);font-size:12px;">(optional)</span></label>
+                  <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. /path/to/lcov.info or coverage/lcov.info" />
+                  <div class="hint">Path to an LCOV <code>.info</code> file generated by <code>lcov</code>, <code>gcov</code>, <code>cargo-llvm-cov --lcov</code>, or any compatible tool. When provided, line and function coverage percentages are added to each file in the report.</div>
                 </div>
               </div>
 
@@ -6359,6 +7710,20 @@ struct SubmoduleRow {
                   <div class="output-field-aside">
                     <strong>Shown in exported artifacts</strong>
                     This title is embedded in the HTML and PDF reports and stays visible in the workbench header while you configure the run. It defaults to the last folder name of the selected project path.
+                  </div>
+                </div>
+              </div>
+
+              <div class="section section-spacer-top">
+                <div class="output-field-row">
+                  <div class="field">
+                    <label for="report_header_footer">Report header / footer</label>
+                    <input id="report_header_footer" name="report_header_footer" type="text" value="" placeholder="e.g. Acme Corp — Confidential · Project Athena" />
+                    <div class="hint">Printed on every page of the HTML and PDF report — use for company name, project identifier, or scanner identification.</div>
+                  </div>
+                  <div class="output-field-aside">
+                    <strong>Page-level identification</strong>
+                    This text appears as a thin banner at the top and bottom of every report page. Leave blank to omit. Useful for labeling reports with an organization name, engagement ID, or classification level.
                   </div>
                 </div>
               </div>
@@ -6764,7 +8129,20 @@ struct SubmoduleRow {
         var infoDesc  = document.getElementById("step-nav-info-desc");
         if (infoLabel) infoLabel.textContent = "Step " + step + " of 4";
         if (infoDesc)  infoDesc.textContent  = stepDescriptions[step - 1] || "";
+      }
 
+      function updateSidebarSummary() {
+        var sumPath    = document.getElementById("sum-path");
+        var sumPreset  = document.getElementById("sum-preset");
+        var sumOutput  = document.getElementById("sum-output");
+        var sidebarSummary = document.getElementById("sidebar-summary");
+        var pathVal    = (pathInput && pathInput.value.trim()) ? inferTitleFromPath(pathInput.value) : "";
+        var presetVal  = (scanPreset && scanPreset.value)    ? scanPreset.value.replace(/_/g, " ")    : "";
+        var outputVal  = (artifactPreset && artifactPreset.value) ? artifactPreset.value.replace(/_/g, " ") : "";
+        if (sumPath)   sumPath.textContent   = pathVal   || "—";
+        if (sumPreset) sumPreset.textContent = presetVal || "—";
+        if (sumOutput) sumOutput.textContent = outputVal || "—";
+        if (sidebarSummary) sidebarSummary.style.display = (pathVal || presetVal || outputVal) ? "" : "none";
       }
 
       function setStep(step, pushHistory) {
@@ -6779,6 +8157,11 @@ struct SubmoduleRow {
         if (layoutEl) layoutEl.setAttribute("data-active-step", step);
         updateWizardProgress();
         updateStepNav(step);
+        stepButtons.forEach(function(btn) {
+          var t = Number(btn.getAttribute("data-step-target"));
+          btn.classList.toggle("done", t < step);
+        });
+        updateSidebarSummary();
 
         if (pushHistory !== false) {
           try {
@@ -7349,6 +8732,14 @@ struct SubmoduleRow {
         });
       });
 
+      document.addEventListener("keydown", function (e) {
+        var tag = (document.activeElement || {}).tagName || "";
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        if (e.key === "ArrowRight" && currentStep < 4) { updateReview(); setStep(currentStep + 1); }
+        else if (e.key === "ArrowLeft" && currentStep > 1) { setStep(currentStep - 1); }
+      });
+
       if (useSamplePath) {
         useSamplePath.addEventListener("click", function () {
           pathInput.value = "tmp-sloc";
@@ -7485,6 +8876,7 @@ struct SubmoduleRow {
         var val = pathInput ? pathInput.value : "";
         updateReportTitleFromPath();
         autoSetOutputDir(val);
+        updateSidebarSummary();
         clearTimeout(historyTimer);
         historyTimer = setTimeout(function () { fetchProjectHistory(val); }, 400);
         if (previewTimer) clearTimeout(previewTimer);
@@ -7527,8 +8919,8 @@ struct SubmoduleRow {
 
       if (mixedLinePolicy) mixedLinePolicy.addEventListener("change", function () { updateMixedPolicyUI(); updateReview(); });
       if (pythonDocstrings) pythonDocstrings.addEventListener("change", function () { updatePythonDocstringUI(); updateReview(); });
-      if (scanPreset) scanPreset.addEventListener("change", function () { applyScanPreset(); updatePresetDescriptions(); updateReview(); });
-      if (artifactPreset) artifactPreset.addEventListener("change", function () { updatePresetDescriptions(); applyArtifactPreset(); updateReview(); });
+      if (scanPreset) scanPreset.addEventListener("change", function () { applyScanPreset(); updatePresetDescriptions(); updateReview(); updateSidebarSummary(); });
+      if (artifactPreset) artifactPreset.addEventListener("change", function () { updatePresetDescriptions(); applyArtifactPreset(); updateReview(); updateSidebarSummary(); });
 
       artifactCards.forEach(function (card) {
         card.addEventListener("click", function () {
@@ -7668,11 +9060,32 @@ struct SubmoduleRow {
       }, 80);
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
 </body>
 </html>
@@ -7705,7 +9118,7 @@ struct IndexTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
-      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#2563eb;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
       --shadow-strong:0 28px 56px rgba(77,44,20,0.20);
     }
@@ -7725,41 +9138,57 @@ struct IndexTemplate {
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
     a.nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
-    .page{max-width:1100px;margin:0 auto;padding:48px 24px 16px;position:relative;z-index:1;}
-    .hero{text-align:center;margin-bottom:52px;}
-    .hero-logo{width:88px;height:97px;object-fit:contain;margin-bottom:6px;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));animation:logoBob 3.6s ease-in-out infinite;}
-    @keyframes logoBob{0%,100%{transform:translateY(0) scale(1);}40%{transform:translateY(-18px) scale(1.07);}60%{transform:translateY(-14px) scale(1.05);}}
-    .hero-title{font-size:51px;font-weight:900;letter-spacing:-0.04em;margin:0 0 10px;
+    .page{max-width:1100px;margin:0 auto;padding:28px 24px 16px;position:relative;z-index:1;}
+    .hero{text-align:center;margin-bottom:32px;}
+    .hero-logo{width:66px;height:73px;object-fit:contain;margin-bottom:4px;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));animation:logoBob 3.6s ease-in-out infinite;}
+    @keyframes logoBob{0%,100%{transform:translateY(0) scale(1);}40%{transform:translateY(-14px) scale(1.07);}60%{transform:translateY(-10px) scale(1.05);}}
+    .hero-title{font-size:42px;font-weight:900;letter-spacing:-0.04em;margin:0 0 8px;
       background:linear-gradient(90deg,#b85d33 0%,#d37a4c 25%,#6f9bff 50%,#b85d33 75%,#d37a4c 100%);
       background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
       animation:titleShimmer 4s linear infinite;}
     @keyframes titleShimmer{0%{background-position:0% center;}100%{background-position:200% center;}}
     body.dark-theme .hero-title{background:linear-gradient(90deg,#d37a4c 0%,#f0a070 25%,#9bb8ff 50%,#d37a4c 75%,#f0a070 100%);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
-    .hero-subtitle{font-size:18px;color:var(--muted);line-height:1.6;max-width:600px;margin:0 auto;animation:fadeSlideUp 0.9s ease both;}
+    .hero-subtitle{font-size:16px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;animation:fadeSlideUp 0.9s ease both;}
     @keyframes fadeSlideUp{from{opacity:0;transform:translateY(18px);}to{opacity:1;transform:translateY(0);}}
-    .action-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:32px;}
+    .action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:20px;}
     @media(max-width:900px){.action-grid{grid-template-columns:1fr 1fr;}}
     @media(max-width:480px){.action-grid{grid-template-columns:1fr;}}
-    .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:28px 26px 24px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
-    .action-card:nth-child(1){animation-delay:0.1s;} .action-card:nth-child(2){animation-delay:0.2s;} .action-card:nth-child(3){animation-delay:0.3s;} .action-card:nth-child(4){animation-delay:0.4s;}
+    .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:20px 22px 18px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
+    .action-card:nth-child(1){animation-delay:0.1s;} .action-card:nth-child(2){animation-delay:0.2s;} .action-card:nth-child(3){animation-delay:0.3s;} .action-card:nth-child(4){animation-delay:0.4s;} .action-card:nth-child(5){animation-delay:0.5s;} .action-card:nth-child(6){animation-delay:0.6s;}
     @keyframes cardRise{from{opacity:0;}to{opacity:1;}}
     .action-card:hover{transform:translateY(-5px) scale(1.04);box-shadow:var(--shadow-strong);border-color:var(--oxide-2);}
-    .action-card-icon{width:52px;height:52px;border-radius:16px;display:flex;align-items:center;justify-content:center;margin-bottom:18px;flex:0 0 auto;transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
+    .action-card-icon{width:46px;height:46px;border-radius:14px;display:flex;align-items:center;justify-content:center;margin-bottom:12px;flex:0 0 auto;transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
     .action-card:hover .action-card-icon{transform:rotate(-8deg) scale(1.12);}
     .action-card-icon svg{width:26px;height:26px;stroke:currentColor;fill:none;stroke-width:2;}
     .action-card.scan .action-card-icon{background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;box-shadow:0 8px 22px rgba(184,80,40,0.30);}
     .action-card.view .action-card-icon{background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;box-shadow:0 8px 22px rgba(59,130,246,0.28);}
     .action-card.compare .action-card-icon{background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;box-shadow:0 8px 22px rgba(139,92,246,0.28);}
-    .action-card-title{font-size:20px;font-weight:850;letter-spacing:-0.02em;margin:0 0 8px;}
-    .action-card-desc{font-size:14px;color:var(--muted);line-height:1.6;margin:0 0 20px;flex:1;}
+    .action-card-title{font-size:17px;font-weight:850;letter-spacing:-0.02em;margin:0 0 6px;}
+    .action-card-desc{font-size:13px;color:var(--muted);line-height:1.55;margin:0 0 14px;flex:1;}
     .action-card-cta{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:800;color:var(--oxide-2);transition:gap 0.15s ease;}
     body.dark-theme .action-card-cta{color:var(--oxide);}
     .action-card.view .action-card-cta{color:var(--accent-2);}
@@ -7769,15 +9198,21 @@ struct IndexTemplate {
     .action-card.git-tools .action-card-icon{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;box-shadow:0 8px 22px rgba(22,163,74,0.28);}
     .action-card.git-tools .action-card-cta{color:#15803d;}
     body.dark-theme .action-card.git-tools .action-card-cta{color:#4ade80;}
+    .action-card.trend .action-card-icon{background:linear-gradient(135deg,#0891b2,#0e7490);color:#fff;box-shadow:0 8px 22px rgba(8,145,178,0.28);}
+    .action-card.trend .action-card-cta{color:#0e7490;}
+    body.dark-theme .action-card.trend .action-card-cta{color:#22d3ee;}
+    .action-card.automation .action-card-icon{background:linear-gradient(135deg,#d97706,#b45309);color:#fff;box-shadow:0 8px 22px rgba(217,119,6,0.28);}
+    .action-card.automation .action-card-cta{color:#b45309;}
+    body.dark-theme .action-card.automation .action-card-cta{color:#fbbf24;}
     .action-card:hover .action-card-cta{gap:12px;}
-    .divider{height:1px;background:var(--line);margin:40px 0;}
-    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;}
+    .divider{height:1px;background:var(--line);margin:22px 0;}
+    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;}
     @media(max-width:960px){.info-strip{grid-template-columns:repeat(3,1fr);}}
     @media(max-width:600px){.info-strip{grid-template-columns:repeat(2,1fr);}}
-    .info-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;text-align:center;position:relative;cursor:default;
+    .info-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 16px;text-align:center;position:relative;cursor:default;
       transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;}
     .info-chip:hover{transform:translateY(-5px) scale(1.04);box-shadow:var(--shadow-strong);border-color:var(--oxide-2);}
-    .info-chip-val{font-size:22px;font-weight:900;color:var(--oxide);}
+    .info-chip-val{font-size:18px;font-weight:900;color:var(--oxide);}
     body.dark-theme .info-chip-val{color:var(--oxide);}
     .info-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
     .info-chip-tip{display:none;position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);z-index:50;
@@ -7807,7 +9242,7 @@ struct IndexTemplate {
     body.dark-theme .lan-local-hint{border-color:rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);}
     body.dark-theme .lan-local-hint code{background:rgba(255,255,255,0.06);}
     .lan-local-hint strong{color:var(--muted);font-weight:600;margin-right:2px;}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -7829,13 +9264,18 @@ struct IndexTemplate {
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -7847,6 +9287,9 @@ struct IndexTemplate {
           <div class="server-status-tip">OxideSLOC is running locally — only accessible from this machine.<br>Press Ctrl+C in the terminal to stop.</div>
           {% endif %}
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -7859,7 +9302,7 @@ struct IndexTemplate {
     <div class="hero">
       <img class="hero-logo" src="/images/logo/small-logo.png" alt="OxideSLOC">
       <h1 class="hero-title">OxideSLOC</h1>
-      <p class="hero-subtitle">A fast, self-contained source line analysis workbench. Count code, track history, and compare scan snapshots — no setup required.</p>
+      <p class="hero-subtitle">A fast, self-contained source line analysis workbench. Count code, track trends, compare snapshots, and automate scans via webhook — no setup required.</p>
     </div>
 
     <div class="action-grid">
@@ -7895,8 +9338,26 @@ struct IndexTemplate {
           <svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
         </div>
         <div class="action-card-title">Git Browser</div>
-        <p class="action-card-desc">Browse repository branches and commits in the Git Browser, or configure webhook triggers and automated scan schedules.</p>
+        <p class="action-card-desc">Browse repository branches and commits, scan any ref on demand, and diff two refs side-by-side — all without leaving the browser.</p>
         <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+      </a>
+
+      <a class="action-card trend" href="/trend-report">
+        <div class="action-card-icon">
+          <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+        </div>
+        <div class="action-card-title">Trend Report</div>
+        <p class="action-card-desc">Visualize how code, comment, and blank-line counts evolve over time. Spot regressions, track growth, and chart the full history across all recorded scans.</p>
+        <span class="action-card-cta">View trends <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+      </a>
+
+      <a class="action-card automation" href="/integrations">
+        <div class="action-card-icon">
+          <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        </div>
+        <div class="action-card-title">Integrations</div>
+        <p class="action-card-desc">Connect GitHub, GitLab, or Bitbucket webhooks to trigger scans automatically, or publish results directly to Atlassian Confluence.</p>
+        <span class="action-card-cta">Set up integrations <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
       </a>
     </div>
 
@@ -7936,14 +9397,14 @@ struct IndexTemplate {
         <div class="info-chip-label">Self-contained</div>
       </div>
       <div class="info-chip">
-        <div class="info-chip-tip">Self-contained HTML reports with<br>light/dark theme — share without a server</div>
-        <div class="info-chip-val">HTML</div>
+        <div class="info-chip-tip">Self-contained HTML reports with light/dark theme<br>— shareable without a server. PDF via headless Chromium (CLI).</div>
+        <div class="info-chip-val">HTML+PDF</div>
         <div class="info-chip-label">Exportable reports</div>
       </div>
       <div class="info-chip">
-        <div class="info-chip-tip">Detects .gitmodules and produces<br>per-submodule breakdowns automatically</div>
-        <div class="info-chip-val">Git</div>
-        <div class="info-chip-label">Submodule support</div>
+        <div class="info-chip-tip">GitHub, GitLab, and Bitbucket push events<br>trigger scans automatically via webhook</div>
+        <div class="info-chip-val">Webhook</div>
+        <div class="info-chip-label">3 platforms</div>
       </div>
       <div class="info-chip">
         <div class="info-chip-tip">Physical SLOC counted per<br>IEEE Std 1045-1992 Software Productivity Metrics</div>
@@ -7965,6 +9426,7 @@ struct IndexTemplate {
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
 
   <script nonce="{{ csp_nonce }}">
@@ -8055,6 +9517,26 @@ struct IndexTemplate {
       })();
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -8084,7 +9566,7 @@ struct SplashTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
-      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#2563eb;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
       --shadow-strong:0 28px 56px rgba(77,44,20,0.20);
     }
@@ -8101,12 +9583,28 @@ struct SplashTemplate {
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
     .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
     a.nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page{max-width:960px;margin:0 auto;padding:40px 24px 64px;position:relative;z-index:1;}
     .page-header{text-align:center;margin-bottom:32px;}
     .page-header h1{font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;}
@@ -8167,7 +9665,9 @@ struct SplashTemplate {
       .card-right{flex-direction:row;flex-wrap:wrap;}
       .btn{flex:1;}
     }
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
+    .server-online-pill{cursor:default;}
   </style>
 </head>
 <body>
@@ -8189,15 +9689,24 @@ struct SplashTemplate {
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
+        <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -8310,6 +9819,7 @@ struct SplashTemplate {
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
 
   <script nonce="{{ csp_nonce }}">
@@ -8429,6 +9939,26 @@ struct SplashTemplate {
       }
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -8518,7 +10048,9 @@ struct ScanSetupTemplate {
     .nav-project-pill { width: 100%; max-width: 260px; display:inline-flex; align-items:center; justify-content:center; gap: 10px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.10); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
     .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .nav-status { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+    .nav-status { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: nowrap; min-width: 0; }
+    @media (max-width: 1400px) { .nav-status { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-status { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); text-decoration: none; }
     .theme-toggle { width: 38px; justify-content: center; padding: 0; cursor: pointer; transition: transform 0.15s ease, background 0.15s ease; }
     .theme-toggle:hover { transform: translateY(-1px); background: rgba(255,255,255,0.16); }
@@ -8526,6 +10058,20 @@ struct ScanSetupTemplate {
     .theme-toggle .icon-sun { display:none; }
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; }
@@ -8626,7 +10172,26 @@ struct ScanSetupTemplate {
     }
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    /* ── Result-page chart controls ─────────────────────────────────────────── */
+    .r-chart-section{margin-bottom:24px;}
+    .r-chart-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
+    .r-chart-select{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:4px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}
+    .r-chart-select:focus{border-color:var(--accent);}
+    .r-chart-container{width:100%;overflow:hidden;position:relative;}
+    .r-chart-container svg{display:block;width:100%;height:auto;}
+    .r-chart-container .rchit{cursor:pointer;transition:opacity .17s,filter .17s;}
+    .r-chart-container .rchit:hover{opacity:.75;filter:brightness(1.14);}
+    .r-chart-tab-bar{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
+    .r-chart-tab{padding:4px 14px;border-radius:20px;border:1px solid var(--line-strong);cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);background:var(--surface-2);transition:background .13s,color .13s;}
+    .r-chart-tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+    .r-chart-grid-2{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;}
+    @media(max-width:720px){.r-chart-grid-2{grid-template-columns:1fr;}}
+    @media print{.r-chart-controls,.r-chart-tab-bar{display:none!important;}}
+    #r-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:#fff;border-radius:10px;padding:8px 13px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.32);border:1px solid rgba(255,255,255,.1);max-width:240px;white-space:nowrap;}
+    .r-lang-overview{display:flex;gap:40px;align-items:flex-start;justify-content:center;flex-wrap:wrap;padding:8px 0 16px;}
+    .r-lang-overview-cell{display:flex;flex-direction:column;align-items:center;gap:8px;flex:1 1 280px;max-width:480px;}
+    .r-lang-overview-cell p{margin:0;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);text-align:center;}
   </style>
 </head>
 <body>
@@ -8661,19 +10226,27 @@ struct ScanSetupTemplate {
       </div>
       <div class="nav-status">
         <a class="nav-pill" href="/" style="text-decoration:none;">Home</a>
-        <a class="nav-pill" href="/view-reports" style="text-decoration:none;">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans" style="text-decoration:none;">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
           <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme" title="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -8822,7 +10395,33 @@ struct ScanSetupTemplate {
           </div>
           <p class="action-empty-note" style="margin-top:6px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
         </div>
+        {% if confluence_configured %}
+        <div class="action-card" id="confluenceCard">
+          <h3>Confluence</h3>
+          <div class="action-buttons">
+            <button class="button" id="postConfluenceBtn" type="button">Post to Confluence</button>
+            <button class="button secondary" id="copyWikiBtn" type="button">Copy Wiki Markup</button>
+          </div>
+          <p class="action-empty-note" style="margin-top:6px;">Create or update a Confluence page with this scan result, or copy wiki markup for manual paste.</p>
+        </div>
+        {% endif %}
       </div>
+      {% if confluence_configured %}
+      <div id="confluenceModal" style="display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.45);align-items:center;justify-content:center;">
+        <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-width:480px;width:95%;box-shadow:0 16px 48px rgba(0,0,0,0.28);">
+          <div style="font-size:16px;font-weight:800;margin-bottom:18px;">Post to Confluence</div>
+          <label style="font-size:12px;font-weight:700;color:var(--muted);">Page Title</label>
+          <input id="confPageTitle" type="text" value="OxideSLOC — {{ report_title }}" style="width:100%;margin:5px 0 14px;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;box-sizing:border-box;">
+          <label style="font-size:12px;font-weight:700;color:var(--muted);">Report URL <span style="font-weight:400;">(optional — linked in page body)</span></label>
+          <input id="confReportUrl" type="url" placeholder="http://127.0.0.1:4317/runs/{{ run_id }}/result" style="width:100%;margin:5px 0 14px;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;box-sizing:border-box;">
+          <div id="confStatus" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>
+          <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button class="button secondary" id="confCancelBtn" type="button">Cancel</button>
+            <button class="button" id="confSubmitBtn" type="button">Post</button>
+          </div>
+        </div>
+      </div>
+      {% endif %}
       {% if !submodule_rows.is_empty() %}
       <div class="submodule-panel">
         <div class="toolbar-row">
@@ -9050,7 +10649,9 @@ struct ScanSetupTemplate {
       </div>
     </section>
 
-    <section class="panel" style="margin-bottom: 18px;">
+    <div id="r-tt" aria-hidden="true"></div>
+
+    <section class="panel" style="margin-bottom: 36px;">
         <div class="toolbar-row">
           <div>
             <h2>Language breakdown</h2>
@@ -9092,6 +10693,67 @@ struct ScanSetupTemplate {
             {% endfor %}
           </tbody>
         </table>
+    </section>
+
+    <section class="panel r-chart-section">
+      <div class="toolbar-row" style="margin-bottom:8px;">
+        <div>
+          <h2>Visualizations</h2>
+          <p class="muted">Interactive charts for this scan — use the controls to switch views.</p>
+        </div>
+      </div>
+
+      <div class="r-chart-grid-2">
+        <div>
+          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 8px;">Language Composition</p>
+          <div class="r-chart-tab-bar">
+            <button class="r-chart-tab active" data-rcomp="abs">Absolute</button>
+            <button class="r-chart-tab" data-rcomp="pct">100% Normalized</button>
+          </div>
+          <div class="r-chart-container" id="r-composition-chart"></div>
+        </div>
+        <div>
+          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 8px;">Files vs Code Lines</p>
+          <div class="r-chart-container" id="r-scatter-chart"></div>
+        </div>
+      </div>
+
+      {% if has_semantic_data %}
+      <div style="margin-top:18px;">
+        <div class="r-chart-controls">
+          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0;">Semantic Metrics</p>
+          <select class="r-chart-select" id="r-semantic-metric">
+            <option value="functions">Functions</option>
+            <option value="classes">Classes</option>
+            <option value="variables">Variables</option>
+            <option value="imports">Imports</option>
+          </select>
+        </div>
+        <div class="r-chart-container" id="r-semantic-chart"></div>
+      </div>
+      {% endif %}
+
+      {% if has_submodule_data %}
+      <div style="margin-top:18px;">
+        <div class="r-chart-controls">
+          <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0;">Submodule Breakdown</p>
+          <select class="r-chart-select" id="r-sub-metric">
+            <option value="code">Code Lines</option>
+            <option value="comment">Comments</option>
+            <option value="blank">Blank Lines</option>
+            <option value="physical">Physical Lines</option>
+            <option value="files">Files</option>
+          </select>
+          <select class="r-chart-select" id="r-sub-sort">
+            <option value="desc">Value ↓</option>
+            <option value="asc">Value ↑</option>
+            <option value="name">Name A→Z</option>
+          </select>
+        </div>
+        <div class="r-chart-container" id="r-submodule-chart"></div>
+      </div>
+      {% endif %}
+
     </section>
 
   </div>
@@ -9143,6 +10805,23 @@ struct ScanSetupTemplate {
 
       loadSavedTheme();
 
+      // ── Shared tooltip for all result-page charts ─────────────────────────
+      var rTT=(function(){
+        var el=document.getElementById('r-tt');
+        if(!el)return{s:function(){},h:function(){},m:function(){}};
+        function show(e,html){el.innerHTML=html;el.style.display='block';move(e);}
+        function hide(){el.style.display='none';}
+        function move(e){
+          var x=e.clientX+16,y=e.clientY-12;
+          var r=el.getBoundingClientRect();
+          if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;
+          if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;
+          el.style.left=x+'px';el.style.top=y+'px';
+        }
+        return{s:show,h:hide,m:move};
+      })();
+      window.rTT=rTT;
+
       // ── Language overview charts ───────────────────────────────────────────
       (function(){
         var D={{ lang_chart_json|safe }};
@@ -9155,12 +10834,16 @@ struct ScanSetupTemplate {
         function fmt(n){return Number(n).toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
+        function tt(label,val){return' class="rchit" onmouseover="rTT.s(event,\'<strong>'+label.replace(/'/g,'\\x27')+'<\\/strong><br>'+String(val).replace(/'/g,'\\x27')+'\')" onmousemove="rTT.m(event)" onmouseout="rTT.h()"';}
         var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
-        var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
-        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
+
+        // Donut chart — fixed 240×240 viewBox, legend to the right inside the SVG
+        var cx=100,cy=110,Ro=88,Ri=48;
+        var legX=204,DW=360,DH=220;
+        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         if(D.length===1){
           var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
-          ds+='<circle cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
+          ds+='<circle'+tt(D[0].lang,fmt(D[0].code)+' code lines')+' cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
         } else {
           var ang=-Math.PI/2;
           D.forEach(function(d,i){
@@ -9169,45 +10852,194 @@ struct ScanSetupTemplate {
             var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
             var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
-            ds+='<path d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
+            var pct=Math.round(d.code/tot*100);
+            ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
             ang+=sw;
           });
         }
-        ds+='<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="22" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
-        ds+='<text x="'+cx+'" y="'+(cy+16)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
+        ds+='<text x="'+cx+'" y="'+(cy-7)+'" text-anchor="middle" font-family="'+FONT+'" font-size="21" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
+        ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
+        var legRows=Math.min(D.length,8);
+        var legYStart=Math.round((DH-legRows*22)/2);
         D.forEach(function(d,i){
-          var ly=12+i*22;
-          if(ly+16>DH)return;
-          ds+='<rect x="'+(cx+Ro+14)+'" y="'+ly+'" width="13" height="13" fill="'+(COLS[i%COLS.length])+'" rx="3"/>';
-          ds+='<text x="'+(cx+Ro+32)+'" y="'+(ly+11)+'" font-family="'+FONT+'" font-size="12" fill="#43342d">'+esc(d.lang)+'</text>';
+          if(i>=8)return;
+          var ly=legYStart+i*22;
+          ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(COLS[i%COLS.length])+'"/>';
+          ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
         });
         ds+='</svg>';
+
+        // Horizontal stacked-bar chart — fills container width
         var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
-        var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
-        var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" width="'+(LW+BW+62)+'" height="'+SH+'" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
+        var LW=108,BW=260,rHb=28,bH=20,SH=D.length*rHb+32,svgW=LW+BW+68;
+        var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         D.forEach(function(d,i){
-          var y=10+i*rHb,x=LW;
+          var y=6+i*rHb,x=LW;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
           bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
-          if(cmW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
-          if(blW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+          if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="0"/>';x+=cW;
+          if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="0"/>';x+=cmW;
+          if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="0"/>';
           bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
         });
-        var ly=SH-16;
-        bs+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
-        bs+='<rect x="'+(LW+56)+'" y="'+ly+'" width="10" height="10" fill="'+GN+'"/><text x="'+(LW+70)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
-        bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
+        var ly=SH-14;
+        bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
+        bs+='<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+67)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
+        bs+='<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
         bs+='</svg>';
-        var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
-        el.innerHTML='<div style="overflow-x:auto;text-align:center;padding:6px 0;">'+
-          '<table style="display:inline-table;border-collapse:separate;border-spacing:56px 0;margin:0 auto;">'+
-            '<tr>'+
-              '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</td>'+
-              '<td style="vertical-align:top;padding:0;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</td>'+
-            '</tr>'+
-          '</table>'+
+        el.innerHTML='<div class="r-lang-overview">'+
+          '<div class="r-lang-overview-cell"><p>Code Lines by Language</p>'+ds+'</div>'+
+          '<div class="r-lang-overview-cell" style="flex:2 1 340px;"><p>Line Mix per Language</p>'+bs+'</div>'+
         '</div>';
+      })();
+
+      // ── Extended charts (composition, scatter, semantic, submodule) ─────────
+      (function(){
+        var LANG_D={{ lang_chart_json|safe }};
+        var SCAT_D={{ scatter_chart_json|safe }};
+        var SEM_D={{ semantic_chart_json|safe }};
+        var SUB_D={{ submodule_chart_json|safe }};
+        var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082','#1F6E6E','#8B4513','#4169E1','#228B22','#8B008B','#FF6347','#708090','#DAA520'];
+        var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+        function fmt(n){return Number(n).toLocaleString();}
+        function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        function px(n){return Math.round(n);}
+        function tt(label,val){
+          var l=String(label).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');
+          var v=String(val).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');
+          return' class="rchit" onmouseover="rTT.s(event,\'<strong>'+l+'<\\/strong><br>'+v+'\')" onmousemove="rTT.m(event)" onmouseout="rTT.h()"';
+        }
+
+        // ── Composition (horizontal stacked bars, abs or 100% pct) ────────────
+        function renderComposition(mode){
+          var el=document.getElementById('r-composition-chart');
+          if(!el||!LANG_D||!LANG_D.length)return;
+          var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
+          var LW=110,BW=260,rH=28,bH=20,gap=3;
+          var SH=LANG_D.length*(rH+gap)+32,svgW=LW+BW+74;
+          var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          if(mode==='pct'){
+            LANG_D.forEach(function(d,i){
+              var tot2=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
+              var cW=(d.code||0)/tot2*BW,cmW=(d.comments||0)/tot2*BW,blW=(d.blanks||0)/tot2*BW;
+              var y=i*(rH+gap)+4,x=LW;
+              s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
+              if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
+              if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+              var pct=Math.round((d.code||0)/tot2*100);
+              s+='<text x="'+(LW+BW+4)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+pct+'%</text>';
+            });
+          } else {
+            var maxT=Math.max.apply(null,LANG_D.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);}))||1;
+            LANG_D.forEach(function(d,i){
+              var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
+              var y=i*(rH+gap)+4,x=LW;
+              s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
+              if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
+              if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+              s+='<text x="'+(LW+BW+4)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+fmt((d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
+            });
+          }
+          var ly=SH-14;
+          s+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>';
+          s+='<rect x="'+(LW+53)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+66)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>';
+          s+='<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blank</text>';
+          s+='</svg>';
+          el.innerHTML=s;
+        }
+        renderComposition('abs');
+        Array.prototype.slice.call(document.querySelectorAll('[data-rcomp]')).forEach(function(btn){
+          btn.addEventListener('click',function(){
+            Array.prototype.slice.call(document.querySelectorAll('[data-rcomp]')).forEach(function(b){b.classList.remove('active');});
+            btn.classList.add('active');
+            renderComposition(btn.getAttribute('data-rcomp'));
+          });
+        });
+
+        // ── Scatter: Files vs Code Lines (bubble = physical lines) ─────────────
+        (function(){
+          var el=document.getElementById('r-scatter-chart');
+          if(!el||!SCAT_D||!SCAT_D.length)return;
+          var W=400,H=280,PL=52,PB=36,PT=12,PR=14;
+          var cW=W-PL-PR,cH=H-PT-PB;
+          var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
+          var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
+          var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
+          var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          [0,0.25,0.5,0.75,1].forEach(function(t){
+            var y=PT+cH*(1-t);
+            s+='<line x1="'+PL+'" y1="'+px(y)+'" x2="'+(PL+cW)+'" y2="'+px(y)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
+            if(t>0)s+='<text x="'+(PL-4)+'" y="'+(px(y)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxC*t))+'</text>';
+          });
+          [0,0.25,0.5,0.75,1].forEach(function(t){
+            var x=PL+cW*t;
+            s+='<line x1="'+px(x)+'" y1="'+PT+'" x2="'+px(x)+'" y2="'+(PT+cH)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
+            if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxF*t))+'</text>';
+          });
+          SCAT_D.forEach(function(d,i){
+            var cx2=PL+d.files/maxF*cW,cy2=PT+cH-d.code/maxC*cH;
+            var r=Math.max(4,Math.sqrt(d.physical/maxP)*18);
+            s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';
+            if(r>6)s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.9" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+          });
+          s+='<text x="'+(PL+cW/2)+'" y="'+(H-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7">Files</text>';
+          s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
+          s+='</svg>';
+          el.innerHTML=s;
+        })();
+
+        // ── Semantic: horizontal bar chart (one bar per language) ─────────────
+        // Horizontal layout avoids the portrait-aspect scaling bug that plagued
+        // the old vertical column layout on wide containers.
+        function renderSemantic(key){
+          var el=document.getElementById('r-semantic-chart');
+          if(!el||!SEM_D||!SEM_D.length)return;
+          var LW=112,BW=300,rH=28,bH=20,gap=3;
+          var SH=SEM_D.length*(rH+gap)+14,svgW=LW+BW+70;
+          var maxV=Math.max.apply(null,SEM_D.map(function(d){return d[key]||0;}))||1;
+          var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          SEM_D.forEach(function(d,i){
+            var v=d[key]||0,bw=v/maxV*BW,y=i*(rH+gap)+4;
+            s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+            if(bw>0.5)s+='<rect'+tt(d.lang,fmt(v)+' '+key)+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
+            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
+          });
+          s+='</svg>';
+          el.innerHTML=s;
+        }
+        var semSel=document.getElementById('r-semantic-metric');
+        if(semSel){renderSemantic('functions');semSel.addEventListener('change',function(){renderSemantic(semSel.value);});}
+
+        // ── Submodule: horizontal bar chart ────────────────────────────────────
+        function renderSubmodule(key,sort){
+          var el=document.getElementById('r-submodule-chart');
+          if(!el||!SUB_D||!SUB_D.length)return;
+          var data=SUB_D.slice();
+          if(sort==='desc')data.sort(function(a,b){return(b[key]||0)-(a[key]||0);});
+          else if(sort==='asc')data.sort(function(a,b){return(a[key]||0)-(b[key]||0);});
+          else data.sort(function(a,b){return(a.name||'').localeCompare(b.name||'');});
+          var LW=128,BW=300,rH=28,bH=20,gap=3;
+          var SH=data.length*(rH+gap)+14,svgW=LW+BW+80;
+          var maxV=Math.max.apply(null,data.map(function(d){return d[key]||0;}))||1;
+          var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          data.forEach(function(d,i){
+            var v=d[key]||0,bw=v/maxV*BW,y=i*(rH+gap)+4;
+            s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.name||d.path||'?')+'</text>';
+            if(bw>0.5)s+='<rect'+tt(d.name||'?',fmt(v))+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
+            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
+          });
+          s+='</svg>';
+          el.innerHTML=s;
+        }
+        var subSel=document.getElementById('r-sub-metric');
+        var sortSel=document.getElementById('r-sub-sort');
+        if(subSel){
+          renderSubmodule('code','desc');
+          subSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel?sortSel.value:'desc');});
+          if(sortSel)sortSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel.value);});
+        }
       })();
 
       (function randomizeWatermarks() {
@@ -9298,12 +11130,96 @@ struct ScanSetupTemplate {
 
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
+  {% if confluence_configured %}
+  <script nonce="{{ csp_nonce }}">
+  (function() {
+    var postBtn = document.getElementById('postConfluenceBtn');
+    var copyBtn = document.getElementById('copyWikiBtn');
+    var modal   = document.getElementById('confluenceModal');
+    if (!postBtn || !modal) return;
+
+    postBtn.addEventListener('click', function() {
+      document.getElementById('confStatus').style.display = 'none';
+      modal.style.display = 'flex';
+    });
+    document.getElementById('confCancelBtn').addEventListener('click', function() {
+      modal.style.display = 'none';
+    });
+    modal.addEventListener('click', function(e) { if (e.target === modal) modal.style.display = 'none'; });
+
+    document.getElementById('confSubmitBtn').addEventListener('click', async function() {
+      var btn = this;
+      btn.disabled = true;
+      var status = document.getElementById('confStatus');
+      status.style.display = 'block';
+      status.style.background = '#dbeafe';
+      status.style.color = '#1e40af';
+      status.textContent = 'Posting to Confluence…';
+      var resp = await fetch('/api/confluence/post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          run_id: '{{ run_id }}',
+          page_title: document.getElementById('confPageTitle').value.trim() || 'OxideSLOC Report',
+          report_url: document.getElementById('confReportUrl').value.trim() || null
+        })
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        status.style.background = '#dcfce7'; status.style.color = '#166534';
+        status.textContent = 'Posted! Page ID: ' + data.page_id;
+      } else {
+        status.style.background = '#fee2e2'; status.style.color = '#991b1b';
+        status.textContent = 'Error: ' + (data.error || 'Unknown error');
+      }
+      btn.disabled = false;
+    });
+
+    if (copyBtn) {
+      copyBtn.addEventListener('click', async function() {
+        var resp = await fetch('/api/confluence/wiki-markup?run_id={{ run_id }}');
+        if (!resp.ok) { alert('Could not load markup. Try again.'); return; }
+        var text = await resp.text();
+        try {
+          await navigator.clipboard.writeText(text);
+          var orig = copyBtn.textContent;
+          copyBtn.textContent = 'Copied!';
+          setTimeout(function() { copyBtn.textContent = orig; }, 2000);
+        } catch(e) {
+          alert('Clipboard write failed — check browser permissions.');
+        }
+      });
+    }
+  })();
+  </script>
+  {% endif %}
 </body>
 </html>
 "##,
@@ -9380,8 +11296,21 @@ struct ResultTemplate {
     submodule_rows: Vec<SubmoduleRow>,
     scan_config_url: String,
     lang_chart_json: String,
+    // Askama reads these via proc-macro expansion; clippy can't trace through it.
+    #[allow(dead_code)]
+    scatter_chart_json: String,
+    #[allow(dead_code)]
+    semantic_chart_json: String,
+    #[allow(dead_code)]
+    submodule_chart_json: String,
+    #[allow(dead_code)]
+    has_submodule_data: bool,
+    #[allow(dead_code)]
+    has_semantic_data: bool,
     pdf_generating: bool,
     csp_nonce: String,
+    /// Whether Confluence integration is configured — shows Post button when true.
+    confluence_configured: bool,
 }
 
 #[derive(Template)]
@@ -9398,7 +11327,7 @@ struct ResultTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#dcb89f; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
-      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#4a78ee;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#4a78ee;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
     }
     body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }
@@ -9411,6 +11340,8 @@ struct ResultTemplate {
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
     .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
@@ -9473,8 +11404,28 @@ struct ResultTemplate {
         </div>
       </a>
       <div class="nav-right">
-        <a href="/view-reports" class="nav-pill">View Reports</a>
-        <a href="/scan" class="nav-pill">New Scan</a>
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+          </div>
+        </div>
+        <div class="server-status-wrap">
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -9587,6 +11538,7 @@ struct ResultTemplate {
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
   <script nonce="{{ csp_nonce }}">
     (function(){
@@ -9624,6 +11576,26 @@ struct ResultTemplate {
       });
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -9650,7 +11622,7 @@ struct ScanWaitTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#dcb89f; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
-      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#4a78ee;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#4a78ee;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
     }
     body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }
@@ -9664,12 +11636,28 @@ struct ScanWaitTemplate {
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page{max-width:1720px;margin:0 auto;padding:28px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 18px;font-size:28px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
@@ -9682,7 +11670,7 @@ struct ScanWaitTemplate {
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -9706,19 +11694,27 @@ struct ScanWaitTemplate {
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
           <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -9779,6 +11775,26 @@ struct ScanWaitTemplate {
       });
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -9809,7 +11825,7 @@ struct ErrorTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.82); --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
-      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#2563eb;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
       --pos:#1a8f47; --pos-bg:#e8f5ed; --neg:#b33b3b; --neg-bg:#fcd6d6;
     }
@@ -9823,12 +11839,28 @@ struct ErrorTemplate {
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
@@ -9895,7 +11927,7 @@ struct ErrorTemplate {
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .vr-toolbar{display:grid;grid-template-columns:1fr auto;gap:6px 20px;margin-bottom:14px;align-items:center;}
     .vr-filters{grid-column:1;grid-row:2;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
     .vr-hint{grid-column:2;grid-row:1;text-align:right;margin:0;font-size:13px;color:var(--muted);white-space:nowrap;}
@@ -9941,19 +11973,27 @@ struct ErrorTemplate {
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
           <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -10105,6 +12145,7 @@ struct ErrorTemplate {
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
 
   <script nonce="{{ csp_nonce }}">
@@ -10383,6 +12424,26 @@ struct ErrorTemplate {
       })();
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -10412,7 +12473,7 @@ struct HistoryTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.82); --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
-      --nav:#b85d33; --nav-2:#7a371b; --accent:#6f9bff; --accent-2:#2563eb;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
       --sel-border:#6f9bff; --sel-bg:rgba(111,155,255,0.06);
     }
@@ -10426,12 +12487,28 @@ struct HistoryTemplate {
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
@@ -10485,6 +12562,7 @@ struct HistoryTemplate {
     .pg-btn:hover:not(:disabled){background:var(--line);}
     .pg-btn.active{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
     .pg-btn:disabled{opacity:.35;cursor:default;}
+    .hint-right-wrap .instruction-bar{max-width:fit-content!important;width:auto!important;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
     @media(max-width:700px){td,th{padding:7px 8px;}.run-id-chip,.git-chip{display:none;}}
@@ -10508,7 +12586,7 @@ struct HistoryTemplate {
     body.dark-theme .submod-chip{background:rgba(111,155,255,0.16);border-color:rgba(111,155,255,0.32);color:var(--accent);}
     #compare-table td:nth-child(11){white-space:normal;overflow:visible;}
     .hidden{display:none!important;}
-    .scope-panel{background:rgba(111,155,255,0.06);border:1.5px solid rgba(111,155,255,0.28);border-radius:12px;padding:12px 16px;margin-bottom:14px;animation:fadeIn .15s ease;}
+    .scope-panel{background:rgba(111,155,255,0.06);border:1.5px solid rgba(111,155,255,0.28);border-radius:12px;padding:12px 16px;margin-bottom:14px;animation:fadeIn .15s ease;display:inline-block;width:auto;max-width:100%;}
     @keyframes fadeIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
     body.dark-theme .scope-panel{background:rgba(111,155,255,0.09);border-color:rgba(111,155,255,0.32);}
     .scope-panel-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
@@ -10522,7 +12600,7 @@ struct HistoryTemplate {
     .scope-option.selected .scope-option-radio{border-color:var(--accent-2);}
     .scope-option.selected .scope-option-radio::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--accent-2);}
     .scope-option-sep{width:1px;height:16px;background:rgba(111,155,255,0.28);margin:0 2px;flex-shrink:0;}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -10543,19 +12621,27 @@ struct HistoryTemplate {
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
           <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -10579,15 +12665,17 @@ struct HistoryTemplate {
           <h1>Compare Scans</h1>
           <p class="panel-meta">{{ total_scans }} scan record(s) available. Select exactly two to compare their metrics side-by-side.</p>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <button class="btn primary" id="compare-btn" disabled>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
-            Compare <span class="sel-count" id="sel-count">0/2</span>
-          </button>
-          <a class="btn-back" href="/">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>
-            Home
-          </a>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+            <button class="btn primary" id="compare-btn" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+              Compare <span class="sel-count" id="sel-count">0/2</span>
+            </button>
+            <a class="btn-back" href="/">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>
+              Home
+            </a>
+          </div>
         </div>
       </div>
 
@@ -10597,10 +12685,6 @@ struct HistoryTemplate {
         Run your first analysis from the <a href="/scan">scan page</a>.
       </div>
       {% else %}
-      <div class="instruction-bar">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-        Click any two rows to select them, then press <strong>Compare</strong> to view the scan delta.
-      </div>
       <div class="filter-row">
         <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
         <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
@@ -10613,6 +12697,14 @@ struct HistoryTemplate {
         </div>
         <div class="scope-options" id="scope-options"></div>
       </div>
+      {% if total_scans > 0 %}
+      <div class="hint-right-wrap" style="display:flex;justify-content:flex-end;margin:6px 0 8px;">
+        <div class="instruction-bar" style="margin:0;max-width:fit-content;flex-shrink:0;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          Click any two rows to select them, then press <strong>Compare</strong> to view the scan delta.
+        </div>
+      </div>
+      {% endif %}
       <div class="table-wrap">
         <table id="compare-table">
           <colgroup>
@@ -10694,6 +12786,7 @@ struct HistoryTemplate {
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
 
   <script nonce="{{ csp_nonce }}">
@@ -11010,6 +13103,26 @@ struct HistoryTemplate {
       });
     })();
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -11038,7 +13151,7 @@ struct CompareSelectTemplate {
     :root {
       --radius:18px; --bg:#f5efe8; --surface:#fbf7f2; --surface-2:#f4ede4;
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08777;
-      --nav:#b85d33; --nav-2:#7a371b;
+      --nav:#283790; --nav-2:#013e6b;
       --accent:#6f9bff; --oxide:#d37a4c; --oxide-2:#b35428; --shadow:0 18px 42px rgba(77,44,20,0.12);
       --pos:#1a8f47; --pos-bg:#e8f5ed; --neg:#b33b3b; --neg-bg:#fcd6d6; --zero-bg:transparent;
       --added:#1a8f47; --removed:#b33b3b; --modified:#926000; --unchanged:#7b675b;
@@ -11049,16 +13162,32 @@ struct CompareSelectTemplate {
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
-    .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+    .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .hero{background:linear-gradient(180deg,rgba(255,255,255,0.20),transparent),var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 28px 28px;margin-bottom:18px;}
@@ -11068,6 +13197,9 @@ struct CompareSelectTemplate {
     .btn-back:hover{background:var(--line);}
     h1{margin:0 0 6px;font-size:36px;font-weight:850;letter-spacing:-0.03em;}
     h2{margin:0 0 14px;font-size:18px;font-weight:750;}
+    .delta-title{font-size:28px;font-weight:900;letter-spacing:-0.03em;margin:0 0 4px;background:linear-gradient(90deg,#b85d33 0%,#d37a4c 40%,#6f9bff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+    .delta-desc{font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.5;}
+    body.dark-theme .delta-title{background:linear-gradient(90deg,#f0a070 0%,#d37a4c 40%,#9bb8ff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
     .muted{color:var(--muted);font-size:14px;}
     .version-pills{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;}
     .vpill{display:inline-flex;flex-direction:column;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:8px 14px;font-size:13px;}
@@ -11156,7 +13288,7 @@ struct CompareSelectTemplate {
     .btn-reset{padding:6px 14px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:background .12s ease;white-space:nowrap;}
     .btn-reset:hover{background:var(--line);}
     .table-wrap{width:100%;overflow-x:auto;}
-    table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}
+    table{width:100%;border-collapse:collapse;font-size:13px;table-layout:auto;}
     th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:8px 10px;border-bottom:2px solid var(--line);white-space:nowrap;position:relative;user-select:none;}
     th.sortable{cursor:pointer;} th.sortable:hover{color:var(--oxide);}
     .sort-icon{margin-left:4px;font-size:10px;opacity:0.45;display:inline-block;vertical-align:middle;}
@@ -11169,7 +13301,7 @@ struct CompareSelectTemplate {
     tr.row-removed td{background:rgba(179,59,59,0.06);opacity:.85;}
     tr.row-modified td{background:rgba(146,96,0,0.05);}
     tr.row-unchanged td{opacity:.6;}
-    .file-path{font-family:ui-monospace,monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .file-path{font-family:ui-monospace,monospace;font-size:12px;white-space:nowrap;overflow:visible;text-overflow:unset;}
     .status-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase;}
     .status-badge.added{background:#e8f5ed;color:#1a8f47;}
     .status-badge.removed{background:#fdeaea;color:#b33b3b;}
@@ -11220,7 +13352,7 @@ struct CompareSelectTemplate {
     body.dark-theme .tab-btn.tab-modified{background:#3d2f0a;color:#f0c060;border-color:#6b5020;}
     body.dark-theme .tab-btn.tab-added{background:#163927;color:#8fe2a8;border-color:#2a6b4a;}
     body.dark-theme .tab-btn.tab-removed{background:#3d1c1c;color:#f5a3a3;border-color:#7a3a3a;}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .submod-scope-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 16px;background:var(--surface-2);border:1.5px solid var(--line-strong);border-radius:12px;margin:12px 0 18px;}
     .submod-scope-divider{width:1px;height:18px;background:var(--line-strong);margin:0 4px;flex-shrink:0;}
     .submod-scope-label{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);flex-shrink:0;white-space:nowrap;}
@@ -11249,19 +13381,27 @@ struct CompareSelectTemplate {
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
-        <a class="nav-pill" href="/view-reports">View Reports</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
           <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -11274,7 +13414,8 @@ struct CompareSelectTemplate {
     <section class="hero">
       <div class="hero-header">
         <div>
-          <h1 style="margin:0 0 6px;">Scan Delta</h1>
+          <h1 class="delta-title">Scan Delta</h1>
+          <p class="delta-desc">Side-by-side metric comparison between two scans — code line deltas, file changes, and language breakdown.</p>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             {% if let Some(sub) = active_submodule %}
             <span class="muted" style="font-size:16px;">Submodule <strong>{{ sub }}</strong> — two scans of</span>
@@ -11482,13 +13623,13 @@ struct CompareSelectTemplate {
       <div class="table-wrap">
       <table id="delta-table">
         <colgroup>
-          <col style="width:55%">
-          <col style="width:7%">
-          <col style="width:7%">
-          <col style="width:12%">
-          <col style="width:6%">
-          <col style="width:6%">
-          <col style="width:7%">
+          <col>
+          <col>
+          <col>
+          <col>
+          <col>
+          <col>
+          <col>
         </colgroup>
         <thead>
           <tr id="delta-thead">
@@ -11546,6 +13687,7 @@ struct CompareSelectTemplate {
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
 
   <script nonce="{{ csp_nonce }}">
@@ -12044,6 +14186,26 @@ struct CompareSelectTemplate {
     }
     window.exportDeltaCharts = function(){slocChartReport(getExportFilename('html'),_sd,getDeltaExportRows());};
   </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
 </body>
 </html>
 "##,
@@ -12123,7 +14285,7 @@ struct CompareTemplate {
   <style nonce="{{ csp_nonce }}">
     :root {
       --bg:#f5efe8; --surface:#fbf7f2; --line:#e6d0bf; --line-strong:#d8bfad;
-      --text:#2f241c; --muted:#7b675b; --nav:#b85d33; --nav-2:#7a371b;
+      --text:#2f241c; --muted:#7b675b; --nav:#283790; --nav-2:#013e6b;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 8px 32px rgba(77,44,20,.10);
       --err-bg:#fdf0f0; --err-border:#e8b4b4; --err-text:#8b2020;
     }
@@ -12133,7 +14295,12 @@ struct CompareTemplate {
     .brand{display:flex;align-items:center;gap:12px;text-decoration:none;}
     .brand-logo{width:38px;height:42px;object-fit:contain;filter:drop-shadow(0 4px 10px rgba(0,0,0,.22));}
     .brand-title{color:#fff;font-size:17px;font-weight:800;margin:0;}
-    .page{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 56px);padding:24px;}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
+    .page{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 56px);padding:24px;position:relative;z-index:1;}
     .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:40px;max-width:420px;width:100%;box-shadow:var(--shadow);}
     h1{margin:0 0 6px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}
     .subtitle{color:var(--muted);font-size:14px;margin:0 0 28px;}
@@ -12148,6 +14315,16 @@ struct CompareTemplate {
   </style>
 </head>
 <body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
 <nav class="top-nav">
   <a class="brand" href="/">
     <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC">
@@ -12175,6 +14352,67 @@ struct CompareTemplate {
     </p>
   </div>
 </main>
+<script nonce="{{ csp_nonce }}">
+(function() {
+  (function randomizeWatermarks() {
+    var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+    if (!wms.length) return;
+    var placed = [];
+    function tooClose(top, left) {
+      for (var i = 0; i < placed.length; i++) {
+        var dt = Math.abs(placed[i][0] - top), dl = Math.abs(placed[i][1] - left);
+        if (dt < 16 && dl < 12) return true;
+      }
+      return false;
+    }
+    function pick(leftBand) {
+      for (var attempt = 0; attempt < 50; attempt++) {
+        var top = Math.random() * 88 + 2;
+        var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+        if (!tooClose(top, left)) { placed.push([top, left]); return [top, left]; }
+      }
+      var top = Math.random() * 88 + 2;
+      var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+      placed.push([top, left]); return [top, left];
+    }
+    var half = Math.floor(wms.length / 2);
+    wms.forEach(function (img, i) {
+      var pos = pick(i < half);
+      var size = Math.floor(Math.random() * 100 + 120);
+      var rot = (Math.random() * 360).toFixed(1);
+      var op = (Math.random() * 0.08 + 0.12).toFixed(2);
+      img.style.width=size+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;
+    });
+  })();
+  (function spawnCodeParticles() {
+    var container = document.getElementById('code-particles');
+    if (!container) return;
+    var snippets = [
+      '1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312',
+      '// comment','pub fn run','use std::fs','Result<()>','let mut n = 0',
+      'git main','#[derive]','impl Scan','3,841 physical','files: 60',
+      '450 comments','cargo build','Ok(run)','Vec<String>','match lang',
+      'fn main() {','.rs .go .py','sloc_core','render_html','2,163 code'
+    ];
+    var count = 38;
+    for (var i = 0; i < count; i++) {
+      (function(idx) {
+        var el = document.createElement('span');
+        el.className = 'code-particle';
+        el.textContent = snippets[idx % snippets.length];
+        var left = Math.random() * 94 + 2;
+        var top = Math.random() * 88 + 6;
+        var dur = (Math.random() * 10 + 9).toFixed(1);
+        var delay = (Math.random() * 18).toFixed(1);
+        var rot = (Math.random() * 26 - 13).toFixed(1);
+        var op = (Math.random() * 0.09 + 0.06).toFixed(3);
+        el.style.cssText = 'left:'+left.toFixed(1)+'%;top:'+top.toFixed(1)+'%;--rot:'+rot+'deg;--op:'+op+';animation-duration:'+dur+'s;animation-delay:-'+delay+'s;';
+        container.appendChild(el);
+      })(i);
+    }
+  })();
+})();
+</script>
 </body>
 </html>
 "##,
@@ -12185,4 +14423,949 @@ struct LoginTemplate {
     has_error: bool,
     next_url: String,
     lockout_threshold: u32,
+}
+
+// ── REST API reference page ────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(
+    source = r##"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OxideSLOC — REST API Reference</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{{ csp_nonce }}">
+    :root {
+      --radius:14px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
+      --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
+      --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
+      --success:#16a34a;
+    }
+    body.dark-theme {
+      --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548;
+      --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; --shadow:0 18px 42px rgba(0,0,0,0.36);
+    }
+    *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
+    .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
+    .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
+    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;}
+    .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;}
+    @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
+    .nav-pill{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
+    a.nav-pill:hover{background:rgba(255,255,255,0.18);}
+    .nav-pill.active{background:rgba(255,255,255,0.22);}
+    .nav-dropdown{position:relative;display:inline-flex;}
+    .nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}
+    .nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}
+    .nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}
+    .nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}
+    .nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}
+    .nav-dropdown-menu a:last-child{border-bottom:none;}
+    .nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}
+    .nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;display:inline-flex;align-items:center;min-height:38px;}
+    .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
+    .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;padding:4px;color:var(--muted-2);display:flex;align-items:center;border-radius:6px;}
+    .settings-close svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .page{max-width:960px;margin:0 auto;padding:40px 24px 60px;position:relative;z-index:1;}
+    .page-header{margin-bottom:28px;}
+    .page-title{font-size:28px;font-weight:900;letter-spacing:-0.03em;margin:0 0 6px;}
+    .page-subtitle{font-size:15px;color:var(--muted);line-height:1.6;margin:0;}
+    .callout{border-radius:12px;padding:16px 20px;margin-bottom:28px;display:flex;align-items:flex-start;gap:14px;font-size:14px;line-height:1.6;}
+    .callout.key-set{background:rgba(22,163,74,0.10);border:1px solid rgba(22,163,74,0.30);}
+    .callout.no-key{background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.30);}
+    .callout-icon{width:20px;height:20px;flex:0 0 auto;margin-top:1px;}
+    .callout strong{font-weight:800;}
+    .callout code{background:rgba(0,0,0,0.07);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+    body.dark-theme .callout code{background:rgba(255,255,255,0.10);}
+    .base-url-bar{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:28px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+    .base-url-label{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted-2);flex:0 0 auto;}
+    .base-url-value{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:var(--accent-2);flex:1;word-break:break-all;}
+    body.dark-theme .base-url-value{color:var(--accent);}
+    .section{margin-bottom:36px;}
+    .section-title{font-size:18px;font-weight:850;letter-spacing:-0.02em;margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line);}
+    .ep-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:10px;overflow:hidden;}
+    .ep-header{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;user-select:none;flex-wrap:wrap;}
+    .ep-header:hover{background:var(--surface-2);}
+    .method{display:inline-flex;align-items:center;justify-content:center;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:800;letter-spacing:0.04em;flex:0 0 auto;text-transform:uppercase;}
+    .method.get{background:#dcfce7;color:#166534;}
+    .method.post{background:#dbeafe;color:#1e40af;}
+    .method.delete{background:#fee2e2;color:#991b1b;}
+    body.dark-theme .method.get{background:#14532d;color:#86efac;}
+    body.dark-theme .method.post{background:#1e3a5f;color:#93c5fd;}
+    body.dark-theme .method.delete{background:#450a0a;color:#fca5a5;}
+    .ep-path{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;font-weight:700;flex:1;min-width:0;}
+    .ep-path .param{color:var(--oxide-2);}
+    body.dark-theme .ep-path .param{color:var(--oxide);}
+    .auth-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;flex:0 0 auto;}
+    .auth-badge.protected{background:rgba(239,68,68,0.10);color:#b91c1c;border:1px solid rgba(239,68,68,0.25);}
+    .auth-badge.public{background:rgba(22,163,74,0.10);color:#166534;border:1px solid rgba(22,163,74,0.25);}
+    .auth-badge.hmac{background:rgba(245,158,11,0.10);color:#b45309;border:1px solid rgba(245,158,11,0.25);}
+    body.dark-theme .auth-badge.protected{background:rgba(239,68,68,0.18);color:#fca5a5;border-color:rgba(239,68,68,0.35);}
+    body.dark-theme .auth-badge.public{background:rgba(22,163,74,0.18);color:#86efac;border-color:rgba(22,163,74,0.35);}
+    body.dark-theme .auth-badge.hmac{background:rgba(245,158,11,0.18);color:#fcd34d;border-color:rgba(245,158,11,0.35);}
+    .ep-desc{font-size:13px;color:var(--muted);flex:1;min-width:120px;}
+    .chevron{width:16px;height:16px;stroke:var(--muted-2);fill:none;stroke-width:2;transition:transform 0.2s ease;flex:0 0 auto;}
+    .ep-card.open .chevron{transform:rotate(180deg);}
+    .ep-body{display:none;padding:0 16px 16px;border-top:1px solid var(--line);}
+    .ep-card.open .ep-body{display:block;}
+    .ep-desc-full{font-size:14px;color:var(--muted);line-height:1.6;margin:14px 0 14px;}
+    .ep-desc-full code{background:rgba(0,0,0,0.06);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+    .ep-desc-full a{color:var(--accent-2);text-decoration:none;}
+    body.dark-theme .ep-desc-full code{background:rgba(255,255,255,0.09);}
+    .params-heading{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted-2);margin:12px 0 6px;}
+    table.params{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:13px;}
+    table.params th{text-align:left;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted-2);padding:5px 8px;border-bottom:1px solid var(--line);}
+    table.params td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top;}
+    table.params tr:last-child td{border-bottom:none;}
+    .pt-name{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-weight:700;}
+    .pt-type{color:var(--muted-2);font-size:12px;}
+    .pt-req{display:inline-block;background:rgba(239,68,68,0.10);color:#b91c1c;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:800;}
+    .pt-opt{display:inline-block;background:rgba(0,0,0,0.06);color:var(--muted);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:800;}
+    body.dark-theme .pt-req{background:rgba(239,68,68,0.20);color:#fca5a5;}
+    body.dark-theme .pt-opt{background:rgba(255,255,255,0.08);color:var(--muted);}
+    details.schema{margin-bottom:14px;}
+    details.schema summary{cursor:pointer;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted-2);padding:5px 0;user-select:none;}
+    details.schema summary:hover{color:var(--text);}
+    .schema-block{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.7;overflow-x:auto;white-space:pre;margin-top:6px;}
+    .curl-heading{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted-2);margin:12px 0 6px;}
+    .curl-wrap{position:relative;}
+    .curl-block{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 80px 10px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;overflow-x:auto;white-space:pre;margin:0;}
+    .curl-copy-btn{position:absolute;right:8px;top:8px;padding:4px 10px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--muted);font-size:11px;font-weight:700;cursor:pointer;transition:background 0.15s,color 0.15s,border-color 0.15s;}
+    .curl-copy-btn:hover{background:var(--accent-2);color:#fff;border-color:var(--accent-2);}
+    .curl-copy-btn.copied{background:var(--success);color:#fff;border-color:var(--success);}
+    .webhook-note{font-size:14px;color:var(--muted);margin:0 0 14px;line-height:1.6;}
+    .webhook-note a{color:var(--accent-2);text-decoration:none;}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
+    .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
+    .site-footer a{color:var(--muted);}
+  </style>
+</head>
+<body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  <div class="top-nav">
+    <div class="top-nav-inner">
+      <a class="brand" href="/">
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">REST API Reference</div></div>
+      </a>
+      <div class="nav-right">
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+          </div>
+        </div>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</a>
+          </div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-header">
+      <h1 class="page-title">REST API Reference</h1>
+      <p class="page-subtitle">All endpoints exposed by this oxide-sloc server. Protected endpoints require authentication unless the server was started without an API key.</p>
+    </div>
+
+    {% if has_api_key %}
+    <div class="callout key-set">
+      <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <div><strong>API key is configured.</strong> Protected endpoints require an <code>Authorization: Bearer &lt;key&gt;</code> header, an <code>X-API-Key: &lt;key&gt;</code> header, or an active session cookie from <code>POST /auth/login</code>.</div>
+    </div>
+    {% else %}
+    <div class="callout no-key">
+      <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div><strong>No API key set.</strong> All endpoints are publicly accessible on this server. Set <code>SLOC_API_KEY</code> or <code>SLOC_API_KEYS</code> to require authentication.</div>
+    </div>
+    {% endif %}
+
+    <div class="base-url-bar">
+      <span class="base-url-label">Base URL</span>
+      <span class="base-url-value" id="base-url">http://127.0.0.1:4317</span>
+    </div>
+
+    <!-- Health -->
+    <div class="section">
+      <h2 class="section-title">Health &amp; Status</h2>
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/healthz</span>
+          <span class="auth-badge public">Public</span>
+          <span class="ep-desc">Server liveness check</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the plain text string <code>ok</code> when the server is running. Suitable for load-balancer health probes and uptime monitors.</p>
+          <p class="params-heading">Response</p>
+          <div class="schema-block">200 OK
+Content-Type: text/plain
+
+ok</div>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-healthz">curl <span class="base-url-slot">http://127.0.0.1:4317</span>/healthz</pre>
+            <button class="curl-copy-btn" data-target="c-healthz">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Badges -->
+    <div class="section">
+      <h2 class="section-title">Badges</h2>
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/badge/<span class="param">{metric}</span></span>
+          <span class="auth-badge public">Public</span>
+          <span class="ep-desc">SVG badge for README / dashboard embedding</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns a shields-style SVG badge showing the requested metric from the most recent scan.</p>
+          <p class="params-heading">Path Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">metric</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>One of: <code>code_lines</code>, <code>comment_lines</code>, <code>blank_lines</code>, <code>files_analyzed</code></td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-badge">curl <span class="base-url-slot">http://127.0.0.1:4317</span>/badge/code_lines</pre>
+            <button class="curl-copy-btn" data-target="c-badge">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Metrics -->
+    <div class="section">
+      <h2 class="section-title">Metrics</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/metrics/latest</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Latest scan metrics (JSON)</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns detailed metrics for the most recent completed scan, including a summary and per-language breakdown.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{
+  "run_id":    string,        // UUID
+  "timestamp": string,        // ISO-8601 UTC
+  "project":   string,        // scanned root path
+  "summary": {
+    "files_analyzed":       number,
+    "files_skipped":        number,
+    "code_lines":           number,
+    "comment_lines":        number,
+    "blank_lines":          number,
+    "total_physical_lines": number,
+    "functions":            number,
+    "classes":              number,
+    "variables":            number,
+    "imports":              number
+  },
+  "languages": [
+    { "name": string, "files": number, "code_lines": number,
+      "comment_lines": number, "blank_lines": number,
+      "functions": number, "classes": number,
+      "variables": number, "imports": number }
+  ]
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-metrics-latest">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/metrics/latest</pre>
+            <button class="curl-copy-btn" data-target="c-metrics-latest">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/metrics/<span class="param">{run_id}</span></span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Metrics for a specific run</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the same shape as <code>/api/metrics/latest</code> but for a specific run identified by UUID.</p>
+          <p class="params-heading">Path Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Run UUID from <code>/api/metrics/history</code></td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-metrics-run">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/metrics/&lt;run_id&gt;</pre>
+            <button class="curl-copy-btn" data-target="c-metrics-run">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/metrics/history</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Paginated scan history</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns an array of scan history entries, newest-first. Optionally filtered by root path.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">root</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Filter by scanned root path</td></tr>
+            <tr><td class="pt-name">limit</td><td class="pt-type">number</td><td><span class="pt-opt">optional</span></td><td>Max entries to return (default: 50)</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">[{
+  "run_id":         string,
+  "timestamp":      string,   // ISO-8601 UTC
+  "commit":         string | null,
+  "branch":         string | null,
+  "tags":           string[],
+  "code_lines":     number,
+  "comment_lines":  number,
+  "blank_lines":    number,
+  "physical_lines": number,
+  "files_analyzed": number,
+  "project_label":  string,
+  "html_url":       string | null
+}]</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-metrics-history">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/metrics/history?limit=10"</pre>
+            <button class="curl-copy-btn" data-target="c-metrics-history">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/project-history</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Project-level scan summary</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns a high-level project summary: total scans, last scan ID and timestamp, last code-line count, and most recent git metadata.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Filter by root path</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{
+  "scan_count":           number,
+  "last_scan_id":         string | null,
+  "last_scan_timestamp":  string | null,  // ISO-8601
+  "last_scan_code_lines": number | null,
+  "last_git_branch":      string | null,
+  "last_git_commit":      string | null
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-proj-history">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/project-history</pre>
+            <button class="curl-copy-btn" data-target="c-proj-history">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Async Run Status -->
+    <div class="section">
+      <h2 class="section-title">Async Run Status</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/runs/<span class="param">{run_id}</span>/status</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Poll scan completion</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Poll after submitting a scan. The <code>state</code> field discriminates the response shape.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">// Running
+{ "state": "running",  "elapsed_secs": number }
+
+// Complete
+{ "state": "complete", "run_id": string }
+
+// Failed
+{ "state": "failed",   "message": string }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-run-status">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;/status</pre>
+            <button class="curl-copy-btn" data-target="c-run-status">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/runs/<span class="param">{run_id}</span>/pdf-status</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Poll PDF generation readiness</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns whether the PDF artifact for a completed run is ready for download.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "ready": boolean, "url": string | null }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-pdf-status">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;/pdf-status</pre>
+            <button class="curl-copy-btn" data-target="c-pdf-status">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scan Profiles -->
+    <div class="section">
+      <h2 class="section-title">Scan Profiles</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/scan-profiles</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">List saved scan profiles</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns all saved scan profiles. Profiles store scan parameters that can be pre-loaded into the scan form.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{
+  "profiles": [{
+    "id":         string,   // UUID
+    "name":       string,
+    "created_at": string,   // ISO-8601
+    "params":     object
+  }]
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-profiles-list">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/scan-profiles</pre>
+            <button class="curl-copy-btn" data-target="c-profiles-list">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/scan-profiles</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Save a scan profile</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Creates a named scan profile. The <code>params</code> field accepts any JSON object containing scan settings.</p>
+          <p class="params-heading">Request Body (application/json)</p>
+          <table class="params">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">name</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Human-readable profile name</td></tr>
+            <tr><td class="pt-name">params</td><td class="pt-type">object</td><td><span class="pt-req">required</span></td><td>Arbitrary scan parameter object</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "ok": true }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-profiles-save">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My Profile","params":{"path":"/my/repo"}}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/scan-profiles</pre>
+            <button class="curl-copy-btn" data-target="c-profiles-save">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method delete">DELETE</span>
+          <span class="ep-path">/api/scan-profiles/<span class="param">{id}</span></span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Delete a scan profile</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Permanently deletes a scan profile by its UUID.</p>
+          <p class="params-heading">Path Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Profile UUID from <code>GET /api/scan-profiles</code></td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "ok": true }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-profiles-del">curl -X DELETE \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/scan-profiles/&lt;id&gt;</pre>
+            <button class="curl-copy-btn" data-target="c-profiles-del">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scheduled Scans -->
+    <div class="section">
+      <h2 class="section-title">Scheduled Scans</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/schedules</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">List configured schedules</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns all configured scheduled scans. See <a href="/integrations">Integrations</a> for the full schedule object schema.</p>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-sched-list">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/schedules</pre>
+            <button class="curl-copy-btn" data-target="c-sched-list">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/schedules</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Create a schedule</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Creates a new scheduled scan. Use the <a href="/integrations">Integrations UI</a> to configure the full field set interactively.</p>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-sched-create">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"nightly","repo_url":"https://github.com/org/repo","cron":"0 2 * * *"}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/schedules</pre>
+            <button class="curl-copy-btn" data-target="c-sched-create">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method delete">DELETE</span>
+          <span class="ep-path">/api/schedules</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Delete a schedule</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Removes a scheduled scan by its ID.</p>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-sched-del">curl -X DELETE \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"&lt;schedule_id&gt;"}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/schedules</pre>
+            <button class="curl-copy-btn" data-target="c-sched-del">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Git Browser -->
+    <div class="section">
+      <h2 class="section-title">Git Browser</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/git/refs</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">List git refs for a repository</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns all branches and tags for a local git repository.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-git-refs">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/refs?path=/path/to/repo"</pre>
+            <button class="curl-copy-btn" data-target="c-git-refs">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/git/scan-ref</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">SLOC-scan a specific git ref</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Checks out a specific commit, branch, or tag and runs an SLOC analysis against it.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
+            <tr><td class="pt-name">ref</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Branch name, tag, or commit SHA</td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-git-scan">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/scan-ref?path=/path/to/repo&amp;ref=main"</pre>
+            <button class="curl-copy-btn" data-target="c-git-scan">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/git/compare-refs</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Compare SLOC across two git refs</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Runs SLOC analysis on two refs and returns the delta between them.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
+            <tr><td class="pt-name">base</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Base ref (branch, tag, or SHA)</td></tr>
+            <tr><td class="pt-name">head</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Head ref to compare against the base</td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-git-compare">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/compare-refs?path=/path/to/repo&amp;base=v1.0&amp;head=main"</pre>
+            <button class="curl-copy-btn" data-target="c-git-compare">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Webhooks -->
+    <div class="section">
+      <h2 class="section-title">Webhooks</h2>
+      <p class="webhook-note">Webhook receivers are public endpoints authenticated by per-schedule HMAC secrets, not by the server API key. Configure secrets in <a href="/integrations">Integrations</a>.</p>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/webhooks/github</span>
+          <span class="auth-badge hmac">HMAC</span>
+          <span class="ep-desc">GitHub push event receiver</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Receives GitHub <code>push</code> events and triggers an SLOC scan. Authenticated via <code>X-Hub-Signature-256</code> HMAC-SHA256.</p>
+          <p class="params-heading">Required Headers</p>
+          <table class="params">
+            <tr><th>Header</th><th>Value</th></tr>
+            <tr><td class="pt-name">X-Hub-Signature-256</td><td>HMAC-SHA256 of the raw body using the per-schedule secret</td></tr>
+            <tr><td class="pt-name">X-GitHub-Event</td><td><code>push</code></td></tr>
+            <tr><td class="pt-name">Content-Type</td><td><code>application/json</code></td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/webhooks/gitlab</span>
+          <span class="auth-badge hmac">HMAC</span>
+          <span class="ep-desc">GitLab push event receiver</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Receives GitLab <code>Push Hook</code> events. Authenticated via <code>X-Gitlab-Token</code> matching the per-schedule secret.</p>
+          <p class="params-heading">Required Headers</p>
+          <table class="params">
+            <tr><th>Header</th><th>Value</th></tr>
+            <tr><td class="pt-name">X-Gitlab-Token</td><td>Per-schedule webhook secret</td></tr>
+            <tr><td class="pt-name">X-Gitlab-Event</td><td><code>Push Hook</code></td></tr>
+            <tr><td class="pt-name">Content-Type</td><td><code>application/json</code></td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/webhooks/bitbucket</span>
+          <span class="auth-badge hmac">HMAC</span>
+          <span class="ep-desc">Bitbucket push event receiver</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Receives Bitbucket push events. Authenticated via <code>X-Hub-Signature</code> HMAC-SHA256.</p>
+          <p class="params-heading">Required Headers</p>
+          <table class="params">
+            <tr><th>Header</th><th>Value</th></tr>
+            <tr><td class="pt-name">X-Hub-Signature</td><td>HMAC-SHA256 of the raw body</td></tr>
+            <tr><td class="pt-name">Content-Type</td><td><code>application/json</code></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Config -->
+    <div class="section">
+      <h2 class="section-title">Config Import / Export</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/export-config</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Export server configuration as JSON</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the current server configuration as a downloadable JSON file.</p>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-export">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  -o config.json \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/export-config</pre>
+            <button class="curl-copy-btn" data-target="c-export">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/import-config</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Import server configuration</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Imports a previously exported configuration JSON, replacing the active server configuration.</p>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-import">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @config.json \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/import-config</pre>
+            <button class="curl-copy-btn" data-target="c-import">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <footer class="site-footer">
+    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
+
+  <script nonce="{{ csp_nonce }}">
+    (function () {
+      var base = window.location.origin;
+      document.getElementById('base-url').textContent = base;
+      document.querySelectorAll('.base-url-slot').forEach(function (el) {
+        el.textContent = base;
+      });
+
+      document.querySelectorAll('.ep-header').forEach(function (hdr) {
+        hdr.addEventListener('click', function () {
+          hdr.closest('.ep-card').classList.toggle('open');
+        });
+      });
+
+      document.querySelectorAll('.curl-copy-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var targetId = btn.dataset.target;
+          var pre = document.querySelector('[data-curl-id="' + targetId + '"]');
+          if (!pre) return;
+          navigator.clipboard.writeText(pre.textContent).then(function () {
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(function () {
+              btn.textContent = 'Copy';
+              btn.classList.remove('copied');
+            }, 2000);
+          });
+        });
+      });
+
+      var storageKey = 'oxide-sloc-theme';
+      try { document.body.classList.toggle('dark-theme', JSON.parse(localStorage.getItem(storageKey))); } catch (e) {}
+      var themeBtn = document.getElementById('theme-toggle');
+      if (themeBtn) {
+        themeBtn.addEventListener('click', function () {
+          var dark = document.body.classList.toggle('dark-theme');
+          try { localStorage.setItem(storageKey, JSON.stringify(dark)); } catch (e) {}
+        });
+      }
+      (function() {
+        var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+        function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+        try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+        var btn=document.getElementById('settings-btn');if(!btn)return;
+        var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+        document.body.appendChild(m);
+        var g=document.getElementById('scheme-grid');
+        if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+        var cl=document.getElementById('settings-close');
+        btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+        if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+        document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+      })();
+      (function randomizeWatermarks() {
+        var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+        if (!wms.length) return;
+        var placed = [];
+        function tooClose(top, left) {
+          for (var i = 0; i < placed.length; i++) {
+            var dt = Math.abs(placed[i][0] - top), dl = Math.abs(placed[i][1] - left);
+            if (dt < 16 && dl < 12) return true;
+          }
+          return false;
+        }
+        function pick(leftBand) {
+          for (var attempt = 0; attempt < 50; attempt++) {
+            var top = Math.random() * 88 + 2;
+            var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+            if (!tooClose(top, left)) { placed.push([top, left]); return [top, left]; }
+          }
+          var top = Math.random() * 88 + 2;
+          var left = leftBand ? Math.random() * 24 + 1 : Math.random() * 24 + 74;
+          placed.push([top, left]); return [top, left];
+        }
+        var half = Math.floor(wms.length / 2);
+        wms.forEach(function (img, i) {
+          var pos = pick(i < half);
+          var size = Math.floor(Math.random() * 100 + 120);
+          var rot = (Math.random() * 360).toFixed(1);
+          var op = (Math.random() * 0.08 + 0.12).toFixed(2);
+          img.style.width=size+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;
+        });
+      })();
+      (function spawnCodeParticles() {
+        var container = document.getElementById('code-particles');
+        if (!container) return;
+        var snippets = [
+          '1,247 sloc','fn analyze()','code_lines','0 mixed','blanks: 312',
+          '// comment','pub fn run','use std::fs','Result<()>','let mut n = 0',
+          'git main','#[derive]','impl Scan','3,841 physical','files: 60',
+          '450 comments','cargo build','Ok(run)','Vec<String>','match lang',
+          'fn main() {','.rs .go .py','sloc_core','render_html','2,163 code'
+        ];
+        var count = 38;
+        for (var i = 0; i < count; i++) {
+          (function(idx) {
+            var el = document.createElement('span');
+            el.className = 'code-particle';
+            el.textContent = snippets[idx % snippets.length];
+            var left = Math.random() * 94 + 2;
+            var top = Math.random() * 88 + 6;
+            var dur = (Math.random() * 10 + 9).toFixed(1);
+            var delay = (Math.random() * 18).toFixed(1);
+            var rot = (Math.random() * 26 - 13).toFixed(1);
+            var op = (Math.random() * 0.09 + 0.06).toFixed(3);
+            el.style.cssText = 'left:'+left.toFixed(1)+'%;top:'+top.toFixed(1)+'%;--rot:'+rot+'deg;--op:'+op+';animation-duration:'+dur+'s;animation-delay:-'+delay+'s;';
+            container.appendChild(el);
+          })(i);
+        }
+      })();
+    }());
+  </script>
+</body>
+</html>
+"##,
+    ext = "html"
+)]
+struct ApiDocsTemplate {
+    has_api_key: bool,
+    csp_nonce: String,
+    version: &'static str,
 }

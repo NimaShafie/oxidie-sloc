@@ -73,6 +73,21 @@ pub fn render_sub_report_html(run: &AnalysisRun) -> Result<String> {
     render_html_inner(run, true)
 }
 
+fn load_custom_logo(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mime = if ext == "svg" {
+        "image/svg+xml"
+    } else {
+        "image/png"
+    };
+    Some(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+}
+
 fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
     let config_json = serde_json::to_string_pretty(&run.effective_configuration)
         .context("failed to serialize effective configuration")?;
@@ -83,15 +98,18 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
     let logo_text_uri = png_data_uri(LOGO_TEXT_PNG);
     let small_logo_uri = png_data_uri(SMALL_LOGO_PNG);
 
+    let rep = &run.effective_configuration.reporting;
+    let custom_logo_uri = rep.logo_path.as_deref().and_then(load_custom_logo);
+    let company_name = rep.company_name.clone();
+    let accent_hex = rep.accent_color.clone();
+    let report_header_footer = rep.report_header_footer.clone();
+
     let template = ReportTemplate {
         // Empty nonce for disk-saved reports; patch_html_nonce replaces it
         // with the request nonce when serving from the web server.
         nonce: String::new(),
-        title: run.effective_configuration.reporting.report_title.clone(),
-        browser_title: format!(
-            "Oxide-SLOC | {}",
-            run.effective_configuration.reporting.report_title
-        ),
+        title: rep.report_title.clone(),
+        browser_title: format!("Oxide-SLOC | {}", rep.report_title),
         generated_display: format!("{} (PST)", to_pst_display(run.tool.timestamp_utc)),
         scan_performed_by: format!(
             "{} / {}",
@@ -116,6 +134,7 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
                 classes: row.classes,
                 variables: row.variables,
                 imports: row.imports,
+                test_count: row.test_count,
             })
             .collect(),
         file_rows: run.per_file_records.iter().map(file_row_view).collect(),
@@ -133,13 +152,92 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
                         .replace('\\', "\\\\")
                         .replace('"', "\\\"");
                     format!(
-                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{}}}"#,
-                        name, l.code_lines, l.comment_lines, l.blank_lines,
+                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"functions":{},"classes":{},"variables":{},"imports":{},"tests":{},"files":{}}}"#,
+                        name,
+                        l.code_lines,
+                        l.comment_lines,
+                        l.blank_lines,
+                        l.functions,
+                        l.classes,
+                        l.variables,
+                        l.imports,
+                        l.test_count,
+                        l.files,
                     )
                 })
                 .collect();
             format!("[{}]", entries.join(","))
         },
+        submodule_chart_json: {
+            let entries: Vec<String> = run
+                .submodule_summaries
+                .iter()
+                .map(|s| {
+                    let name = s.name.replace('\\', "\\\\").replace('"', "\\\"");
+                    let path = s.relative_path.replace('\\', "\\\\").replace('"', "\\\"");
+                    format!(
+                        r#"{{"name":"{}","path":"{}","code":{},"comment":{},"blank":{},"physical":{},"files":{}}}"#,
+                        name,
+                        path,
+                        s.code_lines,
+                        s.comment_lines,
+                        s.blank_lines,
+                        s.total_physical_lines,
+                        s.files_analyzed,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        scatter_chart_json: {
+            let entries: Vec<String> = run
+                .totals_by_language
+                .iter()
+                .map(|l| {
+                    let name = l
+                        .language
+                        .display_name()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    format!(
+                        r#"{{"lang":"{}","files":{},"code":{},"physical":{}}}"#,
+                        name, l.files, l.code_lines, l.total_physical_lines,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        semantic_chart_json: {
+            let entries: Vec<String> = run
+                .totals_by_language
+                .iter()
+                .filter(|l| {
+                    l.functions > 0
+                        || l.classes > 0
+                        || l.variables > 0
+                        || l.imports > 0
+                        || l.test_count > 0
+                })
+                .map(|l| {
+                    let name = l
+                        .language
+                        .display_name()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    format!(
+                        r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{},"tests":{}}}"#,
+                        name, l.functions, l.classes, l.variables, l.imports, l.test_count,
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(","))
+        },
+        has_submodule_data: !run.submodule_summaries.is_empty(),
+        has_semantic_data: run
+            .totals_by_language
+            .iter()
+            .any(|l| l.functions > 0 || l.classes > 0 || l.test_count > 0),
+        has_coverage_data: run.per_file_records.iter().any(|f| f.coverage.is_some()),
         has_run_warnings: !run.warnings.is_empty(),
         warning_count: run.warnings.len(),
         warning_summary_rows,
@@ -149,6 +247,10 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         warning_preview_truncated: run.warnings.len() > 12,
         logo_text_uri,
         small_logo_uri,
+        custom_logo_uri,
+        company_name,
+        accent_hex,
+        report_header_footer,
     };
 
     template.render().context("failed to render HTML report")
@@ -560,6 +662,18 @@ fn file_row_view(file: &FileRecord) -> FileRow {
         classes: file.raw_line_categories.classes,
         variables: file.raw_line_categories.variables,
         imports: file.raw_line_categories.imports,
+        test_count: file.raw_line_categories.test_count,
+        line_cov_pct: file
+            .coverage
+            .as_ref()
+            .map(|c| format!("{:.1}", c.line_pct()))
+            .unwrap_or_default(),
+        fn_cov_pct: file
+            .coverage
+            .as_ref()
+            .filter(|c| c.functions_found > 0)
+            .map(|c| format!("{:.1}", c.function_pct()))
+            .unwrap_or_default(),
         status: format!("{:?}", file.status),
         status_class: format!("{:?}", file.status).to_ascii_lowercase(),
         warnings: if file.warnings.is_empty() {
@@ -774,6 +888,7 @@ struct LanguageRow {
     classes: u64,
     variables: u64,
     imports: u64,
+    test_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -789,6 +904,11 @@ struct FileRow {
     classes: u64,
     variables: u64,
     imports: u64,
+    test_count: u64,
+    /// Line coverage percentage, e.g. "96.7" — empty string when no coverage data.
+    line_cov_pct: String,
+    /// Function coverage percentage — empty string when no coverage data.
+    fn_cov_pct: String,
     status: String,
     status_class: String,
     warnings: String,
@@ -847,6 +967,9 @@ struct WarningOpportunityRow {
       --info-bg: #eef3ff;
       --info-text: #4467d8;
     }
+    {% if let Some(hex) = accent_hex %}
+    :root, body.dark-theme { --accent: {{ hex }}; --accent-2: {{ hex }}; }
+    {% endif %}
     body.dark-theme {
       --bg: #1b1511;
       --surface: #261c17;
@@ -893,7 +1016,9 @@ struct WarningOpportunityRow {
     .nav-project-pill { pointer-events: auto; max-width: 280px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
     .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; }
-    .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap; margin-left: auto; }
+    .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:nowrap; min-width:0; margin-left: auto; }
+    @media (max-width: 1400px) { .nav-status { gap: 6px; } .header-button, .theme-toggle { padding: 0 10px; } }
+    @media (max-width: 1150px) { .nav-status { gap: 4px; } .header-button, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } }
     .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; }
     .theme-toggle { width: 38px; justify-content:center; padding:0; }
     .nav-dropdown-wrap { position: relative; padding-bottom: 6px; }
@@ -952,10 +1077,11 @@ struct WarningOpportunityRow {
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
-    /* Per-file detail table — fixed layout keeps all columns visible */
-    .table-resizable { table-layout: fixed; }
+    /* Per-file detail table — auto layout so File column sizes to content */
+    .table-resizable { table-layout: auto; }
     .table-resizable th { position: sticky; top: 0; z-index: 2; overflow: hidden; white-space: nowrap; min-width: 52px; }
     .table-resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .table-resizable td.mono { overflow: visible; text-overflow: unset; white-space: nowrap; }
     #skipped-table th, #skipped-table td { padding: 7px 10px; }
     /* Column resize handle */
     .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
@@ -1008,6 +1134,9 @@ struct WarningOpportunityRow {
       .hero-top { flex-direction: column; }
       .search { min-width: 100%; width: 100%; }
     }
+    /* ── Report header / footer identification banner ─────────────────── */
+    .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; position: relative; z-index: 31; width: 100%; }
+    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; width: 100%; margin-top: 24px; display: none; }
     /* ── Print & PDF export ──────────────────────────────────────────── */
     @page {
       size: A4 landscape;
@@ -1026,6 +1155,11 @@ struct WarningOpportunityRow {
         width: 100% !important;
       }
 
+      /* Report id banner — fixed on every printed page; always dark grey regardless of nav theme */
+      .report-id-banner { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; z-index: 9999 !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; }
+      .report-id-footer-banner { display: block !important; position: fixed !important; bottom: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; z-index: 9999 !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 0 !important; background: #3d3d3d !important; color: #fff !important; }
+      /* Push body content clear of the fixed top + bottom banners (banner ≈ 22px each side) */
+      body.has-report-banner { padding-top: 22px !important; padding-bottom: 22px !important; }
       /* Hide interactive UI-chrome; keep section heading text visible */
       .top-nav, .hero-actions,
       .background-watermarks,
@@ -1132,12 +1266,18 @@ struct WarningOpportunityRow {
       tr { break-inside: avoid !important; }
 
       th {
-        position: static !important;
+        position: relative !important;
         font-size: 9px !important;
+        font-weight: 700 !important;
+        color: #333 !important;
         padding: 5px 8px !important;
-        background: rgba(211,122,76,0.12) !important;
+        background: rgba(211,122,76,0.18) !important;
         white-space: normal !important;
       }
+      /* Resize handles are screen-only — hide them in print */
+      .col-resize-handle { display: none !important; }
+      /* Sort indicators are redundant on paper */
+      .sort-indicator { display: none !important; }
 
       td {
         white-space: normal !important;
@@ -1232,9 +1372,35 @@ struct WarningOpportunityRow {
     }
     .report-footer { margin-top: 32px; padding: 14px 24px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; font-weight: 600; }
 
+    /* ── Chart controls & containers ───────────────────────────────────── */
+    .chart-section { }
+    .chart-controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+    .chart-controls label { font-size:13px; font-weight:700; color:var(--muted); display:flex; align-items:center; gap:6px; }
+    .chart-select { background:var(--surface-2); border:1px solid var(--line-strong); border-radius:8px; padding:5px 10px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer; outline:none; appearance:auto; }
+    .chart-select:focus { border-color:var(--accent); }
+    .chart-container { width:100%; overflow-x:auto; }
+    .chart-container svg { display:block; width:100%; height:auto; }
+    .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; }
+    .charts-grid > .panel { margin:0; }
+    @media (max-width:820px) { .charts-grid { grid-template-columns:1fr; } }
+    .chart-tab-bar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+    .chart-tab { padding:5px 16px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer; transition:background 0.12s,color 0.12s,border-color 0.12s; }
+    .chart-tab:hover { background:var(--surface-3); color:var(--text); }
+    .chart-tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .chart-locked-card { display:none; padding:20px 24px; border-radius:14px; background:var(--info-bg); border:1px solid rgba(111,144,255,0.28); color:var(--info-text); font-size:14px; line-height:1.6; }
+    .chart-locked-card a { color:var(--accent-2); font-weight:700; }
+    .chart-locked-card h3 { margin:0 0 6px; font-size:15px; }
+
+    /* Print: hide interactive controls; keep SVGs; show locked card for history mode */
+    @media print {
+      .chart-controls, .chart-tab-bar { display:none !important; }
+      .chart-container svg { max-height:340px !important; }
+      .chart-locked-card { display:block !important; background:#eef3ff !important; border:1px solid #ccc !important; color:#2f5fe3 !important; font-size:11px !important; padding:10px 14px !important; border-radius:8px !important; }
+    }
+
 </style>
 </head>
-<body>
+<body{% if report_header_footer.is_some() %} class="has-report-banner"{% endif %}>
   <div class="background-watermarks" aria-hidden="true">
     <img src="{{ logo_text_uri }}" alt="" />
     <img src="{{ logo_text_uri }}" alt="" />
@@ -1249,12 +1415,23 @@ struct WarningOpportunityRow {
     <img src="{{ logo_text_uri }}" alt="" />
     <img src="{{ logo_text_uri }}" alt="" />
   </div>
+  {% if let Some(banner) = report_header_footer %}
+  <div class="report-id-banner" aria-label="Report identification">{{ banner|e }}</div>
+  {% endif %}
   <div class="top-nav">
     <div class="top-nav-inner">
       <a class="brand" href="/" onclick="if(location.protocol==='file:'){event.preventDefault();}">
+        {% if let Some(uri) = custom_logo_uri %}
+        <img class="brand-logo" src="{{ uri }}" alt="logo" />
+        {% else %}
         <img class="brand-logo" src="{{ small_logo_uri }}" alt="OxideSLOC logo" />
+        {% endif %}
         <div class="brand-copy">
+          {% if let Some(name) = company_name %}
+          <div class="brand-title">{{ name }}</div>
+          {% else %}
           <div class="brand-title">OxideSLOC Local analysis workbench</div>
+          {% endif %}
           <div class="brand-subtitle">Saved HTML report</div>
         </div>
       </a>
@@ -1349,11 +1526,132 @@ struct WarningOpportunityRow {
         <div class="metric" data-metric-value="{{ run.summary_totals.classes }}"><div class="metric-tooltip">Best-effort count of class, struct, interface, and type definitions.</div><div class="metric-label">Classes / Types</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-value="{{ run.summary_totals.variables }}"><div class="metric-tooltip">Best-effort count of variable and constant declarations.</div><div class="metric-label">Variables</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-value="{{ run.summary_totals.imports }}"><div class="metric-tooltip">Best-effort count of import, include, and module-use statements.</div><div class="metric-label">Imports</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.test_count }}"><div class="metric-tooltip">Best-effort count of test cases detected by framework pattern (GTest, PyTest, JUnit, etc.).</div><div class="metric-label">Tests</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-density><div class="metric-tooltip">Percentage of physical lines that contain executable source code — higher means a leaner, code-dense codebase.</div><div class="metric-label">Code density</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
       </div>
     </section>
 
     <div class="report-stack">
+      <!-- ── Chart row 1: Overview + Composition ───────────────────────── -->
+      <div class="charts-grid">
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>Project Overview</h2></div>
+              <div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">Interactive — change axes below</span></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.6;">A configurable cartesian view of your codebase. Choose what to show on each axis. Historical modes (commits, tags, releases) require the web UI.</p>
+            <div class="chart-controls">
+              <label>Y Axis:
+                <select class="chart-select" id="overview-y-axis">
+                  <option value="code">Code Lines</option>
+                  <option value="comments">Comment Lines</option>
+                  <option value="blanks">Blank Lines</option>
+                  <option value="physical">Total Physical Lines</option>
+                  <option value="files">File Count</option>
+                </select>
+              </label>
+              <label>X Axis / Mode:
+                <select class="chart-select" id="overview-x-mode">
+                  <option value="languages">Languages</option>
+                  {% if has_submodule_data %}<option value="submodules">Submodules</option>{% endif %}
+                  <option value="history-commits">Per Commit (Web UI)</option>
+                  <option value="history-tags">Per Tag (Web UI)</option>
+                  <option value="history-releases">Per Release (Web UI)</option>
+                  <option value="history-repos">Other Repos (Web UI)</option>
+                </select>
+              </label>
+            </div>
+            <div id="overview-chart" class="chart-container"></div>
+            <div class="chart-locked-card" id="overview-chart-locked">
+              <h3>Historical trend requires the web UI</h3>
+              <p style="margin:0">Run <code>oxide-sloc serve</code> and navigate to <strong>/trend-report</strong> to view per-commit, per-tag, per-release, and cross-repo comparisons on an interactive timeline chart. The web UI stores scan history and can plot any metric over time.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>Language Composition</h2></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Code, comments, and blank lines as a percentage of total physical lines per language.</p>
+            <div class="chart-tab-bar">
+              <button type="button" class="chart-tab active" data-comp-tab="absolute">Absolute Lines</button>
+              <button type="button" class="chart-tab" data-comp-tab="pct">Composition %</button>
+            </div>
+            <div id="composition-chart" class="chart-container"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ── Chart row 2: Scatter + Semantic ───────────────────────────── -->
+      <div class="charts-grid">
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>File Count vs SLOC</h2></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Each bubble is a language. X&nbsp;=&nbsp;files analyzed, Y&nbsp;=&nbsp;code lines, bubble size&nbsp;∝&nbsp;total physical lines.</p>
+            <div id="scatter-chart" class="chart-container"></div>
+          </div>
+        </section>
+
+        {% if has_semantic_data %}
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>Semantic Metrics</h2></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Detected structural elements per language. Select a metric to explore.</p>
+            <div class="chart-controls">
+              <label>Metric:
+                <select class="chart-select" id="semantic-metric">
+                  <option value="functions">Functions</option>
+                  <option value="classes">Classes / Types</option>
+                  <option value="variables">Variables</option>
+                  <option value="imports">Imports</option>
+                  <option value="tests">Tests</option>
+                </select>
+              </label>
+            </div>
+            <div id="semantic-chart" class="chart-container"></div>
+          </div>
+        </section>
+        {% endif %}
+      </div>
+
+      <!-- ── Submodule Breakdown (full-width, conditional) ─────────────── -->
+      {% if has_submodule_data %}
+      <section class="panel stack chart-section">
+        <div>
+          <div class="toolbar">
+            <div class="toolbar-left"><h2>Submodule Breakdown</h2></div>
+            <div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">Change Y axis or sort order below</span></div>
+          </div>
+          <div class="chart-controls">
+            <label>Y Axis:
+              <select class="chart-select" id="sub-y-axis">
+                <option value="code">Code Lines</option>
+                <option value="comment">Comment Lines</option>
+                <option value="blank">Blank Lines</option>
+                <option value="physical">Total Physical Lines</option>
+                <option value="files">File Count</option>
+              </select>
+            </label>
+            <label>Sort:
+              <select class="chart-select" id="sub-sort">
+                <option value="desc">Value ↓</option>
+                <option value="asc">Value ↑</option>
+                <option value="name">Name A→Z</option>
+              </select>
+            </label>
+          </div>
+          <div id="submodule-chart" class="chart-container"></div>
+        </div>
+      </section>
+      {% endif %}
+
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
@@ -1373,6 +1671,7 @@ struct WarningOpportunityRow {
                   <th data-sort-type="number">Classes</th>
                   <th data-sort-type="number">Variables</th>
                   <th data-sort-type="number">Imports</th>
+                  <th data-sort-type="number">Tests</th>
                 </tr>
               </thead>
               <tbody>
@@ -1389,6 +1688,7 @@ struct WarningOpportunityRow {
                   <td>{{ row.classes }}</td>
                   <td>{{ row.variables }}</td>
                   <td>{{ row.imports }}</td>
+                  <td>{{ row.test_count }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -1402,9 +1702,7 @@ struct WarningOpportunityRow {
         <div class="table-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <colgroup>
-              <col><col style="width:100px"><col style="width:90px"><col style="width:72px">
-              <col style="width:90px"><col style="width:72px"><col style="width:76px">
-              <col style="width:90px"><col style="width:76px"><col style="width:90px"><col style="width:76px">
+              <col><col><col><col><col><col><col><col><col><col><col>
             </colgroup>
             <thead>
               <tr>
@@ -1419,6 +1717,8 @@ struct WarningOpportunityRow {
                 <th data-sort-type="number" class="num-col">Classes<div class="col-resize-handle"></div></th>
                 <th data-sort-type="number" class="num-col">Variables<div class="col-resize-handle"></div></th>
                 <th data-sort-type="number" class="num-col">Imports<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Tests<div class="col-resize-handle"></div></th>
+                {% if has_coverage_data %}<th data-sort-type="text" class="num-col">Line Cov %<div class="col-resize-handle"></div></th><th data-sort-type="text" class="num-col">Fn Cov %<div class="col-resize-handle"></div></th>{% endif %}
               </tr>
             </thead>
             <tbody>
@@ -1435,6 +1735,8 @@ struct WarningOpportunityRow {
                 <td class="num-col">{{ row.classes }}</td>
                 <td class="num-col">{{ row.variables }}</td>
                 <td class="num-col">{{ row.imports }}</td>
+                <td class="num-col">{{ row.test_count }}</td>
+                {% if has_coverage_data %}<td class="num-col">{{ row.line_cov_pct }}</td><td class="num-col">{{ row.fn_cov_pct }}</td>{% endif %}
               </tr>
               {% endfor %}
             </tbody>
@@ -1947,8 +2249,315 @@ struct WarningOpportunityRow {
         row.addEventListener('mousemove',moveTT);
       });
     })();
+
+    // ── New interactive charts ────────────────────────────────────────────────
+    (function(){
+      var LANG_D = {{ lang_chart_json|safe }};
+      var SUB_D  = {{ submodule_chart_json|safe }};
+      var SCAT_D = {{ scatter_chart_json|safe }};
+      var SEM_D  = {{ semantic_chart_json|safe }};
+
+      var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+      var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030',
+                '#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082',
+                '#D0743C','#5BA8A0','#8B3A8B','#3D7A3D','#AA5500','#005599',
+                '#996600','#660066'];
+      var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
+
+      function fmt(n){return Number(n).toLocaleString();}
+      function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+      function px(n){return Math.round(n);}
+      function colAt(i){return COLS[i%COLS.length];}
+
+      // Shared tooltip (reuse existing tt element already added by lang chart code)
+      var tt=document.querySelector('div[style*="z-index:9999"]');
+      if(!tt){tt=document.createElement('div');tt.style.cssText='display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:9999;max-width:240px;color:var(--text);';document.body.appendChild(tt);}
+      function showTT(e,html){tt.innerHTML=html;tt.style.display='block';moveTT(e);}
+      function moveTT(e){var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}
+      function hideTT(){tt.style.display='none';}
+
+      // ── Horizontal bar chart (overview & submodule) ──────────────────────────
+      function renderHBar(containerId, data, labelKey, valueKey, colorFn, labelTitle) {
+        var el=document.getElementById(containerId);
+        if(!el||!data||!data.length)return;
+        var maxV=Math.max.apply(null,data.map(function(d){return d[valueKey]||0;}))||1;
+        var LW=120, BW=320, rH=32, pad=8, SH=data.length*rH+40;
+        var W=LW+BW+80;
+        var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+        // Title strip
+        svg+='<text x="0" y="14" font-family="'+FONT+'" font-size="10" font-weight="800" fill="#7b675b" text-transform="uppercase">'+esc(labelTitle||labelKey)+'</text>';
+        svg+='<text x="'+(LW+BW+4)+'" y="14" font-family="'+FONT+'" font-size="10" font-weight="800" fill="#7b675b">'+(valueKey.toUpperCase())+'</text>';
+        data.forEach(function(d,i){
+          var y=20+i*rH, v=d[valueKey]||0;
+          var bW=Math.round(v/maxV*BW);
+          var col=typeof colorFn==='function'?colorFn(i,d):colAt(i);
+          svg+='<g class="hbar-row" data-label="'+esc(String(d[labelKey]))+'" data-value="'+v+'" style="cursor:default;">';
+          svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
+          svg+='<text x="'+(LW-6)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(String(d[labelKey]))+'</text>';
+          if(bW>0)svg+='<rect class="hbar-fill" x="'+LW+'" y="'+(y+4)+'" width="'+bW+'" height="'+(rH-8)+'" fill="'+col+'" rx="3"/>';
+          svg+='<text x="'+(LW+bW+6)+'" y="'+(y+rH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(v)+'</text>';
+          svg+='</g>';
+        });
+        svg+='</svg>';
+        el.innerHTML=svg;
+        el.querySelectorAll('.hbar-row').forEach(function(row){
+          var fill=row.querySelector('.hbar-fill');
+          row.addEventListener('mouseover',function(e){
+            if(fill)fill.style.filter='brightness(1.15)';
+            showTT(e,'<strong style="display:block;font-size:13px;margin-bottom:3px;">'+row.dataset.label+'</strong>'+fmt(Number(row.dataset.value))+' '+valueKey);
+          });
+          row.addEventListener('mouseout',function(){if(fill)fill.style.filter='';hideTT();});
+          row.addEventListener('mousemove',moveTT);
+        });
+      }
+
+      // ── Overview chart ───────────────────────────────────────────────────────
+      var ySel=document.getElementById('overview-y-axis');
+      var xSel=document.getElementById('overview-x-mode');
+      var overviewEl=document.getElementById('overview-chart');
+      var lockedEl=document.getElementById('overview-chart-locked');
+
+      var Y_LABELS={'code':'Code Lines','comments':'Comment Lines','blanks':'Blank Lines','physical':'Physical Lines','files':'Files','comment':'Comment Lines','blank':'Blank Lines'};
+
+      function renderOverview(){
+        if(!ySel||!xSel)return;
+        var yKey=ySel.value, mode=xSel.value;
+        var isHistory=mode.indexOf('history')===0;
+        if(overviewEl)overviewEl.style.display=isHistory?'none':'block';
+        if(lockedEl)lockedEl.style.display=isHistory?'block':'none';
+        if(isHistory)return;
+        var data=mode==='submodules'?SUB_D:LANG_D;
+        var lKey=mode==='submodules'?'name':'lang';
+        var sorted=data.slice().sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
+        renderHBar('overview-chart',sorted,lKey,yKey,function(i){return colAt(i);},(Y_LABELS[yKey]||yKey)+' by '+(mode==='submodules'?'Submodule':'Language'));
+      }
+
+      if(ySel)ySel.addEventListener('change',renderOverview);
+      if(xSel)xSel.addEventListener('change',renderOverview);
+      renderOverview();
+
+      // ── Submodule chart ──────────────────────────────────────────────────────
+      var subYSel=document.getElementById('sub-y-axis');
+      var subSortSel=document.getElementById('sub-sort');
+
+      var SUB_COLOR_MAP={'code':OX,'comment':GN,'blank':GY,'physical':'#4472C4','files':'#805099'};
+
+      function renderSubmodule(){
+        if(!SUB_D||!SUB_D.length)return;
+        var yKey=subYSel?subYSel.value:'code';
+        var sortMode=subSortSel?subSortSel.value:'desc';
+        var data=SUB_D.slice();
+        if(sortMode==='desc')data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
+        else if(sortMode==='asc')data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
+        else data.sort(function(a,b){return a.name.localeCompare(b.name);});
+        var col=SUB_COLOR_MAP[yKey]||OX;
+        var el=document.getElementById('submodule-chart');
+        if(!el)return;
+        var maxV=Math.max.apply(null,data.map(function(d){return d[yKey]||0;}))||1;
+        var LW=130, BW=340, rH=34, SH=data.length*rH+44;
+        var W=LW+BW+90;
+        var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+        data.forEach(function(d,i){
+          var y=10+i*rH, v=d[yKey]||0, bW=Math.round(v/maxV*BW);
+          svg+='<g class="sub-row" data-name="'+esc(d.name)+'" data-path="'+esc(d.path)+'" data-code="'+d.code+'" data-comment="'+d.comment+'" data-blank="'+d.blank+'" data-physical="'+d.physical+'" data-files="'+d.files+'" style="cursor:default;">';
+          svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
+          svg+='<text x="'+(LW-8)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" font-weight="600" fill="#43342d">'+esc(d.name)+'</text>';
+          if(bW>0)svg+='<rect class="sub-fill" x="'+LW+'" y="'+(y+6)+'" width="'+bW+'" height="'+(rH-12)+'" fill="'+col+'" rx="3"/>';
+          svg+='<text x="'+(LW+bW+7)+'" y="'+(y+rH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(v)+'</text>';
+          svg+='</g>';
+        });
+        // Legend
+        var ly=SH-18;
+        svg+='<rect x="'+LW+'" y="'+ly+'" width="12" height="12" fill="'+col+'" rx="2"/>';
+        svg+='<text x="'+(LW+16)+'" y="'+(ly+11)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#43342d">'+(Y_LABELS[yKey]||yKey)+'</text>';
+        svg+='</svg>';
+        el.innerHTML=svg;
+        el.querySelectorAll('.sub-row').forEach(function(row){
+          var fill=row.querySelector('.sub-fill');
+          row.addEventListener('mouseover',function(e){
+            if(fill)fill.style.filter='brightness(1.15)';
+            showTT(e,
+              '<strong style="display:block;font-size:13px;margin-bottom:4px;">'+row.dataset.name+'</strong>'+
+              '<span style="color:'+OX+'">&#9632;</span> Code: <strong>'+fmt(Number(row.dataset.code))+'</strong><br>'+
+              '<span style="color:'+GN+'">&#9632;</span> Comments: <strong>'+fmt(Number(row.dataset.comment))+'</strong><br>'+
+              '<span style="color:'+GY+'">&#9632;</span> Blanks: <strong>'+fmt(Number(row.dataset.blank))+'</strong><br>'+
+              'Physical: <strong>'+fmt(Number(row.dataset.physical))+'</strong> &nbsp;|&nbsp; Files: <strong>'+fmt(Number(row.dataset.files))+'</strong>'
+            );
+          });
+          row.addEventListener('mouseout',function(){if(fill)fill.style.filter='';hideTT();});
+          row.addEventListener('mousemove',moveTT);
+        });
+      }
+
+      if(subYSel)subYSel.addEventListener('change',renderSubmodule);
+      if(subSortSel)subSortSel.addEventListener('change',renderSubmodule);
+      renderSubmodule();
+
+      // ── Composition chart (absolute + 100% normalized) ───────────────────────
+      var compMode='absolute';
+      var compEl=document.getElementById('composition-chart');
+
+      function renderComposition(){
+        if(!LANG_D||!LANG_D.length||!compEl)return;
+        var isPct=compMode==='pct';
+        var data=LANG_D.slice(0,15);
+        var rH=28, LW=110, BW=300, SH=data.length*rH+44;
+        var W=LW+BW+80;
+        var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+        data.forEach(function(d,i){
+          var y=10+i*rH;
+          var total=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
+          var norm=isPct?total:Math.max.apply(null,data.map(function(r){return (r.code||0)+(r.comments||0)+(r.blanks||0);}));
+          var scale=BW/norm;
+          var cW=Math.round((d.code||0)*scale), cmW=Math.round((d.comments||0)*scale), blW=Math.round((d.blanks||0)*scale);
+          if(isPct){cW=Math.round((d.code||0)/total*BW);cmW=Math.round((d.comments||0)/total*BW);blW=Math.round((d.blanks||0)/total*BW);}
+          var x=LW;
+          svg+='<g class="comp-row" data-lang="'+esc(d.lang)+'" data-code="'+d.code+'" data-comments="'+d.comments+'" data-blanks="'+d.blanks+'" style="cursor:default;">';
+          svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
+          svg+='<text x="'+(LW-6)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          if(cW>0){svg+='<rect x="'+px(x)+'" y="'+(y+4)+'" width="'+px(cW)+'" height="'+(rH-8)+'" fill="'+OX+'" rx="2"/>';x+=cW;}
+          if(cmW>0){svg+='<rect x="'+px(x)+'" y="'+(y+4)+'" width="'+px(cmW)+'" height="'+(rH-8)+'" fill="'+GN+'" rx="2"/>';x+=cmW;}
+          if(blW>0)svg+='<rect x="'+px(x)+'" y="'+(y+4)+'" width="'+px(blW)+'" height="'+(rH-8)+'" fill="'+GY+'" rx="2"/>';
+          svg+='</g>';
+        });
+        var ly=SH-18;
+        svg+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
+        svg+='<rect x="'+(LW+56)+'" y="'+ly+'" width="10" height="10" fill="'+GN+'"/><text x="'+(LW+70)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
+        svg+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
+        svg+='</svg>';
+        compEl.innerHTML=svg;
+        compEl.querySelectorAll('.comp-row').forEach(function(row){
+          var total=(Number(row.dataset.code)||0)+(Number(row.dataset.comments)||0)+(Number(row.dataset.blanks)||0)||1;
+          row.addEventListener('mouseover',function(e){
+            var c=Number(row.dataset.code),cm=Number(row.dataset.comments),bl=Number(row.dataset.blanks);
+            showTT(e,
+              '<strong style="display:block;font-size:13px;margin-bottom:4px;">'+row.dataset.lang+'</strong>'+
+              '<span style="color:'+OX+'">&#9632;</span> Code: <strong>'+fmt(c)+'</strong> ('+(c/total*100).toFixed(1)+'%)<br>'+
+              '<span style="color:'+GN+'">&#9632;</span> Comments: <strong>'+fmt(cm)+'</strong> ('+(cm/total*100).toFixed(1)+'%)<br>'+
+              '<span style="color:'+GY+'">&#9632;</span> Blanks: <strong>'+fmt(bl)+'</strong> ('+(bl/total*100).toFixed(1)+'%)'
+            );
+          });
+          row.addEventListener('mouseout',hideTT);
+          row.addEventListener('mousemove',moveTT);
+        });
+      }
+
+      document.querySelectorAll('[data-comp-tab]').forEach(function(btn){
+        btn.addEventListener('click',function(){
+          document.querySelectorAll('[data-comp-tab]').forEach(function(b){b.classList.remove('active');});
+          btn.classList.add('active');
+          compMode=btn.getAttribute('data-comp-tab');
+          renderComposition();
+        });
+      });
+      renderComposition();
+
+      // ── Scatter / bubble chart ───────────────────────────────────────────────
+      (function(){
+        var el=document.getElementById('scatter-chart');
+        if(!el||!SCAT_D||!SCAT_D.length)return;
+        var W=520, H=340, PL=60, PR=20, PT=20, PB=48;
+        var CW=W-PL-PR, CH=H-PT-PB;
+        var maxX=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}));
+        var maxY=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}));
+        var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
+        maxX=maxX||1; maxY=maxY||1;
+        var svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+        // Grid lines
+        var yTicks=5;
+        for(var ti=0;ti<=yTicks;ti++){
+          var gy=PT+CH-Math.round(ti/yTicks*CH);
+          var gv=Math.round(ti/yTicks*maxY);
+          svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(PL+CW)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
+          svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+fmt(gv)+'</text>';
+        }
+        var xTicks=5;
+        for(var xi=0;xi<=xTicks;xi++){
+          var gx=PL+Math.round(xi/xTicks*CW);
+          var xv=Math.round(xi/xTicks*maxX);
+          svg+='<line x1="'+gx+'" y1="'+PT+'" x2="'+gx+'" y2="'+(PT+CH)+'" stroke="#e6d0bf" stroke-width="1"/>';
+          svg+='<text x="'+gx+'" y="'+(PT+CH+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+xv+'</text>';
+        }
+        // Axis labels
+        svg+='<text x="'+(PL+CW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">Files Analyzed</text>';
+        svg+='<text x="12" y="'+(PT+CH/2)+'" text-anchor="middle" transform="rotate(-90,12,'+(PT+CH/2)+')" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">Code Lines</text>';
+        // Bubbles
+        SCAT_D.forEach(function(d,i){
+          var bx=PL+Math.round((d.files/maxX)*CW);
+          var by=PT+CH-Math.round((d.code/maxY)*CH);
+          var r=Math.max(6,Math.round(Math.sqrt(d.physical/maxP)*28));
+          svg+='<circle class="bubble" cx="'+bx+'" cy="'+by+'" r="'+r+'" fill="'+colAt(i)+'" fill-opacity="0.72" stroke="white" stroke-width="1.5" style="cursor:pointer;" data-lang="'+esc(d.lang)+'" data-files="'+d.files+'" data-code="'+d.code+'" data-physical="'+d.physical+'"/>';
+          if(r>10)svg+='<text x="'+bx+'" y="'+(by+r+12)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" fill="#43342d" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+        });
+        svg+='</svg>';
+        el.innerHTML=svg;
+        el.querySelectorAll('.bubble').forEach(function(c){
+          c.addEventListener('mouseover',function(e){
+            this.setAttribute('fill-opacity','0.92');
+            showTT(e,
+              '<strong style="display:block;font-size:13px;margin-bottom:3px;">'+this.dataset.lang+'</strong>'+
+              'Files: <strong>'+fmt(Number(this.dataset.files))+'</strong><br>'+
+              'Code lines: <strong>'+fmt(Number(this.dataset.code))+'</strong><br>'+
+              'Physical lines: <strong>'+fmt(Number(this.dataset.physical))+'</strong>'
+            );
+          });
+          c.addEventListener('mouseout',function(){this.setAttribute('fill-opacity','0.72');hideTT();});
+          c.addEventListener('mousemove',moveTT);
+        });
+      })();
+
+      // ── Semantic metrics chart ───────────────────────────────────────────────
+      var semSel=document.getElementById('semantic-metric');
+      var semEl=document.getElementById('semantic-chart');
+
+      function renderSemantic(){
+        if(!semEl||!SEM_D||!SEM_D.length)return;
+        var mKey=semSel?semSel.value:'functions';
+        var data=SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);}).slice(0,15);
+        var maxV=Math.max.apply(null,data.map(function(d){return d[mKey]||0;}))||1;
+        var barW=36, gap=8, PL=40, PT=16, PB=60, BH=200;
+        var W=PL+(barW+gap)*data.length+20, H=PT+BH+PB;
+        var SEM_COLS={'functions':OX,'classes':'#4472C4','variables':GN,'imports':'#805099'};
+        var col=SEM_COLS[mKey]||OX;
+        var svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
+        // Y axis ticks
+        for(var ti=0;ti<=4;ti++){
+          var gy=PT+BH-Math.round(ti/4*BH);
+          var gv=Math.round(ti/4*maxV);
+          svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(W-20)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
+          svg+='<text x="'+(PL-4)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+fmt(gv)+'</text>';
+        }
+        data.forEach(function(d,i){
+          var x=PL+i*(barW+gap), v=d[mKey]||0;
+          var bH=Math.round(v/maxV*BH);
+          svg+='<g class="sem-bar" data-lang="'+esc(d.lang)+'" data-value="'+v+'" style="cursor:default;">';
+          svg+='<rect x="'+x+'" y="'+(PT+BH-bH)+'" width="'+barW+'" height="'+bH+'" fill="'+col+'" rx="3" class="sem-fill"/>';
+          // Rotated label
+          var lx=x+barW/2, ly=PT+BH+8;
+          svg+='<text x="'+lx+'" y="'+ly+'" transform="rotate(40,'+lx+','+ly+')" font-family="'+FONT+'" font-size="10" fill="#43342d">'+esc(d.lang)+'</text>';
+          svg+='</g>';
+        });
+        svg+='</svg>';
+        semEl.innerHTML=svg;
+        semEl.querySelectorAll('.sem-bar').forEach(function(row){
+          var fill=row.querySelector('.sem-fill');
+          row.addEventListener('mouseover',function(e){
+            if(fill)fill.style.filter='brightness(1.15)';
+            showTT(e,'<strong style="display:block;font-size:13px;margin-bottom:3px;">'+row.dataset.lang+'</strong>'+mKey.charAt(0).toUpperCase()+mKey.slice(1)+': <strong>'+fmt(Number(row.dataset.value))+'</strong>');
+          });
+          row.addEventListener('mouseout',function(){if(fill)fill.style.filter='';hideTT();});
+          row.addEventListener('mousemove',moveTT);
+        });
+      }
+
+      if(semSel)semSel.addEventListener('change',renderSemantic);
+      renderSemantic();
+    })();
   </script>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
+  {% if let Some(banner) = report_header_footer %}
+  <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
+  {% endif %}
 </body>
 </html>"##,
     ext = "html"
@@ -1968,6 +2577,12 @@ struct ReportTemplate<'a> {
     skipped_rows: Vec<FileRow>,
     config_json: String,
     lang_chart_json: String,
+    submodule_chart_json: String,
+    scatter_chart_json: String,
+    semantic_chart_json: String,
+    has_submodule_data: bool,
+    has_semantic_data: bool,
+    has_coverage_data: bool,
     has_run_warnings: bool,
     warning_count: usize,
     warning_summary_rows: Vec<WarningSummaryRow>,
@@ -1977,6 +2592,14 @@ struct ReportTemplate<'a> {
     warning_preview_truncated: bool,
     logo_text_uri: String,
     small_logo_uri: String,
+    /// Data-URI for a custom logo, or None to show the default OxideSLOC logo.
+    custom_logo_uri: Option<String>,
+    /// Optional company/team name shown instead of "OxideSLOC" in the nav header.
+    company_name: Option<String>,
+    /// CSS hex accent colour override (e.g. `#3b82f6`), or None for the default.
+    accent_hex: Option<String>,
+    /// Text for the header/footer identification banner on every report page.
+    report_header_footer: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2642,4 +3265,177 @@ pub fn write_diff_xlsx(cmp: &sloc_core::ScanComparison, path: &Path) -> Result<(
     let bytes = build_xlsx_archive(&sheets);
     fs::write(path, bytes)
         .with_context(|| format!("failed to write diff XLSX to {}", path.display()))
+}
+
+// ── Confluence rendering ────────────────────────────────────────────────────
+
+fn html_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Generates Confluence storage-format XHTML for a scan result page.
+/// Includes an info panel, summary stats, per-language table, and an optional
+/// link back to the full oxide-sloc HTML report.
+pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) -> String {
+    let mut out = String::with_capacity(8192);
+
+    let project = run
+        .input_roots
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(unknown)");
+    let branch = run.git_branch.as_deref().unwrap_or("—");
+    let commit = run.git_commit_short.as_deref().unwrap_or("—");
+    let scanned = run
+        .tool
+        .timestamp_utc
+        .format("%Y-%m-%d %H:%M UTC")
+        .to_string();
+
+    // Info panel macro
+    out.push_str(
+        "<ac:structured-macro ac:name=\"info\" ac:schema-version=\"1\">\
+         <ac:rich-text-body><p>",
+    );
+    let _ = write!(
+        out,
+        "<strong>Project:</strong> {proj} &nbsp;·&nbsp; \
+         <strong>Branch:</strong> {branch} &nbsp;·&nbsp; \
+         <strong>Commit:</strong> {commit} &nbsp;·&nbsp; \
+         <strong>Scanned:</strong> {scanned}",
+        proj = html_esc(project),
+        branch = html_esc(branch),
+        commit = html_esc(commit),
+        scanned = html_esc(&scanned),
+    );
+    out.push_str("</p></ac:rich-text-body></ac:structured-macro>");
+
+    // Summary stats table
+    out.push_str("<h2>Summary</h2>");
+    out.push_str(
+        "<table><thead><tr>\
+         <th>Files Analyzed</th><th>Code Lines</th><th>Comment Lines</th>\
+         <th>Blank Lines</th><th>Languages</th>\
+         </tr></thead><tbody><tr>",
+    );
+    let t = &run.summary_totals;
+    let _ = write!(
+        out,
+        "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>",
+        t.files_analyzed,
+        t.code_lines,
+        t.comment_lines,
+        t.blank_lines,
+        run.totals_by_language.len(),
+    );
+    out.push_str("</tr></tbody></table>");
+
+    // Per-language breakdown table
+    if !run.totals_by_language.is_empty() {
+        out.push_str("<h2>Language Breakdown</h2>");
+        out.push_str(
+            "<table><thead><tr>\
+             <th>Language</th><th>Files</th><th>Code</th><th>Comments</th><th>Blank</th>\
+             </tr></thead><tbody>",
+        );
+        for lang in &run.totals_by_language {
+            let _ = write!(
+                out,
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_esc(lang.language.display_name()),
+                lang.files,
+                lang.code_lines,
+                lang.comment_lines,
+                lang.blank_lines,
+            );
+        }
+        out.push_str("</tbody></table>");
+    }
+
+    // Link back to full report
+    if let Some(url) = report_url {
+        let _ = write!(
+            out,
+            "<p><strong>Full interactive report:</strong> \
+             <a href=\"{url}\">{url_disp}</a></p>",
+            url = html_esc(url),
+            url_disp = html_esc(url),
+        );
+    }
+
+    out
+}
+
+/// Generates Confluence wiki markup (legacy syntax) for copy/paste into a
+/// Confluence page editor.
+pub fn render_confluence_wiki_markup(run: &AnalysisRun) -> String {
+    let mut out = String::with_capacity(4096);
+
+    let project = run
+        .input_roots
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(unknown)");
+    let branch = run.git_branch.as_deref().unwrap_or("—");
+    let commit = run.git_commit_short.as_deref().unwrap_or("—");
+    let scanned = run
+        .tool
+        .timestamp_utc
+        .format("%Y-%m-%d %H:%M UTC")
+        .to_string();
+
+    let _ = writeln!(out, "{{info}}");
+    let _ = writeln!(
+        out,
+        "Project: {project}  ·  Branch: {branch}  ·  Commit: {commit}  ·  Scanned: {scanned}"
+    );
+    let _ = writeln!(out, "{{info}}");
+    out.push('\n');
+
+    let t = &run.summary_totals;
+    let _ = writeln!(out, "h2. Summary");
+    let _ = writeln!(
+        out,
+        "||Files Analyzed||Code Lines||Comment Lines||Blank Lines||Languages||"
+    );
+    let _ = writeln!(
+        out,
+        "|{}|{}|{}|{}|{}|",
+        t.files_analyzed,
+        t.code_lines,
+        t.comment_lines,
+        t.blank_lines,
+        run.totals_by_language.len(),
+    );
+    out.push('\n');
+
+    if !run.totals_by_language.is_empty() {
+        let _ = writeln!(out, "h2. Language Breakdown");
+        let _ = writeln!(out, "||Language||Files||Code||Comments||Blank||");
+        for lang in &run.totals_by_language {
+            let _ = writeln!(
+                out,
+                "|{}|{}|{}|{}|{}|",
+                lang.language.display_name(),
+                lang.files,
+                lang.code_lines,
+                lang.comment_lines,
+                lang.blank_lines,
+            );
+        }
+        out.push('\n');
+    }
+
+    let _ = writeln!(
+        out,
+        "*Total:* {} code lines · {} files · {} languages",
+        t.code_lines,
+        t.files_analyzed,
+        run.totals_by_language.len(),
+    );
+
+    out
 }

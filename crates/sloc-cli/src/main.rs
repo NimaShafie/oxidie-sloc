@@ -15,7 +15,10 @@ use lettre::{
 use tracing_subscriber::EnvFilter;
 
 use sloc_config::{AppConfig, BlankInBlockCommentPolicy, ContinuationLinePolicy, MixedLinePolicy};
-use sloc_core::{analyze, compute_delta, read_json, write_json, AnalysisRun, ScanComparison};
+use sloc_core::{
+    analyze, check_against_baseline, compute_delta, read_json, resolve_baselines_path, write_json,
+    AnalysisRun, BaselineEntry, BaselineStore, ScanComparison,
+};
 use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, get_sha};
 use sloc_report::{
     render_html, write_csv, write_diff_csv, write_html, write_pdf_from_html, write_xlsx,
@@ -55,7 +58,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Scan one or more directories and count source lines
-    Analyze(AnalyzeArgs),
+    Analyze(Box<AnalyzeArgs>),
     /// Re-render a report from a saved JSON result (no re-scan)
     Report(ReportArgs),
     /// Compare two saved JSON results and show the delta
@@ -67,13 +70,17 @@ enum Commands {
     /// Validate a scan result against a golden corpus (not yet implemented)
     Validate(ValidateArgs),
     /// Deliver a saved report via SMTP or webhook
-    Send(SendArgs),
+    Send(Box<SendArgs>),
     /// Clone a repository and scan it at a specific branch, tag, or commit SHA
     GitScan(GitScanArgs),
     /// Scan two git refs and emit a comparison (diff) report
     GitCompare(GitCompareArgs),
     /// Poll a repository branch for changes and scan on every new commit
     Watch(WatchArgs),
+    /// Post an SLOC diff comment to a pull request on GitHub or GitLab.
+    /// Designed to be called from Jenkins post-build steps and CI pipelines.
+    #[command(name = "pr-comment")]
+    PrComment(PrCommentArgs),
 }
 
 // ── analyze ───────────────────────────────────────────────────────────────────
@@ -181,6 +188,38 @@ struct AnalyzeArgs {
     /// Detect git submodules and emit per-submodule breakdown
     #[arg(long)]
     submodule_breakdown: bool,
+
+    /// Apply a named profile from the config file (e.g. --profile frontend).
+    /// Profile sections override the base [discovery], [analysis], and [reporting]
+    /// sections in their entirety; define them as [profile.NAME] in the TOML.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+
+    /// Exit with code 4 if any SLOC budget threshold is exceeded.
+    /// Thresholds are defined under [analysis.budget] in the config file or
+    /// passed via --config.
+    #[arg(long)]
+    fail_on_budget: bool,
+
+    /// Save this scan as a named baseline snapshot (stored in out/baselines.json).
+    /// Use --fail-above-baseline to enforce growth limits against this snapshot later.
+    #[arg(long, value_name = "NAME")]
+    set_baseline: Option<String>,
+
+    /// Exit with code 5 if code lines grew more than MAX_DELTA_PCT % vs. the named
+    /// baseline. Omit --max-delta-pct to fail on any growth.
+    #[arg(long, value_name = "NAME")]
+    fail_above_baseline: Option<String>,
+
+    /// Maximum allowed code-line growth percentage when used with --fail-above-baseline.
+    #[arg(long, value_name = "PCT")]
+    max_delta_pct: Option<f64>,
+
+    /// Path to an LCOV .info file (from lcov, gcov, cargo-llvm-cov, etc.) to attach
+    /// per-file line and function coverage data to the analysis output.
+    /// Can also be set via the SLOC_COVERAGE_FILE environment variable.
+    #[arg(long, value_name = "FILE")]
+    coverage_file: Option<PathBuf>,
 }
 
 // ── report ────────────────────────────────────────────────────────────────────
@@ -277,9 +316,9 @@ struct InitArgs {
 
 #[derive(Debug, Args)]
 struct ValidateArgs {
-    /// Path to the golden corpus directory
+    /// Path to the config file to validate (default: .oxide-sloc.toml)
     #[arg(long, value_name = "PATH")]
-    corpus: Option<PathBuf>,
+    config: Option<PathBuf>,
 }
 
 // ── send ──────────────────────────────────────────────────────────────────────
@@ -317,6 +356,90 @@ struct SendArgs {
     /// Bearer token for webhook auth. Defaults to `SLOC_WEBHOOK_TOKEN` env var.
     #[arg(long, value_name = "TOKEN", env = "SLOC_WEBHOOK_TOKEN")]
     webhook_token: Option<String>,
+
+    // --- Microsoft Teams ---
+    /// Post an Adaptive Card summary to a Microsoft Teams Incoming Webhook URL (repeatable).
+    /// Obtain the URL from Teams: channel → Connectors → Incoming Webhook.
+    #[arg(long, value_name = "URL")]
+    notify_teams: Vec<String>,
+    /// Optional URL linking to the full HTML report, included in the Teams card.
+    #[arg(long, value_name = "URL")]
+    report_url: Option<String>,
+
+    // --- Atlassian Confluence ---
+    /// Confluence base URL (e.g. https://myco.atlassian.net or https://confluence.corp.com).
+    /// Defaults to SLOC_CONFLUENCE_URL env var.
+    #[arg(long, value_name = "URL", env = "SLOC_CONFLUENCE_URL")]
+    confluence_url: Option<String>,
+    /// Atlassian account email (Cloud) or username (Server).
+    /// Defaults to SLOC_CONFLUENCE_USER env var.
+    #[arg(long, value_name = "USER", env = "SLOC_CONFLUENCE_USER")]
+    confluence_username: Option<String>,
+    /// API token (Cloud) or password/PAT (Server).
+    /// Prefer the SLOC_CONFLUENCE_TOKEN env var to avoid credential exposure in process listings.
+    #[arg(long, value_name = "TOKEN", env = "SLOC_CONFLUENCE_TOKEN")]
+    confluence_token: Option<String>,
+    /// Target Confluence space key (e.g. ENG). Defaults to SLOC_CONFLUENCE_SPACE env var.
+    #[arg(long, value_name = "KEY", env = "SLOC_CONFLUENCE_SPACE")]
+    confluence_space: Option<String>,
+    /// Optional numeric parent page ID to nest the created page under.
+    #[arg(long, value_name = "ID")]
+    confluence_parent_id: Option<String>,
+    /// Title of the Confluence page to create or update.
+    #[arg(long, value_name = "TITLE")]
+    confluence_page_title: Option<String>,
+    /// URL linking to the full oxide-sloc HTML report, embedded in the Confluence page body.
+    /// Defaults to --report-url if set.
+    #[arg(long, value_name = "URL")]
+    confluence_report_url: Option<String>,
+}
+
+// ── pr-comment ────────────────────────────────────────────────────────────────
+
+/// Which VCS hosting the pull request lives on.
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum VcsProvider {
+    Github,
+    Gitlab,
+}
+
+#[derive(Debug, Args)]
+struct PrCommentArgs {
+    /// Path to the current scan JSON (the PR head).
+    #[arg(value_name = "CURRENT_JSON")]
+    current: PathBuf,
+
+    /// Path to the baseline scan JSON (the target branch). Optional — if omitted,
+    /// the comment shows absolute counts without a delta section.
+    #[arg(long, value_name = "BASELINE_JSON")]
+    baseline: Option<PathBuf>,
+
+    /// VCS provider.
+    #[arg(long, value_enum, default_value = "github")]
+    provider: VcsProvider,
+
+    /// GitHub/GitLab API base URL. Defaults to `https://api.github.com` for GitHub
+    /// or `https://gitlab.com` for GitLab. Override for self-hosted instances.
+    #[arg(long, value_name = "URL", env = "SLOC_VCS_API_URL")]
+    api_url: Option<String>,
+
+    /// Repository in `owner/repo` format (GitHub) or numeric project ID / `namespace/project`
+    /// (GitLab).
+    #[arg(long, value_name = "REPO", env = "SLOC_VCS_REPO")]
+    repo: String,
+
+    /// Pull request / merge request number.
+    #[arg(long, value_name = "NUMBER", env = "SLOC_PR_NUMBER")]
+    pr_number: u64,
+
+    /// API token with `repo` (GitHub) or `api` (GitLab) scope.
+    /// Defaults to `SLOC_VCS_TOKEN` env var.
+    #[arg(long, value_name = "TOKEN", env = "SLOC_VCS_TOKEN")]
+    token: String,
+
+    /// Optional URL linking to the full HTML report, appended to the comment.
+    #[arg(long, value_name = "URL")]
+    report_url: Option<String>,
 }
 
 // ── git-scan ──────────────────────────────────────────────────────────────────
@@ -439,16 +562,17 @@ async fn main() -> Result<()> {
         bind: None,
         server: false,
     })) {
-        Commands::Analyze(args) => run_analyze(args).await,
+        Commands::Analyze(args) => run_analyze(*args).await,
         Commands::Report(args) => run_report(&args),
         Commands::Diff(args) => run_diff(&args),
         Commands::Serve(args) => run_serve(args).await,
         Commands::Init(args) => run_init(&args),
         Commands::Validate(args) => run_validate(&args),
-        Commands::Send(args) => run_send(args).await,
+        Commands::Send(args) => run_send(*args).await,
         Commands::GitScan(args) => run_git_scan(args).await,
         Commands::GitCompare(args) => run_git_compare(args).await,
         Commands::Watch(args) => run_watch(args).await,
+        Commands::PrComment(args) => run_pr_comment(args).await,
     }
 }
 
@@ -495,7 +619,12 @@ fn write_outputs(run: &AnalysisRun, args: &AnalyzeArgs, quiet: bool) -> Result<(
 }
 
 /// Check threshold and warning-count exit conditions after outputs are written.
-fn check_exit_conditions(run: &AnalysisRun, fail_on_warnings: bool, fail_below: Option<u64>) {
+fn check_exit_conditions(
+    run: &AnalysisRun,
+    fail_on_warnings: bool,
+    fail_below: Option<u64>,
+    fail_on_budget: bool,
+) {
     if fail_on_warnings && !run.warnings.is_empty() {
         eprintln!(
             "error: {} warning(s) found — failing due to --fail-on-warnings",
@@ -513,6 +642,43 @@ fn check_exit_conditions(run: &AnalysisRun, fail_on_warnings: bool, fail_below: 
             std::process::exit(3);
         }
     }
+
+    if fail_on_budget {
+        if let Some(budget) = &run.effective_configuration.analysis.budget {
+            check_budget(run, budget);
+        }
+    }
+}
+
+fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
+    let mut violated = false;
+
+    if budget.total_max > 0 && run.summary_totals.code_lines > budget.total_max {
+        eprintln!(
+            "error: budget exceeded — total code lines {} > limit {} (--fail-on-budget)",
+            run.summary_totals.code_lines, budget.total_max
+        );
+        violated = true;
+    }
+
+    for lang_row in &run.totals_by_language {
+        let key = lang_row.language.display_name().to_ascii_lowercase();
+        if let Some(&limit) = budget.per_language.get(&key) {
+            if lang_row.code_lines > limit {
+                eprintln!(
+                    "error: budget exceeded — {} code lines {} > limit {} (--fail-on-budget)",
+                    lang_row.language.display_name(),
+                    lang_row.code_lines,
+                    limit
+                );
+                violated = true;
+            }
+        }
+    }
+
+    if violated {
+        std::process::exit(4);
+    }
 }
 
 async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
@@ -528,8 +694,54 @@ async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
 
     write_outputs(&run, &args, quiet)?;
 
+    // Save baseline snapshot if requested.
+    if let Some(name) = &args.set_baseline {
+        let baselines_path = resolve_baselines_path();
+        let mut store = BaselineStore::load(&baselines_path);
+        store.set(BaselineEntry {
+            name: name.clone(),
+            saved_at: chrono::Utc::now(),
+            run_id: run.tool.run_id.clone(),
+            summary: sloc_core::ScanSummarySnapshot {
+                files_analyzed: run.summary_totals.files_analyzed,
+                files_skipped: run.summary_totals.files_skipped,
+                code_lines: run.summary_totals.code_lines,
+                comment_lines: run.summary_totals.comment_lines,
+                blank_lines: run.summary_totals.blank_lines,
+                total_physical_lines: run.summary_totals.total_physical_lines,
+                ..Default::default()
+            },
+            json_path: args.json_out.clone(),
+        });
+        store.save(&baselines_path)?;
+        if !quiet {
+            eprintln!("baseline '{}' saved → {}", name, baselines_path.display());
+        }
+    }
+
     // Threshold / warning exit codes (checked after all outputs are written)
-    check_exit_conditions(&run, args.fail_on_warnings, args.fail_below);
+    check_exit_conditions(
+        &run,
+        args.fail_on_warnings,
+        args.fail_below,
+        args.fail_on_budget,
+    );
+
+    // Baseline growth check.
+    if let Some(baseline_name) = &args.fail_above_baseline {
+        let baselines_path = resolve_baselines_path();
+        let store = BaselineStore::load(&baselines_path);
+        let result = check_against_baseline(
+            &store,
+            baseline_name,
+            run.summary_totals.code_lines,
+            args.max_delta_pct,
+        )?;
+        result.print_summary();
+        if result.exceeded {
+            std::process::exit(5);
+        }
+    }
 
     Ok(())
 }
@@ -645,7 +857,7 @@ fn run_init(args: &InitArgs) -> Result<()> {
         );
     }
 
-    let content = r#"# oxide-sloc configuration
+    let content = r##"# oxide-sloc configuration
 # Generated by `oxide-sloc init`. Uncomment and adjust as needed.
 # Full reference: https://github.com/oxide-sloc/oxide-sloc
 
@@ -678,17 +890,47 @@ fn run_init(args: &InitArgs) -> Result<()> {
 # [analysis.extension_overrides]
 # "h" = "cpp"
 
+# SLOC budget thresholds — fail CI with --fail-on-budget if exceeded.
+# [analysis.budget]
+# total_max = 100000        # maximum code lines across all languages (0 = unlimited)
+# rust = 60000              # per-language ceiling; key = lowercase display name
+# typescript = 30000
+
 [reporting]
 # report_title = "OxideSLOC Report"
 # theme = "auto"   # auto | light | dark
 # include_summary_charts = true
 # include_skipped_files_section = true
 # include_warnings_section = true
+#
+# Team branding (all optional):
+# company_name = "Acme Corp"        # replaces "OxideSLOC" in the report header
+# logo_path = "assets/logo.png"     # PNG or SVG to embed in place of the default logo
+# accent_color = "#3b82f6"          # primary accent colour (#RGB or #RRGGBB)
 
 [web]
 # bind_address = "127.0.0.1:4317"
 # server_mode = false
-"#;
+
+# ── Named profiles ───────────────────────────────────────────────────────────
+# Use `oxide-sloc analyze --profile frontend` to apply a profile.
+# Each profile overrides its entire config section when selected.
+#
+# [profile.frontend]
+# [profile.frontend.discovery]
+# root_paths = ["frontend"]
+# exclude_globs = ["**/node_modules/**", "**/dist/**"]
+# [profile.frontend.analysis]
+# enabled_languages = ["TypeScript", "JavaScript", "CSS", "HTML"]
+# [profile.frontend.reporting]
+# report_title = "Frontend SLOC Report"
+#
+# [profile.backend]
+# [profile.backend.discovery]
+# root_paths = ["backend", "shared"]
+# [profile.backend.analysis]
+# enabled_languages = ["Rust", "Python", "SQL"]
+"##;
 
     if let Some(parent) = args.output.parent() {
         if !parent.as_os_str().is_empty() {
@@ -707,18 +949,120 @@ fn run_init(args: &InitArgs) -> Result<()> {
 // ── validate handler ──────────────────────────────────────────────────────────
 
 fn run_validate(args: &ValidateArgs) -> Result<()> {
-    let corpus = args
-        .corpus
-        .as_ref()
-        .map_or_else(|| "<not provided>".into(), |p| p.display().to_string());
-    anyhow::bail!("validate is scaffolded but not yet implemented; corpus = {corpus}")
+    let config_path = args
+        .config
+        .as_deref()
+        .unwrap_or(std::path::Path::new(".oxide-sloc.toml"));
+
+    if !config_path.exists() {
+        anyhow::bail!(
+            "config file not found: {} (use `oxide-sloc init` to create one)",
+            config_path.display()
+        );
+    }
+
+    let config = sloc_config::AppConfig::load_from_file(config_path)
+        .with_context(|| format!("failed to load {}", config_path.display()))?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // Check discovery.root_paths exist
+    for path in &config.discovery.root_paths {
+        if !path.exists() {
+            errors.push(format!(
+                "discovery.root_paths: '{}' does not exist",
+                path.display()
+            ));
+        }
+    }
+
+    // Check allowed_scan_roots exist
+    for path in &config.discovery.allowed_scan_roots {
+        if !path.exists() {
+            errors.push(format!(
+                "discovery.allowed_scan_roots: '{}' does not exist",
+                path.display()
+            ));
+        }
+    }
+
+    // Check globs are parseable
+    for pattern in &config.discovery.include_globs {
+        if globset::Glob::new(pattern).is_err() {
+            errors.push(format!(
+                "discovery.include_globs: invalid glob pattern '{pattern}'"
+            ));
+        }
+    }
+    for pattern in &config.discovery.exclude_globs {
+        if globset::Glob::new(pattern).is_err() {
+            errors.push(format!(
+                "discovery.exclude_globs: invalid glob pattern '{pattern}'"
+            ));
+        }
+    }
+
+    // Check reporting.logo_path exists if set
+    if let Some(logo) = &config.reporting.logo_path {
+        if !logo.exists() {
+            errors.push(format!(
+                "reporting.logo_path: '{}' does not exist",
+                logo.display()
+            ));
+        }
+    }
+
+    // Check accent_color is valid (already validated in AppConfig::validate but report nicely)
+    if let Some(color) = &config.reporting.accent_color {
+        if sloc_config::validate_hex_color(color).is_err() {
+            errors.push(format!(
+                "reporting.accent_color: '{color}' is not a valid hex colour (use #RGB or #RRGGBB)"
+            ));
+        }
+    }
+
+    // Check profiles
+    for name in config.profiles.keys() {
+        if name.trim().is_empty() {
+            errors.push("profiles: profile name must not be empty".into());
+        }
+    }
+
+    if errors.is_empty() {
+        println!("config valid: {}", config_path.display());
+        let profile_count = config.profiles.len();
+        if profile_count > 0 {
+            println!(
+                "  {} profile(s): {}",
+                profile_count,
+                config
+                    .profiles
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(())
+    } else {
+        for e in &errors {
+            eprintln!("error: {e}");
+        }
+        anyhow::bail!("{} validation error(s) found", errors.len())
+    }
 }
 
 // ── send handler ──────────────────────────────────────────────────────────────
 
 async fn run_send(args: SendArgs) -> Result<()> {
-    if args.smtp_to.is_empty() && args.webhook_url.is_empty() {
-        anyhow::bail!("provide at least one of --smtp-to or --webhook-url");
+    if args.smtp_to.is_empty()
+        && args.webhook_url.is_empty()
+        && args.notify_teams.is_empty()
+        && args.confluence_url.is_none()
+    {
+        anyhow::bail!(
+            "provide at least one of --smtp-to, --webhook-url, --notify-teams, or --confluence-url"
+        );
     }
 
     if args.smtp_pass.is_some() && std::env::var("SLOC_SMTP_PASS").is_err() {
@@ -736,6 +1080,14 @@ async fn run_send(args: SendArgs) -> Result<()> {
 
     for url in &args.webhook_url {
         send_webhook(url, args.webhook_token.as_deref(), &run).await?;
+    }
+
+    for url in &args.notify_teams {
+        send_teams_card(url, &run, args.report_url.as_deref()).await?;
+    }
+
+    if args.confluence_url.is_some() {
+        send_confluence(&args, &run).await?;
     }
 
     println!("send: all deliveries completed");
@@ -874,6 +1226,120 @@ async fn send_webhook(url: &str, token: Option<&str>, run: &AnalysisRun) -> Resu
     Ok(())
 }
 
+fn fmt_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        let pos_from_right = bytes.len() - 1 - i;
+        if i > 0 && pos_from_right % 3 == 2 {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+/// Build and POST a Microsoft Teams Adaptive Card summary for the given run.
+///
+/// The payload uses the `attachments` envelope understood by both legacy
+/// Incoming Webhook connectors and Power Automate-backed webhook flows.
+async fn send_teams_card(url: &str, run: &AnalysisRun, report_url: Option<&str>) -> Result<()> {
+    validate_webhook_url(url)?;
+
+    let totals = &run.summary_totals;
+    let title = &run.effective_configuration.reporting.report_title;
+
+    // Build a language summary string (top 5 languages).
+    let lang_lines: String = run
+        .totals_by_language
+        .iter()
+        .take(5)
+        .map(|l| {
+            format!(
+                "- **{}**: {} code lines ({} files)",
+                l.language.display_name(),
+                fmt_thousands(l.code_lines),
+                l.files
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  \n");
+
+    let facts = serde_json::json!([
+        { "title": "Files Analyzed", "value": totals.files_analyzed.to_string() },
+        { "title": "Code Lines",     "value": fmt_thousands(totals.code_lines) },
+        { "title": "Comment Lines",  "value": fmt_thousands(totals.comment_lines) },
+        { "title": "Blank Lines",    "value": fmt_thousands(totals.blank_lines) },
+        { "title": "Total Physical", "value": fmt_thousands(totals.total_physical_lines) },
+    ]);
+
+    let mut body_items = vec![
+        serde_json::json!({
+            "type": "TextBlock",
+            "text": title,
+            "weight": "Bolder",
+            "size": "Medium"
+        }),
+        serde_json::json!({
+            "type": "FactSet",
+            "facts": facts
+        }),
+    ];
+
+    if !lang_lines.is_empty() {
+        body_items.push(serde_json::json!({
+            "type": "TextBlock",
+            "text": "**Top Languages**",
+            "weight": "Bolder",
+            "spacing": "Medium"
+        }));
+        body_items.push(serde_json::json!({
+            "type": "TextBlock",
+            "text": lang_lines,
+            "wrap": true
+        }));
+    }
+
+    let mut actions: Vec<serde_json::Value> = Vec::new();
+    if let Some(link) = report_url {
+        actions.push(serde_json::json!({
+            "type": "Action.OpenUrl",
+            "title": "View Full Report",
+            "url": link
+        }));
+    }
+
+    let card = serde_json::json!({
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": body_items,
+                "actions": actions
+            }
+        }]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(url)
+        .json(&card)
+        .send()
+        .await
+        .with_context(|| format!("Teams webhook POST to {url} failed"))?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Teams webhook {url} returned HTTP {}", resp.status());
+    }
+
+    println!("send: posted Teams card to {url}");
+    Ok(())
+}
+
 // ── config helpers ────────────────────────────────────────────────────────────
 
 fn load_base_config(config_path: Option<&Path>) -> Result<AppConfig> {
@@ -925,11 +1391,18 @@ fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
     if args.no_count_compiler_directives {
         config.analysis.count_compiler_directives = false;
     }
+    if let Some(cov) = &args.coverage_file {
+        config.analysis.coverage_file = Some(cov.clone());
+    }
     if let Some(title) = &args.report_title {
         config.reporting.report_title.clone_from(title);
     }
     if args.submodule_breakdown {
         config.discovery.submodule_breakdown = true;
+    }
+
+    if let Some(profile) = &args.profile {
+        config.apply_profile(profile)?;
     }
 
     config.validate()?;
@@ -1183,6 +1656,409 @@ fn open_path(path: &Path) {
 // Write diff as XLSX — thin wrapper delegating to sloc_report
 fn write_diff_xlsx(cmp: &ScanComparison, path: &Path) -> Result<()> {
     sloc_report::write_diff_xlsx(cmp, path)
+}
+
+// ── Confluence delivery ───────────────────────────────────────────────────────
+
+async fn send_confluence(args: &SendArgs, run: &AnalysisRun) -> Result<()> {
+    use base64::Engine as _;
+
+    let base_url = args
+        .confluence_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--confluence-url is required"))?
+        .trim_end_matches('/');
+    let token = args.confluence_token.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("--confluence-token (or SLOC_CONFLUENCE_TOKEN) is required")
+    })?;
+    let space = args.confluence_space.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("--confluence-space (or SLOC_CONFLUENCE_SPACE) is required")
+    })?;
+
+    let page_title = args
+        .confluence_page_title
+        .as_deref()
+        .unwrap_or(&run.effective_configuration.reporting.report_title);
+
+    let report_url = args
+        .confluence_report_url
+        .as_deref()
+        .or(args.report_url.as_deref());
+
+    let body_html = sloc_report::render_confluence_storage(run, report_url);
+
+    // Determine Cloud vs Server by URL
+    let is_cloud = base_url.to_lowercase().contains(".atlassian.net");
+
+    // Build auth header
+    let auth = if let Some(username) = args.confluence_username.as_deref() {
+        if !username.is_empty() {
+            let raw = format!("{username}:{token}");
+            let enc = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+            format!("Basic {enc}")
+        } else {
+            format!("Bearer {token}")
+        }
+    } else {
+        format!("Bearer {token}")
+    };
+
+    let client = reqwest::Client::new();
+
+    if is_cloud {
+        // Cloud v2 API: look up space ID, then find/create/update page
+        let space_resp: serde_json::Value = client
+            .get(format!(
+                "{base_url}/wiki/api/v2/spaces?keys={space}&limit=1"
+            ))
+            .header("Authorization", &auth)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("Confluence space lookup")?
+            .json()
+            .await
+            .context("Confluence space response")?;
+
+        let space_id = space_resp["results"][0]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Confluence space '{space}' not found"))?
+            .to_owned();
+
+        let enc_title = percent_encode(page_title);
+        let find_resp: serde_json::Value = client
+            .get(format!(
+                "{base_url}/wiki/api/v2/pages?spaceId={space_id}&title={enc_title}&limit=1&expand=version"
+            ))
+            .header("Authorization", &auth)
+            .header("Accept", "application/json")
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
+        let existing_ver = find_resp["results"][0]["version"]["number"]
+            .as_u64()
+            .map(|v| v as u32);
+
+        match (existing_id, existing_ver) {
+            (Some(page_id), Some(ver)) => {
+                let payload = serde_json::json!({
+                    "version": { "number": ver + 1 },
+                    "title": page_title,
+                    "body": { "representation": "storage", "value": body_html }
+                });
+                let resp = client
+                    .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
+                    .header("Authorization", &auth)
+                    .header("Content-Type", "application/json")
+                    .json(&payload)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
+                }
+                println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+            }
+            _ => {
+                let mut payload = serde_json::json!({
+                    "spaceId": space_id,
+                    "title": page_title,
+                    "body": { "representation": "storage", "value": body_html }
+                });
+                if let Some(parent_id) = &args.confluence_parent_id {
+                    payload["parentId"] = serde_json::Value::String(parent_id.clone());
+                }
+                let resp = client
+                    .post(format!("{base_url}/wiki/api/v2/pages"))
+                    .header("Authorization", &auth)
+                    .header("Content-Type", "application/json")
+                    .json(&payload)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+                }
+                let created: serde_json::Value = resp.json().await?;
+                let new_id = created["id"].as_str().unwrap_or("?");
+                println!("send: created Confluence page '{page_title}' (id: {new_id})");
+            }
+        }
+    } else {
+        // Server/DC v1 API
+        let enc_title = percent_encode(page_title);
+        let find_resp: serde_json::Value = client
+            .get(format!(
+                "{base_url}/rest/api/content?spaceKey={space}&title={enc_title}&type=page&expand=version&limit=1"
+            ))
+            .header("Authorization", &auth)
+            .header("Accept", "application/json")
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
+        let existing_ver = find_resp["results"][0]["version"]["number"]
+            .as_u64()
+            .map(|v| v as u32);
+
+        match (existing_id, existing_ver) {
+            (Some(page_id), Some(ver)) => {
+                let payload = serde_json::json!({
+                    "version": { "number": ver + 1 },
+                    "type": "page",
+                    "title": page_title,
+                    "space": { "key": space },
+                    "body": { "storage": { "value": body_html, "representation": "storage" } }
+                });
+                let resp = client
+                    .put(format!("{base_url}/rest/api/content/{page_id}"))
+                    .header("Authorization", &auth)
+                    .header("Content-Type", "application/json")
+                    .json(&payload)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
+                }
+                println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+            }
+            _ => {
+                let mut payload = serde_json::json!({
+                    "type": "page",
+                    "space": { "key": space },
+                    "title": page_title,
+                    "body": { "storage": { "value": body_html, "representation": "storage" } }
+                });
+                if let Some(parent_id) = &args.confluence_parent_id {
+                    payload["ancestors"] = serde_json::json!([{ "id": parent_id }]);
+                }
+                let resp = client
+                    .post(format!("{base_url}/rest/api/content"))
+                    .header("Authorization", &auth)
+                    .header("Content-Type", "application/json")
+                    .json(&payload)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+                }
+                let created: serde_json::Value = resp.json().await?;
+                let new_id = created["id"].as_str().unwrap_or("?");
+                println!("send: created Confluence page '{page_title}' (id: {new_id})");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+// ── pr-comment handler ────────────────────────────────────────────────────────
+
+async fn run_pr_comment(args: PrCommentArgs) -> Result<()> {
+    let current = read_json(&args.current)
+        .with_context(|| format!("failed to read current: {}", args.current.display()))?;
+
+    let comparison = if let Some(baseline_path) = &args.baseline {
+        let baseline = read_json(baseline_path)
+            .with_context(|| format!("failed to read baseline: {}", baseline_path.display()))?;
+        Some(compute_delta(&baseline, &current))
+    } else {
+        None
+    };
+
+    let body = build_pr_comment_body(&current, comparison.as_ref(), args.report_url.as_deref());
+
+    match args.provider {
+        VcsProvider::Github => {
+            post_github_comment(&args, &body).await?;
+        }
+        VcsProvider::Gitlab => {
+            post_gitlab_comment(&args, &body).await?;
+        }
+    }
+
+    println!("pr-comment: posted comment to PR #{}", args.pr_number);
+    Ok(())
+}
+
+fn build_pr_comment_body(
+    run: &AnalysisRun,
+    comparison: Option<&ScanComparison>,
+    report_url: Option<&str>,
+) -> String {
+    let totals = &run.summary_totals;
+    let mut out = String::new();
+
+    out.push_str("## SLOC Report\n\n");
+
+    // Summary table
+    out.push_str("| Metric | Value |\n");
+    out.push_str("|--------|-------|\n");
+    out.push_str(&format!("| Files analyzed | {} |\n", totals.files_analyzed));
+    out.push_str(&format!(
+        "| Code lines | {} |\n",
+        fmt_thousands(totals.code_lines)
+    ));
+    out.push_str(&format!(
+        "| Comment lines | {} |\n",
+        fmt_thousands(totals.comment_lines)
+    ));
+    out.push_str(&format!(
+        "| Blank lines | {} |\n",
+        fmt_thousands(totals.blank_lines)
+    ));
+
+    // Delta section
+    if let Some(cmp) = comparison {
+        let s = &cmp.summary;
+        let sign = |v: i64| {
+            if v >= 0 {
+                format!("+{v}")
+            } else {
+                v.to_string()
+            }
+        };
+        out.push_str("\n### Changes vs. Target Branch\n\n");
+        out.push_str("| | Delta |\n");
+        out.push_str("|--|-------|\n");
+        out.push_str(&format!("| Code Δ | {} |\n", sign(s.code_lines_delta)));
+        out.push_str(&format!(
+            "| Comment Δ | {} |\n",
+            sign(s.comment_lines_delta)
+        ));
+        out.push_str(&format!("| Blank Δ | {} |\n", sign(s.blank_lines_delta)));
+        out.push_str(&format!(
+            "| Files | +{} added / -{} removed / ~{} modified |\n",
+            cmp.files_added, cmp.files_removed, cmp.files_modified
+        ));
+    }
+
+    // Top languages
+    if !run.totals_by_language.is_empty() {
+        out.push_str("\n<details><summary>Language breakdown</summary>\n\n");
+        out.push_str("| Language | Files | Code | Comments | Blank |\n");
+        out.push_str("|----------|-------|------|----------|-------|\n");
+        for l in run.totals_by_language.iter().take(10) {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                l.language.display_name(),
+                l.files,
+                l.code_lines,
+                l.comment_lines,
+                l.blank_lines,
+            ));
+        }
+        out.push_str("\n</details>\n");
+    }
+
+    if let Some(url) = report_url {
+        out.push_str(&format!("\n[View full report]({url})\n"));
+    }
+
+    out.push_str("\n*Generated by [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc)*\n");
+    out
+}
+
+async fn post_github_comment(args: &PrCommentArgs, body: &str) -> Result<()> {
+    let base = args
+        .api_url
+        .as_deref()
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let url = format!(
+        "{base}/repos/{}/issues/{}/comments",
+        args.repo, args.pr_number
+    );
+
+    validate_webhook_url(&url)?;
+
+    let payload = serde_json::json!({ "body": body });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", args.token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "oxide-sloc")
+        .json(&payload)
+        .send()
+        .await
+        .with_context(|| format!("GitHub API POST to {url} failed"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("GitHub API returned HTTP {status}: {text}");
+    }
+    Ok(())
+}
+
+async fn post_gitlab_comment(args: &PrCommentArgs, body: &str) -> Result<()> {
+    let base = args
+        .api_url
+        .as_deref()
+        .unwrap_or("https://gitlab.com")
+        .trim_end_matches('/');
+    // GitLab encodes the namespace/project as URL-encoded path for the API.
+    let encoded_repo: String = args
+        .repo
+        .chars()
+        .map(|c| {
+            if c == '/' {
+                "%2F".to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    let url = format!(
+        "{base}/api/v4/projects/{encoded_repo}/merge_requests/{}/notes",
+        args.pr_number
+    );
+
+    validate_webhook_url(&url)?;
+
+    let payload = serde_json::json!({ "body": body });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("PRIVATE-TOKEN", &args.token)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .with_context(|| format!("GitLab API POST to {url} failed"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("GitLab API returned HTTP {status}: {text}");
+    }
+    Ok(())
 }
 
 // ── git-scan handler ──────────────────────────────────────────────────────────
