@@ -97,18 +97,18 @@ use super::{AppState, CspNonce};
     .info-btn:hover .info-tip,.info-btn:focus .info-tip{display:block;}
     body.dark-theme .info-tip{background:var(--surface-2);box-shadow:0 6px 18px rgba(0,0,0,0.36);}
     /* Integrations module */
-    .integrations-module{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:28px;overflow:hidden;}
+    .integrations-module{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:28px;}
     .integrations-header{padding:26px 28px 20px;}
     .integrations-header h1{margin-bottom:6px;}
     .integrations-header .subtitle{margin-bottom:0;}
     /* Tab bar */
-    .tab-bar{display:flex;border-top:1px solid var(--line);background:var(--surface-2);}
-    .tab-btn{background:transparent;border:none;border-bottom:3px solid transparent;padding:14px 44px;font-size:14px;font-weight:700;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:9px;transition:color 0.15s,border-color 0.15s,background 0.15s;}
+    .tab-bar{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;}
+    .tab-btn{display:inline-flex;align-items:center;gap:8px;padding:7px 20px;border-radius:999px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;transition:background 0.12s,color 0.12s,border-color 0.12s;}
     .tab-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
-    .tab-btn:hover{color:var(--text);background:rgba(0,0,0,0.05);}
-    body.dark-theme .tab-btn:hover{background:rgba(255,255,255,0.06);}
-    .tab-btn.active{color:var(--oxide-2);border-bottom-color:var(--oxide-2);background:rgba(184,93,51,0.06);}
-    body.dark-theme .tab-btn.active{background:rgba(184,93,51,0.10);}
+    .tab-btn:hover{background:#efe6dc;color:var(--text);}
+    body.dark-theme .tab-btn:hover{background:#372922;color:var(--text);}
+    .tab-btn.active{background:var(--oxide-2);color:#fff;border-color:var(--oxide-2);}
+    .tab-btn.active svg{stroke:#fff;}
     .tab-pane{display:none;}
     .tab-pane.active{display:block;}
     /* Shared misc */
@@ -186,16 +186,16 @@ use super::{AppState, CspNonce};
       <div class="integrations-header">
         <h1>Integrations</h1>
         <p class="subtitle">Connect OxideSLOC to external platforms — automate scanning via webhooks, or publish results directly to Atlassian Confluence.</p>
-      </div>
-      <div class="tab-bar">
-        <button class="tab-btn" data-tab="webhooks" type="button">
-          <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
-          Webhooks
-        </button>
-        <button class="tab-btn" data-tab="confluence" type="button">
-          <svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
-          Confluence
-        </button>
+        <div class="tab-bar">
+          <button class="tab-btn" data-tab="webhooks" type="button">
+            <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
+            Webhooks
+          </button>
+          <button class="tab-btn" data-tab="confluence" type="button">
+            <svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+            Confluence
+          </button>
+        </div>
       </div>
     </div>
 

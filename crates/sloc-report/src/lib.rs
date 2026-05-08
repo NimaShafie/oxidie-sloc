@@ -18,6 +18,7 @@ use sloc_core::{AnalysisRun, FileRecord};
 // HTML is rendered by Chrome via file:// (PDF export) or opened from disk.
 static LOGO_TEXT_PNG: &[u8] = include_bytes!("../assets/logo/logo-text.png");
 static SMALL_LOGO_PNG: &[u8] = include_bytes!("../assets/logo/small-logo.png");
+static CHART_JS: &str = include_str!("../assets/chart.min.js");
 
 fn png_data_uri(bytes: &[u8]) -> String {
     format!("data:image/png;base64,{}", base64_encode(bytes))
@@ -251,6 +252,7 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         company_name,
         accent_hex,
         report_header_footer,
+        chart_js: CHART_JS,
     };
 
     template.render().context("failed to render HTML report")
@@ -1040,7 +1042,7 @@ struct WarningOpportunityRow {
     .metric-label, .section-kicker { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
     .metric-value { margin-top: 6px; }
     .metric-big { display:block; font-size: 24px; font-weight: 800; color: var(--text); line-height: 1.15; letter-spacing: -0.02em; }
-    .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 10px; font-weight: 600; color: var(--muted-2); font-family: ui-monospace, monospace; }
+    .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 12px; font-weight: 600; color: var(--muted-2); font-family: ui-monospace, monospace; }
     .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.45; white-space: normal; max-width: 220px; text-align: center; pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.22); }
     .metric-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--text); }
     .metric:hover .metric-tooltip { opacity: 1; }
@@ -1073,7 +1075,7 @@ struct WarningOpportunityRow {
     .export-group { display:flex; gap:6px; align-items:center; }
     .export-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
     .export-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; contain: layout; }
+    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; contain: layout; scrollbar-gutter: stable; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
@@ -1091,16 +1093,27 @@ struct WarningOpportunityRow {
     /* Per-file table: fixed layout so all columns fit without horizontal scroll */
     #per-file-table { table-layout: fixed; width: 100%; min-width: 0; }
     #per-file-table th, #per-file-table td { padding: 8px 6px; }
-    /* File column: pinned, capped at 22%, truncates long paths */
-    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; width: 22%; background: var(--surface-2); padding: 8px 6px; overflow: hidden; text-overflow: ellipsis; }
+    /* File column: pinned, capped at 30%, truncates long paths */
+    #per-file-table th:first-child { position: sticky; top: 0; left: 0; z-index: 3; width: 30%; background: var(--surface-2); padding: 8px 6px; overflow: hidden; text-overflow: ellipsis; }
     #per-file-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-2); padding: 8px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #per-file-table th:nth-child(2) { width: 9%; }
-    /* 10 numeric columns share the remaining ~69% */
-    #per-file-table th:nth-child(n+3) { width: 6.9%; }
+    #per-file-table th:nth-child(2) { width: 7%; }
+    /* 10 numeric columns share the remaining ~63% */
+    #per-file-table th:nth-child(n+3) { width: 6.3%; }
     /* Override mono class overflow so file paths truncate */
     #per-file-table td.mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #per-file-table tbody tr:hover td:first-child { background: rgba(255,247,238,0.6); }
     body.dark-theme #per-file-table tbody tr:hover td:first-child { background: rgba(255,255,255,0.03); }
+    /* Language breakdown: fixed layout keeps every column at its declared width */
+    #lang-breakdown-table { table-layout: fixed; width: 100%; }
+    #lang-breakdown-table th:first-child { width: 18%; }
+    #lang-breakdown-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
+    /* Skipped table: extend truncation to all cells, not just the first column */
+    #skipped-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
+    /* Support opportunities table: fixed layout so Recommendation column can't expand */
+    .support-table { table-layout: fixed; width: 100%; }
+    .support-table th:first-child { width: 26%; }
+    .support-table th:nth-child(2) { width: 8%; }
+    .support-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
     .num-col { text-align: right !important; }
     tbody tr:hover { background: rgba(255, 247, 238, 0.6); }
     body.dark-theme tbody tr:hover { background: rgba(255,255,255,0.03); }
@@ -1227,7 +1240,7 @@ struct WarningOpportunityRow {
       }
 
       .metric-big { font-size: 20px !important; }
-      .metric-exact { font-size: 9px !important; bottom: 5px !important; right: 8px !important; }
+      .metric-exact { font-size: 10px !important; bottom: 5px !important; right: 8px !important; }
       .metric-label { font-size: 10px !important; }
 
       /* Page break control — small atomic cards stay together; large panels
@@ -1385,13 +1398,11 @@ struct WarningOpportunityRow {
     .chart-controls label { font-size:13px; font-weight:700; color:var(--muted); display:flex; align-items:center; gap:6px; }
     .chart-select { background:var(--surface-2); border:1px solid var(--line-strong); border-radius:8px; padding:5px 10px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer; outline:none; appearance:auto; }
     .chart-select:focus { border-color:var(--accent); }
-    .chart-container { width:100%; overflow-x:auto; }
-    .chart-container svg { display:block; width:100%; height:auto; }
+    .chart-container { width:100%; overflow:visible; }
     .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:stretch; }
     .charts-grid > .panel { margin:0; display:flex; flex-direction:column; }
     .charts-grid .chart-section > div { display:flex; flex-direction:column; flex:1; }
     .charts-grid .chart-container { flex:1; min-height:180px; }
-    #submodule-chart { max-height: 360px; overflow-y: auto; }
     @media (max-width:820px) { .charts-grid { grid-template-columns:1fr; } }
     .chart-tab-bar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
     .chart-tab { padding:5px 16px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer; transition:background 0.12s,color 0.12s,border-color 0.12s; }
@@ -1409,6 +1420,7 @@ struct WarningOpportunityRow {
     }
 
 </style>
+<script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
 </head>
 <body{% if report_header_footer.is_some() %} class="has-report-banner"{% endif %}>
   <div class="background-watermarks" aria-hidden="true">
@@ -1538,6 +1550,7 @@ struct WarningOpportunityRow {
         <div class="metric" data-metric-value="{{ run.summary_totals.imports }}"><div class="metric-tooltip">Best-effort count of import, include, and module-use statements.</div><div class="metric-label">Imports</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-value="{{ run.summary_totals.test_count }}"><div class="metric-tooltip">Best-effort count of test cases detected by framework pattern (GTest, PyTest, JUnit, etc.).</div><div class="metric-label">Tests</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-density><div class="metric-tooltip">Percentage of physical lines that contain executable source code — higher means a leaner, code-dense codebase.</div><div class="metric-label">Code density</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        <div class="metric" data-metric-value="{{ run.summary_totals.files_analyzed }}"><div class="metric-tooltip">Total number of source files included in this analysis.</div><div class="metric-label">Files analyzed</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
       </div>
     </section>
 
@@ -1572,7 +1585,7 @@ struct WarningOpportunityRow {
                 </select>
               </label>
             </div>
-            <div id="overview-chart" class="chart-container"></div>
+            <div id="overview-chart" class="chart-container"><div id="canvas-proj-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-proj"></canvas></div></div>
             <div class="chart-locked-card" id="overview-chart-locked">
               <h3>Historical trend requires the web UI</h3>
               <p style="margin:0">Run <code>oxide-sloc serve</code> and navigate to <strong>/trend-report</strong> to view per-commit, per-tag, per-release, and cross-repo comparisons on an interactive timeline chart. The web UI stores scan history and can plot any metric over time.</p>
@@ -1590,7 +1603,7 @@ struct WarningOpportunityRow {
               <button type="button" class="chart-tab active" data-comp-tab="absolute">Absolute Lines</button>
               <button type="button" class="chart-tab" data-comp-tab="pct">Composition %</button>
             </div>
-            <div id="composition-chart" class="chart-container"></div>
+            <div id="composition-chart" class="chart-container"><div id="canvas-comp-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-comp"></canvas></div></div>
           </div>
         </section>
       </div>
@@ -1603,7 +1616,7 @@ struct WarningOpportunityRow {
               <div class="toolbar-left"><h2>File Count vs SLOC</h2></div>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Each bubble is a language. X&nbsp;=&nbsp;files analyzed, Y&nbsp;=&nbsp;code lines, bubble size&nbsp;∝&nbsp;total physical lines.</p>
-            <div id="scatter-chart" class="chart-container"></div>
+            <div id="scatter-chart" class="chart-container" style="position:relative;height:324px;"><canvas id="canvas-scatter"></canvas></div>
           </div>
         </section>
 
@@ -1625,7 +1638,7 @@ struct WarningOpportunityRow {
                 </select>
               </label>
             </div>
-            <div id="semantic-chart" class="chart-container"></div>
+            <div id="semantic-chart" class="chart-container" style="position:relative;height:234px;"><canvas id="canvas-semantic"></canvas></div>
           </div>
         </section>
         {% endif %}
@@ -1657,7 +1670,7 @@ struct WarningOpportunityRow {
               </select>
             </label>
           </div>
-          <div id="submodule-chart" class="chart-container"></div>
+          <div id="submodule-chart" class="chart-container"><div id="canvas-sub-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-sub"></canvas></div></div>
         </div>
       </section>
       {% endif %}
@@ -1665,9 +1678,18 @@ struct WarningOpportunityRow {
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
-          <div id="lang-overview-charts" style="margin:0 0 16px;"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;margin:0 0 16px;">
+            <div>
+              <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;">Code Lines by Language</p>
+              <div style="position:relative;height:270px;"><canvas id="canvas-donut"></canvas></div>
+            </div>
+            <div>
+              <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;">Line Mix per Language</p>
+              <div id="canvas-linemix-container" style="position:relative;min-height:100px;"><canvas id="canvas-linemix"></canvas></div>
+            </div>
+          </div>
           <div class="table-shell">
-            <table data-sort-table>
+            <table id="lang-breakdown-table" data-sort-table>
               <thead>
                 <tr>
                   <th data-sort-type="text">Language</th>
@@ -1687,7 +1709,7 @@ struct WarningOpportunityRow {
               <tbody>
                 {% for row in language_rows %}
                 <tr>
-                  <td>{{ row.language }}</td>
+                  <td title="{{ row.language }}">{{ row.language }}</td>
                   <td>{{ row.files }}</td>
                   <td>{{ row.total_physical_lines }}</td>
                   <td>{{ row.code_lines }}</td>
@@ -1712,7 +1734,7 @@ struct WarningOpportunityRow {
         <div class="table-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <colgroup>
-              <col><col><col><col><col><col><col><col><col><col><col>
+              <col><col><col><col><col><col><col><col><col><col><col><col>
             </colgroup>
             <thead>
               <tr>
@@ -1735,7 +1757,7 @@ struct WarningOpportunityRow {
               {% for row in file_rows %}
               <tr>
                 <td class="mono" title="{{ row.relative_path }}">{{ row.relative_path }}</td>
-                <td>{{ row.language }}</td>
+                <td title="{{ row.language }}">{{ row.language }}</td>
                 <td class="num-col">{{ row.total_physical_lines }}</td>
                 <td class="num-col">{{ row.code_lines }}</td>
                 <td class="num-col">{{ row.comment_lines }}</td>
@@ -1756,7 +1778,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." data-table-filter="skipped-table" /></div></div>
-        <div class="table-shell" style="margin-top:6px;max-height:441px;">
+        <div class="table-shell" style="margin-top:6px;max-height:309px;">
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
@@ -1768,9 +1790,9 @@ struct WarningOpportunityRow {
             <tbody>
               {% for row in skipped_rows %}
               <tr>
-                <td class="mono">{{ row.relative_path }}</td>
+                <td class="mono" title="{{ row.relative_path }}">{{ row.relative_path }}</td>
                 <td><span class="status-tag status-{{ row.status_class }}">{{ row.status }}</span></td>
-                <td class="small">{{ row.warnings }}</td>
+                <td class="small" title="{{ row.warnings }}">{{ row.warnings }}</td>
               </tr>
               {% endfor %}
             </tbody>
@@ -1819,9 +1841,9 @@ struct WarningOpportunityRow {
               <tbody>
                 {% for row in warning_opportunity_rows %}
                 <tr>
-                  <td>{{ row.label }}</td>
+                  <td title="{{ row.label }}">{{ row.label }}</td>
                   <td>{{ row.count }}</td>
-                  <td class="small">{{ row.recommendation }}</td>
+                  <td class="small" title="{{ row.recommendation }}">{{ row.recommendation }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -2126,451 +2148,475 @@ struct WarningOpportunityRow {
     function getReportExportRows(){var r=[];document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<11)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim(),tds[3].textContent.trim(),tds[4].textContent.trim(),tds[5].textContent.trim(),tds[6].textContent.trim(),tds[7].textContent.trim(),tds[8].textContent.trim(),tds[9].textContent.trim(),tds[10].textContent.trim()]);});return r;}
     window.exportReportCsv=function(){slocCsv('report-per-file.csv',_rh,getReportExportRows());};
     window.exportReportXls=function(){slocXls('report-per-file.xlsx','Per-File Detail',_rh,getReportExportRows());};
-    // ── Language overview charts ─────────────────────────────────────────────
-    (function(){
-      var D={{ lang_chart_json|safe }};
-      if(!D||!D.length)return;
-      var el=document.getElementById('lang-overview-charts');
-      if(!el)return;
-      var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
-      var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082'];
-      var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-      function fmt(n){return Number(n).toLocaleString();}
-      function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-      function px(n){return Math.round(n);}
-      // Floating tooltip (adapts to light/dark theme via CSS variables)
-      var tt=document.createElement('div');
-      tt.style.cssText='display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:9999;max-width:240px;color:var(--text);';
-      document.body.appendChild(tt);
-      function showTT(e,html){tt.innerHTML=html;tt.style.display='block';moveTT(e);}
-      function moveTT(e){var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}
-      function hideTT(){tt.style.display='none';}
-      // Code lines donut — larger radius and legend area for legibility
-      var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
-      var cx=120,cy=120,Ro=100,Ri=54,DW=420,DH=Math.max(270,24+D.length*22);
-      // overflow:visible lets scale(1.06) hover expand beyond the SVG bounds
-      var ds='<svg viewBox="0 0 '+DW+' '+DH+'" style="display:block;overflow:visible;width:100%;height:auto;" xmlns="http://www.w3.org/2000/svg">';
-      if(D.length===1){
-        // Single language: full-circle arc paths can degenerate in some renderers; use a stroked circle instead
-        var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
-        ds+='<circle class="donut-seg" data-lang="'+esc(D[0].lang)+'" data-code="'+D[0].code+'" data-pct="100" cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'" style="cursor:pointer;"/>';
-      } else {
-        var ang=-Math.PI/2;
-        D.forEach(function(d,i){
-          var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
-          var x1=cx+Ro*Math.cos(ang),y1=cy+Ro*Math.sin(ang);
-          var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
-          var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
-          var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
-          var pct=Math.round(d.code/tot*100);
-          ds+='<path class="donut-seg" data-lang="'+esc(d.lang)+'" data-code="'+d.code+'" data-pct="'+pct+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2" style="cursor:pointer;"/>';
-          ang+=sw;
-        });
-      }
-      ds+='<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="22" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
-      ds+='<text x="'+cx+'" y="'+(cy+16)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
-      D.forEach(function(d,i){
-        var ly=12+i*22;
-        if(ly+16>DH)return;
-        ds+='<rect x="'+(cx+Ro+14)+'" y="'+ly+'" width="13" height="13" fill="'+(COLS[i%COLS.length])+'" rx="3"/>';
-        ds+='<text x="'+(cx+Ro+32)+'" y="'+(ly+11)+'" font-family="'+FONT+'" font-size="12" fill="#43342d">'+esc(d.lang)+'</text>';
-      });
-      ds+='</svg>';
-      // Per-language stacked bar — wider bars and labels for legibility
-      var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
-      var LW=104,BW=280,rHb=30,bH=22,SH=D.length*rHb+36;
-      var bs='<svg viewBox="0 0 '+(LW+BW+62)+' '+SH+'" style="display:block;overflow:visible;width:100%;height:auto;" xmlns="http://www.w3.org/2000/svg">';
-      D.forEach(function(d,i){
-        var y=10+i*rHb,x=LW;
-        var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
-        bs+='<g class="bar-row" data-lang="'+esc(d.lang)+'" data-code="'+d.code+'" data-comments="'+d.comments+'" data-blanks="'+d.blanks+'">';
-        bs+='<rect class="bar-hover-bg" x="0" y="'+y+'" width="'+(LW+BW+62)+'" height="'+rHb+'" fill="transparent" rx="3"/>';
-        bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-        bs+='<g class="bar-anim" data-bar-x="'+LW+'">';
-        if(cW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="2"/>';x+=cW;
-        if(cmW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="2"/>';x+=cmW;
-        if(blW>0)bs+='<rect x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="2"/>';
-        bs+='</g>';
-        bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
-        bs+='</g>';
-      });
-      var ly=SH-16;
-      bs+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
-      bs+='<rect x="'+(LW+56)+'" y="'+ly+'" width="10" height="10" fill="'+GN+'"/><text x="'+(LW+70)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
-      bs+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
-      bs+='</svg>';
-      var lbl='font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;';
-      el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">'+
-        '<div style="min-width:0;text-align:center;"><p style="'+lbl+'">Code Lines by Language</p>'+ds+'</div>'+
-        '<div style="min-width:0;text-align:center;"><p style="'+lbl+'">Line Mix per Language</p>'+bs+'</div>'+
-      '</div>';
-      // Donut segment: entry fade-in + hover scale/brighten
-      el.querySelectorAll('.donut-seg').forEach(function(seg,i){
-        // transform-box:view-box makes transform-origin relative to the SVG viewBox,
-        // so scale() expands each segment outward from the donut centre (cx,cy)
-        seg.style.transformBox='view-box';
-        seg.style.transformOrigin=cx+'px '+cy+'px';
-        seg.style.opacity='0';
-        setTimeout(function(){
-          seg.style.transition='opacity 0.3s ease,transform 0.15s ease,filter 0.15s ease';
-          seg.style.opacity='1';
-        },60+i*55);
-        setTimeout(function(){
-          seg.style.transition='transform 0.15s ease,filter 0.15s ease';
-        },60+i*55+380);
-        seg.addEventListener('mouseover',function(e){
-          this.style.transform='scale(1.06)';
-          this.style.filter='brightness(1.18)';
-          showTT(e,'<strong style="display:block;font-size:13px;margin-bottom:3px;">'+this.dataset.lang+'</strong>'+fmt(Number(this.dataset.code))+' code lines<br><span style="opacity:0.65">('+this.dataset.pct+'% of total)</span>');
-        });
-        seg.addEventListener('mouseout',function(){
-          this.style.transform='';
-          this.style.filter='';
-          hideTT();
-        });
-        seg.addEventListener('mousemove',moveTT);
-      });
-      // Bar row: entry grow-from-left + hover highlight + tooltip
-      el.querySelectorAll('.bar-anim').forEach(function(g,i){
-        // transform-origin at the left edge of the bar area so scaleX grows rightward
-        g.style.transformBox='view-box';
-        g.style.transformOrigin=g.dataset.barX+'px 0px';
-        g.style.transform='scaleX(0)';
-        setTimeout(function(){
-          g.style.transition='transform 0.45s cubic-bezier(0.25,0.46,0.45,0.94)';
-          g.style.transform='scaleX(1)';
-        },80+i*55);
-        setTimeout(function(){
-          g.style.transition='';
-        },80+i*55+500);
-      });
-      el.querySelectorAll('.bar-row').forEach(function(row){
-        var bg=row.querySelector('.bar-hover-bg');
-        var segs=row.querySelectorAll('.bar-anim rect');
-        row.style.cursor='default';
-        row.addEventListener('mouseover',function(e){
-          if(bg)bg.setAttribute('fill','rgba(184,93,51,0.07)');
-          segs.forEach(function(r){r.style.filter='brightness(1.12)';});
-          showTT(e,
-            '<strong style="display:block;font-size:13px;margin-bottom:4px;">'+row.dataset.lang+'</strong>'+
-            '<span style="color:'+OX+'">&#9632;</span> Code: <strong>'+fmt(Number(row.dataset.code))+'</strong><br>'+
-            '<span style="color:'+GN+'">&#9632;</span> Comments: <strong>'+fmt(Number(row.dataset.comments))+'</strong><br>'+
-            '<span style="color:'+GY+'">&#9632;</span> Blanks: <strong>'+fmt(Number(row.dataset.blanks))+'</strong>'
-          );
-        });
-        row.addEventListener('mouseout',function(){
-          if(bg)bg.setAttribute('fill','transparent');
-          segs.forEach(function(r){r.style.filter='';});
-          hideTT();
-        });
-        row.addEventListener('mousemove',moveTT);
-      });
-    })();
-
-    // ── New interactive charts ────────────────────────────────────────────────
-    (function(){
-      var LANG_D = {{ lang_chart_json|safe }};
-      var SUB_D  = {{ submodule_chart_json|safe }};
+    // ── Chart.js initialization ───────────────────────────────────────────────
+    (function() {
+      var D = {{ lang_chart_json|safe }};
+      var SUB_D = {{ submodule_chart_json|safe }};
       var SCAT_D = {{ scatter_chart_json|safe }};
-      var SEM_D  = {{ semantic_chart_json|safe }};
+      var SEM_D = {{ semantic_chart_json|safe }};
+      if (!D || !D.length) return;
 
-      var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-      var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030',
-                '#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082',
-                '#D0743C','#5BA8A0','#8B3A8B','#3D7A3D','#AA5500','#005599',
-                '#996600','#660066'];
-      var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
+      var PALETTE = ['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030',
+                     '#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082',
+                     '#D0743C','#5BA8A0','#8B3A8B','#3D7A3D','#AA5500','#005599'];
+      var OX = '#C45C10', GN = '#2A6846', GY = '#BBBBBB';
+      var ALL_CHARTS = [];
 
-      function fmt(n){return Number(n).toLocaleString();}
-      function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-      function px(n){return Math.round(n);}
-      function colAt(i){return COLS[i%COLS.length];}
-
-      // Shared tooltip (reuse existing tt element already added by lang chart code)
-      var tt=document.querySelector('div[style*="z-index:9999"]');
-      if(!tt){tt=document.createElement('div');tt.style.cssText='display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:9999;max-width:240px;color:var(--text);';document.body.appendChild(tt);}
-      function showTT(e,html){tt.innerHTML=html;tt.style.display='block';moveTT(e);}
-      function moveTT(e){var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}
-      function hideTT(){tt.style.display='none';}
-
-      // ── Horizontal bar chart (overview & submodule) ──────────────────────────
-      function renderHBar(containerId, data, labelKey, valueKey, colorFn, labelTitle) {
-        var el=document.getElementById(containerId);
-        if(!el||!data||!data.length)return;
-        var maxV=Math.max.apply(null,data.map(function(d){return d[valueKey]||0;}))||1;
-        var LW=120, BW=320, rH=32, pad=8, SH=data.length*rH+40;
-        var W=LW+BW+80;
-        var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
-        // Title strip
-        svg+='<text x="0" y="14" font-family="'+FONT+'" font-size="10" font-weight="800" fill="#7b675b" text-transform="uppercase">'+esc(labelTitle||labelKey)+'</text>';
-        svg+='<text x="'+(LW+BW+4)+'" y="14" font-family="'+FONT+'" font-size="10" font-weight="800" fill="#7b675b">'+(valueKey.toUpperCase())+'</text>';
-        data.forEach(function(d,i){
-          var y=20+i*rH, v=d[valueKey]||0;
-          var bW=Math.round(v/maxV*BW);
-          var col=typeof colorFn==='function'?colorFn(i,d):colAt(i);
-          svg+='<g class="hbar-row" data-label="'+esc(String(d[labelKey]))+'" data-value="'+v+'" style="cursor:default;">';
-          svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
-          svg+='<text x="'+(LW-6)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(String(d[labelKey]))+'</text>';
-          if(bW>0)svg+='<rect class="hbar-fill" x="'+LW+'" y="'+(y+4)+'" width="'+bW+'" height="'+(rH-8)+'" fill="'+col+'" rx="3"/>';
-          svg+='<text x="'+(LW+bW+6)+'" y="'+(y+rH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(v)+'</text>';
-          svg+='</g>';
-        });
-        svg+='</svg>';
-        el.innerHTML=svg;
-        el.querySelectorAll('.hbar-row').forEach(function(row){
-          var fill=row.querySelector('.hbar-fill');
-          row.addEventListener('mouseover',function(e){
-            if(fill)fill.style.filter='brightness(1.15)';
-            showTT(e,'<strong style="display:block;font-size:13px;margin-bottom:3px;">'+row.dataset.label+'</strong>'+fmt(Number(row.dataset.value))+' '+valueKey);
-          });
-          row.addEventListener('mouseout',function(){if(fill)fill.style.filter='';hideTT();});
-          row.addEventListener('mousemove',moveTT);
-        });
+      function fmt(n) {
+        var v = Number(n), a = Math.abs(v);
+        if (a >= 1e6) return (v/1e6).toFixed(1).replace(/\.0$/,'') + 'M';
+        if (a >= 1e4) return Math.round(v/1e3) + 'K';
+        return v.toLocaleString();
+      }
+      function isDark() { return document.body.classList.contains('dark-theme'); }
+      function clr() {
+        return isDark()
+          ? { text: '#d4c5b8', grid: 'rgba(255,255,255,0.10)' }
+          : { text: '#43342d', grid: '#e6d0bf' };
       }
 
-      // ── Overview chart ───────────────────────────────────────────────────────
-      var ySel=document.getElementById('overview-y-axis');
-      var xSel=document.getElementById('overview-x-mode');
-      var overviewEl=document.getElementById('overview-chart');
-      var lockedEl=document.getElementById('overview-chart-locked');
-
-      var Y_LABELS={'code':'Code Lines','comments':'Comment Lines','blanks':'Blank Lines','physical':'Physical Lines','files':'Files','comment':'Comment Lines','blank':'Blank Lines'};
-
-      function renderOverview(){
-        if(!ySel||!xSel)return;
-        var yKey=ySel.value, mode=xSel.value;
-        var isHistory=mode.indexOf('history')===0;
-        if(overviewEl)overviewEl.style.display=isHistory?'none':'block';
-        if(lockedEl)lockedEl.style.display=isHistory?'block':'none';
-        if(isHistory)return;
-        var data=mode==='submodules'?SUB_D:LANG_D;
-        var lKey=mode==='submodules'?'name':'lang';
-        var sorted=data.slice().sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
-        renderHBar('overview-chart',sorted,lKey,yKey,function(i){return colAt(i);},(Y_LABELS[yKey]||yKey)+' by '+(mode==='submodules'?'Submodule':'Language'));
-      }
-
-      if(ySel)ySel.addEventListener('change',renderOverview);
-      if(xSel)xSel.addEventListener('change',renderOverview);
-      renderOverview();
-
-      // ── Submodule chart ──────────────────────────────────────────────────────
-      var subYSel=document.getElementById('sub-y-axis');
-      var subSortSel=document.getElementById('sub-sort');
-
-      var SUB_COLOR_MAP={'code':OX,'comment':GN,'blank':GY,'physical':'#4472C4','files':'#805099'};
-
-      function renderSubmodule(){
-        if(!SUB_D||!SUB_D.length)return;
-        var yKey=subYSel?subYSel.value:'code';
-        var sortMode=subSortSel?subSortSel.value:'desc';
-        var data=SUB_D.slice();
-        if(sortMode==='desc')data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
-        else if(sortMode==='asc')data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
-        else data.sort(function(a,b){return a.name.localeCompare(b.name);});
-        data=data.slice(0,30);
-        var col=SUB_COLOR_MAP[yKey]||OX;
-        var el=document.getElementById('submodule-chart');
-        if(!el)return;
-        var maxV=Math.max.apply(null,data.map(function(d){return d[yKey]||0;}))||1;
-        var LW=130, BW=320, rH=24, SH=data.length*rH+32;
-        var W=LW+BW+90;
-        var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
-        data.forEach(function(d,i){
-          var y=10+i*rH, v=d[yKey]||0, bW=Math.round(v/maxV*BW);
-          svg+='<g class="sub-row" data-name="'+esc(d.name)+'" data-path="'+esc(d.path)+'" data-code="'+d.code+'" data-comment="'+d.comment+'" data-blank="'+d.blank+'" data-physical="'+d.physical+'" data-files="'+d.files+'" style="cursor:default;">';
-          svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
-          svg+='<text x="'+(LW-8)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" font-weight="600" fill="#43342d">'+esc(d.name)+'</text>';
-          if(bW>0)svg+='<rect class="sub-fill" x="'+LW+'" y="'+(y+4)+'" width="'+bW+'" height="'+(rH-8)+'" fill="'+col+'" rx="2"/>';
-          svg+='<text x="'+(LW+bW+6)+'" y="'+(y+rH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(v)+'</text>';
-          svg+='</g>';
+      // ── Donut chart ────────────────────────────────────────────────────────────
+      (function() {
+        var canvas = document.getElementById('canvas-donut');
+        if (!canvas) return;
+        var c = clr();
+        var chart = new Chart(canvas, {
+          type: 'doughnut',
+          data: {
+            labels: D.map(function(d) { return d.lang; }),
+            datasets: [{
+              data: D.map(function(d) { return d.code; }),
+              backgroundColor: D.map(function(_, i) { return PALETTE[i % PALETTE.length]; }),
+              hoverOffset: 8, borderWidth: 2, borderColor: '#ffffff'
+            }]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false, cutout: '54%',
+            animation: { duration: 500, easing: 'easeOutQuart' },
+            plugins: {
+              legend: { position: 'right', labels: { color: c.text, font: { size: 12 }, padding: 10 } },
+              tooltip: {
+                callbacks: {
+                  title: function(items) { return items[0].label; },
+                  label: function(ctx) {
+                    var tot = ctx.dataset.data.reduce(function(a,b){return a+b;},0) || 1;
+                    var pct = (ctx.parsed/tot*100).toFixed(1);
+                    return '  Code lines: ' + Number(ctx.parsed).toLocaleString() + '  (' + pct + '% of total)';
+                  }
+                }
+              }
+            }
+          }
         });
-        // Legend
-        var ly=SH-18;
-        svg+='<rect x="'+LW+'" y="'+ly+'" width="12" height="12" fill="'+col+'" rx="2"/>';
-        svg+='<text x="'+(LW+16)+'" y="'+(ly+11)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#43342d">'+(Y_LABELS[yKey]||yKey)+'</text>';
-        svg+='</svg>';
-        el.innerHTML=svg;
-        el.querySelectorAll('.sub-row').forEach(function(row){
-          var fill=row.querySelector('.sub-fill');
-          row.addEventListener('mouseover',function(e){
-            if(fill)fill.style.filter='brightness(1.15)';
-            showTT(e,
-              '<strong style="display:block;font-size:13px;margin-bottom:4px;">'+row.dataset.name+'</strong>'+
-              '<span style="color:'+OX+'">&#9632;</span> Code: <strong>'+fmt(Number(row.dataset.code))+'</strong><br>'+
-              '<span style="color:'+GN+'">&#9632;</span> Comments: <strong>'+fmt(Number(row.dataset.comment))+'</strong><br>'+
-              '<span style="color:'+GY+'">&#9632;</span> Blanks: <strong>'+fmt(Number(row.dataset.blank))+'</strong><br>'+
-              'Physical: <strong>'+fmt(Number(row.dataset.physical))+'</strong> &nbsp;|&nbsp; Files: <strong>'+fmt(Number(row.dataset.files))+'</strong>'
-            );
-          });
-          row.addEventListener('mouseout',function(){if(fill)fill.style.filter='';hideTT();});
-          row.addEventListener('mousemove',moveTT);
-        });
-      }
-
-      if(subYSel)subYSel.addEventListener('change',renderSubmodule);
-      if(subSortSel)subSortSel.addEventListener('change',renderSubmodule);
-      renderSubmodule();
-
-      // ── Composition chart (absolute + 100% normalized) ───────────────────────
-      var compMode='absolute';
-      var compEl=document.getElementById('composition-chart');
-
-      function renderComposition(){
-        if(!LANG_D||!LANG_D.length||!compEl)return;
-        var isPct=compMode==='pct';
-        var data=LANG_D.slice(0,15);
-        var rH=28, LW=110, BW=300, SH=data.length*rH+44;
-        var W=LW+BW+80;
-        var svg='<svg viewBox="0 0 '+W+' '+SH+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
-        data.forEach(function(d,i){
-          var y=10+i*rH;
-          var total=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
-          var norm=isPct?total:Math.max.apply(null,data.map(function(r){return (r.code||0)+(r.comments||0)+(r.blanks||0);}));
-          var scale=BW/norm;
-          var cW=Math.round((d.code||0)*scale), cmW=Math.round((d.comments||0)*scale), blW=Math.round((d.blanks||0)*scale);
-          if(isPct){cW=Math.round((d.code||0)/total*BW);cmW=Math.round((d.comments||0)/total*BW);blW=Math.round((d.blanks||0)/total*BW);}
-          var x=LW;
-          svg+='<g class="comp-row" data-lang="'+esc(d.lang)+'" data-code="'+d.code+'" data-comments="'+d.comments+'" data-blanks="'+d.blanks+'" style="cursor:default;">';
-          svg+='<rect x="0" y="'+y+'" width="'+W+'" height="'+rH+'" fill="transparent"/>';
-          svg+='<text x="'+(LW-6)+'" y="'+(y+rH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0){svg+='<rect x="'+px(x)+'" y="'+(y+4)+'" width="'+px(cW)+'" height="'+(rH-8)+'" fill="'+OX+'" rx="2"/>';x+=cW;}
-          if(cmW>0){svg+='<rect x="'+px(x)+'" y="'+(y+4)+'" width="'+px(cmW)+'" height="'+(rH-8)+'" fill="'+GN+'" rx="2"/>';x+=cmW;}
-          if(blW>0)svg+='<rect x="'+px(x)+'" y="'+(y+4)+'" width="'+px(blW)+'" height="'+(rH-8)+'" fill="'+GY+'" rx="2"/>';
-          svg+='</g>';
-        });
-        var ly=SH-18;
-        svg+='<rect x="'+LW+'" y="'+ly+'" width="10" height="10" fill="'+OX+'"/><text x="'+(LW+14)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
-        svg+='<rect x="'+(LW+56)+'" y="'+ly+'" width="10" height="10" fill="'+GN+'"/><text x="'+(LW+70)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
-        svg+='<rect x="'+(LW+158)+'" y="'+ly+'" width="10" height="10" fill="'+GY+'"/><text x="'+(LW+172)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
-        svg+='</svg>';
-        compEl.innerHTML=svg;
-        compEl.querySelectorAll('.comp-row').forEach(function(row){
-          var total=(Number(row.dataset.code)||0)+(Number(row.dataset.comments)||0)+(Number(row.dataset.blanks)||0)||1;
-          row.addEventListener('mouseover',function(e){
-            var c=Number(row.dataset.code),cm=Number(row.dataset.comments),bl=Number(row.dataset.blanks);
-            showTT(e,
-              '<strong style="display:block;font-size:13px;margin-bottom:4px;">'+row.dataset.lang+'</strong>'+
-              '<span style="color:'+OX+'">&#9632;</span> Code: <strong>'+fmt(c)+'</strong> ('+(c/total*100).toFixed(1)+'%)<br>'+
-              '<span style="color:'+GN+'">&#9632;</span> Comments: <strong>'+fmt(cm)+'</strong> ('+(cm/total*100).toFixed(1)+'%)<br>'+
-              '<span style="color:'+GY+'">&#9632;</span> Blanks: <strong>'+fmt(bl)+'</strong> ('+(bl/total*100).toFixed(1)+'%)'
-            );
-          });
-          row.addEventListener('mouseout',hideTT);
-          row.addEventListener('mousemove',moveTT);
-        });
-      }
-
-      document.querySelectorAll('[data-comp-tab]').forEach(function(btn){
-        btn.addEventListener('click',function(){
-          document.querySelectorAll('[data-comp-tab]').forEach(function(b){b.classList.remove('active');});
-          btn.classList.add('active');
-          compMode=btn.getAttribute('data-comp-tab');
-          renderComposition();
-        });
-      });
-      renderComposition();
-
-      // ── Scatter / bubble chart ───────────────────────────────────────────────
-      (function(){
-        var el=document.getElementById('scatter-chart');
-        if(!el||!SCAT_D||!SCAT_D.length)return;
-        var W=520, H=340, PL=60, PR=20, PT=20, PB=48;
-        var CW=W-PL-PR, CH=H-PT-PB;
-        var maxX=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}));
-        var maxY=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}));
-        var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
-        maxX=maxX||1; maxY=maxY||1;
-        var svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
-        // Grid lines
-        var yTicks=5;
-        for(var ti=0;ti<=yTicks;ti++){
-          var gy=PT+CH-Math.round(ti/yTicks*CH);
-          var gv=Math.round(ti/yTicks*maxY);
-          svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(PL+CW)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
-          svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+fmt(gv)+'</text>';
-        }
-        var xTicks=5;
-        for(var xi=0;xi<=xTicks;xi++){
-          var gx=PL+Math.round(xi/xTicks*CW);
-          var xv=Math.round(xi/xTicks*maxX);
-          svg+='<line x1="'+gx+'" y1="'+PT+'" x2="'+gx+'" y2="'+(PT+CH)+'" stroke="#e6d0bf" stroke-width="1"/>';
-          svg+='<text x="'+gx+'" y="'+(PT+CH+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+xv+'</text>';
-        }
-        // Axis labels
-        svg+='<text x="'+(PL+CW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">Files Analyzed</text>';
-        svg+='<text x="12" y="'+(PT+CH/2)+'" text-anchor="middle" transform="rotate(-90,12,'+(PT+CH/2)+')" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">Code Lines</text>';
-        // Bubbles
-        SCAT_D.forEach(function(d,i){
-          var bx=PL+Math.round((d.files/maxX)*CW);
-          var by=PT+CH-Math.round((d.code/maxY)*CH);
-          var r=Math.max(6,Math.round(Math.sqrt(d.physical/maxP)*28));
-          svg+='<circle class="bubble" cx="'+bx+'" cy="'+by+'" r="'+r+'" fill="'+colAt(i)+'" fill-opacity="0.72" stroke="white" stroke-width="1.5" style="cursor:pointer;" data-lang="'+esc(d.lang)+'" data-files="'+d.files+'" data-code="'+d.code+'" data-physical="'+d.physical+'"/>';
-          if(r>10)svg+='<text x="'+bx+'" y="'+(by+r+12)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" fill="#43342d" style="pointer-events:none;">'+esc(d.lang)+'</text>';
-        });
-        svg+='</svg>';
-        el.innerHTML=svg;
-        el.querySelectorAll('.bubble').forEach(function(c){
-          c.addEventListener('mouseover',function(e){
-            this.setAttribute('fill-opacity','0.92');
-            showTT(e,
-              '<strong style="display:block;font-size:13px;margin-bottom:3px;">'+this.dataset.lang+'</strong>'+
-              'Files: <strong>'+fmt(Number(this.dataset.files))+'</strong><br>'+
-              'Code lines: <strong>'+fmt(Number(this.dataset.code))+'</strong><br>'+
-              'Physical lines: <strong>'+fmt(Number(this.dataset.physical))+'</strong>'
-            );
-          });
-          c.addEventListener('mouseout',function(){this.setAttribute('fill-opacity','0.72');hideTT();});
-          c.addEventListener('mousemove',moveTT);
-        });
+        ALL_CHARTS.push(chart);
       })();
 
-      // ── Semantic metrics chart ───────────────────────────────────────────────
-      var semSel=document.getElementById('semantic-metric');
-      var semEl=document.getElementById('semantic-chart');
+      // ── Line Mix stacked bar ─────────────────────────────────────────────────
+      (function() {
+        var canvas = document.getElementById('canvas-linemix');
+        var wrap = document.getElementById('canvas-linemix-container');
+        if (!canvas) return;
+        var h = Math.max(90, Math.min(432, D.length * 32 + 36));
+        if (wrap) wrap.style.height = h + 'px';
+        var c = clr();
+        var chart = new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: D.map(function(d) { return d.lang; }),
+            datasets: [
+              { label: 'Code',     data: D.map(function(d){return d.code;}),     backgroundColor: OX, borderRadius: 3 },
+              { label: 'Comments', data: D.map(function(d){return d.comments;}), backgroundColor: GN, borderRadius: 3 },
+              { label: 'Blanks',   data: D.map(function(d){return d.blanks;}),   backgroundColor: GY, borderRadius: 3 }
+            ]
+          },
+          options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            animation: { duration: 500, easing: 'easeOutQuart' },
+            scales: {
+              x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} } },
+              y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
+            },
+            plugins: {
+              legend: { position: 'bottom', labels: { color: c.text } },
+              tooltip: {
+                mode: 'index', intersect: false,
+                callbacks: {
+                  title: function(items) { return items.length ? items[0].label : ''; },
+                  label: function(ctx) { return '  ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.x); },
+                  footer: function(items) {
+                    var tot = items.reduce(function(s, i){ return s + (i.parsed.x||0); }, 0);
+                    return 'Total: ' + Number(tot).toLocaleString() + ' lines';
+                  }
+                }
+              }
+            }
+          }
+        });
+        ALL_CHARTS.push(chart);
+      })();
 
-      function renderSemantic(){
-        if(!semEl||!SEM_D||!SEM_D.length)return;
-        var mKey=semSel?semSel.value:'functions';
-        var data=SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);}).slice(0,15);
-        var maxV=Math.max.apply(null,data.map(function(d){return d[mKey]||0;}))||1;
-        var barW=36, gap=8, PL=40, PT=16, PB=60, BH=200;
-        var W=PL+(barW+gap)*data.length+20, H=PT+BH+PB;
-        var SEM_COLS={'functions':OX,'classes':'#4472C4','variables':GN,'imports':'#805099'};
-        var col=SEM_COLS[mKey]||OX;
-        var svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;overflow:visible;" xmlns="http://www.w3.org/2000/svg">';
-        // Y axis ticks
-        for(var ti=0;ti<=4;ti++){
-          var gy=PT+BH-Math.round(ti/4*BH);
-          var gv=Math.round(ti/4*maxV);
-          svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(W-20)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
-          svg+='<text x="'+(PL-4)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+fmt(gv)+'</text>';
+      // ── Project Overview bar ─────────────────────────────────────────────────
+      var projChart = null;
+      (function() {
+        var ySel = document.getElementById('overview-y-axis');
+        var xSel = document.getElementById('overview-x-mode');
+        var el = document.getElementById('overview-chart');
+        var lockedEl = document.getElementById('overview-chart-locked');
+        var wrap = document.getElementById('canvas-proj-wrap');
+        var canvas = document.getElementById('canvas-proj');
+        if (!canvas || !ySel || !xSel) return;
+        var Y_LABELS = { code:'Code Lines', comments:'Comment Lines', blanks:'Blank Lines',
+                         physical:'Physical Lines', files:'Files', comment:'Comment Lines', blank:'Blank Lines' };
+        function getData() {
+          var yKey = ySel.value, mode = xSel.value;
+          var src = mode === 'submodules' ? SUB_D : D;
+          var lKey = mode === 'submodules' ? 'name' : 'lang';
+          var sorted = src.slice().sort(function(a,b){ return (b[yKey]||0)-(a[yKey]||0); });
+          return { sorted: sorted, lKey: lKey, yKey: yKey, yLabel: Y_LABELS[yKey]||yKey };
         }
-        data.forEach(function(d,i){
-          var x=PL+i*(barW+gap), v=d[mKey]||0;
-          var bH=Math.round(v/maxV*BH);
-          svg+='<g class="sem-bar" data-lang="'+esc(d.lang)+'" data-value="'+v+'" style="cursor:default;">';
-          svg+='<rect x="'+x+'" y="'+(PT+BH-bH)+'" width="'+barW+'" height="'+bH+'" fill="'+col+'" rx="3" class="sem-fill"/>';
-          // Rotated label
-          var lx=x+barW/2, ly=PT+BH+8;
-          svg+='<text x="'+lx+'" y="'+ly+'" transform="rotate(40,'+lx+','+ly+')" font-family="'+FONT+'" font-size="10" fill="#43342d">'+esc(d.lang)+'</text>';
-          svg+='</g>';
-        });
-        svg+='</svg>';
-        semEl.innerHTML=svg;
-        semEl.querySelectorAll('.sem-bar').forEach(function(row){
-          var fill=row.querySelector('.sem-fill');
-          row.addEventListener('mouseover',function(e){
-            if(fill)fill.style.filter='brightness(1.15)';
-            showTT(e,'<strong style="display:block;font-size:13px;margin-bottom:3px;">'+row.dataset.lang+'</strong>'+mKey.charAt(0).toUpperCase()+mKey.slice(1)+': <strong>'+fmt(Number(row.dataset.value))+'</strong>');
+        function renderOverview() {
+          var mode = xSel.value, isHist = mode.indexOf('history') === 0;
+          if (el) el.style.display = isHist ? 'none' : 'block';
+          if (lockedEl) lockedEl.style.display = isHist ? 'block' : 'none';
+          if (isHist) return;
+          var r = getData();
+          var c = clr();
+          if (wrap) wrap.style.height = Math.max(90, Math.min(432, r.sorted.length * 29 + 36)) + 'px';
+          if (projChart) {
+            projChart.data.labels = r.sorted.map(function(d){return d[r.lKey];});
+            projChart.data.datasets[0].data = r.sorted.map(function(d){return d[r.yKey]||0;});
+            projChart.data.datasets[0].backgroundColor = r.sorted.map(function(_,i){return PALETTE[i%PALETTE.length];});
+            projChart.data.datasets[0].label = r.yLabel;
+            projChart.options.scales.x.title.text = r.yLabel;
+            projChart.update('none'); return;
+          }
+          projChart = new Chart(canvas, {
+            type: 'bar',
+            data: {
+              labels: r.sorted.map(function(d){return d[r.lKey];}),
+              datasets: [{ label: r.yLabel,
+                data: r.sorted.map(function(d){return d[r.yKey]||0;}),
+                backgroundColor: r.sorted.map(function(_,i){return PALETTE[i%PALETTE.length];}),
+                borderRadius: 3 }]
+            },
+            options: {
+              indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+              animation: { duration: 500, easing: 'easeOutQuart' },
+              scales: {
+                x: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
+                     title: { display: true, text: r.yLabel, color: c.text } },
+                y: { grid: { display: false }, ticks: { color: c.text } }
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    title: function(items) { return items.length ? items[0].label : ''; },
+                    label: function(ctx) {
+                      return '  ' + ctx.dataset.label + ': ' + Number(ctx.parsed.x).toLocaleString();
+                    }
+                  }
+                }
+              }
+            }
           });
-          row.addEventListener('mouseout',function(){if(fill)fill.style.filter='';hideTT();});
-          row.addEventListener('mousemove',moveTT);
-        });
-      }
+          ALL_CHARTS.push(projChart);
+        }
+        ySel.addEventListener('change', renderOverview);
+        xSel.addEventListener('change', renderOverview);
+        renderOverview();
+      })();
 
-      if(semSel)semSel.addEventListener('change',renderSemantic);
-      renderSemantic();
+      // ── Language Composition ─────────────────────────────────────────────────
+      var compChart = null;
+      (function() {
+        var wrap = document.getElementById('canvas-comp-wrap');
+        var canvas = document.getElementById('canvas-comp');
+        if (!canvas) return;
+        var data = D.slice(0, 15);
+        var compMode = 'absolute';
+        if (wrap) wrap.style.height = Math.max(90, Math.min(432, data.length * 25 + 44)) + 'px';
+        function renderComp() {
+          var c = clr(), isPct = compMode === 'pct';
+          var tot = function(d){ return (d.code||0)+(d.comments||0)+(d.blanks||0)||1; };
+          var codeD = data.map(function(d){ return isPct ? (d.code||0)/tot(d)*100 : d.code||0; });
+          var cmD   = data.map(function(d){ return isPct ? (d.comments||0)/tot(d)*100 : d.comments||0; });
+          var blD   = data.map(function(d){ return isPct ? (d.blanks||0)/tot(d)*100 : d.blanks||0; });
+          var tickCb = isPct ? function(v){return v.toFixed(0)+'%';} : function(v){return fmt(v);};
+          if (compChart) {
+            compChart.data.datasets[0].data = codeD;
+            compChart.data.datasets[1].data = cmD;
+            compChart.data.datasets[2].data = blD;
+            compChart.options.scales.x.ticks.callback = tickCb;
+            compChart.update('none'); return;
+          }
+          compChart = new Chart(canvas, {
+            type: 'bar',
+            data: {
+              labels: data.map(function(d){ return d.lang; }),
+              datasets: [
+                { label:'Code',     data: codeD, backgroundColor: OX, borderRadius: 3 },
+                { label:'Comments', data: cmD,   backgroundColor: GN, borderRadius: 3 },
+                { label:'Blanks',   data: blD,   backgroundColor: GY, borderRadius: 3 }
+              ]
+            },
+            options: {
+              indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+              animation: { duration: 500, easing: 'easeOutQuart' },
+              scales: {
+                x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
+                y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
+              },
+              plugins: {
+                legend: { position: 'bottom', labels: { color: c.text } },
+                tooltip: {
+                  mode: 'index', intersect: false,
+                  callbacks: {
+                    title: function(items) { return items.length ? items[0].label : ''; },
+                    label: function(ctx) {
+                      var val = isPct
+                        ? '  ' + ctx.dataset.label + ': ' + ctx.parsed.x.toFixed(1) + '% of physical lines'
+                        : '  ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.x) + ' lines';
+                      return val;
+                    },
+                    footer: function(items) {
+                      if (isPct) return '';
+                      var tot2 = items.reduce(function(s,i){return s+(i.parsed.x||0);},0);
+                      return 'Total: ' + Number(tot2).toLocaleString() + ' lines';
+                    }
+                  }
+                }
+              }
+            }
+          });
+          ALL_CHARTS.push(compChart);
+        }
+        document.querySelectorAll('[data-comp-tab]').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            document.querySelectorAll('[data-comp-tab]').forEach(function(b){b.classList.remove('active');});
+            btn.classList.add('active');
+            compMode = btn.getAttribute('data-comp-tab');
+            renderComp();
+          });
+        });
+        renderComp();
+      })();
+
+      // ── Scatter / Bubble chart ────────────────────────────────────────────────
+      (function() {
+        var canvas = document.getElementById('canvas-scatter');
+        if (!canvas || !SCAT_D || !SCAT_D.length) return;
+        var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
+        var c = clr();
+        var chart = new Chart(canvas, {
+          type: 'bubble',
+          data: {
+            datasets: SCAT_D.map(function(d, i) {
+              return {
+                label: d.lang,
+                data: [{ x: d.files, y: d.code, r: Math.max(5, Math.round(Math.sqrt(d.physical/maxP)*20)) }],
+                backgroundColor: PALETTE[i % PALETTE.length] + 'b8',
+                borderColor: PALETTE[i % PALETTE.length], borderWidth: 1,
+                hoverBorderWidth: 2
+              };
+            })
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            animation: { duration: 500, easing: 'easeOutQuart' },
+            scales: {
+              x: { grid: { color: c.grid }, ticks: { color: c.text },
+                   title: { display: true, text: 'Files Analyzed', color: c.text } },
+              y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
+                   title: { display: true, text: 'Code Lines', color: c.text } }
+            },
+            plugins: {
+              legend: { position: 'right', labels: { color: c.text } },
+              tooltip: {
+                callbacks: {
+                  title: function(items) { return items.length ? items[0].dataset.label : ''; },
+                  label: function(ctx){
+                    var d = SCAT_D[ctx.datasetIndex];
+                    return [
+                      '  Files analyzed: ' + fmt(d.files),
+                      '  Code lines: ' + Number(d.code).toLocaleString(),
+                      '  Physical lines: ' + Number(d.physical).toLocaleString()
+                    ];
+                  }
+                }
+              }
+            }
+          }
+        });
+        ALL_CHARTS.push(chart);
+      })();
+
+      // ── Submodule breakdown ──────────────────────────────────────────────────
+      var subChart = null;
+      (function() {
+        if (!SUB_D || !SUB_D.length) return;
+        var subYSel = document.getElementById('sub-y-axis');
+        var subSortSel = document.getElementById('sub-sort');
+        var wrap = document.getElementById('canvas-sub-wrap');
+        var canvas = document.getElementById('canvas-sub');
+        if (!canvas) return;
+        var Y_LABELS = { code:'Code Lines', comment:'Comment Lines', blank:'Blank Lines',
+                         physical:'Physical Lines', files:'Files' };
+        var SUB_COLS = { code:OX, comment:GN, blank:GY, physical:'#4472C4', files:'#805099' };
+        function renderSubmodule() {
+          var yKey = subYSel ? subYSel.value : 'code';
+          var sortMode = subSortSel ? subSortSel.value : 'desc';
+          var data = SUB_D.slice();
+          if (sortMode==='desc') data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
+          else if (sortMode==='asc') data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
+          else data.sort(function(a,b){return a.name.localeCompare(b.name);});
+          data = data.slice(0, 30);
+          var c = clr();
+          var col = SUB_COLS[yKey] || OX;
+          if (wrap) wrap.style.height = Math.max(90, Math.min(540, data.length * 25 + 36)) + 'px';
+          if (subChart) {
+            subChart.data.labels = data.map(function(d){return d.name;});
+            subChart.data.datasets[0].data = data.map(function(d){return d[yKey]||0;});
+            subChart.data.datasets[0].backgroundColor = col;
+            subChart.data.datasets[0].label = Y_LABELS[yKey]||yKey;
+            subChart.options.scales.x.title.text = Y_LABELS[yKey]||yKey;
+            subChart.update('none'); return;
+          }
+          subChart = new Chart(canvas, {
+            type: 'bar',
+            data: {
+              labels: data.map(function(d){return d.name;}),
+              datasets: [{ label: Y_LABELS[yKey]||yKey,
+                data: data.map(function(d){return d[yKey]||0;}),
+                backgroundColor: col, borderRadius: 3 }]
+            },
+            options: {
+              indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+              animation: { duration: 500, easing: 'easeOutQuart' },
+              scales: {
+                x: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
+                     title: { display: true, text: Y_LABELS[yKey]||yKey, color: c.text } },
+                y: { grid: { display: false }, ticks: { color: c.text } }
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    title: function(items) { return items.length ? items[0].label : ''; },
+                    label: function(ctx){
+                      var d = data[ctx.dataIndex] || {};
+                      return [
+                        '  Code: ' + Number(d.code||0).toLocaleString(),
+                        '  Comments: ' + Number(d.comment||0).toLocaleString(),
+                        '  Blanks: ' + Number(d.blank||0).toLocaleString(),
+                        '  Physical: ' + Number(d.physical||0).toLocaleString(),
+                        '  Files: ' + fmt(d.files||0)
+                      ];
+                    }
+                  }
+                }
+              }
+            }
+          });
+          ALL_CHARTS.push(subChart);
+        }
+        if (subYSel) subYSel.addEventListener('change', renderSubmodule);
+        if (subSortSel) subSortSel.addEventListener('change', renderSubmodule);
+        renderSubmodule();
+      })();
+
+      // ── Semantic Metrics ─────────────────────────────────────────────────────
+      (function() {
+        if (!SEM_D || !SEM_D.length) return;
+        var semSel = document.getElementById('semantic-metric');
+        var canvas = document.getElementById('canvas-semantic');
+        if (!canvas) return;
+        var SEM_LABELS = { functions:'Functions', classes:'Classes / Types', variables:'Variables',
+                           imports:'Imports', tests:'Tests' };
+        var SEM_COLS = { functions:OX, classes:'#4472C4', variables:GN, imports:'#805099', tests:'#B23030' };
+        var semChart = null;
+        function renderSemantic() {
+          var mKey = semSel ? semSel.value : 'functions';
+          var data = SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);}).slice(0,15);
+          var c = clr();
+          var col = SEM_COLS[mKey] || OX;
+          if (semChart) {
+            semChart.data.labels = data.map(function(d){return d.lang;});
+            semChart.data.datasets[0].data = data.map(function(d){return d[mKey]||0;});
+            semChart.data.datasets[0].backgroundColor = col;
+            semChart.data.datasets[0].label = SEM_LABELS[mKey]||mKey;
+            semChart.update('none'); return;
+          }
+          semChart = new Chart(canvas, {
+            type: 'bar',
+            data: {
+              labels: data.map(function(d){return d.lang;}),
+              datasets: [{ label: SEM_LABELS[mKey]||mKey,
+                data: data.map(function(d){return d[mKey]||0;}),
+                backgroundColor: col, borderRadius: 4 }]
+            },
+            options: {
+              responsive: true, maintainAspectRatio: false,
+              animation: { duration: 500, easing: 'easeOutQuart' },
+              scales: {
+                x: { grid: { display: false }, ticks: { color: c.text } },
+                y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} } }
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    title: function(items) { return items.length ? items[0].label : ''; },
+                    label: function(ctx) {
+                      var d = data[ctx.dataIndex] || {};
+                      var lines = ['  ' + (SEM_LABELS[mKey]||mKey) + ': ' + Number(ctx.parsed.y).toLocaleString()];
+                      var others = Object.keys(SEM_LABELS).filter(function(k){ return k !== mKey && (d[k]||0) > 0; });
+                      others.forEach(function(k) {
+                        lines.push('  ' + SEM_LABELS[k] + ': ' + Number(d[k]||0).toLocaleString());
+                      });
+                      return lines;
+                    }
+                  }
+                }
+              }
+            }
+          });
+          ALL_CHARTS.push(semChart);
+        }
+        if (semSel) semSel.addEventListener('change', renderSemantic);
+        renderSemantic();
+      })();
+
+      // ── Dark mode sync ────────────────────────────────────────────────────────
+      document.querySelectorAll('[data-theme-toggle]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          setTimeout(function() {
+            var c = clr();
+            ALL_CHARTS.forEach(function(chart) {
+              if (chart.options.scales) {
+                Object.keys(chart.options.scales).forEach(function(k) {
+                  var ax = chart.options.scales[k];
+                  if (ax.grid) ax.grid.color = c.grid;
+                  if (ax.ticks) ax.ticks.color = c.text;
+                  if (ax.title) ax.title.color = c.text;
+                });
+              }
+              if (chart.options.plugins && chart.options.plugins.legend && chart.options.plugins.legend.labels)
+                chart.options.plugins.legend.labels.color = c.text;
+              chart.update('none');
+            });
+          }, 60);
+        });
+      });
     })();
+    // Auto-populate title on any td that is visually truncated but has no explicit title
+    requestAnimationFrame(function() {
+      document.querySelectorAll('td').forEach(function(td) {
+        if (!td.title && td.scrollWidth > td.clientWidth) {
+          td.title = td.textContent.trim();
+        }
+      });
+    });
   </script>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
   {% if let Some(banner) = report_header_footer %}
@@ -2618,6 +2664,7 @@ struct ReportTemplate<'a> {
     accent_hex: Option<String>,
     /// Text for the header/footer identification banner on every report page.
     report_header_footer: Option<String>,
+    chart_js: &'static str,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

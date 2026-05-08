@@ -187,6 +187,9 @@ pub struct AnalysisRun {
     /// Comma-separated git tags pointing at HEAD at scan time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tags: Option<String>,
+    /// Nearest ancestor release tag (output of `git describe --tags --abbrev=0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_nearest_tag: Option<String>,
     /// ISO 8601 author-date of the last git commit at scan time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_commit_date: Option<String>,
@@ -211,6 +214,7 @@ struct GitInfo {
     branch: Option<String>,
     author: Option<String>,
     tags: Option<String>,
+    nearest_tag: Option<String>,
     commit_date: Option<String>,
 }
 
@@ -226,6 +230,10 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
                 .collect::<Vec<_>>()
                 .join(", ")
         }),
+        nearest_tag: run_git_in(
+            project_path,
+            &["describe", "--tags", "--abbrev=0", "HEAD"],
+        ),
         commit_date: run_git_in(project_path, &["log", "--format=%aI", "-1"]),
     }
 }
@@ -425,6 +433,7 @@ fn assemble_run(
         git_branch: git.branch,
         git_commit_author: git.author,
         git_tags: git.tags,
+        git_nearest_tag: git.nearest_tag,
         git_commit_date: git.commit_date,
     }
 }
