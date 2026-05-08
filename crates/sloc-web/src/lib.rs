@@ -4659,17 +4659,16 @@ async fn api_metrics_history_handler(
                 // Point the report link to the submodule sub-report if it was generated.
                 let safe = sanitize_project_label(&sub.name);
                 let artifact_key = format!("sub_{safe}");
-                let sub_html_url =
-                    if let Some(run_dir) = std::path::Path::new(json_path).parent() {
-                        let sub_path = run_dir.join(format!("{artifact_key}.html"));
-                        if sub_path.exists() {
-                            Some(format!("/runs/{}/{artifact_key}", e.run_id))
-                        } else {
-                            base.html_url.clone()
-                        }
+                let sub_html_url = if let Some(run_dir) = std::path::Path::new(json_path).parent() {
+                    let sub_path = run_dir.join(format!("{artifact_key}.html"));
+                    if sub_path.exists() {
+                        Some(format!("/runs/{}/{artifact_key}", e.run_id))
                     } else {
                         base.html_url.clone()
-                    };
+                    }
+                } else {
+                    base.html_url.clone()
+                };
                 Some(MetricsHistoryEntry {
                     code_lines: sub.code_lines,
                     comment_lines: sub.comment_lines,

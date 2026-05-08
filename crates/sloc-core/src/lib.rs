@@ -230,10 +230,7 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
                 .collect::<Vec<_>>()
                 .join(", ")
         }),
-        nearest_tag: run_git_in(
-            project_path,
-            &["describe", "--tags", "--abbrev=0", "HEAD"],
-        ),
+        nearest_tag: run_git_in(project_path, &["describe", "--tags", "--abbrev=0", "HEAD"]),
         commit_date: run_git_in(project_path, &["log", "--format=%aI", "-1"]),
     }
 }
