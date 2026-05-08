@@ -1,0 +1,55 @@
+# oxide-sloc GitHub Actions integration
+#
+# Drop this into your repo's .github/workflows/ directory.
+# Set SLOC_SERVER as a repository variable (Settings → Variables → Actions)
+# and optionally SLOC_API_KEY as a repository secret.
+#
+# How it works:
+#   1. oxide-sloc analyze runs inside the CI runner — no network call to the server.
+#   2. oxide-sloc send POSTs the result JSON to /api/ingest on your server.
+#   3. The server renders HTML, stores the artifact, and the scan appears in /view-reports.
+
+name: SLOC Analysis
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  sloc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install oxide-sloc
+        run: cargo install oxide-sloc --locked
+
+      - name: Analyze
+        run: oxide-sloc analyze . --json-out sloc-result.json
+
+      - name: Upload to oxide-sloc server
+        if: env.SLOC_SERVER != ''
+        env:
+          SLOC_SERVER: ${{ vars.SLOC_SERVER }}
+          SLOC_API_KEY: ${{ secrets.SLOC_API_KEY }}
+        run: |
+          oxide-sloc send sloc-result.json \
+            --webhook-url "${SLOC_SERVER}/api/ingest?label=${{ github.repository }}" \
+            ${SLOC_API_KEY:+--webhook-token "${SLOC_API_KEY}"}
+
+      - name: Archive result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sloc-result
+          path: sloc-result.json
+          retention-days: 7

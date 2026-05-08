@@ -225,6 +225,10 @@ pub struct RawLineCounts {
     /// `AnalysisConfig::count_compiler_directives`. IEEE 1045-1992 §4.2.
     #[serde(default)]
     pub compiler_directive_lines: u64,
+    /// Best-effort count of test case / test function definition lines detected lexically
+    /// (GTest, Catch2, PyTest, JUnit, etc.). Always a subset of `code_only_lines`.
+    #[serde(default)]
+    pub test_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1039,6 +1043,9 @@ struct SymbolPatterns {
     classes: &'static [&'static str],
     variables: &'static [&'static str],
     imports: &'static [&'static str],
+    /// Line prefixes (after stripping leading whitespace) that indicate a test case or test
+    /// function definition. Matched against code lines only, same as other symbol categories.
+    tests: &'static [&'static str],
 }
 
 impl SymbolPatterns {
@@ -1048,6 +1055,7 @@ impl SymbolPatterns {
             classes: &[],
             variables: &[],
             imports: &[],
+            tests: &[],
         }
     }
 }
@@ -1090,6 +1098,14 @@ const SP_RUST: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["let ", "let mut "],
     imports: &["use ", "pub use ", "pub(crate) use ", "extern crate "],
+    // Built-in #[test], tokio/actix async test attributes, rstest
+    tests: &[
+        "#[test]",
+        "#[tokio::test]",
+        "#[actix_web::test]",
+        "#[rstest]",
+        "#[test_case",
+    ],
 };
 
 const SP_PYTHON: SymbolPatterns = SymbolPatterns {
@@ -1097,6 +1113,8 @@ const SP_PYTHON: SymbolPatterns = SymbolPatterns {
     classes: &["class "],
     variables: &[],
     imports: &["import ", "from "],
+    // pytest: test_ prefix functions and Test* classes; unittest: test_ methods
+    tests: &["def test_", "async def test_", "class Test"],
 };
 
 const SP_JS: SymbolPatterns = SymbolPatterns {
@@ -1117,6 +1135,15 @@ const SP_JS: SymbolPatterns = SymbolPatterns {
         "export const ",
     ],
     imports: &["import "],
+    // Jest/Mocha/Jasmine: describe/it/test block openers
+    tests: &[
+        "describe(",
+        "it(",
+        "test(",
+        "it.each(",
+        "test.each(",
+        "describe.each(",
+    ],
 };
 
 const SP_TS: SymbolPatterns = SymbolPatterns {
@@ -1147,6 +1174,15 @@ const SP_TS: SymbolPatterns = SymbolPatterns {
         "export const ",
     ],
     imports: &["import "],
+    // Jest/Mocha/Jasmine/Vitest: describe/it/test block openers
+    tests: &[
+        "describe(",
+        "it(",
+        "test(",
+        "it.each(",
+        "test.each(",
+        "describe.each(",
+    ],
 };
 
 const SP_GO: SymbolPatterns = SymbolPatterns {
@@ -1154,6 +1190,8 @@ const SP_GO: SymbolPatterns = SymbolPatterns {
     classes: &["type "],
     variables: &["var "],
     imports: &["import "],
+    // Go standard testing: Test* functions (convention is practically exclusive to _test.go files)
+    tests: &["func Test", "func Benchmark", "func Fuzz"],
 };
 
 const SP_JAVA: SymbolPatterns = SymbolPatterns {
@@ -1177,6 +1215,14 @@ const SP_JAVA: SymbolPatterns = SymbolPatterns {
     ],
     variables: &[],
     imports: &["import "],
+    // JUnit 4 & 5, TestNG — annotations appear on their own line before the method
+    tests: &[
+        "@Test",
+        "@ParameterizedTest",
+        "@RepeatedTest",
+        "@TestFactory",
+        "@TestTemplate",
+    ],
 };
 
 const SP_CSHARP: SymbolPatterns = SymbolPatterns {
@@ -1206,7 +1252,35 @@ const SP_CSHARP: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["var "],
     imports: &["using "],
+    // MSTest, NUnit, xUnit — attributes on their own line before the method
+    tests: &["[TestMethod]", "[Test]", "[Fact]", "[Theory]", "[TestCase("],
 };
+
+// GTest, Catch2/doctest, Boost.Test patterns shared by C and C++.
+const TEST_PATTERNS_C_CPP: &[&str] = &[
+    // Google Test
+    "TEST(",
+    "TEST_F(",
+    "TEST_P(",
+    "TYPED_TEST(",
+    "TYPED_TEST_P(",
+    "INSTANTIATE_TEST_SUITE_P(",
+    "INSTANTIATE_TYPED_TEST_SUITE_P(",
+    // Catch2 / doctest
+    "TEST_CASE(",
+    "SECTION(",
+    "SCENARIO(",
+    "SCENARIO_METHOD(",
+    "TEST_CASE_METHOD(",
+    // Boost.Test
+    "BOOST_AUTO_TEST_CASE(",
+    "BOOST_FIXTURE_TEST_CASE(",
+    "BOOST_AUTO_TEST_SUITE(",
+    "BOOST_PARAM_TEST_CASE(",
+    // CppUnit
+    "CPPUNIT_TEST(",
+    "CPPUNIT_TEST_SUITE(",
+];
 
 const SP_C: SymbolPatterns = SymbolPatterns {
     functions: &[],
@@ -1219,6 +1293,7 @@ const SP_C: SymbolPatterns = SymbolPatterns {
     ],
     variables: &[],
     imports: &["#include "],
+    tests: TEST_PATTERNS_C_CPP,
 };
 
 const SP_CPP: SymbolPatterns = SymbolPatterns {
@@ -1226,6 +1301,7 @@ const SP_CPP: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "struct ", "namespace ", "template "],
     variables: &[],
     imports: &["#include "],
+    tests: TEST_PATTERNS_C_CPP,
 };
 
 const SP_SHELL: SymbolPatterns = SymbolPatterns {
@@ -1233,6 +1309,7 @@ const SP_SHELL: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &["declare ", "local ", "export "],
     imports: &["source ", ". "],
+    tests: &[],
 };
 
 const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
@@ -1240,6 +1317,8 @@ const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
     classes: &["class "],
     variables: &[],
     imports: &["Import-Module ", "using "],
+    // Pester test framework
+    tests: &["Describe ", "It ", "Context "],
 };
 
 const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
@@ -1270,6 +1349,14 @@ const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["val ", "var ", "private val ", "private var ", "const val "],
     imports: &["import "],
+    // JUnit 4/5, KotlinTest, Kotest
+    tests: &[
+        "@Test",
+        "@ParameterizedTest",
+        "@RepeatedTest",
+        "\"should ",
+        "\"it ",
+    ],
 };
 
 const SP_SWIFT: SymbolPatterns = SymbolPatterns {
@@ -1310,6 +1397,8 @@ const SP_SWIFT: SymbolPatterns = SymbolPatterns {
         "static let ",
     ],
     imports: &["import "],
+    // XCTest: test functions are named test* by convention; Swift Testing: @Test attribute
+    tests: &["func test", "func Test", "@Test"],
 };
 
 const SP_RUBY: SymbolPatterns = SymbolPatterns {
@@ -1317,6 +1406,8 @@ const SP_RUBY: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "module "],
     variables: &[],
     imports: &["require ", "require_relative "],
+    // RSpec / minitest
+    tests: &["it ", "it(", "describe ", "context ", "test "],
 };
 
 const SP_SCALA: SymbolPatterns = SymbolPatterns {
@@ -1331,6 +1422,8 @@ const SP_SCALA: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["val ", "var ", "lazy val "],
     imports: &["import "],
+    // ScalaTest / MUnit: FunSuite test("..."), FlatSpec it("..."), AnyWordSpec "..." should
+    tests: &["test(", "it(", "describe("],
 };
 
 const SP_PHP: SymbolPatterns = SymbolPatterns {
@@ -1362,6 +1455,13 @@ const SP_PHP: SymbolPatterns = SymbolPatterns {
         "include ",
         "include_once ",
     ],
+    // PHPUnit: test methods start with test, or use @test annotation
+    tests: &[
+        "public function test",
+        "function test",
+        "#[Test]",
+        "#[DataProvider(",
+    ],
 };
 
 const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
@@ -1376,6 +1476,8 @@ const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
     classes: &["defmodule ", "defprotocol ", "defimpl "],
     variables: &[],
     imports: &["import ", "alias ", "use ", "require "],
+    // ExUnit
+    tests: &["test ", "describe "],
 };
 
 const SP_ERLANG: SymbolPatterns = SymbolPatterns {
@@ -1383,6 +1485,7 @@ const SP_ERLANG: SymbolPatterns = SymbolPatterns {
     classes: &["-module("],
     variables: &[],
     imports: &["-import(", "-include(", "-include_lib("],
+    tests: &[],
 };
 
 const SP_FSHARP: SymbolPatterns = SymbolPatterns {
@@ -1396,6 +1499,8 @@ const SP_FSHARP: SymbolPatterns = SymbolPatterns {
     classes: &["type "],
     variables: &["let mutable "],
     imports: &["open "],
+    // NUnit / xUnit attributes on their own line; FsUnit uses [<Test>] / [<Fact>]
+    tests: &["[<Test>]", "[<Fact>]", "[<Theory>]", "[<TestCase("],
 };
 
 const SP_GROOVY: SymbolPatterns = SymbolPatterns {
@@ -1403,6 +1508,8 @@ const SP_GROOVY: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "abstract class ", "interface ", "enum ", "trait "],
     variables: &[],
     imports: &["import "],
+    // Spock framework: feature methods; JUnit annotations
+    tests: &["def \"", "@Test", "given:", "when:", "then:", "expect:"],
 };
 
 const SP_HASKELL: SymbolPatterns = SymbolPatterns {
@@ -1410,6 +1517,7 @@ const SP_HASKELL: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "data ", "newtype ", "type "],
     variables: &[],
     imports: &["import "],
+    tests: &[],
 };
 
 const SP_LUA: SymbolPatterns = SymbolPatterns {
@@ -1417,6 +1525,8 @@ const SP_LUA: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &["local "],
     imports: &[],
+    // busted test framework
+    tests: &["it(", "describe(", "pending("],
 };
 
 const SP_NIM: SymbolPatterns = SymbolPatterns {
@@ -1432,6 +1542,8 @@ const SP_NIM: SymbolPatterns = SymbolPatterns {
     classes: &["type "],
     variables: &["var ", "let ", "const "],
     imports: &["import ", "from "],
+    // unittest module
+    tests: &["test "],
 };
 
 const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
@@ -1439,6 +1551,8 @@ const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
     classes: &["@interface ", "@implementation ", "@protocol "],
     variables: &[],
     imports: &["#import ", "#include "],
+    // XCTest: test methods start with - (void)test
+    tests: &["- (void)test"],
 };
 
 const SP_OCAML: SymbolPatterns = SymbolPatterns {
@@ -1446,6 +1560,7 @@ const SP_OCAML: SymbolPatterns = SymbolPatterns {
     classes: &["type ", "module ", "class "],
     variables: &[],
     imports: &["open "],
+    tests: &[],
 };
 
 const SP_PERL: SymbolPatterns = SymbolPatterns {
@@ -1453,6 +1568,7 @@ const SP_PERL: SymbolPatterns = SymbolPatterns {
     classes: &["package "],
     variables: &["my ", "our ", "local "],
     imports: &["use ", "require "],
+    tests: &[],
 };
 
 const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
@@ -1465,6 +1581,8 @@ const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["(def ", "(defonce "],
     imports: &["(ns ", "(require "],
+    // clojure.test
+    tests: &["(deftest ", "(testing "],
 };
 
 const SP_JULIA: SymbolPatterns = SymbolPatterns {
@@ -1477,6 +1595,8 @@ const SP_JULIA: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["const "],
     imports: &["import ", "using "],
+    // Test.jl standard library
+    tests: &["@test ", "@testset "],
 };
 
 const SP_DART: SymbolPatterns = SymbolPatterns {
@@ -1484,6 +1604,8 @@ const SP_DART: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "abstract class ", "mixin ", "extension ", "enum "],
     variables: &["var ", "final ", "const ", "late "],
     imports: &["import "],
+    // flutter_test / test package
+    tests: &["test(", "testWidgets(", "group("],
 };
 
 const SP_R: SymbolPatterns = SymbolPatterns {
@@ -1491,6 +1613,8 @@ const SP_R: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &[],
     imports: &["library(", "source("],
+    // testthat
+    tests: &["test_that(", "it(", "describe(", "expect_"],
 };
 
 const SP_SQL: SymbolPatterns = SymbolPatterns {
@@ -1514,6 +1638,7 @@ const SP_SQL: SymbolPatterns = SymbolPatterns {
     ],
     variables: &["declare ", "DECLARE "],
     imports: &[],
+    tests: &[],
 };
 
 const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
@@ -1521,6 +1646,7 @@ const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &[],
     imports: &["include ", "INCLUDE ", "%include "],
+    tests: &[],
 };
 
 const SP_ZIG: SymbolPatterns = SymbolPatterns {
@@ -1534,6 +1660,8 @@ const SP_ZIG: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &["var ", "pub var "],
     imports: &[],
+    // Zig built-in test blocks
+    tests: &["test \"", "test{"],
 };
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1853,11 +1981,12 @@ fn process_physical_line(
     classify_line(raw, &emit, trimmed);
 
     if emit.has_code {
-        let (f, c, v, i) = count_symbols(&config.symbol_patterns, trimmed);
+        let (f, c, v, i, t) = count_symbols(&config.symbol_patterns, trimmed);
         raw.functions += f;
         raw.classes += c;
         raw.variables += v;
         raw.imports += i;
+        raw.test_count += t;
     }
 }
 
@@ -1936,13 +2065,14 @@ const fn classify_line(raw: &mut RawLineCounts, facts: &LineFacts, trimmed: &str
     }
 }
 
-fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64) {
+fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64) {
     let hit = |pats: &[&str]| u64::from(pats.iter().any(|p| trimmed.starts_with(p)));
     (
         hit(patterns.functions),
         hit(patterns.classes),
         hit(patterns.variables),
         hit(patterns.imports),
+        hit(patterns.tests),
     )
 }
 
