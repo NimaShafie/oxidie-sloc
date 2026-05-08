@@ -1656,6 +1656,7 @@ fn registry_entry_from_run(
         git_commit: None,
         git_author: None,
         git_tags: None,
+        git_nearest_tag: None,
         git_commit_date: None,
     }
 }
@@ -1937,6 +1938,7 @@ async fn locate_reports_dir_handler(
             git_commit: run.git_commit_short.clone(),
             git_author: run.git_commit_author.clone(),
             git_tags: run.git_tags.clone(),
+            git_nearest_tag: run.git_nearest_tag.clone(),
             git_commit_date: run.git_commit_date.clone(),
         };
         reg.add_entry(entry);
@@ -2229,6 +2231,7 @@ pub(crate) fn build_run_registry_entry(
         git_commit: run.git_commit_short.clone(),
         git_author: run.git_commit_author.clone(),
         git_tags: run.git_tags.clone(),
+        git_nearest_tag: run.git_nearest_tag.clone(),
         git_commit_date: run.git_commit_date.clone(),
     }
 }
@@ -4521,19 +4524,30 @@ struct MetricsHistoryQuery {
 }
 
 #[derive(Serialize)]
+struct MetricsSubmoduleLink {
+    name: String,
+    url: String,
+}
+
+#[derive(Serialize)]
 struct MetricsHistoryEntry {
     run_id: String,
+    run_id_short: String,
     timestamp: String,
     commit: Option<String>,
     branch: Option<String>,
     tags: Vec<String>,
+    nearest_tag: Option<String>,
     code_lines: u64,
     comment_lines: u64,
     blank_lines: u64,
     physical_lines: u64,
     files_analyzed: u64,
+    files_skipped: u64,
     project_label: String,
     html_url: Option<String>,
+    has_pdf: bool,
+    submodule_links: Vec<MetricsSubmoduleLink>,
 }
 
 async fn api_metrics_history_handler(
@@ -4577,20 +4591,62 @@ async fn api_metrics_history_handler(
             let html_url = e
                 .html_path
                 .as_ref()
-                .map(|_| format!("/view-reports?run_id={}", e.run_id));
+                .filter(|p| p.exists())
+                .map(|_| format!("/runs/{}/html", e.run_id));
+            let nearest_tag = e.git_nearest_tag.clone();
+            let has_pdf = e.pdf_path.as_ref().is_some_and(|p| p.exists());
+            let run_id_short: String = e
+                .run_id
+                .split('-')
+                .next_back()
+                .unwrap_or(&e.run_id)
+                .chars()
+                .take(7)
+                .collect();
+            let submodule_links: Vec<MetricsSubmoduleLink> = {
+                let mut links: Vec<MetricsSubmoduleLink> = vec![];
+                let sub_dir = e
+                    .html_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .or_else(|| e.json_path.as_ref().and_then(|p| p.parent()));
+                if let Some(dir) = sub_dir {
+                    if let Ok(rd) = std::fs::read_dir(dir) {
+                        for entry_res in rd.flatten() {
+                            let fname = entry_res.file_name();
+                            let fname_str = fname.to_string_lossy();
+                            if fname_str.starts_with("sub_") && fname_str.ends_with(".html") {
+                                let stem = &fname_str[..fname_str.len() - 5];
+                                let display = stem[4..].replace('-', " ");
+                                links.push(MetricsSubmoduleLink {
+                                    name: display,
+                                    url: format!("/runs/{}/{stem}", e.run_id),
+                                });
+                            }
+                        }
+                    }
+                }
+                links.sort_by(|a, b| a.name.cmp(&b.name));
+                links
+            };
             let base = MetricsHistoryEntry {
                 run_id: e.run_id.clone(),
+                run_id_short,
                 timestamp: e.timestamp_utc.to_rfc3339(),
                 commit: e.git_commit.clone(),
                 branch: e.git_branch.clone(),
                 tags,
+                nearest_tag,
                 code_lines: e.summary.code_lines,
                 comment_lines: e.summary.comment_lines,
                 blank_lines: e.summary.blank_lines,
                 physical_lines: e.summary.total_physical_lines,
                 files_analyzed: e.summary.files_analyzed,
+                files_skipped: e.summary.files_skipped,
                 project_label: e.project_label.clone(),
                 html_url,
+                has_pdf,
+                submodule_links,
             };
             if let Some(ref filter) = submodule_filter {
                 // Read the full JSON artifact to get per-submodule metrics.
@@ -4600,12 +4656,29 @@ async fn api_metrics_history_handler(
                 let sub = run.submodule_summaries.iter().find(|s| {
                     s.name.to_lowercase() == *filter || s.relative_path.to_lowercase() == *filter
                 })?;
+                // Point the report link to the submodule sub-report if it was generated.
+                let safe = sanitize_project_label(&sub.name);
+                let artifact_key = format!("sub_{safe}");
+                let sub_html_url =
+                    if let Some(run_dir) = std::path::Path::new(json_path).parent() {
+                        let sub_path = run_dir.join(format!("{artifact_key}.html"));
+                        if sub_path.exists() {
+                            Some(format!("/runs/{}/{artifact_key}", e.run_id))
+                        } else {
+                            base.html_url.clone()
+                        }
+                    } else {
+                        base.html_url.clone()
+                    };
                 Some(MetricsHistoryEntry {
                     code_lines: sub.code_lines,
                     comment_lines: sub.comment_lines,
                     blank_lines: sub.blank_lines,
                     physical_lines: sub.total_physical_lines,
                     files_analyzed: sub.files_analyzed,
+                    html_url: sub_html_url,
+                    has_pdf: false,
+                    submodule_links: vec![],
                     ..base
                 })
             } else {
@@ -4843,6 +4916,7 @@ async fn trend_report_handler(
     .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
     .stat-chip:hover .stat-chip-tip{{opacity:1;}}
+    .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:10px;font-weight:600;color:var(--muted-2);font-variant-numeric:tabular-nums;line-height:1;}}
     .stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}
     body.dark-theme .stat-delta-up{{color:#5aba8a;}}body.dark-theme .stat-delta-down{{color:#e07070;}}
     .chart-wrap{{width:100%;overflow-x:auto;}} .chart-wrap svg{{display:block;margin:0 auto;}}
@@ -4852,16 +4926,33 @@ async fn trend_report_handler(
     .chart-hint-inline .dot{{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin:0 1px;}}
     .chart-section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
     .data-table{{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}}
-    .data-table th,.data-table td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
-    .data-table td:nth-child(5){{white-space:normal;}}
-    .data-table th{{color:var(--muted);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.06em;background:var(--surface-2);}}
-    .data-table tbody tr:hover{{background:rgba(255,247,238,0.6);cursor:pointer;}}
-    body.dark-theme .data-table tbody tr:hover{{background:rgba(255,255,255,0.03);}}
+    .data-table th{{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+    .data-table td{{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}}
+    .data-table tr:last-child td{{border-bottom:none;}}
+    .data-table tbody tr:hover td{{background:var(--surface-2);cursor:pointer;}}
     .num{{text-align:right;font-variant-numeric:tabular-nums;}}
     .tag-chip{{display:inline-flex;padding:2px 8px;border-radius:999px;background:var(--info-bg);color:var(--info-text);font-size:11px;font-weight:700;margin-right:4px;}}
     .mono{{font-family:ui-monospace,monospace;font-size:11px;}}
     a.run-link{{color:var(--accent-2);font-weight:700;text-decoration:none;}}
     a.run-link:hover{{text-decoration:underline;}}
+    .run-id-chip{{font-family:ui-monospace,monospace;font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--muted);}}
+    .git-chip{{font-family:ui-monospace,monospace;font-size:11px;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent-2);}}
+    body.dark-theme .git-chip{{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}}
+    .metric-num{{font-weight:700;color:var(--text);}}
+    .metric-secondary{{font-size:11px;color:var(--muted);margin-top:2px;}}
+    .btn{{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}}
+    .btn.primary{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}}
+    .btn.primary:hover{{opacity:.9;}}
+    .rpt-btn{{min-width:58px;justify-content:center;}}
+    .actions-cell{{display:flex;gap:5px;flex-wrap:wrap;align-items:center;}}
+    .report-cell{{overflow:visible!important;white-space:normal!important;}}
+    .submod-details{{margin-top:6px;font-size:12px;color:var(--muted);}}
+    .submod-details summary{{cursor:pointer;font-weight:600;user-select:none;list-style:none;padding:2px 0;}}
+    .submod-details summary::-webkit-details-marker{{display:none;}}
+    .submod-link-list{{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;}}
+    .submod-view-btn{{display:inline-flex;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(111,155,255,0.10);border:1px solid rgba(111,155,255,0.22);color:var(--accent-2);text-decoration:none;white-space:nowrap;}}
+    .submod-view-btn:hover{{background:rgba(111,155,255,0.22);}}
+    body.dark-theme .submod-view-btn{{background:rgba(111,155,255,0.14);border-color:rgba(111,155,255,0.28);color:var(--accent);}}
     .chart-actions{{display:flex;justify-content:flex-end;gap:7px;margin-bottom:10px;}}
     .export-btn{{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .12s ease;text-decoration:none;}}
     .export-btn:hover{{background:var(--line);}}
@@ -4927,7 +5018,7 @@ async fn trend_report_handler(
           <p class="muted">Plot any SLOC metric over time. Each data point is a saved scan. Select a project root, choose a metric and X-axis mode, then explore how your codebase has changed across commits, tags, or time.</p>
           <span class="chart-hint-inline">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-            Click a dot or row to view its full report &nbsp;·&nbsp; <span class="dot" style="background:#C45C10;"></span>&thinsp;regular scan &nbsp;<span class="dot" style="background:#4472C4;"></span>&thinsp;tagged release
+            Click a dot or row to view its full report &nbsp;·&nbsp; <span class="dot" style="background:#C45C10;"></span>&thinsp;regular scan &nbsp;<span class="dot" style="background:#4472C4;"></span>&thinsp;tagged / release scan
           </span>
         </div>
         <div class="chart-actions">
@@ -4961,7 +5052,8 @@ async fn trend_report_handler(
           <select class="chart-select" id="x-sel">
             <option value="time">By Time</option>
             <option value="commit">By Commit</option>
-            <option value="tag">Tags Only</option>
+            <option value="release">By Release</option>
+            <option value="tag">Tagged Commits</option>
           </select>
         </label>
         <label id="submodule-label" style="display:none;">Submodule:
@@ -4969,10 +5061,18 @@ async fn trend_report_handler(
             <option value="">All (project total)</option>
           </select>
         </label>
+        <label>Chart Size:
+          <select class="chart-select" id="scale-sel">
+            <option value="0.75">Compact</option>
+            <option value="1" selected>Normal</option>
+            <option value="1.5">Large</option>
+            <option value="2">Extra Large</option>
+          </select>
+        </label>
       </div>
 
       <div id="chart-wrap" class="chart-wrap"></div>
-      <div id="data-table-wrap"></div>
+      <div id="data-table-wrap" style="overflow-x:auto;"></div>
     </div>
   </div>
 
@@ -5056,6 +5156,13 @@ async fn trend_report_handler(
     function moveTT(e){{var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}}
     function hideTT(){{tt.style.display='none';}}
 
+    function statExact(compact, full){{
+      return compact!==full?'<span class="stat-chip-exact">'+full+'</span>':'';
+    }}
+    function statVal(n){{
+      var compact=fmt(n),full=fmtFull(n);return compact+statExact(compact,full);
+    }}
+
     function updateStats(data){{
       var statsEl=document.getElementById('trend-stats');
       if(!statsEl)return;
@@ -5065,11 +5172,14 @@ async fn trend_report_handler(
       var sorted=data.slice().sort(function(a,b){{return a.timestamp.localeCompare(b.timestamp);}});
       var firstVal=Number(sorted[0][yKey])||0,lastVal=Number(sorted[sorted.length-1][yKey])||0;
       var delta=lastVal-firstVal,sign=delta>=0?'+':'',cls=delta>=0?'stat-delta-up':'stat-delta-down';
+      var absDelta=Math.abs(delta);
+      var deltaCompact=fmt(absDelta),deltaFull=fmtFull(absDelta);
+      var deltaExact=statExact(deltaCompact,deltaFull);
       var projs={{}};data.forEach(function(d){{projs[d.project_label]=1;}});
       statsEl.innerHTML=
         '<div class="stat-chip"><div class="stat-chip-tip">Total scan runs recorded in this workspace</div><div class="stat-chip-val">'+data.length+'</div><div class="stat-chip-label">Total Scans</div></div>'+
-        '<div class="stat-chip"><div class="stat-chip-tip">The most recent recorded value for the selected metric</div><div class="stat-chip-val">'+fmt(lastVal)+'</div><div class="stat-chip-label">Latest '+(Y_LABELS[yKey]||yKey)+'</div></div>'+
-        '<div class="stat-chip"><div class="stat-chip-tip">Change in the selected metric from the earliest to the latest scan</div><div class="stat-chip-val '+cls+'">'+sign+fmt(delta)+'</div><div class="stat-chip-label">Net Change</div></div>'+
+        '<div class="stat-chip"><div class="stat-chip-tip">The most recent recorded value for the selected metric</div><div class="stat-chip-val">'+statVal(lastVal)+'</div><div class="stat-chip-label">Latest '+(Y_LABELS[yKey]||yKey)+'</div></div>'+
+        '<div class="stat-chip"><div class="stat-chip-tip">Change in the selected metric from the earliest to the latest scan</div><div class="stat-chip-val '+cls+'">'+sign+deltaCompact+deltaExact+'</div><div class="stat-chip-label">Net Change</div></div>'+
         '<div class="stat-chip"><div class="stat-chip-tip">Number of distinct project roots tracked across all scans</div><div class="stat-chip-val">'+Object.keys(projs).length+'</div><div class="stat-chip-label">Projects</div></div>';
     }}
 
@@ -5080,8 +5190,8 @@ async fn trend_report_handler(
       if(!subSel||!subLabel)return;
       while(subSel.options.length>1)subSel.remove(1);
       subSel.value='';
-      if(!root){{subLabel.style.display='none';return;}}
-      fetch('/api/metrics/submodules?root='+encodeURIComponent(root))
+      var url='/api/metrics/submodules'+(root?'?root='+encodeURIComponent(root):'');
+      fetch(url)
         .then(function(r){{return r.json();}})
         .then(function(subs){{
           if(!subs||!subs.length){{subLabel.style.display='none';return;}}
@@ -5115,7 +5225,7 @@ async fn trend_report_handler(
       var yKey = document.getElementById('y-sel').value;
       var xMode = document.getElementById('x-sel').value;
 
-      // Filter for tag mode
+      // Filter for tag/release mode
       var pts = data;
       if(xMode === 'tag') pts = data.filter(function(d){{return d.tags&&d.tags.length>0;}});
 
@@ -5124,12 +5234,17 @@ async fn trend_report_handler(
 
       var wrap = document.getElementById('chart-wrap');
       if(!pts.length){{
-        wrap.innerHTML='<div class="empty-state">No scan data found for the selected filters.</div>';
+        var emptyMsg = (xMode === 'tag')
+          ? 'No scans found at exact tagged commits. Try <strong>By Release</strong> to see all scans labelled by their nearest ancestor release tag.'
+          : 'No scan data found for the selected filters.';
+        wrap.innerHTML='<div class="empty-state">'+emptyMsg+'</div>';
         renderTable([]);
         return;
       }}
 
-      var W=900,H=380,PL=80,PR=40,PT=30,PB=60,CW=W-PL-PR,CH=H-PT-PB;
+      var scaleEl=document.getElementById('scale-sel');
+      var sc=scaleEl?parseFloat(scaleEl.value)||1:1;
+      var W=Math.round(900*sc),H=Math.round(380*sc),PL=Math.round(80*sc),PR=Math.round(40*sc),PT=Math.round(30*sc),PB=Math.round(60*sc),CW=W-PL-PR,CH=H-PT-PB;
       var maxY = Math.max.apply(null,pts.map(function(d){{return Number(d[yKey])||0;}}))||1;
 
       var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comment Lines',blank_lines:'Blank Lines',physical_lines:'Physical Lines',files_analyzed:'Files Analyzed'}};
@@ -5137,12 +5252,14 @@ async fn trend_report_handler(
       var svg='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;overflow:visible;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
       svg+='<defs><linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#C45C10" stop-opacity="0.18"/><stop offset="100%" stop-color="#C45C10" stop-opacity="0"/></linearGradient></defs>';
 
+      var fs=Math.round(10*sc),fsS=Math.round(9*sc),fsL=Math.round(11*sc);
+
       // Grid + Y axis ticks
       for(var ti=0;ti<=5;ti++){{
         var gy=PT+CH-Math.round(ti/5*CH);
         var gv=Math.round(ti/5*maxY);
         svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(PL+CW)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
-        svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(gv)+'</text>';
+        svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="'+fs+'" fill="#7b675b">'+fmt(gv)+'</text>';
       }}
 
       // X axis labels (every N-th point to avoid crowding)
@@ -5150,14 +5267,15 @@ async fn trend_report_handler(
       pts.forEach(function(d,i){{
         var x=PL+Math.round(i/(Math.max(pts.length-1,1))*CW);
         if(i%labelEvery===0||i===pts.length-1){{
-          var lbl=xMode==='commit'&&d.commit?d.commit.substring(0,7):(d.tags&&d.tags[0]?d.tags[0]:d.timestamp.substring(0,10));
-          svg+='<text x="'+x+'" y="'+(PT+CH+18)+'" text-anchor="middle" transform="rotate(30,'+x+','+(PT+CH+18)+')" font-family="'+FONT+'" font-size="9" fill="#7b675b">'+esc(lbl)+'</text>';
+          var lbl=xMode==='commit'&&d.commit?d.commit.substring(0,7):(xMode==='release'?(d.nearest_tag||d.tags&&d.tags[0]||d.timestamp.substring(0,10)):(d.tags&&d.tags[0]?d.tags[0]:d.timestamp.substring(0,10)));
+          svg+='<text x="'+x+'" y="'+(PT+CH+fsS*2)+'" text-anchor="middle" transform="rotate(30,'+x+','+(PT+CH+fsS*2)+')" font-family="'+FONT+'" font-size="'+fsS+'" fill="#7b675b">'+esc(lbl)+'</text>';
         }}
       }});
 
       // Axis label
-      svg+='<text x="'+(PL+CW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+(xMode==='time'?'Scan Date':(xMode==='tag'?'Tag':'Commit'))+'</text>';
-      svg+='<text x="14" y="'+(PT+CH/2)+'" text-anchor="middle" transform="rotate(-90,14,'+(PT+CH/2)+')" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+(Y_LABELS[yKey]||yKey)+'</text>';
+      var xAxisLabel=xMode==='time'?'Scan Date':(xMode==='commit'?'Commit':(xMode==='release'?'Release':'Tag'));
+      svg+='<text x="'+(PL+CW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+fsL+'" font-weight="700" fill="#7b675b">'+xAxisLabel+'</text>';
+      svg+='<text x="'+Math.round(14*sc)+'" y="'+(PT+CH/2)+'" text-anchor="middle" transform="rotate(-90,'+Math.round(14*sc)+','+(PT+CH/2)+')" font-family="'+FONT+'" font-size="'+fsL+'" font-weight="700" fill="#7b675b">'+(Y_LABELS[yKey]||yKey)+'</text>';
 
       // Area fill + line path
       var pathD='';
@@ -5168,11 +5286,9 @@ async fn trend_report_handler(
       }});
       if(pts.length>1){{
         var x0=PL,xN=PL+Math.round((pts.length-1)/(Math.max(pts.length-1,1))*CW);
-        var y0=PT+CH-Math.round((Number(pts[0][yKey])||0)/maxY*CH);
-        var yN=PT+CH-Math.round((Number(pts[pts.length-1][yKey])||0)/maxY*CH);
         svg+='<path d="M'+x0+','+(PT+CH)+' '+pathD.substring(1)+' L'+xN+','+(PT+CH)+'Z" fill="url(#areaFill)" pointer-events="none"/>';
       }}
-      svg+='<path d="'+pathD+'" fill="none" stroke="#C45C10" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+      svg+='<path d="'+pathD+'" fill="none" stroke="#C45C10" stroke-width="'+(2+sc)+'" stroke-linejoin="round" stroke-linecap="round"/>';
 
       // Data points (clickable) + permanent value labels
       var showLabels = pts.length <= 40;
@@ -5181,11 +5297,12 @@ async fn trend_report_handler(
         var x=PL+Math.round(i/(Math.max(pts.length-1,1))*CW);
         var y=PT+CH-Math.round((Number(d[yKey])||0)/maxY*CH);
         var hasTags=d.tags&&d.tags.length>0;
-        var r=hasTags?7:5;
-        svg+='<circle class="trend-pt" cx="'+x+'" cy="'+y+'" r="'+r+'" fill="'+(hasTags?'#4472C4':'#C45C10')+'" stroke="white" stroke-width="2" style="cursor:pointer;" data-idx="'+i+'"/>';
+        var isReleasePoint=hasTags||(xMode==='release'&&d.nearest_tag);
+        var r=Math.round((hasTags?7:5)*Math.sqrt(sc));
+        svg+='<circle class="trend-pt" cx="'+x+'" cy="'+y+'" r="'+r+'" fill="'+(isReleasePoint?'#4472C4':'#C45C10')+'" stroke="white" stroke-width="2" style="cursor:pointer;" data-idx="'+i+'"/>';
         if(showLabels && i%labelEveryN===0){{
           var lx=x, ly=y-r-5;
-          svg+='<text x="'+lx+'" y="'+ly+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#7b675b" pointer-events="none">'+fmt(Number(d[yKey]))+'</text>';
+          svg+='<text x="'+lx+'" y="'+ly+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+fs+'" font-weight="700" fill="#7b675b" pointer-events="none">'+fmt(Number(d[yKey]))+'</text>';
         }}
       }});
 
@@ -5197,15 +5314,16 @@ async fn trend_report_handler(
         c.addEventListener('mouseover',function(e){{
           var d=pts[parseInt(this.dataset.idx)];
           var tagsHtml=d.tags&&d.tags.length?'<br>Tags: '+d.tags.map(function(t){{return'<span style="background:var(--info-bg);color:var(--info-text);padding:1px 6px;border-radius:999px;font-size:10px;margin-right:3px;">'+esc(t)+'</span>';}}).join(''):'';
+          var nearestHtml=d.nearest_tag?'<br>Nearest release: <span style="background:var(--info-bg);color:var(--info-text);padding:1px 6px;border-radius:999px;font-size:10px;">'+esc(d.nearest_tag)+'</span>':'';
           showTT(e,
             '<strong style="display:block;font-size:13px;margin-bottom:3px;">'+esc(d.project_label)+'</strong>'+
             (Y_LABELS[yKey]||yKey)+': <strong>'+fmtFull(Number(d[yKey]))+'</strong><br>'+
             'Date: '+d.timestamp.substring(0,10)+(d.commit?'<br>Commit: <code>'+esc(d.commit.substring(0,12))+'</code>':'')+
-            (d.branch?'<br>Branch: '+esc(d.branch):'')+tagsHtml
+            (d.branch?'<br>Branch: '+esc(d.branch):'')+tagsHtml+nearestHtml
           );
           this.setAttribute('r','8');
         }});
-        c.addEventListener('mouseout',function(){{hideTT();this.setAttribute('r',(pts[parseInt(this.dataset.idx)].tags&&pts[parseInt(this.dataset.idx)].tags.length)?'7':'5');}});
+        c.addEventListener('mouseout',function(){{hideTT();var _d=pts[parseInt(this.dataset.idx)];this.setAttribute('r',(_d.tags&&_d.tags.length)?'7':'5');}});
         c.addEventListener('mousemove',moveTT);
         c.addEventListener('click',function(){{
           var d=pts[parseInt(this.dataset.idx)];
@@ -5222,11 +5340,50 @@ async fn trend_report_handler(
       if(!pts||!pts.length){{wrap.innerHTML='';return;}}
       var yLabel = Y_LABELS[yKey]||yKey||'';
       var rows = pts.slice().reverse().map(function(d){{
-        var tags = (d.tags&&d.tags.length)?d.tags.map(function(t){{return'<span class="tag-chip">'+esc(t)+'</span>';}}).join(''):'—';
-        var link = d.html_url?'<a class="run-link" href="'+esc(d.html_url)+'" target="_blank">View</a>':'—';
-        return '<tr'+(d.html_url?' style="cursor:pointer;" onclick="window.open(\''+esc(d.html_url)+'\',\'_blank\')"':'')+' title='+(d.html_url?'"Click to open report"':'"No report saved for this scan"')+'><td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td><td>'+esc(d.project_label)+'</td><td class="mono">'+(d.commit?esc(d.commit.substring(0,8)):'—')+'</td><td>'+(d.branch?esc(d.branch):'—')+'</td><td>'+tags+'</td><td class="num">'+fmt(Number(d[yKey]))+'</td><td>'+link+'</td></tr>';
+        var tags=(d.tags&&d.tags.length)?d.tags.map(function(t){{return'<span class="tag-chip">'+esc(t)+'</span>';}}).join(''):'<span style="color:var(--muted)">&#8212;</span>';
+        var commitHtml=d.commit?'<span class="git-chip" title="'+esc(d.commit)+'">'+esc(d.commit.substring(0,7))+'</span>':'<span style="color:var(--muted)">&#8212;</span>';
+        var branchHtml=d.branch?'<span class="git-chip">'+esc(d.branch)+'</span>':'<span style="color:var(--muted)">&#8212;</span>';
+        var runIdHtml=d.run_id_short?'<span class="run-id-chip">'+esc(d.run_id_short)+'</span>':'&#8212;';
+        var metricHtml='<span class="metric-num">'+fmt(Number(d[yKey]))+'</span>';
+        var reportCell='';
+        if(d.html_url){{
+          reportCell+='<div class="actions-cell">';
+          reportCell+='<a class="btn primary rpt-btn" href="'+esc(d.html_url)+'" target="_blank" rel="noopener">View</a>';
+          if(d.has_pdf){{
+            var pdfUrl=d.html_url.replace(/\/html$/,'/pdf');
+            reportCell+='<a class="btn primary rpt-btn" href="'+esc(pdfUrl)+'" target="_blank" rel="noopener">PDF</a>';
+          }}
+          reportCell+='</div>';
+        }}else{{
+          reportCell+='<span style="color:var(--muted);font-size:11px;font-style:italic;">&#8212;</span>';
+        }}
+        if(d.submodule_links&&d.submodule_links.length){{
+          reportCell+='<details class="submod-details"><summary>&#8627; '+d.submodule_links.length+' submodule(s)</summary><div class="submod-link-list">';
+          d.submodule_links.forEach(function(s){{reportCell+='<a href="'+esc(s.url)+'" target="_blank" rel="noopener" class="submod-view-btn">'+esc(s.name)+'</a>';}});
+          reportCell+='</div></details>';
+        }}
+        return '<tr>'
+          +'<td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td>'
+          +'<td>'+esc(d.project_label)+'</td>'
+          +'<td>'+runIdHtml+'</td>'
+          +'<td>'+commitHtml+'</td>'
+          +'<td>'+branchHtml+'</td>'
+          +'<td>'+tags+'</td>'
+          +'<td class="num">'+metricHtml+'</td>'
+          +'<td class="report-cell">'+reportCell+'</td>'
+          +'</tr>';
       }}).join('');
-      wrap.innerHTML = '<div class="chart-section-header">Scan History</div><table class="data-table"><thead><tr><th style="width:148px">Date</th><th>Project</th><th style="width:78px">Commit</th><th style="width:95px">Branch</th><th style="width:100px">Tags</th><th class="num" style="width:90px">'+esc(yLabel)+'</th><th style="width:65px">Report</th></tr></thead><tbody>'+rows+'</tbody></table>';
+      wrap.innerHTML='<div class="chart-section-header">SCAN HISTORY</div>'
+        +'<table class="data-table" style="min-width:1060px"><thead><tr>'
+        +'<th style="width:160px">Date</th>'
+        +'<th>Project</th>'
+        +'<th style="width:92px">Run ID</th>'
+        +'<th style="width:92px">Commit</th>'
+        +'<th style="width:115px">Branch</th>'
+        +'<th style="width:115px">Tags</th>'
+        +'<th class="num" style="width:100px">'+esc(yLabel)+'</th>'
+        +'<th style="width:155px">Report</th>'
+        +'</tr></thead><tbody>'+rows+'</tbody></table>';
     }}
 
     function exportXLSX(){{
@@ -5494,7 +5651,7 @@ async fn trend_report_handler(
       img.src=url;
     }}
 
-    ['y-sel','x-sel'].forEach(function(id){{
+    ['y-sel','x-sel','scale-sel'].forEach(function(id){{
       var el=document.getElementById(id);
       if(el)el.addEventListener('change',function(){{render(allData);updateStats(allData);}});
     }});
@@ -6100,6 +6257,7 @@ fn build_sub_run(
         git_commit_author: parent.git_commit_author.clone(),
         git_commit_date: parent.git_commit_date.clone(),
         git_tags: parent.git_tags.clone(),
+        git_nearest_tag: parent.git_nearest_tag.clone(),
     }
 }
 
@@ -7271,6 +7429,9 @@ struct SubmoduleRow {
     .artifact-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(37,99,235,0.18), var(--shadow-strong); }
     .artifact-card .marker { position:absolute; top: 12px; right: 12px; width: 22px; height: 22px; border-radius: 999px; border:2px solid var(--line-strong); display:flex; align-items:center; justify-content:center; font-size: 12px; color: transparent; }
     .artifact-card.selected .marker { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .artifact-card.artifact-locked { background: rgba(0,0,0,0.055); cursor:not-allowed; }
+    .artifact-card.artifact-locked:hover { transform: none !important; box-shadow: 0 0 0 1px rgba(37,99,235,0.18), var(--shadow-strong) !important; }
+    body.dark-theme .artifact-card.artifact-locked { background: rgba(255,255,255,0.055); }
     .artifact-icon { width: 42px; height: 42px; border-radius: 12px; background: var(--surface-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size: 22px; font-weight: 900; }
     .artifact-card h4 { margin: 12px 0 6px; font-size: 16px; }
     .artifact-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
@@ -7400,6 +7561,8 @@ struct SubmoduleRow {
     .lc-cancelled strong { display:block;color:var(--muted);margin-bottom:2px;font-size:13px; }
     .lc-actions { display:flex;gap:10px;flex-wrap:wrap;margin-top:14px; }
     .lc-outline-btn { display:inline-flex;align-items:center;padding:9px 20px;border-radius:999px;background:transparent;color:var(--nav,#b85d33);border:2px solid var(--nav,#b85d33);font-size:13px;font-weight:700;text-decoration:none;cursor:pointer; }
+    .quick-excl-row { display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:6px; }
+    .quick-excl-label { font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;margin-right:2px; }
     .quick-excl-chip { display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;background:rgba(37,99,235,0.07);border:1px solid rgba(37,99,235,0.2);color:var(--accent-2);font-size:11px;font-weight:700;cursor:pointer;transition:background .12s,border-color .12s; }
     .quick-excl-chip:hover { background:rgba(37,99,235,0.15);border-color:rgba(37,99,235,0.4); }
     .quick-excl-chip.active { background:rgba(37,99,235,0.18);border-color:rgba(37,99,235,0.55);opacity:0.6;cursor:default; }
@@ -7751,16 +7914,17 @@ struct SubmoduleRow {
                   </div>
                   <div class="field">
                     <label for="exclude_globs">Exclude globs</label>
-                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;" id="quick-exclude-chips">
-                      <button type="button" class="quick-excl-chip" data-pattern="third_party/**">+ third_party/**</button>
-                      <button type="button" class="quick-excl-chip" data-pattern="vendor/**">+ vendor/**</button>
-                      <button type="button" class="quick-excl-chip" data-pattern="node_modules/**">+ node_modules/**</button>
-                      <button type="button" class="quick-excl-chip" data-pattern="build/**">+ build/**</button>
-                      <button type="button" class="quick-excl-chip" data-pattern="target/**">+ target/**</button>
+                    <textarea id="exclude_globs" name="exclude_globs" placeholder="examples:&#10;vendor/**&#10;**/*.min.js"></textarea>
+                    <div id="quick-exclude-chips" class="quick-excl-row">
+                      <span class="quick-excl-label">Quick add:</span>
+                      <button type="button" class="quick-excl-chip" data-pattern="third_party/**">third_party/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="vendor/**">vendor/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="node_modules/**">node_modules/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="build/**">build/**</button>
+                      <button type="button" class="quick-excl-chip" data-pattern="target/**">target/**</button>
                       <button type="button" class="quick-excl-chip quick-excl-chip-all" data-pattern="third_party/**&#10;vendor/**&#10;node_modules/**&#10;build/**&#10;target/**&#10;dist/**">⚡ Skip all deps</button>
                     </div>
-                    <textarea id="exclude_globs" name="exclude_globs" placeholder="examples:&#10;vendor/**&#10;**/*.min.js"></textarea>
-                    <div class="hint">Use this to remove noisy areas from the scope such as dependency trees, generated output, build folders, snapshots, or minified assets. Use the chips above to quickly add common patterns — this is the fastest way to reduce scan time for large repos with many third-party dependencies.</div>
+                    <div class="hint">Use this to remove noisy areas from the scope such as dependency trees, generated output, build folders, snapshots, or minified assets.</div>
                   </div>
                 </div>
                 <div class="glob-guidance-grid">
@@ -7915,21 +8079,13 @@ lcov --capture --directory . --output-file coverage/lcov.info
                   </div>
                 </div>
               </div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
+              <div style="margin-top:12px;">
                   <div class="always-tracked-tip">
                     <div class="always-tracked-tip-icon">ℹ</div>
                     <div class="always-tracked-tip-body">
-                      <div class="field-help-title">Always tracked — not configurable</div>
-                      <h4>Comment and blank-line basics</h4>
-                      <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The mixed-line policy above only affects lines where executable code and comment text share the same line.</div>
-                    </div>
-                  </div>
-                  <div class="always-tracked-tip">
-                    <div class="always-tracked-tip-icon">→</div>
-                    <div class="always-tracked-tip-body">
-                      <div class="field-help-title">What these settings change</div>
-                      <h4>Lines on the boundary</h4>
-                      <div class="advanced-rule-description">The rules on this page only affect lines that live on the boundary between code and comments. A line like <code style="font-size:12px;">x = 1  # counter</code> is the boundary case — it contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
+                      <div class="field-help-title">Always tracked — not configurable &nbsp;·&nbsp; What these settings change</div>
+                      <h4>Comment and blank-line basics &amp; Lines on the boundary</h4>
+                      <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The settings on this page only affect lines that live on the boundary between code and comments — for example <code style="font-size:12px;">x = 1  # counter</code>, which contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
                     </div>
                   </div>
                 </div>
@@ -8040,7 +8196,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
               <div class="section">
                 <div class="section-kicker">Artifacts</div>
                 <div class="artifact-grid">
-                  <div class="artifact-card selected" data-artifact="html">
+                  <div class="artifact-card selected" data-artifact="html" data-review-label="HTML report">
                     <div class="marker">✓</div>
                     <div class="artifact-icon">H</div>
                     <h4>HTML report</h4>
@@ -8051,7 +8207,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                     </div>
                     <input type="checkbox" name="generate_html" checked class="hidden artifact-checkbox" />
                   </div>
-                  <div class="artifact-card selected" data-artifact="pdf">
+                  <div class="artifact-card selected" data-artifact="pdf" data-review-label="PDF export">
                     <div class="marker">✓</div>
                     <div class="artifact-icon">P</div>
                     <h4>PDF export</h4>
@@ -8062,7 +8218,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                     </div>
                     <input type="checkbox" name="generate_pdf" checked class="hidden artifact-checkbox" />
                   </div>
-                  <div class="artifact-card selected" data-artifact="json" style="opacity:0.75;pointer-events:none;">
+                  <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)">
                     <div class="marker" style="background:var(--oxide);border-color:var(--oxide);color:#fff;">✓</div>
                     <div class="artifact-icon">J</div>
                     <h4>JSON result <span style="font-size:11px;font-weight:700;color:var(--oxide-2);">Always on</span></h4>
@@ -8074,7 +8230,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                     <input type="checkbox" name="generate_json" checked class="hidden artifact-checkbox" />
                   </div>
                 </div>
-                <div class="hint" style="margin-top:16px;">Artifact cards are selectable. Presets above can also toggle them for common workflows.</div>
+                <div class="hint" style="margin-top:16px;">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
               </div>
 
               <div class="wizard-actions">
@@ -8637,14 +8793,15 @@ lcov --capture --directory . --output-file coverage/lcov.info
       }
 
       function applyArtifactPreset() {
-        var enabled = { html: false, pdf: false, json: false };
+        var enabled = { html: false, pdf: false };
         if (artifactPreset.value === "review") { enabled.html = true; enabled.pdf = true; }
-        if (artifactPreset.value === "full") { enabled.html = true; enabled.pdf = true; enabled.json = true; }
+        if (artifactPreset.value === "full") { enabled.html = true; enabled.pdf = true; }
         if (artifactPreset.value === "html_only") { enabled.html = true; }
-        if (artifactPreset.value === "machine") { enabled.json = true; enabled.html = true; }
+        if (artifactPreset.value === "machine") { enabled.html = true; }
 
         artifactCards.forEach(function (card) {
           var artifact = card.getAttribute("data-artifact");
+          if (artifact === "json") return;
           var checked = !!enabled[artifact];
           var checkbox = card.querySelector(".artifact-checkbox");
           checkbox.checked = checked;
@@ -8693,7 +8850,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
           + "<li>Binary behavior: " + escapeHtml(document.getElementById("binary_file_behavior").options[document.getElementById("binary_file_behavior").selectedIndex].text) + "</li>"
           + "<li>Scan preset: " + escapeHtml(scanPreset.options[scanPreset.selectedIndex].text) + "</li>";
 
-        var selectedArtifacts = artifactCards.filter(function (card) { return card.classList.contains("selected"); }).map(function (card) { return card.querySelector("h4").textContent; });
+        var selectedArtifacts = artifactCards.filter(function (card) { return card.classList.contains("selected"); }).map(function (card) { return card.getAttribute("data-review-label") || card.querySelector("h4").textContent; });
         artifactSummary.innerHTML = ""
           + "<li>Artifact preset: " + escapeHtml(artifactPreset.options[artifactPreset.selectedIndex].text) + "</li>"
           + "<li>Selected artifacts: " + escapeHtml(selectedArtifacts.join(", ") || "none") + "</li>";
@@ -9352,6 +9509,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
 
       artifactCards.forEach(function (card) {
         card.addEventListener("click", function () {
+          if (card.classList.contains("artifact-locked")) return;
           toggleArtifactCard(card);
           updateReview();
         });
@@ -9598,16 +9756,21 @@ struct IndexTemplate {
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page{max-width:1100px;margin:0 auto;padding:28px 24px 16px;position:relative;z-index:1;}
     .hero{text-align:center;margin-bottom:32px;}
-    .hero-logo{width:66px;height:73px;object-fit:contain;margin-bottom:4px;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));animation:logoBob 3.6s ease-in-out infinite;}
+    .hero-logo-wrap{display:inline-block;cursor:default;}
+    .hero-logo{width:76px;height:84px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));animation:logoBob 3.6s ease-in-out infinite;display:block;}
     @keyframes logoBob{0%,100%{transform:translateY(0) scale(1);}40%{transform:translateY(-14px) scale(1.07);}60%{transform:translateY(-10px) scale(1.05);}}
-    .hero-title{font-size:42px;font-weight:900;letter-spacing:-0.04em;margin:0 0 8px;
+    .hero-logo-shadow{width:60px;height:10px;background:radial-gradient(ellipse,rgba(211,122,76,0.55),transparent 70%);border-radius:50%;margin:0 auto 10px;animation:shadowBob 3.6s ease-in-out infinite;}
+    @keyframes shadowBob{0%,100%{transform:scaleX(1);opacity:0.55;}40%{transform:scaleX(0.72);opacity:0.18;}60%{transform:scaleX(0.82);opacity:0.25;}}
+    .hero-title{font-size:42px;font-weight:900;letter-spacing:-0.04em;margin:0 0 8px;display:inline-block;will-change:transform;transition:transform 0.08s linear;
       background:linear-gradient(90deg,#b85d33 0%,#d37a4c 25%,#6f9bff 50%,#b85d33 75%,#d37a4c 100%);
       background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
-      animation:titleShimmer 4s linear infinite;}
+      clip-path:inset(0 100% 0 0);animation:titleReveal 0.65s cubic-bezier(.4,0,.2,1) 0.12s forwards,titleShimmer 4s linear 0.82s infinite;}
+    @keyframes titleReveal{to{clip-path:inset(0 0% 0 0);}}
     @keyframes titleShimmer{0%{background-position:0% center;}100%{background-position:200% center;}}
     body.dark-theme .hero-title{background:linear-gradient(90deg,#d37a4c 0%,#f0a070 25%,#9bb8ff 50%,#d37a4c 75%,#f0a070 100%);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
-    .hero-subtitle{font-size:16px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;animation:fadeSlideUp 0.9s ease both;}
-    @keyframes fadeSlideUp{from{opacity:0;transform:translateY(18px);}to{opacity:1;transform:translateY(0);}}
+    .hero-subtitle{font-size:16px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:3em;opacity:0;}
+    .hero-cursor{display:inline-block;width:2px;height:0.9em;background:var(--oxide);vertical-align:text-bottom;margin-left:1px;border-radius:1px;animation:cursorBlink 0.72s step-end infinite;}
+    @keyframes cursorBlink{0%,100%{opacity:1;}50%{opacity:0;}}
     .action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:20px;}
     @media(max-width:900px){.action-grid{grid-template-columns:1fr 1fr;}}
     @media(max-width:480px){.action-grid{grid-template-columns:1fr;}}
@@ -9735,9 +9898,12 @@ struct IndexTemplate {
 
   <div class="page">
     <div class="hero">
-      <img class="hero-logo" src="/images/logo/small-logo.png" alt="OxideSLOC">
-      <h1 class="hero-title">OxideSLOC</h1>
-      <p class="hero-subtitle">A fast, self-contained source line analysis workbench. Count code, track trends, compare snapshots, and automate scans via webhook — no setup required.</p>
+      <div class="hero-logo-wrap" id="hero-logo-wrap">
+        <img class="hero-logo" src="/images/logo/small-logo.png" alt="OxideSLOC">
+      </div>
+      <div class="hero-logo-shadow"></div>
+      <h1 class="hero-title" id="hero-title">OxideSLOC</h1>
+      <p class="hero-subtitle" id="hero-subtitle">A fast, self-contained source line analysis workbench. Count code, track trends, compare snapshots, and automate scans via webhook — no setup required.</p>
     </div>
 
     <div class="action-grid">
@@ -9948,6 +10114,33 @@ struct IndexTemplate {
               + 'animation-duration:' + dur + 's;animation-delay:-' + delay + 's;';
             container.appendChild(el);
           })(i);
+        }
+      })();
+      (function heroAnimations() {
+        var sub = document.getElementById('hero-subtitle');
+        if (sub) {
+          var full = sub.textContent.trim();
+          sub.textContent = '';
+          sub.style.opacity = '1';
+          var cursor = document.createElement('span');
+          cursor.className = 'hero-cursor';
+          sub.appendChild(cursor);
+          var i = 0;
+          setTimeout(function() {
+            var iv = setInterval(function() {
+              if (i < full.length) {
+                sub.insertBefore(document.createTextNode(full[i]), cursor);
+                i++;
+              } else {
+                clearInterval(iv);
+                setTimeout(function() {
+                  cursor.style.transition = 'opacity 1s ease';
+                  cursor.style.opacity = '0';
+                  setTimeout(function() { if (cursor.parentNode) cursor.parentNode.removeChild(cursor); }, 1000);
+                }, 2400);
+              }
+            }, 26);
+          }, 880);
         }
       })();
     })();
@@ -10614,7 +10807,7 @@ struct ScanSetupTemplate {
     .r-chart-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
     .r-chart-select{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:4px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}
     .r-chart-select:focus{border-color:var(--accent);}
-    .r-chart-container{width:100%;overflow:hidden;position:relative;}
+    .r-chart-container{width:100%;overflow:hidden;position:relative;flex:1;}
     .r-chart-container svg{display:block;width:100%;height:auto;}
     .r-chart-container .rchit{cursor:pointer;transition:opacity .17s,filter .17s;}
     .r-chart-container .rchit:hover{opacity:.75;filter:brightness(1.14);}
@@ -10628,9 +10821,9 @@ struct ScanSetupTemplate {
     .r-lang-overview{display:flex;gap:40px;align-items:flex-start;justify-content:center;flex-wrap:wrap;padding:8px 0 16px;}
     .r-lang-overview-cell{display:flex;flex-direction:column;align-items:center;gap:8px;flex:1 1 280px;max-width:480px;}
     .r-lang-overview-cell p{margin:0;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);text-align:center;}
-    .r-viz-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;}
+    .r-viz-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:stretch;}
     @media(max-width:820px){.r-viz-grid{grid-template-columns:1fr;}}
-    .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:var(--surface-2);}
+    .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:var(--surface-2);display:flex;flex-direction:column;}
     .r-viz-card-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;}
   </style>
 </head>
@@ -11136,7 +11329,7 @@ struct ScanSetupTemplate {
         </table>
     </section>
 
-    <section class="panel r-chart-section" style="margin-top:32px;">
+    <section class="panel r-chart-section" style="margin-top:60px;">
       <div class="toolbar-row" style="margin-bottom:16px;">
         <div>
           <h2>Visualizations</h2>
@@ -11354,34 +11547,37 @@ struct ScanSetupTemplate {
           var el=document.getElementById('r-composition-chart');
           if(!el||!LANG_D||!LANG_D.length)return;
           var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
-          var LW=110,BW=260,rH=28,bH=20,gap=3;
-          var SH=LANG_D.length*(rH+gap)+32,svgW=LW+BW+74;
+          var LW=110,BW=260,SH=280,svgW=480;
+          var legendH=24,topPad=4;
+          var n=LANG_D.length||1;
+          var rowTotal=Math.floor((SH-legendH-topPad)/n);
+          var bH=Math.min(22,Math.max(10,Math.floor(rowTotal*0.65)));
           var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
           if(mode==='pct'){
             LANG_D.forEach(function(d,i){
               var tot2=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
               var cW=(d.code||0)/tot2*BW,cmW=(d.comments||0)/tot2*BW,blW=(d.blanks||0)/tot2*BW;
-              var y=i*(rH+gap)+4,x=LW;
-              s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
+              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
               if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
               if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
               if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
               var pct=Math.round((d.code||0)/tot2*100);
-              s+='<text x="'+(LW+BW+4)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+pct+'%</text>';
+              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+pct+'%</text>';
             });
           } else {
             var maxT=Math.max.apply(null,LANG_D.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);}))||1;
             LANG_D.forEach(function(d,i){
               var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
-              var y=i*(rH+gap)+4,x=LW;
-              s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
+              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
               if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
               if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
               if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-              s+='<text x="'+(LW+BW+4)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+fmt((d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
+              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+fmt((d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
-          var ly=SH-14;
+          var ly=SH-legendH+4;
           s+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>';
           s+='<rect x="'+(LW+53)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+66)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>';
           s+='<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blank</text>';
@@ -11401,7 +11597,7 @@ struct ScanSetupTemplate {
         (function(){
           var el=document.getElementById('r-scatter-chart');
           if(!el||!SCAT_D||!SCAT_D.length)return;
-          var W=400,H=280,PL=52,PB=36,PT=12,PR=14;
+          var W=480,H=280,PL=52,PB=36,PT=12,PR=14;
           var cW=W-PL-PR,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
@@ -11435,15 +11631,18 @@ struct ScanSetupTemplate {
         function renderSemantic(key){
           var el=document.getElementById('r-semantic-chart');
           if(!el||!SEM_D||!SEM_D.length)return;
-          var LW=112,BW=300,rH=28,bH=20,gap=3;
-          var SH=SEM_D.length*(rH+gap)+14,svgW=LW+BW+70;
+          var LW=112,BW=300,SH=280,svgW=480;
+          var topPad=4,botPad=14;
+          var n2=SEM_D.length||1;
+          var rowTotal2=Math.floor((SH-topPad-botPad)/n2);
+          var bH=Math.min(22,Math.max(10,Math.floor(rowTotal2*0.65)));
           var maxV=Math.max.apply(null,SEM_D.map(function(d){return d[key]||0;}))||1;
           var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
           SEM_D.forEach(function(d,i){
-            var v=d[key]||0,bw=v/maxV*BW,y=i*(rH+gap)+4;
-            s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+            var v=d[key]||0,bw=v/maxV*BW,y=topPad+i*rowTotal2+Math.floor((rowTotal2-bH)/2);
+            s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
             if(bw>0.5)s+='<rect'+tt(d.lang,fmt(v)+' '+key)+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
-            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
+            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
           });
           s+='</svg>';
           el.innerHTML=s;
@@ -11459,15 +11658,18 @@ struct ScanSetupTemplate {
           if(sort==='desc')data.sort(function(a,b){return(b[key]||0)-(a[key]||0);});
           else if(sort==='asc')data.sort(function(a,b){return(a[key]||0)-(b[key]||0);});
           else data.sort(function(a,b){return(a.name||'').localeCompare(b.name||'');});
-          var LW=128,BW=300,rH=28,bH=20,gap=3;
-          var SH=data.length*(rH+gap)+14,svgW=LW+BW+80;
+          var LW=128,BW=300,SH=280,svgW=480;
+          var topPad3=4,botPad3=14;
+          var n3=data.length||1;
+          var rowTotal3=Math.floor((SH-topPad3-botPad3)/n3);
+          var bH=Math.min(22,Math.max(10,Math.floor(rowTotal3*0.65)));
           var maxV=Math.max.apply(null,data.map(function(d){return d[key]||0;}))||1;
           var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
           data.forEach(function(d,i){
-            var v=d[key]||0,bw=v/maxV*BW,y=i*(rH+gap)+4;
-            s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.name||d.path||'?')+'</text>';
+            var v=d[key]||0,bw=v/maxV*BW,y=topPad3+i*rowTotal3+Math.floor((rowTotal3-bH)/2);
+            s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.name||d.path||'?')+'</text>';
             if(bw>0.5)s+='<rect'+tt(d.name||'?',fmt(v))+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
-            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
+            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
           });
           s+='</svg>';
           el.innerHTML=s;
@@ -12357,6 +12559,7 @@ struct ErrorTemplate {
     .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .stat-chip:hover .stat-chip-tip{opacity:1;}
+    .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:10px;font-weight:600;color:var(--muted-2);font-variant-numeric:tabular-nums;line-height:1;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
     @media(max-width:700px){td,th{padding:7px 8px;}.run-id-chip,.git-chip{display:none;}}
@@ -12620,9 +12823,10 @@ struct ErrorTemplate {
       if (allRows.length) {
         var first = allRows[0];
         function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
-        var ce = document.getElementById('agg-code'); if (ce) ce.textContent = slocFmt(first.dataset.code);
-        var fe = document.getElementById('agg-files'); if (fe) fe.textContent = slocFmt(first.dataset.files);
-        var se = document.getElementById('agg-skipped'); if (se) se.textContent = slocFmt(first.dataset.skipped);
+        function setChipVal(id,n){var el=document.getElementById(id);if(!el)return;var compact=slocFmt(n),full=Number(n).toLocaleString();el.innerHTML=compact+(compact!==full?'<span class="stat-chip-exact">'+full+'</span>':'');}
+        setChipVal('agg-code', first.dataset.code);
+        setChipVal('agg-files', first.dataset.files);
+        setChipVal('agg-skipped', first.dataset.skipped);
       }
 
       // ── Branch filter population ──────────────────────────────────────────
@@ -12975,11 +13179,11 @@ struct HistoryTemplate {
     .table-wrap{width:100%;overflow-x:auto;}
     table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}
     th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;position:relative;user-select:none;}
-    th.sortable{cursor:pointer;} th.sortable:hover{color:var(--accent-2);}
+    th.sortable{cursor:pointer;} th.sortable:hover{color:var(--oxide);}
     .sort-icon{margin-left:4px;font-size:10px;opacity:0.45;display:inline-block;vertical-align:middle;}
-    th.sort-asc .sort-icon,th.sort-desc .sort-icon{opacity:1;color:var(--accent-2);}
+    th.sort-asc .sort-icon,th.sort-desc .sort-icon{opacity:1;color:var(--oxide);}
     .col-resize-handle{position:absolute;top:0;right:0;bottom:0;width:6px;cursor:col-resize;z-index:2;}
-    .col-resize-handle:hover,.col-resize-handle.dragging{background:rgba(111,155,255,0.3);}
+    .col-resize-handle:hover,.col-resize-handle.dragging{background:rgba(211,122,76,0.3);}
     td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     tr:last-child td{border-bottom:none;}
     tr.selected td{background:var(--sel-bg);}
@@ -12989,7 +13193,7 @@ struct HistoryTemplate {
     .run-id-chip{font-family:ui-monospace,monospace;font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--muted);}
     .git-chip{font-family:ui-monospace,monospace;font-size:11px;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent-2);}
     body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
-    .metric-num{font-weight:700;}
+    .metric-num{font-weight:700;color:var(--text);}
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
     .sel-badge{display:block;width:22px;height:22px;margin:0 auto;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--surface-2);line-height:20px;text-align:center;font-size:11px;font-weight:900;color:var(--muted-2);transition:background .12s,border-color .12s;}
     tr.selected .sel-badge{background:var(--sel-border);border-color:var(--sel-border);color:#fff;}
@@ -13012,7 +13216,7 @@ struct HistoryTemplate {
     .pagination-btns{display:flex;gap:6px;}
     .pg-btn{min-width:34px;min-height:34px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:background .12s ease;}
     .pg-btn:hover:not(:disabled){background:var(--line);}
-    .pg-btn.active{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
+    .pg-btn.active{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
     .pg-btn:disabled{opacity:.35;cursor:default;}
     .hint-right-wrap .instruction-bar{max-width:fit-content!important;width:auto!important;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
@@ -13031,6 +13235,7 @@ struct HistoryTemplate {
     .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .stat-chip:hover .stat-chip-tip{opacity:1;}
+    .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:10px;font-weight:600;color:var(--muted-2);font-variant-numeric:tabular-nums;line-height:1;}
     .sel-count{font-size:11px;background:rgba(255,255,255,0.22);border-radius:999px;padding:1px 8px;font-weight:800;letter-spacing:.02em;margin-left:2px;}
     .instruction-bar{background:rgba(111,155,255,0.08);border:1px solid rgba(111,155,255,0.22);border-radius:10px;padding:8px 14px;font-size:13px;color:var(--accent-2);display:inline-flex;align-items:center;gap:8px;margin-bottom:14px;width:fit-content;max-width:100%;}
     body.dark-theme .instruction-bar{background:rgba(111,155,255,0.12);color:var(--accent);}
@@ -13161,23 +13366,23 @@ struct HistoryTemplate {
       <div class="table-wrap">
         <table id="compare-table">
           <colgroup>
-            <col style="width:3%">
-            <col style="width:12%">
-            <col style="width:13%">
-            <col style="width:9%">
-            <col style="width:6%">
-            <col style="width:9%">
-            <col style="width:8%">
-            <col style="width:6%">
-            <col style="width:8%">
-            <col style="width:14%">
-            <col style="width:12%">
+            <col style="width:40px">
+            <col style="width:210px">
+            <col style="width:220px">
+            <col style="width:100px">
+            <col style="width:72px">
+            <col style="width:90px">
+            <col style="width:82px">
+            <col style="width:65px">
+            <col style="width:90px">
+            <col style="width:120px">
+            <col>
           </colgroup>
           <thead>
             <tr id="compare-thead">
               <th style="text-align:center;padding-left:4px;padding-right:4px;"><div class="col-resize-handle"></div></th>
-              <th class="sortable" data-sort-col="timestamp" data-sort-type="str">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
-              <th class="sortable" data-sort-col="project" data-sort-type="str">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th class="sortable" data-sort-col="timestamp" data-sort-type="str" style="min-width:210px;width:210px;">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th class="sortable" data-sort-col="project" data-sort-type="str" style="min-width:220px;width:220px;">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th title="Internal scan ID generated by OxideSLOC">Run ID<div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="files" data-sort-type="num">Files<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="code" data-sort-type="num">Code Lines<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
@@ -13269,10 +13474,11 @@ struct HistoryTemplate {
           if (!latestRow || ts > latestTs) { latestTs = ts; latestRow = r; }
         });
         function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function setChipVal(id,n){var el=document.getElementById(id);if(!el)return;var compact=slocFmt(n),full=Number(n).toLocaleString();el.innerHTML=compact+(compact!==full?'<span class="stat-chip-exact">'+full+'</span>':'');}
         var pe = document.getElementById('agg-projects'); if (pe) pe.textContent = Object.keys(projects).filter(Boolean).length;
         if (latestRow) {
-          var ce = document.getElementById('agg-code'); if (ce) ce.textContent = slocFmt(latestRow.dataset.code);
-          var fe = document.getElementById('agg-files'); if (fe) fe.textContent = slocFmt(latestRow.dataset.files);
+          setChipVal('agg-code', latestRow.dataset.code);
+          setChipVal('agg-files', latestRow.dataset.files);
         }
       })();
 
