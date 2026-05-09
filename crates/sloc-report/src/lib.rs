@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result};
 use askama::Template;
@@ -243,9 +242,7 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         warning_count: run.warnings.len(),
         warning_summary_rows,
         warning_opportunity_rows,
-        warning_console_preview: build_warning_console_preview(&run.warnings, 12),
         warning_console_full: build_warning_console(&run.warnings),
-        warning_preview_truncated: run.warnings.len() > 12,
         logo_text_uri,
         small_logo_uri,
         custom_logo_uri,
@@ -269,128 +266,87 @@ pub fn write_html(run: &AnalysisRun, output_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
 
-/// Build the argument list for the browser process.
-fn build_browser_args<'a>(
-    headless_flag: &'a str,
-    user_data_arg: &'a str,
-    print_to_pdf_arg: &'a str,
-    file_url: &'a str,
-    no_sandbox: bool,
-) -> Vec<&'a str> {
-    let mut args: Vec<&str> = vec![
-        headless_flag,
-        "--disable-gpu",
-        "--disable-extensions",
-        "--disable-background-networking",
-        "--disable-sync",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-default-apps",
-        "--hide-scrollbars",
-        "--mute-audio",
-        "--print-to-pdf-no-header",
-        "--no-pdf-header-footer",
-        "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=8000",
-        "--force-device-scale-factor=1",
-        user_data_arg,
-        print_to_pdf_arg,
-        file_url,
-    ];
+/// Use Chrome DevTools Protocol to render `html_path` as a PDF at `output_path`.
+///
+/// Launches a headless Chromium-based browser at A4-landscape viewport (1122 × 794 px),
+/// waits up to 15 s for all Chart.js canvases to signal readiness via
+/// `window.oxSlocChartsReady`, then captures the page using `Page.printToPDF` via CDP.
+fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
+    use headless_chrome::types::PrintToPdfOptions;
+    use headless_chrome::{Browser, LaunchOptions};
+
+    let browser_path = discover_browser().context(
+        "no supported Chromium-based browser found; \
+         set SLOC_BROWSER/BROWSER or install Chrome, Chromium, Edge, Brave, Vivaldi, or Opera",
+    )?;
+    eprintln!("[oxide-sloc][pdf] browser = {}", browser_path.display());
+
+    let no_sandbox = std::env::var("SLOC_BROWSER_NOSANDBOX").as_deref() == Ok("1");
     if no_sandbox {
-        args.push("--no-sandbox");
+        eprintln!("[oxide-sloc][pdf] --no-sandbox enabled via SLOC_BROWSER_NOSANDBOX=1");
     }
-    args
-}
 
-/// Poll for the PDF file to reach a stable non-zero size.
-/// Returns `true` if stable, `false` if not yet ready.
-fn poll_pdf_stable(pdf_path: &Path, last_size: &mut Option<u64>, stable_polls: &mut u32) -> bool {
-    let Ok(meta) = fs::metadata(pdf_path) else {
-        return false;
-    };
-    let size = meta.len();
-    if size == 0 {
-        return false;
-    }
-    if *last_size == Some(size) {
-        *stable_polls += 1;
-    } else {
-        *last_size = Some(size);
-        *stable_polls = 0;
-    }
-    *stable_polls >= 3
-}
+    let browser = Browser::new(LaunchOptions {
+        headless: true,
+        path: Some(browser_path),
+        window_size: Some((1122, 794)), // A4 landscape at 96 dpi
+        sandbox: !no_sandbox,
+        ..Default::default()
+    })
+    .context("failed to launch browser via CDP")?;
 
-/// Handle browser exit status, returning Ok if PDF was produced or an error otherwise.
-fn handle_browser_exit(
-    status: std::process::ExitStatus,
-    headless_flag: &str,
-    absolute_pdf: &Path,
-) -> Result<()> {
-    eprintln!(
-        "[oxide-sloc][pdf] {} exit = {:?}",
-        headless_flag,
-        status.code()
+    let tab = browser.new_tab().context("failed to open browser tab")?;
+
+    let html_for_url = PathBuf::from(
+        html_path
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string(),
     );
-    if status.success() && absolute_pdf.exists() {
-        return Ok(());
-    }
-    if status.success() {
-        anyhow::bail!("browser exited successfully but PDF file was not created");
-    }
-    anyhow::bail!(
-        "browser exited with status {} while generating PDF",
-        status
-            .code()
-            .map_or_else(|| "unknown".into(), |code| code.to_string())
-    );
-}
+    let url = file_url(&html_for_url);
+    eprintln!("[oxide-sloc][pdf] url = {url}");
 
-/// Wait loop: poll until the PDF is stable, the browser exits, or we time out.
-fn wait_for_pdf_stable(
-    child: &mut std::process::Child,
-    browser_display: &std::path::Display<'_>,
-    headless_flag: &str,
-    absolute_pdf: &Path,
-) -> Result<()> {
-    let started = std::time::Instant::now();
-    let mut last_size: Option<u64> = None;
-    let mut stable_polls: u32 = 0;
+    tab.navigate_to(&url)
+        .context("failed to navigate browser to HTML file")?;
+    tab.wait_until_navigated()
+        .context("browser navigation did not complete")?;
 
+    // Poll until the Chart.js init IIFE sets window.oxSlocChartsReady = true (max 15 s).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
-        if poll_pdf_stable(absolute_pdf, &mut last_size, &mut stable_polls) {
-            let size = last_size.unwrap_or(0);
-            eprintln!("[oxide-sloc][pdf] file ready at {size} bytes");
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(());
-        }
-
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("failed while waiting for {browser_display}"))?
-        {
-            return handle_browser_exit(status, headless_flag, absolute_pdf);
-        }
-
-        if started.elapsed() > std::time::Duration::from_secs(45) {
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Ok(meta) = fs::metadata(absolute_pdf) {
-                if meta.len() > 0 {
-                    eprintln!(
-                        "[oxide-sloc][pdf] timeout reached but PDF exists at {} bytes",
-                        meta.len()
-                    );
-                    return Ok(());
-                }
+        if let Ok(r) = tab.evaluate("!!window.oxSlocChartsReady", false) {
+            if matches!(r.value, Some(serde_json::Value::Bool(true))) {
+                break;
             }
-            anyhow::bail!("browser timed out while generating PDF");
         }
-
+        if std::time::Instant::now() >= deadline {
+            eprintln!("[oxide-sloc][pdf] chart readiness timed out — capturing anyway");
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+
+    let pdf_bytes = tab
+        .print_to_pdf(Some(PrintToPdfOptions {
+            landscape: Some(true),
+            print_background: Some(true),
+            scale: Some(1.0),
+            paper_width: Some(11.69), // A4 landscape width (inches)
+            paper_height: Some(8.27), // A4 landscape height (inches)
+            margin_top: Some(0.4),
+            margin_bottom: Some(0.4),
+            margin_left: Some(0.45),
+            margin_right: Some(0.45),
+            prefer_css_page_size: Some(false),
+            ..Default::default()
+        }))
+        .context("browser failed to generate PDF")?;
+
+    fs::write(output_path, &pdf_bytes)
+        .with_context(|| format!("failed to write PDF to {}", output_path.display()))?;
+
+    eprintln!("[oxide-sloc][pdf] wrote {} bytes", pdf_bytes.len());
+    Ok(())
 }
 
 /// Launch a headless Chromium-based browser to print `html_path` as a PDF to `pdf_path`.
@@ -399,15 +355,8 @@ fn wait_for_pdf_stable(
 ///
 /// Returns an error if no supported browser is found, the browser process fails to start,
 /// or the PDF file is not produced within the timeout.
-#[allow(clippy::too_many_lines)]
 pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
-    // NOSONAR
     eprintln!("[oxide-sloc][pdf] starting");
-
-    let browser = discover_browser().context(
-        "no supported Chromium-based browser found; set SLOC_BROWSER/BROWSER or install Chrome, Chromium, Edge, Brave, Vivaldi, or Opera",
-    )?;
-    eprintln!("[oxide-sloc][pdf] browser = {}", browser.display());
 
     let absolute_html = html_path
         .canonicalize()
@@ -429,87 +378,7 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
         })?;
     }
 
-    let html_for_url = PathBuf::from(
-        absolute_html
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .to_string(),
-    );
-    let file_url = file_url(&html_for_url);
-    eprintln!("[oxide-sloc][pdf] url = {file_url}");
-
-    let html_parent = absolute_html
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-
-    let profile_dir_handle = tempfile::Builder::new()
-        .prefix(&format!("oxide-sloc-pdf-{}-", std::process::id()))
-        .tempdir()
-        .context("failed to create temporary browser profile directory")?;
-    let profile_dir = profile_dir_handle.path().to_path_buf();
-    eprintln!("[oxide-sloc][pdf] profile = {}", profile_dir.display());
-
-    // Chrome's --print-to-pdf silently fails when the output path exceeds ~260 characters
-    // (Windows MAX_PATH). Write to a short path inside the profile dir (which is always in
-    // %TEMP%) and rename to the final destination afterward.
-    let chrome_pdf_path = profile_dir.join("output.pdf");
-
-    // --no-sandbox is required in Docker (and other rootless environments) where
-    // the Linux kernel namespacing that Chrome's sandbox relies on is unavailable.
-    // It is NOT enabled by default because it disables security isolation.
-    // Set SLOC_BROWSER_NOSANDBOX=1 when running inside a container.
-    let no_sandbox = std::env::var("SLOC_BROWSER_NOSANDBOX").as_deref() == Ok("1");
-    if no_sandbox {
-        eprintln!("[oxide-sloc][pdf] --no-sandbox enabled via SLOC_BROWSER_NOSANDBOX=1");
-    }
-
-    let run_once = |headless_flag: &str| -> Result<()> {
-        eprintln!("[oxide-sloc][pdf] launching {headless_flag}");
-
-        if chrome_pdf_path.exists() {
-            let _ = fs::remove_file(&chrome_pdf_path);
-        }
-
-        let user_data_arg = format!("--user-data-dir={}", profile_dir.display());
-        let print_to_pdf_arg = format!("--print-to-pdf={}", chrome_pdf_path.display());
-        let args = build_browser_args(
-            headless_flag,
-            &user_data_arg,
-            &print_to_pdf_arg,
-            &file_url,
-            no_sandbox,
-        );
-
-        let mut child = Command::new(&browser)
-            .current_dir(&html_parent)
-            .args(&args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .with_context(|| format!("failed to launch browser {}", browser.display()))?;
-
-        wait_for_pdf_stable(
-            &mut child,
-            &browser.display(),
-            headless_flag,
-            &chrome_pdf_path,
-        )
-    };
-
-    let result = run_once("--headless=old").or_else(|err| {
-        eprintln!("[oxide-sloc][pdf] --headless=old failed ({err}), trying --headless");
-        run_once("--headless")
-    });
-
-    if let Err(err) = &result {
-        eprintln!("[oxide-sloc][pdf] --headless failed: {err}");
-    }
-
-    result?;
-
-    fs::rename(&chrome_pdf_path, &absolute_pdf)
-        .with_context(|| format!("failed to move generated PDF to {}", absolute_pdf.display()))?;
-
+    write_pdf_via_cdp(&absolute_html, &absolute_pdf)?;
     eprintln!("[oxide-sloc][pdf] done");
     Ok(())
 }
@@ -713,26 +582,6 @@ fn build_warning_console(warnings: &[String]) -> String {
         .join("\n")
 }
 
-fn build_warning_console_preview(warnings: &[String], limit: usize) -> String {
-    if warnings.is_empty() {
-        return "No top-level warnings.".to_string();
-    }
-
-    warnings
-        .iter()
-        .take(limit)
-        .enumerate()
-        .map(|(index, warning)| {
-            format!(
-                "[{index:03}] {warning}",
-                index = index + 1,
-                warning = warning
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn summarize_warnings(warnings: &[String]) -> Vec<WarningSummaryRow> {
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     for warning in warnings {
@@ -833,17 +682,44 @@ fn classify_unsupported_path(path: &str) -> &'static str {
 /// Map a bucket label to its recommendation string.
 fn bucket_recommendation(label: &str) -> String {
     match label {
-        "Documentation / text" => "Add a docs/text classification path so README, LICENSE, and markdown stop appearing as source-language misses.".to_string(),
-        "JSON manifests and config" => "Promote JSON manifests into a metadata bucket or add a light-weight JSON analyzer if you want them counted separately.".to_string(),
-        "Project metadata and packaging" => "Treat TOML, MANIFEST.in, and requirements files as metadata so they become intentional non-source records instead of generic warnings.".to_string(),
-        "HTML templates" => "Add HTML/template detection for web views and server-rendered pages to reduce unsupported-template noise.".to_string(),
-        "Plain text assets" => "Classify text asset placeholders as plain text or ignore them by policy.".to_string(),
-        _ => "Review this bucket and either map it to an existing metadata class or create a dedicated analyzer when it truly represents source.".to_string(),
+        "Documentation / text" => "These files are documentation, not source code. Add a docs/text exclude glob (e.g. **/*.md) or mark them as non-source in your config so they stop generating warnings.".to_string(),
+        "JSON manifests and config" => "JSON config and manifest files are not source code. Exclude them with an ignore glob (e.g. **/*.json) or add them to excluded_directories so they are silently skipped.".to_string(),
+        "Project metadata and packaging" => "TOML, requirements.txt, and MANIFEST.in files describe package metadata — not source. Add an exclude glob such as **/*.toml or list them in excluded_directories to suppress these warnings.".to_string(),
+        "HTML templates" => "HTML is already a supported language. These files may have unusual extensions or be in a directory that is being excluded. Check that the files have a .html extension and are not inside an excluded path.".to_string(),
+        "Plain text assets" => "Plain .txt files are not analyzed by default. If they contain source, rename them with a source extension. Otherwise add **/*.txt to your exclude globs.".to_string(),
+        "Extensionless or custom text files" => "Files without an extension cannot be auto-detected. Add a shebang line (e.g. #!/usr/bin/env python3) so oxide-sloc can identify the language, or add an explicit language override in your config.".to_string(),
+        _ => "Files in this group were not recognized. Check the file extensions and either add an exclude glob to silence the warning or open an issue to request analyzer support.".to_string(),
+    }
+}
+
+/// Short human-readable description of what each bucket means.
+fn bucket_description(label: &str) -> String {
+    match label {
+        "Documentation / text" => {
+            "README, LICENSE, and markdown files — not source code.".to_string()
+        }
+        "JSON manifests and config" => {
+            "JSON configuration or manifest files (package.json, lockfiles, etc.).".to_string()
+        }
+        "Project metadata and packaging" => {
+            "TOML, requirements.txt, and MANIFEST.in files that describe package metadata."
+                .to_string()
+        }
+        "HTML templates" => {
+            "HTML files not covered by the built-in HTML analyzer (unexpected extension or path)."
+                .to_string()
+        }
+        "Plain text assets" => "Plain .txt files that have no analyzable structure.".to_string(),
+        "Extensionless or custom text files" => {
+            "Files with no extension that could not be language-detected.".to_string()
+        }
+        _ => "Files with an unrecognized extension or format.".to_string(),
     }
 }
 
 fn build_support_opportunities(warnings: &[String]) -> Vec<WarningOpportunityRow> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for warning in warnings {
         if !warning.contains("unsupported or undetected language") {
@@ -860,6 +736,18 @@ fn build_support_opportunities(warnings: &[String]) -> Vec<WarningOpportunityRow
 
         let bucket = classify_unsupported_path(path);
         *counts.entry(bucket.to_string()).or_default() += 1;
+
+        let ex = examples.entry(bucket.to_string()).or_default();
+        if ex.len() < 3 {
+            let basename = Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            if !ex.contains(&basename) {
+                ex.push(basename);
+            }
+        }
     }
 
     let mut rows = counts.into_iter().collect::<Vec<_>>();
@@ -868,10 +756,14 @@ fn build_support_opportunities(warnings: &[String]) -> Vec<WarningOpportunityRow
     rows.into_iter()
         .map(|(label, count)| {
             let recommendation = bucket_recommendation(&label);
+            let bucket_description = bucket_description(&label);
+            let example_files = examples.remove(&label).unwrap_or_default();
             WarningOpportunityRow {
                 label,
                 count,
                 recommendation,
+                example_files,
+                bucket_description,
             }
         })
         .collect()
@@ -929,6 +821,10 @@ struct WarningOpportunityRow {
     label: String,
     count: usize,
     recommendation: String,
+    /// Up to 3 example file names (basename only) that triggered this bucket.
+    example_files: Vec<String>,
+    /// Short description of what this bucket means for the user.
+    bucket_description: String,
 }
 
 #[derive(Template)]
@@ -1156,7 +1052,7 @@ struct WarningOpportunityRow {
     }
     /* ── Report header / footer identification banner ─────────────────── */
     .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; position: relative; z-index: 31; width: 100%; }
-    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; width: 100%; margin-top: 24px; display: none; }
+    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; width: 100%; margin-top: 24px; }
     /* ── Print & PDF export ──────────────────────────────────────────── */
     @page {
       size: A4 landscape;
@@ -1175,11 +1071,9 @@ struct WarningOpportunityRow {
         width: 100% !important;
       }
 
-      /* Report id banner — fixed on every printed page; always dark grey regardless of nav theme */
-      .report-id-banner { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; z-index: 9999 !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; }
-      .report-id-footer-banner { display: block !important; position: fixed !important; bottom: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; z-index: 9999 !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 0 !important; background: #3d3d3d !important; color: #fff !important; }
-      /* Push body content clear of the fixed top + bottom banners (banner ≈ 22px each side) */
-      body.has-report-banner { padding-top: 22px !important; padding-bottom: 22px !important; }
+      /* Report id banner — appears once at the top/bottom of the document in print */
+      .report-id-banner { position: static !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; }
+      .report-id-footer-banner { display: block !important; position: static !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 12px !important; background: #3d3d3d !important; color: #fff !important; }
       /* Hide interactive UI-chrome; keep section heading text visible */
       .top-nav, .hero-actions,
       .background-watermarks,
@@ -1382,8 +1276,11 @@ struct WarningOpportunityRow {
     }
     .config-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 10px; }
     .config-actions { display: flex; gap: 8px; flex-shrink: 0; margin-top: 4px; }
+    .config-pre-wrap { position: relative; }
     .config-pre { background: #16120f; color: #d4f0d0; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; overflow: auto; resize: vertical; max-height: 320px; min-height: 100px; white-space: pre; }
     body.dark-theme .config-pre { background: #0e0c0a; color: #b8f0b8; }
+    .config-pre-copy { position: absolute; top: 8px; right: 10px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.22); color: #d4f0d0; border-radius: 7px; padding: 3px 10px; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s ease; }
+    .config-pre-copy:hover { background: rgba(255,255,255,0.22); }
 
 
     .page {
@@ -1415,6 +1312,9 @@ struct WarningOpportunityRow {
     /* Print: hide interactive controls; keep SVGs; show locked card for history mode */
     @media print {
       .chart-controls, .chart-tab-bar { display:none !important; }
+      canvas { max-width: 100% !important; }
+      .chart-container { width: 100% !important; overflow: visible !important; }
+      .charts-grid { grid-template-columns: 1fr 1fr !important; gap: 14px !important; }
       .chart-container svg { max-height:340px !important; }
       .chart-locked-card { display:block !important; background:#eef3ff !important; border:1px solid #ccc !important; color:#2f5fe3 !important; font-size:11px !important; padding:10px 14px !important; border-radius:8px !important; }
     }
@@ -1588,7 +1488,7 @@ struct WarningOpportunityRow {
             <div id="overview-chart" class="chart-container"><div id="canvas-proj-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-proj"></canvas></div></div>
             <div class="chart-locked-card" id="overview-chart-locked">
               <h3>Historical trend requires the web UI</h3>
-              <p style="margin:0">Run <code>oxide-sloc serve</code> and navigate to <strong>/trend-report</strong> to view per-commit, per-tag, per-release, and cross-repo comparisons on an interactive timeline chart. The web UI stores scan history and can plot any metric over time.</p>
+              <p style="margin:0">Run <code>oxide-sloc serve</code> and navigate to <strong>/trend-reports</strong> to view per-commit, per-tag, per-release, and cross-repo comparisons on an interactive timeline chart. The web UI stores scan history and can plot any metric over time.</p>
             </div>
           </div>
         </section>
@@ -1828,22 +1728,33 @@ struct WarningOpportunityRow {
         </div>
 
         <div>
-          <h3 style="margin:0 0 6px;">High-value support opportunities</h3>
-          <p class="support-note">Groups the noisy unsupported warnings into the next format buckets most worth classifying or supporting in the analysis core.</p>
+          <h3 style="margin:0 0 4px;">Skipped file categories</h3>
+          <p class="support-note">Files that were not analyzed, grouped by category. Each row shows what the files are, how many were skipped, example file names, and how to silence or fix the warning.</p>
           {% if warning_opportunity_rows.is_empty() %}
             <div class="pill good">No unsupported text-format buckets detected.</div>
           {% else %}
           <div class="table-shell">
             <table class="support-table">
               <thead>
-                <tr><th>Opportunity</th><th>Count</th><th>Recommended next move</th></tr>
+                <tr><th style="width:22%;">Category</th><th style="width:7%;">Count</th><th style="width:28%;">What these files are</th><th>Example files &amp; how to fix</th></tr>
               </thead>
               <tbody>
                 {% for row in warning_opportunity_rows %}
                 <tr>
-                  <td title="{{ row.label }}">{{ row.label }}</td>
-                  <td>{{ row.count }}</td>
-                  <td class="small" title="{{ row.recommendation }}">{{ row.recommendation }}</td>
+                  <td style="font-weight:700;" title="{{ row.label }}">{{ row.label }}</td>
+                  <td style="font-weight:800;color:var(--oxide);">{{ row.count }}</td>
+                  <td class="small" style="color:var(--muted);">{{ row.bucket_description }}</td>
+                  <td>
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                      {% if !row.example_files.is_empty() %}
+                      <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                        {% for f in row.example_files %}<code style="font-size:11px;padding:1px 5px;">{{ f }}</code>{% endfor %}
+                        {% if row.count > row.example_files.len() %}<span style="font-size:11px;color:var(--muted);align-self:center;">+{{ row.count - row.example_files.len() }} more</span>{% endif %}
+                      </div>
+                      {% endif %}
+                      <span class="small" style="color:var(--muted-2);font-size:11px;">{{ row.recommendation }}</span>
+                    </div>
+                  </td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -1853,20 +1764,14 @@ struct WarningOpportunityRow {
         </div>
 
         <div>
-          <details>
+          <details open>
             <summary>Detailed run warnings ({{ warning_count }})</summary>
             <div>
-              <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">These are the raw warning messages emitted during the scan — file-level parse issues, encoding fallbacks, binary detections, and unsupported-language notices. High counts typically indicate large numbers of non-code assets (JSON configs, docs, lockfiles) in the target directory.</p>
+              <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">Raw warning messages emitted during the scan — unsupported file formats, encoding fallbacks, binary detections, and per-file parse issues. Scroll to see all warnings. High counts typically indicate many non-code assets (JSON configs, docs, lockfiles) in the scanned directory.</p>
               {% if !has_run_warnings %}
                 <div class="pill good">No top-level warnings.</div>
               {% else %}
-                <pre class="warning-console" id="warning-console-preview">{{ warning_console_preview }}</pre>
-                {% if warning_preview_truncated %}
-                <div class="warning-console-actions">
-                  <button type="button" class="header-button" data-expand-warnings class="warnings-show-link">Show all warnings</button>
-                </div>
-                <pre class="warning-console hidden" id="warning-console-full">{{ warning_console_full }}</pre>
-                {% endif %}
+                <pre class="warning-console" id="warning-console-full" style="max-height:210px;">{{ warning_console_full }}</pre>
               {% endif %}
             </div>
           </details>
@@ -1884,7 +1789,10 @@ struct WarningOpportunityRow {
               <button type="button" class="header-button" data-download-config>Download</button>
             </div>
           </div>
-          <pre class="config-pre" id="config-json-block">{{ config_json }}</pre>
+          <div class="config-pre-wrap">
+            <pre class="config-pre" id="config-json-block">{{ config_json }}</pre>
+            <button type="button" class="config-pre-copy" id="config-inline-copy-btn" aria-label="Copy configuration">Copy</button>
+          </div>
         </div>
       </section>
     </div>
@@ -1906,7 +1814,6 @@ struct WarningOpportunityRow {
       var copyLinkButtons = Array.prototype.slice.call(document.querySelectorAll('[data-copy-link]'));
       var shareButtons = Array.prototype.slice.call(document.querySelectorAll('[data-share-report]'));
       var printButtons = Array.prototype.slice.call(document.querySelectorAll('[data-print-report]'));
-      var expandWarningsButton = document.querySelector('[data-expand-warnings]');
 
       function applyTheme(theme) {
         body.classList.toggle('dark-theme', theme === 'dark');
@@ -1960,26 +1867,21 @@ struct WarningOpportunityRow {
         });
       });
 
-      if (expandWarningsButton) {
-        expandWarningsButton.addEventListener('click', function () {
-          var preview = document.getElementById('warning-console-preview');
-          var full = document.getElementById('warning-console-full');
-          if (preview) preview.classList.add('hidden');
-          if (full) full.classList.remove('hidden');
-          expandWarningsButton.classList.add('hidden');
-        });
-      }
-
       var copyConfigBtn = document.querySelector('[data-copy-config]');
       var downloadConfigBtn = document.querySelector('[data-download-config]');
       var configBlock = document.getElementById('config-json-block');
-      if (copyConfigBtn && configBlock) {
-        copyConfigBtn.addEventListener('click', function () {
+      var inlineCopyBtn = document.getElementById('config-inline-copy-btn');
+      function handleConfigCopy(btn) {
+        if (!btn || !configBlock) return;
+        btn.addEventListener('click', function () {
           copyText(configBlock.textContent);
-          copyConfigBtn.textContent = 'Copied!';
-          setTimeout(function () { copyConfigBtn.textContent = 'Copy'; }, 1600);
+          var orig = btn.textContent;
+          btn.textContent = 'Copied!';
+          setTimeout(function () { btn.textContent = orig; }, 1600);
         });
       }
+      handleConfigCopy(copyConfigBtn);
+      handleConfigCopy(inlineCopyBtn);
       if (downloadConfigBtn && configBlock) {
         downloadConfigBtn.addEventListener('click', function () {
           var blob = new Blob([configBlock.textContent], { type: 'application/json' });
@@ -2609,6 +2511,7 @@ struct WarningOpportunityRow {
         });
       });
     })();
+    window.oxSlocChartsReady = true;
     // Auto-populate title on any td that is visually truncated but has no explicit title
     requestAnimationFrame(function() {
       document.querySelectorAll('td').forEach(function(td) {
@@ -2651,9 +2554,7 @@ struct ReportTemplate<'a> {
     warning_count: usize,
     warning_summary_rows: Vec<WarningSummaryRow>,
     warning_opportunity_rows: Vec<WarningOpportunityRow>,
-    warning_console_preview: String,
     warning_console_full: String,
-    warning_preview_truncated: bool,
     logo_text_uri: String,
     small_logo_uri: String,
     /// Data-URI for a custom logo, or None to show the default OxideSLOC logo.

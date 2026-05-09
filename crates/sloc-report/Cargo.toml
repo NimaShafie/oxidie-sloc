@@ -17,6 +17,6 @@ categories.workspace = true
 anyhow.workspace = true
 askama.workspace = true
 chrono.workspace = true
+headless_chrome = "1"
 serde_json.workspace = true
 sloc-core = { path = "../sloc-core", version = "1.4.0" }
-tempfile = "3"

@@ -103,7 +103,7 @@ use super::{AppState, CspNonce};
     .integrations-header .subtitle{margin-bottom:0;}
     /* Tab bar */
     .tab-bar{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;}
-    .tab-btn{display:inline-flex;align-items:center;gap:8px;padding:7px 20px;border-radius:999px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;transition:background 0.12s,color 0.12s,border-color 0.12s;}
+    .tab-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 27px;border-radius:999px;border:1.5px solid var(--line);background:var(--bg);color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;transition:background 0.12s,color 0.12s,border-color 0.12s;}
     .tab-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .tab-btn:hover{background:#efe6dc;color:var(--text);}
     body.dark-theme .tab-btn:hover{background:#372922;color:var(--text);}
@@ -154,7 +154,7 @@ use super::{AppState, CspNonce};
           <button class="nav-dropdown-btn" type="button">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/view-reports"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>All Reports</a>
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -167,7 +167,7 @@ use super::{AppState, CspNonce};
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
