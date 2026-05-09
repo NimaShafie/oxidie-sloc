@@ -405,7 +405,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/ingest", post(api_ingest_handler))
         .route("/api/project-history", get(project_history_handler))
-        .route("/trend-report", get(trend_report_handler))
+        .route("/trend-reports", get(trend_report_handler))
         .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
         .route("/api/runs/{wait_id}/cancel", post(cancel_run_handler))
         .route("/api/runs/{run_id}/pdf-status", get(pdf_status_handler))
@@ -1973,26 +1973,49 @@ async fn open_path_handler(
         _ => return (StatusCode::BAD_REQUEST, "missing path").into_response(),
     };
 
-    let Ok(canonical) = fs::canonicalize(raw) else {
-        return (StatusCode::BAD_REQUEST, "path not found").into_response();
-    };
-
-    // Must be a directory (or a file whose parent directory we open).
-    let target = if canonical.is_file() {
-        match canonical.parent() {
+    // Resolve the target directory. If the path doesn't exist yet (e.g. the output
+    // dir hasn't been created by a scan), walk up to the nearest existing ancestor
+    // so the file explorer still opens somewhere useful.
+    let target = match fs::canonicalize(raw) {
+        Ok(canonical) if canonical.is_file() => match canonical.parent() {
             Some(p) => p.to_path_buf(),
             None => return (StatusCode::BAD_REQUEST, "path has no parent").into_response(),
+        },
+        Ok(canonical) if canonical.is_dir() => canonical,
+        Ok(_) => {
+            return (StatusCode::BAD_REQUEST, "path is not a file or directory").into_response()
         }
-    } else if canonical.is_dir() {
-        canonical
-    } else {
-        // Block special devices, pipes, sockets, etc.
-        return (StatusCode::BAD_REQUEST, "path is not a file or directory").into_response();
+        Err(_) => {
+            // Path doesn't exist — find nearest existing ancestor directory.
+            let mut ancestor = std::path::Path::new(raw);
+            loop {
+                match ancestor.parent() {
+                    Some(p) => {
+                        ancestor = p;
+                        if ancestor.is_dir() {
+                            break;
+                        }
+                    }
+                    None => {
+                        return (StatusCode::BAD_REQUEST, "no existing ancestor found")
+                            .into_response();
+                    }
+                }
+            }
+            ancestor.to_path_buf()
+        }
     };
 
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer.exe")
-        .arg(&target)
+    let _ = std::process::Command::new("cmd")
+        .args([
+            "/c",
+            "start",
+            "",
+            "/max",
+            "explorer.exe",
+            &target.to_string_lossy(),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
@@ -2860,35 +2883,53 @@ fn render_result_page(
             .map(|prev_run| compute_delta(&prev_run, run))
     });
 
-    let language_rows = run
-        .totals_by_language
-        .iter()
-        .map(|row| LanguageSummaryRow {
-            language: row.language.display_name().to_string(),
-            files: row.files,
-            physical: row.total_physical_lines,
-            code: row.code_lines,
-            comments: row.comment_lines,
-            blank: row.blank_lines,
-            mixed: row.mixed_lines_separate,
-            functions: row.functions,
-            classes: row.classes,
-            variables: row.variables,
-            imports: row.imports,
-        })
-        .collect::<Vec<_>>();
-
     let files_analyzed = run.per_file_records.len() as u64;
     let files_skipped = run.skipped_file_records.len() as u64;
-    let physical_lines = language_rows.iter().map(|r| r.physical).sum::<u64>();
-    let code_lines = language_rows.iter().map(|r| r.code).sum::<u64>();
-    let comment_lines = language_rows.iter().map(|r| r.comments).sum::<u64>();
-    let blank_lines = language_rows.iter().map(|r| r.blank).sum::<u64>();
-    let mixed_lines = language_rows.iter().map(|r| r.mixed).sum::<u64>();
-    let functions = language_rows.iter().map(|r| r.functions).sum::<u64>();
-    let classes = language_rows.iter().map(|r| r.classes).sum::<u64>();
-    let variables = language_rows.iter().map(|r| r.variables).sum::<u64>();
-    let imports = language_rows.iter().map(|r| r.imports).sum::<u64>();
+    let physical_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.total_physical_lines)
+        .sum::<u64>();
+    let code_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.code_lines)
+        .sum::<u64>();
+    let comment_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.comment_lines)
+        .sum::<u64>();
+    let blank_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.blank_lines)
+        .sum::<u64>();
+    let mixed_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.mixed_lines_separate)
+        .sum::<u64>();
+    let functions = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.functions)
+        .sum::<u64>();
+    let classes = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.classes)
+        .sum::<u64>();
+    let variables = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.variables)
+        .sum::<u64>();
+    let imports = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.imports)
+        .sum::<u64>();
 
     let prev_sum = prev_entry.as_ref().map(|e| &e.summary);
     let prev_fa = prev_sum.map(|s| s.files_analyzed);
@@ -2977,7 +3018,6 @@ fn render_result_page(
         html_path: artifacts.html_path.as_ref().map(|p| display_path(p)),
         pdf_path: artifacts.pdf_path.as_ref().map(|p| display_path(p)),
         json_path: artifacts.json_path.as_ref().map(|p| display_path(p)),
-        language_rows,
         prev_run_id: prev_entry.as_ref().map(|e| e.run_id.clone()),
         prev_run_timestamp: prev_entry.as_ref().map(|e| fmt_pst(e.timestamp_utc)),
         prev_run_code_lines: prev_entry.as_ref().map(|e| e.summary.code_lines),
@@ -3511,7 +3551,7 @@ async fn artifact_handler(
                          <div class=\"nav-dropdown\">\
                            <a href=\"/view-reports\" class=\"nav-dropdown-btn\">View Reports <svg width=\"10\" height=\"10\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"6 9 12 15 18 9\"></polyline></svg></a>\
                            <div class=\"nav-dropdown-menu\">\
-                             <a href=\"/trend-report\"><svg viewBox=\"0 0 24 24\"><polyline points=\"23 6 13.5 15.5 8.5 10.5 1 18\"></polyline><polyline points=\"17 6 23 6 23 12\"></polyline></svg>Trend Report</a>\
+                             <a href=\"/trend-reports\"><svg viewBox=\"0 0 24 24\"><polyline points=\"23 6 13.5 15.5 8.5 10.5 1 18\"></polyline><polyline points=\"17 6 23 6 23 12\"></polyline></svg>Trend Reports</a>\
                            </div>\
                          </div>\
                          <button type=\"button\" class=\"theme-toggle\" id=\"theme-toggle\" aria-label=\"Toggle theme\">\
@@ -4827,7 +4867,7 @@ async fn api_ingest_handler(
 // Protected. Interactive time-series chart page that loads scan history via
 // /api/metrics/history and renders a vanilla-SVG line chart.
 //
-// GET /trend-report
+// GET /trend-reports
 
 async fn trend_report_handler(
     State(state): State<AppState>,
@@ -4854,7 +4894,7 @@ async fn trend_report_handler(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OxideSLOC | Trend Report</title>
+  <title>OxideSLOC | Trend Reports</title>
   <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
   <style nonce="{nonce}">
     :root {{
@@ -4915,7 +4955,7 @@ async fn trend_report_handler(
     .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
     .stat-chip:hover .stat-chip-tip{{opacity:1;}}
-    .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:10px;font-weight:600;color:var(--muted-2);font-variant-numeric:tabular-nums;line-height:1;}}
+    .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
     .stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}
     body.dark-theme .stat-delta-up{{color:#5aba8a;}}body.dark-theme .stat-delta-down{{color:#e07070;}}
     .chart-wrap{{width:100%;overflow-x:auto;}} .chart-wrap svg{{display:block;margin:0 auto;}}
@@ -4981,7 +5021,7 @@ async fn trend_report_handler(
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -4994,7 +5034,7 @@ async fn trend_report_handler(
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -5013,7 +5053,7 @@ async fn trend_report_handler(
     <div class="panel">
       <div class="trend-header">
         <div class="trend-title-block">
-          <h1>Trend Report</h1>
+          <h1>Trend Reports</h1>
           <p class="muted">Plot any SLOC metric over time. Each data point is a saved scan. Select a project root, choose a metric and X-axis mode, then explore how your codebase has changed across commits, tags, or time.</p>
           <span class="chart-hint-inline">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
@@ -5063,9 +5103,8 @@ async fn trend_report_handler(
         <label>Chart Size:
           <select class="chart-select" id="scale-sel">
             <option value="0.75">Compact</option>
-            <option value="1" selected>Normal</option>
-            <option value="1.5">Large</option>
-            <option value="2">Extra Large</option>
+            <option value="1.2" selected>Normal</option>
+            <option value="1.38">Large</option>
           </select>
         </label>
       </div>
@@ -7068,21 +7107,6 @@ fn escape_html(value: &str) -> String {
 }
 
 #[derive(Clone)]
-struct LanguageSummaryRow {
-    language: String,
-    files: u64,
-    physical: u64,
-    code: u64,
-    comments: u64,
-    blank: u64,
-    mixed: u64,
-    functions: u64,
-    classes: u64,
-    variables: u64,
-    imports: u64,
-}
-
-#[derive(Clone)]
 struct SubmoduleRow {
     name: String,
     relative_path: String,
@@ -7280,12 +7304,12 @@ struct SubmoduleRow {
     .summary-body { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .coverage-pills { display:flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
     .coverage-pill, .language-pill, .soft-chip { display:inline-flex; align-items:center; min-height: 32px; padding: 0 12px; border-radius: 999px; border:1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 13px; font-weight: 700; }
-    .layout { display:grid; grid-template-columns: 218px minmax(0, 1fr); gap: 18px; align-items:start; min-height: calc(100vh - 57px); }
-    .side-stack { display:grid; gap: 16px; align-items:start; align-self: start; position: sticky; top: 73px; max-height: calc(100vh - 90px); overflow-y: auto; width: 218px; max-width: 218px; scrollbar-width: none; }
+    .layout { display:grid; grid-template-columns: 244px minmax(0, 1fr); gap: 18px; align-items:start; min-height: calc(100vh - 57px); }
+    .side-stack { display:grid; gap: 16px; align-items:start; align-self: start; position: sticky; top: 73px; max-height: calc(100vh - 90px); overflow-y: auto; width: 244px; max-width: 244px; scrollbar-width: none; }
     .side-stack::-webkit-scrollbar { display: none; }
     .step-nav { padding: 20px 16px; }
     .step-nav h3 { margin: 6px 4px 20px; font-size: 16px; font-weight: 850; letter-spacing: -0.01em; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
-    .step-button { width:100%; display:flex; align-items:center; gap:12px; border:none; background:transparent; border-radius: 12px; padding: 14px 12px; color: var(--text); cursor:pointer; text-align:left; font-size:15px; font-weight:700; transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease; animation: stepEntrance 0.3s ease both; }
+    .step-button { width:100%; display:flex; align-items:center; gap:10px; border:none; background:transparent; border-radius: 12px; padding: 11px 8px; color: var(--text); cursor:pointer; text-align:left; font-size:13px; font-weight:700; white-space:nowrap; transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease; animation: stepEntrance 0.3s ease both; }
     .step-button:hover { background: var(--surface-2); }
     .step-button.active { background: rgba(37,99,235,0.09); box-shadow: inset 0 0 0 1px rgba(37,99,235,0.18); color: var(--accent-2); }
     .step-num { width:22px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; background: var(--surface-3); color: var(--text); font-size:12px; font-weight:800; flex:0 0 auto; }
@@ -7297,6 +7321,7 @@ struct SubmoduleRow {
     .step-nav-sum-row:last-child { border-bottom:none; }
     .step-nav-sum-key { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:.07em; color:var(--muted-2); flex-shrink:0; }
     .step-nav-sum-val { font-size:12px; font-weight:700; color:var(--text); text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:120px; }
+    .step-steps-divider { height:1px; background:var(--line); margin: 14px 4px 0; }
     .quick-scan-divider { height:1px; background:var(--line); margin: 20px 4px 6px; }
     .quick-scan-section { padding: 10px 4px 14px; }
     .quick-scan-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:.08em; color:var(--muted-2); margin-bottom:16px; }
@@ -7315,8 +7340,8 @@ struct SubmoduleRow {
     .step-check { margin-left:auto; width:14px; height:14px; stroke:#16a34a; fill:none; opacity:0; transition:opacity 0.22s ease; flex-shrink:0; }
     .step-button.done .step-check { opacity:1; }
     .step-button.done .step-num { background:rgba(34,197,94,0.16); color:#16a34a; }
-    .sidebar-kbd-hint { margin:14px 4px 0; font-size:10px; color:var(--muted-2); line-height:1.55; text-align:center; }
-    .sidebar-kbd-key { display:inline-block; padding:1px 5px; border-radius:4px; background:var(--surface-3); border:1px solid var(--line); font-size:9px; font-weight:700; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .sidebar-kbd-hint { margin:14px 4px 0; font-size:10px; color:var(--muted-2); line-height:1.55; text-align:center; display:flex; align-items:center; justify-content:center; gap:4px; }
+    .sidebar-kbd-key { display:inline-flex; align-items:center; justify-content:center; padding:1px 5px; border-radius:4px; background:var(--surface-3); border:1px solid var(--line); font-size:9px; font-weight:700; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; line-height:1; }
     .card-header { padding: 22px 22px 18px; border-bottom:1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,0.30), transparent), var(--surface); position: sticky; top: 57px; z-index: 20; border-radius: var(--radius) var(--radius) 0 0; }
     body.dark-theme .card-header { background: linear-gradient(180deg, rgba(255,255,255,0.04), transparent), var(--surface); }
     .card-title-row { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
@@ -7364,24 +7389,31 @@ struct SubmoduleRow {
     .mini-button.primary-lite { background: rgba(37,99,235,0.08); color: var(--accent-2); border-color: rgba(37,99,235,0.20); }
     button.primary { background: linear-gradient(180deg, var(--accent), var(--accent-2)); color:#fff; border-color: transparent; }
     button.secondary { background: var(--surface); }
+    button.next-step { background: linear-gradient(180deg, var(--nav), var(--nav-2)); color: #fff; border-color: transparent; }
+    button.next-step:hover { opacity: 0.88; box-shadow: 0 6px 20px rgba(0,0,0,0.22); transform: translateY(-1px); }
+    button.prev-step { color: var(--nav); border-color: var(--nav); background: var(--surface); }
+    button.prev-step:hover { background: linear-gradient(180deg, var(--nav), var(--nav-2)); color: #fff; border-color: transparent; }
     .wizard-actions { display:flex; justify-content:space-between; align-items:center; gap: 12px; margin-top: 22px; padding-top: 18px; border-top:1px solid var(--line); }
     .section + .wizard-actions { border-top: none; padding-top: 0; }
     .wizard-actions .left, .wizard-actions .right { display:flex; gap: 10px; flex-wrap:wrap; }
     .field-help-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
     .field-help-grid.coupled-help { margin-top: 12px; }
     .field-help-grid.preset-grid { align-items: start; }
-    .preset-inline-row { display:grid; grid-template-columns: minmax(0, 0.55fr) 1fr; gap: 20px; align-items:stretch; margin-bottom: 16px; }
+    .preset-inline-row { display:grid; grid-template-columns: minmax(0, 0.55fr) 1fr; gap: 20px; align-items:start; margin-bottom: 16px; }
     .preset-inline-row .field { margin: 0; }
     .preset-inline-row .explainer-card { margin: 0; }
     .preset-inline-row .toggle-card { display:flex; flex-direction:column; }
     .preset-inline-row .explainer-card { display:flex; flex-direction:column; }
+    .preset-kv-row { display:flex; align-items:flex-start; gap:20px; margin-bottom:16px; }
+    .preset-kv-row > :first-child { flex:0 0 35%; min-width:0; }
+    .preset-kv-row > :last-child { flex:1; min-width:0; }
     .output-field-row { display:grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items:start; }
     .output-field-row .field { margin: 0; }
     .output-field-aside { padding: 16px 18px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); font-size: 14px; color: var(--muted); line-height: 1.6; }
     .output-field-aside strong { display:block; font-size: 13px; font-weight: 800; letter-spacing: 0.04em; color: var(--text); margin-bottom: 6px; }
     .step3-subtitle { margin-bottom: 10px; max-width: none; }
     .counting-intro { margin-bottom: 8px; max-width: none; }
-    .ieee-note { margin-bottom: 22px; padding: 9px 14px; border-left: 3px solid var(--oxide); background: linear-gradient(180deg, rgba(184,93,51,0.07), transparent), var(--surface-2); border-radius: 0 8px 8px 0; font-size: 13px; color: var(--muted); line-height: 1.5; font-style: italic; }
+    .ieee-note { margin-bottom: 22px; padding: 14px; border-radius: 12px; border: 1px solid var(--line); border-left: 4px solid var(--oxide); background: linear-gradient(180deg, rgba(184,93,51,0.08), transparent), var(--surface-2); font-size: 15px; line-height: 1.65; }
     .counting-top-grid { gap: 20px; margin-top: 12px; align-items: start; }
     .counting-top-grid .field { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
     .counting-top-grid .hint { margin-top: 14px; padding: 12px 14px; border-left: 4px solid var(--oxide); background: linear-gradient(180deg, rgba(184,93,51,0.06), transparent), var(--surface-2); border-radius: 10px; }
@@ -7627,7 +7659,7 @@ struct SubmoduleRow {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -7640,7 +7672,7 @@ struct SubmoduleRow {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -7782,6 +7814,8 @@ struct SubmoduleRow {
         <button type="button" class="step-button" data-step-target="3"><span class="step-num">3</span><span>Outputs and reports</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
         <button type="button" class="step-button" data-step-target="4"><span class="step-num">4</span><span>Review and run</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
 
+        <div class="step-steps-divider"></div>
+
         <div class="step-nav-info" id="step-nav-info">
           <div class="step-nav-info-label" id="step-nav-info-label">Step 1 of 4</div>
           <div class="step-nav-info-desc" id="step-nav-info-desc">Choose a project folder, apply scope filters, and preview which files will be counted.</div>
@@ -7803,7 +7837,7 @@ struct SubmoduleRow {
           <div class="quick-scan-hint">Scan immediately with default settings — skips steps 2–4.</div>
         </div>
 
-        <div class="sidebar-kbd-hint"><span class="sidebar-kbd-key">←</span> Back &nbsp;&nbsp; <span class="sidebar-kbd-key">→</span> Next</div>
+        <div class="sidebar-kbd-hint"><span class="sidebar-kbd-key">←</span><span>Back</span><span style="margin:0 6px;">·</span><span class="sidebar-kbd-key">→</span><span>Next</span></div>
         </section>
 
       </aside>
@@ -7976,7 +8010,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                 <p class="card-subtitle counting-intro">These settings decide how mixed code-plus-comment lines and Python docstrings are classified. Pure comment lines, block comments, physical lines, and blank lines are still tracked by supported analyzers even when they do not share a line with executable code.</p>
                 <div class="ieee-note">Counting methodology follows IEEE Std 1045-1992 physical SLOC.</div>
                 <div class="subsection-bar">Primary line classification</div>
-                <div class="preset-inline-row" style="align-items:start;">
+                <div class="preset-kv-row">
                   <div class="toggle-card mixed-line-card" style="margin:0;">
                     <div class="field-help-title" style="margin-bottom:10px;">Primary line classification</div>
                     <h4 style="margin:0 0 12px;font-size:16px;">Mixed-line policy</h4>
@@ -8078,7 +8112,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                   </div>
                 </div>
               </div>
-              <div style="margin-top:12px;">
+              <div style="margin-top:24px;">
                   <div class="always-tracked-tip">
                     <div class="always-tracked-tip-icon">ℹ</div>
                     <div class="always-tracked-tip-body">
@@ -8104,7 +8138,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                 <div class="section-kicker">Step 3</div>
                 <h2>Output and report identity</h2>
                 <p class="card-subtitle step3-subtitle" style="white-space:nowrap;">Choose where generated files should be saved, what the exported report title should be, and which artifact bundle fits your workflow.</p>
-                <div class="preset-inline-row" style="align-items:start;">
+                <div class="preset-kv-row">
                   <div class="toggle-card" style="margin:0;">
                     <div class="field-help-title" style="margin-bottom:10px;">Scan configuration</div>
                     <h4 style="margin:0 0 12px;font-size:16px;">Scan preset</h4>
@@ -8125,7 +8159,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                   </div>
                 </div>
                 <hr class="step3-separator" />
-                <div class="preset-inline-row" style="align-items:start;">
+                <div class="preset-kv-row">
                   <div class="toggle-card" style="margin:0;">
                     <div class="field-help-title" style="margin-bottom:10px;">Output configuration</div>
                     <h4 style="margin:0 0 12px;font-size:16px;">Artifact preset</h4>
@@ -8217,10 +8251,10 @@ lcov --capture --directory . --output-file coverage/lcov.info
                     </div>
                     <input type="checkbox" name="generate_pdf" checked class="hidden artifact-checkbox" />
                   </div>
-                  <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)">
-                    <div class="marker" style="background:var(--oxide);border-color:var(--oxide);color:#fff;">✓</div>
-                    <div class="artifact-icon">J</div>
-                    <h4>JSON result <span style="font-size:11px;font-weight:700;color:var(--oxide-2);">Always on</span></h4>
+                  <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)" style="opacity:0.55;pointer-events:none;">
+                    <div class="marker" style="background:var(--muted);border-color:var(--muted);color:#fff;">✓</div>
+                    <div class="artifact-icon" style="color:var(--muted);">J</div>
+                    <h4>JSON result <span style="font-size:11px;font-weight:700;color:var(--muted);">always on</span></h4>
                     <p>Machine-readable output always saved — required for run comparison, diff, and history features.</p>
                     <div class="artifact-tags">
                       <span class="soft-chip">Required for compare</span>
@@ -9753,14 +9787,15 @@ struct IndexTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
-    .page{max-width:1100px;margin:0 auto;padding:28px 24px 16px;position:relative;z-index:1;}
-    .hero{text-align:center;margin-bottom:32px;}
+    .page{max-width:1720px;margin:0 auto;padding:28px 24px 16px;position:relative;z-index:1;}
+    .hero{text-align:center;margin:0 auto 32px;max-width:1100px;}
     .hero-logo-wrap{display:inline-block;cursor:default;}
-    .hero-logo{width:76px;height:84px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));animation:logoBob 3.6s ease-in-out infinite;display:block;}
-    @keyframes logoBob{0%,100%{transform:translateY(0) scale(1);}40%{transform:translateY(-14px) scale(1.07);}60%{transform:translateY(-10px) scale(1.05);}}
-    .hero-logo-shadow{width:60px;height:10px;background:radial-gradient(ellipse,rgba(211,122,76,0.55),transparent 70%);border-radius:50%;margin:0 auto 10px;animation:shadowBob 3.6s ease-in-out infinite;}
-    @keyframes shadowBob{0%,100%{transform:scaleX(1);opacity:0.55;}40%{transform:scaleX(0.72);opacity:0.18;}60%{transform:scaleX(0.82);opacity:0.25;}}
-    .hero-title{font-size:42px;font-weight:900;letter-spacing:-0.04em;margin:0 0 8px;display:inline-block;will-change:transform;transition:transform 0.08s linear;
+    .hero-logo{width:76px;height:84px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));display:block;}
+    .hero-logo-shadow{width:60px;height:10px;background:radial-gradient(ellipse,rgba(211,122,76,0.55),transparent 70%);border-radius:50%;margin:0 auto 10px;}
+    .hero-title-wrap{position:relative;display:inline-flex;flex-direction:column;align-items:center;}
+    .hero-title-aura{position:absolute;inset:-40px -80px;background:radial-gradient(ellipse at 50% 55%,rgba(211,122,76,0.20) 0%,rgba(211,122,76,0.056) 45%,transparent 72%);pointer-events:none;z-index:0;}
+    body.dark-theme .hero-title-aura{background:radial-gradient(ellipse at 50% 55%,rgba(211,122,76,0.29) 0%,rgba(211,122,76,0.10) 45%,transparent 72%);}
+    .hero-title{font-size:42px;font-weight:900;letter-spacing:-0.04em;margin:0 0 8px;display:inline-block;position:relative;z-index:1;will-change:transform;transition:transform 0.08s linear;
       background:linear-gradient(90deg,#b85d33 0%,#d37a4c 25%,#6f9bff 50%,#b85d33 75%,#d37a4c 100%);
       background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
       clip-path:inset(0 100% 0 0);animation:titleReveal 0.65s cubic-bezier(.4,0,.2,1) 0.12s forwards,titleShimmer 4s linear 0.82s infinite;}
@@ -9770,7 +9805,7 @@ struct IndexTemplate {
     .hero-subtitle{font-size:16px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:3em;opacity:0;}
     .hero-cursor{display:inline-block;width:2px;height:0.9em;background:var(--oxide);vertical-align:text-bottom;margin-left:1px;border-radius:1px;animation:cursorBlink 0.72s step-end infinite;}
     @keyframes cursorBlink{0%,100%{opacity:1;}50%{opacity:0;}}
-    .action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:20px;}
+    .action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:0 auto 20px;max-width:1100px;}
     @media(max-width:900px){.action-grid{grid-template-columns:1fr 1fr;}}
     @media(max-width:480px){.action-grid{grid-template-columns:1fr;}}
     .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:20px 22px 18px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
@@ -9801,8 +9836,8 @@ struct IndexTemplate {
     .action-card.automation .action-card-cta{color:#b45309;}
     body.dark-theme .action-card.automation .action-card-cta{color:#fbbf24;}
     .action-card:hover .action-card-cta{gap:12px;}
-    .divider{height:1px;background:var(--line);margin:22px 0;}
-    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;}
+    .divider{height:1px;background:var(--line);margin:22px auto;max-width:1100px;}
+    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;max-width:1100px;margin:0 auto;}
     @media(max-width:960px){.info-strip{grid-template-columns:repeat(3,1fr);}}
     @media(max-width:600px){.info-strip{grid-template-columns:repeat(2,1fr);}}
     .info-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 16px;text-align:center;position:relative;cursor:default;
@@ -9819,7 +9854,7 @@ struct IndexTemplate {
     .info-chip:hover .info-chip-tip{display:block;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
-    .lan-card{border-radius:var(--radius);border:1.5px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);padding:24px 28px;margin-bottom:32px;animation:cardRise 0.7s ease both;}
+    .lan-card{border-radius:var(--radius);border:1.5px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);padding:24px 28px;margin:0 auto 32px;max-width:1100px;animation:cardRise 0.7s ease both;}
     .lan-card.server{border-color:#3b82f6;background:linear-gradient(135deg,rgba(59,130,246,0.06),var(--surface));}
     body.dark-theme .lan-card.server{background:linear-gradient(135deg,rgba(59,130,246,0.10),var(--surface));}
     .lan-card-header{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:800;margin-bottom:16px;letter-spacing:-0.01em;}
@@ -9863,7 +9898,7 @@ struct IndexTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -9877,10 +9912,10 @@ struct IndexTemplate {
         </div>
         <div class="server-status-wrap">
           {% if server_mode %}
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>LAN server</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running in server mode — accessible on your LAN.<br>Use Ctrl+C in the terminal to stop.</div>
           {% else %}
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Running locally</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running locally — only accessible from this machine.<br>Press Ctrl+C in the terminal to stop.</div>
           {% endif %}
         </div>
@@ -9901,7 +9936,10 @@ struct IndexTemplate {
         <img class="hero-logo" src="/images/logo/small-logo.png" alt="OxideSLOC">
       </div>
       <div class="hero-logo-shadow"></div>
-      <h1 class="hero-title" id="hero-title">OxideSLOC</h1>
+      <div class="hero-title-wrap">
+        <div class="hero-title-aura" aria-hidden="true"></div>
+        <h1 class="hero-title" id="hero-title">OxideSLOC</h1>
+      </div>
       <p class="hero-subtitle" id="hero-subtitle">A fast, self-contained source line analysis workbench. Count code, track trends, compare snapshots, and automate scans via webhook — no setup required.</p>
     </div>
 
@@ -9942,7 +9980,7 @@ struct IndexTemplate {
         <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
       </a>
 
-      <a class="action-card trend" href="/trend-report">
+      <a class="action-card trend" href="/trend-reports">
         <div class="action-card-icon">
           <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
         </div>
@@ -10138,9 +10176,77 @@ struct IndexTemplate {
                   setTimeout(function() { if (cursor.parentNode) cursor.parentNode.removeChild(cursor); }, 1000);
                 }, 2400);
               }
-            }, 26);
-          }, 880);
+            }, 11);
+          }, 374);
         }
+      })();
+      (function logoBob() {
+        var logo = document.querySelector('.hero-logo');
+        var shadow = document.querySelector('.hero-logo-shadow');
+        if (!logo) return;
+        var cycleStart = null, cycleDur = 3600;
+        var peakY = -14, peakScale = 1.07, peakRot = 0;
+        function newCycle() {
+          cycleDur = 3000 + Math.random() * 1840;
+          peakY = -(9 + Math.random() * 13.8);
+          peakScale = 1.04 + Math.random() * 0.081;
+          peakRot = (Math.random() * 11.5 - 5.75);
+        }
+        function ease(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
+        newCycle();
+        function frame(ts) {
+          if (cycleStart === null) cycleStart = ts;
+          var t = (ts - cycleStart) / cycleDur;
+          if (t >= 1) { cycleStart = ts; t = 0; newCycle(); }
+          var phase = t < 0.4 ? ease(t / 0.4) : t < 0.6 ? 1 : ease(1 - (t - 0.6) / 0.4);
+          var y = peakY * phase;
+          var sc = 1 + (peakScale - 1) * phase;
+          var rot = peakRot * Math.sin(Math.PI * phase);
+          logo.style.transform = 'translateY('+y.toFixed(2)+'px) scale('+sc.toFixed(4)+') rotate('+rot.toFixed(2)+'deg)';
+          if (shadow) {
+            shadow.style.transform = 'scaleX('+(1 - 0.3*phase).toFixed(4)+')';
+            shadow.style.opacity = (0.55 - 0.37*phase).toFixed(3);
+          }
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      })();
+      (function mouseEffects() {
+        var heroTitle = document.getElementById('hero-title');
+        var raf = null, mx = window.innerWidth / 2, my = window.innerHeight / 2;
+        function tick() {
+          raf = null;
+          if (heroTitle) {
+            var r = heroTitle.getBoundingClientRect();
+            var dx = (mx - (r.left + r.width / 2)) / (window.innerWidth / 2);
+            var dy = (my - (r.top + r.height / 2)) / (window.innerHeight / 2);
+            heroTitle.style.transform = 'perspective(800px) rotateX('+(-dy*7.8).toFixed(2)+'deg) rotateY('+(dx*18.2).toFixed(2)+'deg)';
+          }
+        }
+        document.addEventListener('mousemove', function(e) {
+          mx = e.clientX; my = e.clientY;
+          if (!raf) raf = requestAnimationFrame(tick);
+        });
+        document.addEventListener('mouseleave', function() {
+          if (heroTitle) {
+            heroTitle.style.transition = 'transform 0.5s ease';
+            heroTitle.style.transform = '';
+            setTimeout(function() { heroTitle.style.transition = ''; }, 500);
+          }
+        });
+        document.querySelectorAll('.action-card').forEach(function(card) {
+          card.addEventListener('mousemove', function(e) {
+            var rect = card.getBoundingClientRect();
+            var dx = (e.clientX - (rect.left + rect.width / 2)) / (rect.width / 2);
+            var dy = (e.clientY - (rect.top + rect.height / 2)) / (rect.height / 2);
+            card.style.transition = 'transform 0.08s linear,box-shadow 0.18s ease,border-color 0.18s ease';
+            card.style.transform = 'perspective(700px) rotateX('+(-dy*7).toFixed(2)+'deg) rotateY('+(dx*7).toFixed(2)+'deg) translateY(-5px) scale(1.03)';
+          });
+          card.addEventListener('mouseleave', function() {
+            card.style.transition = '';
+            card.style.transform = '';
+          });
+        });
       })();
     })();
   </script>
@@ -10191,7 +10297,7 @@ struct SplashTemplate {
   <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
   <style nonce="{{ csp_nonce }}">
     :root {
-      --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
+      --radius:18px; --bg:#f5efe8; --surface:#ffffff; --surface-2:#fbf7f2;
       --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
       --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
       --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
@@ -10236,30 +10342,35 @@ struct SplashTemplate {
     .page-header{text-align:center;margin-bottom:32px;}
     .page-header h1{font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;}
     .page-header p{font-size:15px;color:var(--muted);line-height:1.6;white-space:nowrap;margin:0 auto;}
-    .breadcrumb{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:28px;}
-    .breadcrumb a{color:var(--muted);text-decoration:none;} .breadcrumb a:hover{color:var(--oxide);}
-    .breadcrumb svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;}
     /* Cards */
-    .option-grid{display:flex;flex-direction:column;gap:16px;}
-    .option-card{background:var(--surface);border:1.5px solid var(--line-strong);border-radius:var(--radius);padding:22px 26px;box-shadow:var(--shadow);transition:border-color 0.18s ease,box-shadow 0.18s ease;}
+    .option-grid{display:flex;flex-direction:column;gap:16px;padding-top:42px;}
+    .option-card-wrap{position:relative;}
+    .option-card{background:var(--surface);border:1.5px solid var(--line-strong);border-radius:var(--radius);padding:20px 24px;box-shadow:var(--shadow);transition:border-color 0.18s ease,box-shadow 0.18s ease;position:relative;z-index:1;display:flex;align-items:center;gap:20px;}
     .option-card:hover{border-color:var(--oxide-2);box-shadow:var(--shadow-strong);}
+    #recent-card{flex-direction:column;align-items:stretch;gap:0;}
+    .card-top-row{display:flex;align-items:center;gap:20px;}
     /* Two-column layout inside each card */
-    .card-body{display:grid;grid-template-columns:1fr 240px;gap:24px;align-items:center;}
-    .card-left{display:flex;align-items:flex-start;gap:16px;min-width:0;}
-    .option-icon{width:46px;height:46px;border-radius:14px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
-    .option-icon svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;}
-    .option-icon.new-scan{background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;box-shadow:0 6px 18px rgba(184,80,40,0.28);}
-    .option-icon.load-config{background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;box-shadow:0 6px 18px rgba(59,130,246,0.28);}
-    .option-icon.rescan{background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;box-shadow:0 6px 18px rgba(139,92,246,0.28);}
+    .card-body{flex:1;min-width:0;display:grid;grid-template-columns:1fr 220px;gap:20px;align-items:center;padding-left:12px;}
+    .card-left{display:flex;align-items:flex-start;min-width:0;}
+    .option-icon{width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+    .option-icon svg{width:28px;height:28px;stroke:#fff;fill:none;stroke-width:2;}
+    .option-icon.new-scan{background:linear-gradient(135deg,#e07b3a,#b85028);box-shadow:0 10px 30px rgba(224,123,58,0.55),0 4px 10px rgba(0,0,0,0.22);}
+    .option-icon.load-config{background:linear-gradient(135deg,#3b82f6,#1d4ed8);box-shadow:0 10px 30px rgba(59,130,246,0.55),0 4px 10px rgba(0,0,0,0.22);}
+    .option-icon.rescan{background:linear-gradient(135deg,#8b5cf6,#6d28d9);box-shadow:0 10px 30px rgba(139,92,246,0.55),0 4px 10px rgba(0,0,0,0.22);}
     .card-text{min-width:0;}
-    .option-title{font-size:17px;font-weight:800;letter-spacing:-0.02em;margin:0 0 4px;}
+    .option-title{font-size:17px;font-weight:800;letter-spacing:-0.02em;margin:0 0 9px;}
     .option-desc{font-size:13px;color:var(--muted);line-height:1.55;margin:0 0 10px;}
     .feature-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;}
     .feature-list li{font-size:12px;color:var(--muted-2);display:flex;align-items:center;gap:7px;}
     .feature-list li::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--oxide);opacity:0.7;flex:0 0 auto;}
     /* Right CTA column */
     .card-right{display:flex;flex-direction:column;align-items:stretch;gap:10px;}
-    .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 20px;border-radius:10px;font-size:13px;font-weight:700;text-decoration:none;cursor:pointer;border:none;transition:transform 0.15s ease,box-shadow 0.15s ease;white-space:nowrap;}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:8px 16px;border-radius:10px;font-size:13px;font-weight:700;text-decoration:none;cursor:pointer;border:none;transition:transform 0.15s ease,box-shadow 0.15s ease;white-space:nowrap;}
+    /* Re-scan count badge */
+    .rescan-count-box{text-align:center;padding:12px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;}
+    .rescan-count-num{font-size:28px;font-weight:900;color:var(--oxide);line-height:1;}
+    .rescan-count-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-top:5px;}
+    body.dark-theme .rescan-count-box{background:var(--surface-2);border-color:var(--line-strong);}
     .btn:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,0.14);}
     .btn-primary{background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;}
     .btn-secondary{background:var(--surface-2);color:var(--oxide-2);border:1.5px solid var(--line-strong);}
@@ -10319,7 +10430,7 @@ struct SplashTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -10331,7 +10442,7 @@ struct SplashTemplate {
             <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
           </div>
         </div>
-        <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+        <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
         </button>
@@ -10344,12 +10455,6 @@ struct SplashTemplate {
   </div>
 
   <div class="page">
-    <div class="breadcrumb">
-      <a href="/">Home</a>
-      <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
-      <span>Scan Setup</span>
-    </div>
-
     <div class="page-header">
       <h1>How would you like to scan?</h1>
       <p>Start fresh with the full wizard, load saved settings from a config file, or quickly re-run a recent scan.</p>
@@ -10358,20 +10463,20 @@ struct SplashTemplate {
     <div class="option-grid">
 
       <!-- Option 1: New scan -->
-      <div class="option-card">
+      <div class="option-card-wrap">
+        <div class="option-card">
+        <div class="option-icon new-scan">
+          <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+        </div>
         <div class="card-body">
           <div class="card-left">
-            <div class="option-icon new-scan">
-              <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-            </div>
             <div class="card-text">
               <div class="option-title">Start a new scan</div>
               <p class="option-desc">Walk through the 4-step guided wizard — pick a project folder, configure counting rules, choose output formats, then review before running.</p>
               <ul class="feature-list">
                 <li>Live project scope preview before you run</li>
-                <li>4 line-counting modes with interactive examples</li>
+                <li>4 IEEE 1045-1992 counting modes with interactive examples</li>
                 <li>HTML, PDF, and JSON output — your choice</li>
-                <li>IEEE 1045-1992 compliant physical SLOC counting</li>
               </ul>
             </div>
           </div>
@@ -10383,15 +10488,17 @@ struct SplashTemplate {
             <p class="card-tip">Full 4-step setup · all options</p>
           </div>
         </div>
+        </div>
       </div>
 
       <!-- Option 2: Load from config file -->
-      <div class="option-card">
+      <div class="option-card-wrap">
+        <div class="option-card">
+        <div class="option-icon load-config">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+        </div>
         <div class="card-body">
           <div class="card-left">
-            <div class="option-icon load-config">
-              <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
-            </div>
             <div class="card-text">
               <div class="option-title">Load a saved config</div>
               <p class="option-desc">Upload a <strong>scan-config.json</strong> exported from a previous run. The wizard opens pre-filled — you can still tweak anything before running.</p>
@@ -10413,29 +10520,45 @@ struct SplashTemplate {
             <p class="card-tip" id="config-file-name">Exported after every scan</p>
           </div>
         </div>
+        </div>
       </div>
 
       <!-- Option 3: Re-scan recent project -->
-      <div class="option-card" id="recent-card">
-        <div class="card-body">
-          <div class="card-left" style="grid-column:1/-1;">
-            <div class="option-icon rescan">
-              <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+      <div class="option-card-wrap">
+        <div class="option-card" id="recent-card">
+        <div class="card-top-row">
+          <div class="option-icon rescan">
+            <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </div>
+          <div class="card-body">
+            <div class="card-left">
+              <div class="card-text">
+                <div class="option-title">Re-scan a recent project</div>
+                <p class="option-desc">Pick a recent run to instantly restore all its settings in the wizard — path, output folder, filters, and more. Tweak anything before scanning.</p>
+                <ul class="feature-list">
+                  <li>All 15+ settings restored from the saved config</li>
+                  <li>Path and output dir are editable before running</li>
+                  <li>Only scans with a saved config appear here</li>
+                </ul>
+              </div>
             </div>
-            <div class="card-text">
-              <div class="option-title">Re-scan a recent project</div>
-              <p class="option-desc">Pick a recent run to instantly restore all its settings in the wizard — path, output folder, filters, and more. Tweak anything before scanning.</p>
-              <ul class="feature-list">
-                <li>All 15+ settings restored from the saved config</li>
-                <li>Path and output dir are editable before running</li>
-                <li>Only scans with a saved config appear here</li>
-              </ul>
+            <div class="card-right">
+              <div class="rescan-count-box">
+                <div class="rescan-count-num" id="rescan-count-num">—</div>
+                <div class="rescan-count-label">saved configs</div>
+              </div>
+              <a class="btn btn-secondary" href="/view-reports">
+                <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+                View all runs
+              </a>
+              <p class="card-tip">Opens run history</p>
             </div>
           </div>
         </div>
         <div class="section-divider"></div>
         <div class="recent-list" id="recent-list">
           <p class="no-recent-note" id="no-recent-note">No recent scans yet. Complete a scan and it will appear here automatically.</p>
+        </div>
         </div>
       </div>
 
@@ -10538,6 +10661,12 @@ struct SplashTemplate {
         }
       }
       if (hasAny && noNote) noNote.style.display = 'none';
+      // Update count badge
+      var countEl = document.getElementById('rescan-count-num');
+      if (countEl) {
+        var total = Array.isArray(recentScans) ? recentScans.filter(function(e) { return e.config && typeof e.config === 'object'; }).length : 0;
+        countEl.textContent = total > 0 ? total : '0';
+      }
 
       // Config file loader
       var fileInput = document.getElementById('config-file-input');
@@ -10766,6 +10895,14 @@ struct ScanSetupTemplate {
     .open-path-btn:hover { border-color: var(--accent); color: var(--accent-2); }
     .empty-card-note { padding: 18px; color: var(--muted); font-size: 14px; line-height: 1.65; border-radius: 12px; border: 1px dashed var(--line-strong); background: var(--surface-2); margin-top: 8px; }
     .action-empty-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+    /* Stat chips (matches HTML report) */
+    .summary-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-top:18px; }
+    @media(max-width:1100px){.summary-strip{grid-template-columns:repeat(3,1fr);}}
+    @media(max-width:640px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
+    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
+    .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); }
+    .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
+    .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
     /* Submodule panel */
     .submodule-panel { margin-top: 18px; margin-bottom: 18px; padding: 18px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
     /* Metrics tables stack */
@@ -10822,7 +10959,7 @@ struct ScanSetupTemplate {
     .r-lang-overview-cell p{margin:0;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);text-align:center;}
     .r-viz-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:stretch;}
     @media(max-width:820px){.r-viz-grid{grid-template-columns:1fr;}}
-    .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:var(--surface-2);display:flex;flex-direction:column;}
+    .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--surface-2);display:flex;flex-direction:column;}
     .r-viz-card-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;}
   </style>
 </head>
@@ -10847,21 +10984,17 @@ struct ScanSetupTemplate {
   <div class="top-nav">
     <div class="top-nav-inner">
       <a class="brand" href="/">
-        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo" />
-        <div class="brand-copy">
-          <div class="brand-title">OxideSLOC</div>
-          <div class="brand-subtitle">Local analysis workbench</div>
-        </div>
+        <img class="brand-logo" src="/images/logo/logo-text.png" alt="OxideSLOC logo" style="height:46px;width:auto;" />
       </a>
       <div class="nav-project-slot">
-        <div class="nav-project-pill"><span class="nav-project-label">Project</span><span class="nav-project-value">{{ report_title }}</span></div>
+        <div class="nav-project-pill"><span class="nav-project-label">REPORT</span><span class="nav-project-value">{{ report_title }}</span></div>
       </div>
       <div class="nav-status">
         <a class="nav-pill" href="/" style="text-decoration:none;">Home</a>
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans" style="text-decoration:none;">Compare Scans</a>
@@ -10874,7 +11007,7 @@ struct ScanSetupTemplate {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -10900,6 +11033,33 @@ struct ScanSetupTemplate {
           <button type="button" class="copy-button secondary" data-copy-value="{{ output_dir }}">Copy output folder</button>
           <button type="button" class="copy-button secondary" data-copy-value="{{ run_id }}">Copy run ID</button>
           <button type="button" class="copy-button secondary open-path-btn open-folder-button" data-folder="{{ output_dir }}">Open output folder</button>
+        </div>
+      </div>
+
+      <div class="summary-strip">
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ physical_lines }}</div>
+          <div class="stat-chip-label">Physical Lines</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ code_lines }}</div>
+          <div class="stat-chip-label">Code</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ comment_lines }}</div>
+          <div class="stat-chip-label">Comments</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ blank_lines }}</div>
+          <div class="stat-chip-label">Blank</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ files_analyzed }}</div>
+          <div class="stat-chip-label">Files Analyzed</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ functions }}</div>
+          <div class="stat-chip-label">Functions</div>
         </div>
       </div>
 
@@ -10976,7 +11136,7 @@ struct ScanSetupTemplate {
             {% match html_path %}
               {% when Some with (_path) %}{% when None %}{% endmatch %}
           </div>
-          <p class="action-empty-note" style="margin-top:6px;">Interactive report with charts, language breakdown, and per-file detail. Opens in your browser.</p>
+          <p class="action-empty-note" style="margin-top:16px;">Interactive report with charts, language breakdown, and per-file detail. Opens in your browser.</p>
         </div>
         <div class="action-card">
           <h3>PDF report</h3>
@@ -10999,7 +11159,7 @@ struct ScanSetupTemplate {
             {% match pdf_path %}
               {% when Some with (_path) %}{% when None %}{% endmatch %}
           </div>
-          <p class="action-empty-note" style="margin-top:6px;">Print-ready PDF generated from the HTML report. Suitable for sharing or archiving.</p>
+          <p class="action-empty-note" style="margin-top:16px;">Print-ready PDF generated from the HTML report. Suitable for sharing or archiving.</p>
         </div>
         <div class="action-card">
           <h3>JSON result</h3>
@@ -11026,7 +11186,7 @@ struct ScanSetupTemplate {
             <a class="button secondary" href="{{ scan_config_url }}">Download config</a>
             <a class="button" href="/scan-setup" style="background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;border:none;">Run another scan</a>
           </div>
-          <p class="action-empty-note" style="margin-top:6px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
+          <p class="action-empty-note" style="margin-top:16px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
         </div>
         {% if confluence_configured %}
         <div class="action-card" id="confluenceCard">
@@ -11284,51 +11444,19 @@ struct ScanSetupTemplate {
 
     <div id="r-tt" aria-hidden="true"></div>
 
-    <section class="panel" style="margin-bottom: 36px;">
+    <section class="panel" style="margin-bottom: 80px; padding-bottom: 24px;">
         <div class="toolbar-row">
           <div>
             <h2>Language breakdown</h2>
             <p class="muted">A quick summary of what this run actually counted across supported languages.</p>
           </div>
         </div>
-        <div id="result-lang-charts" style="margin:0 0 18px;"></div>
-        <table>
-          <thead>
-            <tr>
-              <th>Language</th>
-              <th>Files</th>
-              <th>Physical</th>
-              <th>Code</th>
-              <th>Comments</th>
-              <th>Blank</th>
-              <th>Mixed</th>
-              <th>Functions</th>
-              <th>Classes</th>
-              <th>Variables</th>
-              <th>Imports</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in language_rows %}
-            <tr>
-              <td>{{ row.language }}</td>
-              <td>{{ row.files }}</td>
-              <td>{{ row.physical }}</td>
-              <td>{{ row.code }}</td>
-              <td>{{ row.comments }}</td>
-              <td>{{ row.blank }}</td>
-              <td>{{ row.mixed }}</td>
-              <td>{{ row.functions }}</td>
-              <td>{{ row.classes }}</td>
-              <td>{{ row.variables }}</td>
-              <td>{{ row.imports }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+        <div id="result-lang-charts" style="margin:0 0 8px;"></div>
     </section>
 
-    <section class="panel r-chart-section" style="margin-top:60px;">
+    <div style="height:60px;"></div>
+
+    <section class="panel r-chart-section" style="margin-top:80px;">
       <div class="toolbar-row" style="margin-bottom:16px;">
         <div>
           <h2>Visualizations</h2>
@@ -11453,6 +11581,34 @@ struct ScanSetupTemplate {
       })();
       window.rTT=rTT;
 
+      // ── Tooltip event delegation (CSP-safe, no inline handlers needed) ────
+      (function(){
+        function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        document.addEventListener('mouseover',function(e){
+          var t=e.target;
+          while(t&&t.getAttribute){
+            var l=t.getAttribute('data-ttl');
+            if(l!==null){
+              var v=t.getAttribute('data-ttv')||'';
+              rTT.s(e,'<strong>'+escH(l)+'</strong><br>'+escH(v));
+              return;
+            }
+            t=t.parentNode;
+          }
+        });
+        document.addEventListener('mouseout',function(e){
+          var t=e.target;
+          while(t&&t.getAttribute){
+            if(t.getAttribute('data-ttl')!==null){rTT.h();return;}
+            t=t.parentNode;
+          }
+        });
+        document.addEventListener('mousemove',function(e){
+          var el=document.getElementById('r-tt');
+          if(el&&el.style.display!=='none')rTT.m(e);
+        });
+      })();
+
       // ── Language overview charts ───────────────────────────────────────────
       (function(){
         var D={{ lang_chart_json|safe }};
@@ -11465,7 +11621,7 @@ struct ScanSetupTemplate {
         function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
-        function tt(label,val){return' class="rchit" onmouseover="rTT.s(event,\'<strong>'+label.replace(/'/g,'\\x27')+'<\\/strong><br>'+String(val).replace(/'/g,'\\x27')+'\')" onmousemove="rTT.m(event)" onmouseout="rTT.h()"';}
+        function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
         var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
 
         // Donut chart — fixed 240×240 viewBox, legend to the right inside the SVG
@@ -11535,18 +11691,14 @@ struct ScanSetupTemplate {
         function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
-        function tt(label,val){
-          var l=String(label).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');
-          var v=String(val).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');
-          return' class="rchit" onmouseover="rTT.s(event,\'<strong>'+l+'<\\/strong><br>'+v+'\')" onmousemove="rTT.m(event)" onmouseout="rTT.h()"';
-        }
+        function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
 
         // ── Composition (horizontal stacked bars, abs or 100% pct) ────────────
         function renderComposition(mode){
           var el=document.getElementById('r-composition-chart');
           if(!el||!LANG_D||!LANG_D.length)return;
           var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
-          var LW=110,BW=260,SH=280,svgW=480;
+          var LW=110,BW=260,SH=224,svgW=480;
           var legendH=24,topPad=4;
           var n=LANG_D.length||1;
           var rowTotal=Math.floor((SH-legendH-topPad)/n);
@@ -11596,7 +11748,7 @@ struct ScanSetupTemplate {
         (function(){
           var el=document.getElementById('r-scatter-chart');
           if(!el||!SCAT_D||!SCAT_D.length)return;
-          var W=480,H=280,PL=52,PB=36,PT=12,PR=14;
+          var W=480,H=224,PL=52,PB=36,PT=12,PR=14;
           var cW=W-PL-PR,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
@@ -11630,7 +11782,7 @@ struct ScanSetupTemplate {
         function renderSemantic(key){
           var el=document.getElementById('r-semantic-chart');
           if(!el||!SEM_D||!SEM_D.length)return;
-          var LW=112,BW=300,SH=280,svgW=480;
+          var LW=112,BW=300,SH=224,svgW=480;
           var topPad=4,botPad=14;
           var n2=SEM_D.length||1;
           var rowTotal2=Math.floor((SH-topPad-botPad)/n2);
@@ -11657,7 +11809,7 @@ struct ScanSetupTemplate {
           if(sort==='desc')data.sort(function(a,b){return(b[key]||0)-(a[key]||0);});
           else if(sort==='asc')data.sort(function(a,b){return(a[key]||0)-(b[key]||0);});
           else data.sort(function(a,b){return(a.name||'').localeCompare(b.name||'');});
-          var LW=128,BW=300,SH=280,svgW=480;
+          var LW=128,BW=300,SH=224,svgW=480;
           var topPad3=4,botPad3=14;
           var n3=data.length||1;
           var rowTotal3=Math.floor((SH-topPad3-botPad3)/n3);
@@ -11891,7 +12043,6 @@ struct ResultTemplate {
     html_path: Option<String>,
     pdf_path: Option<String>,
     json_path: Option<String>,
-    language_rows: Vec<LanguageSummaryRow>,
     prev_run_id: Option<String>,
     prev_run_timestamp: Option<String>,
     prev_run_code_lines: Option<u64>,
@@ -12048,7 +12199,7 @@ struct ResultTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -12061,7 +12212,7 @@ struct ResultTemplate {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -12338,7 +12489,7 @@ struct ScanWaitTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -12351,7 +12502,7 @@ struct ScanWaitTemplate {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -12558,7 +12709,7 @@ struct ErrorTemplate {
     .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .stat-chip:hover .stat-chip-tip{opacity:1;}
-    .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:10px;font-weight:600;color:var(--muted-2);font-variant-numeric:tabular-nums;line-height:1;}
+    .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
     @media(max-width:700px){td,th{padding:7px 8px;}.run-id-chip,.git-chip{display:none;}}
@@ -12621,7 +12772,7 @@ struct ErrorTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -12634,7 +12785,7 @@ struct ErrorTemplate {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -13234,7 +13385,7 @@ struct HistoryTemplate {
     .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .stat-chip:hover .stat-chip-tip{opacity:1;}
-    .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:10px;font-weight:600;color:var(--muted-2);font-variant-numeric:tabular-nums;line-height:1;}
+    .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
     .sel-count{font-size:11px;background:rgba(255,255,255,0.22);border-radius:999px;padding:1px 8px;font-weight:800;letter-spacing:.02em;margin-left:2px;}
     .instruction-bar{background:rgba(111,155,255,0.08);border:1px solid rgba(111,155,255,0.22);border-radius:10px;padding:8px 14px;font-size:13px;color:var(--accent-2);display:inline-flex;align-items:center;gap:8px;margin-bottom:14px;width:fit-content;max-width:100%;}
     body.dark-theme .instruction-bar{background:rgba(111,155,255,0.12);color:var(--accent);}
@@ -13280,7 +13431,7 @@ struct HistoryTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -13293,7 +13444,7 @@ struct HistoryTemplate {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -13365,23 +13516,23 @@ struct HistoryTemplate {
       <div class="table-wrap">
         <table id="compare-table">
           <colgroup>
-            <col style="width:40px">
-            <col style="width:210px">
-            <col style="width:220px">
-            <col style="width:100px">
+            <col style="width:36px">
+            <col style="width:230px">
+            <col style="width:250px">
+            <col style="width:88px">
+            <col style="width:62px">
+            <col style="width:80px">
             <col style="width:72px">
-            <col style="width:90px">
-            <col style="width:82px">
-            <col style="width:65px">
-            <col style="width:90px">
-            <col style="width:120px">
+            <col style="width:58px">
+            <col style="width:80px">
+            <col style="width:100px">
             <col>
           </colgroup>
           <thead>
             <tr id="compare-thead">
-              <th style="text-align:center;padding-left:4px;padding-right:4px;"><div class="col-resize-handle"></div></th>
-              <th class="sortable" data-sort-col="timestamp" data-sort-type="str" style="min-width:210px;width:210px;">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
-              <th class="sortable" data-sort-col="project" data-sort-type="str" style="min-width:220px;width:220px;">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th style="text-align:center;padding-left:4px;padding-right:4px;width:36px;max-width:36px;"><div class="col-resize-handle"></div></th>
+              <th class="sortable" data-sort-col="timestamp" data-sort-type="str" style="min-width:230px;width:230px;">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th class="sortable" data-sort-col="project" data-sort-type="str" style="min-width:250px;width:250px;">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th title="Internal scan ID generated by OxideSLOC">Run ID<div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="files" data-sort-type="num">Files<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="code" data-sort-type="num">Code Lines<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
@@ -13601,7 +13752,7 @@ struct HistoryTemplate {
         }
         var pps = document.getElementById('per-page-sel'); if (pps) { pps.value = '25'; perPage = 25; }
         var table = document.getElementById('compare-table');
-        if (table) Array.prototype.slice.call(table.querySelectorAll('col')).forEach(function(c) { c.style.width = ''; });
+        if (table) { var dw=['36px','230px','250px','88px','62px','80px','72px','58px','80px','100px',''];Array.prototype.slice.call(table.querySelectorAll('col')).forEach(function(c,i){c.style.width=dw[i]||'';});}
         currentPage = 1; renderPage();
       };
 
@@ -14043,7 +14194,7 @@ struct CompareSelectTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
@@ -14056,7 +14207,7 @@ struct CompareSelectTemplate {
           </div>
         </div>
         <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Server online</div>
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
           <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -15248,7 +15399,7 @@ struct LoginTemplate {
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/trend-report"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Report</a>
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
