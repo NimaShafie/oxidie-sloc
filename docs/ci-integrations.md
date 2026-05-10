@@ -25,8 +25,17 @@ This document covers how to wire oxide-sloc into your CI/CD pipelines and how to
 3. [GitHub Actions](#github-actions)
    - [VirusTotal binary scanning](#virustotal-binary-scanning)
 4. [GitLab CI](#gitlab-ci)
-5. [Environment variables reference](#environment-variables-reference)
-6. [CLI flag quick reference](#cli-flag-quick-reference)
+5. [Artifact Repository Integration](#artifact-repository-integration)
+   - [JFrog Artifactory](#jfrog-artifactory)
+   - [Sonatype Nexus Repository Manager 3](#sonatype-nexus-repository-manager-3)
+   - [Sonatype Nexus Repository Manager 2](#sonatype-nexus-repository-manager-2)
+   - [Amazon S3](#amazon-s3)
+   - [MinIO](#minio)
+   - [Azure Blob Storage](#azure-blob-storage)
+   - [Generic HTTP PUT](#generic-http-put)
+   - [Registering artifact repo credentials](#registering-artifact-repo-credentials)
+6. [Environment variables reference](#environment-variables-reference)
+7. [CLI flag quick reference](#cli-flag-quick-reference)
 
 ---
 
@@ -369,6 +378,13 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `SKIP_WEB_CHECK` | false | Skip web UI health-check on agents without loopback / port 4317. |
 | `WEBHOOK_URL` | _(skip)_ | POST JSON result here after scan. Add `SLOC_WEBHOOK_TOKEN` Secret Text credential for Bearer auth. |
 | `EMAIL_RECIPIENTS` | _(skip)_ | Comma-separated recipients. Requires `SLOC_SMTP_HOST`, `SLOC_SMTP_USER`, `SLOC_SMTP_PASS` credentials. |
+| `ARTIFACT_REPO_TYPE` | `none` | Artifact repository backend: `none` / `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http`. |
+| `ARTIFACT_REPO_URL` | _(empty)_ | Base URL of the artifact repository (see [Artifact Repository Integration](#artifact-repository-integration)). |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` | Path prefix for uploaded artifacts. Tokens `${JOB_NAME}` and `${BUILD_NUMBER}` are substituted at runtime. |
+| `ARTIFACT_REPO_EXTRA` | _(empty)_ | Provider-specific config: Nexus repo name, Azure container name, MinIO endpoint URL, or extra S3 flags. |
+| `ARTIFACT_PUSH_JSON` | true | Include `result.json` in the artifact repository push. |
+| `ARTIFACT_PUSH_HTML` | true | Include `report.html` in the push (only when `GENERATE_HTML` is checked). |
+| `ARTIFACT_PUSH_PDF` | false | Include `report.pdf` in the push (only when `GENERATE_PDF` is checked). |
 
 > **JSON is always generated** regardless of parameters — it is required for build-over-build trend plots, the build description summary, and the `send` delivery subcommand.
 
@@ -382,6 +398,8 @@ The pipeline's webhook and email delivery features read credentials from the Jen
 | `SLOC_SMTP_HOST` | SMTP host for `EMAIL_RECIPIENTS` delivery |
 | `SLOC_SMTP_USER` | SMTP username |
 | `SLOC_SMTP_PASS` | SMTP password |
+| `SLOC_ARTIFACT_REPO_USER` | Username or access-key ID for artifact repository push |
+| `SLOC_ARTIFACT_REPO_PASS` | Password, API token, or secret key for artifact repository push |
 
 To create a credential via the REST API (repeat for each ID, substituting the correct `id` and `secret`):
 
@@ -803,6 +821,226 @@ Store credentials in **Settings → CI/CD → Variables** as `CONFLUENCE_USER` a
 
 ---
 
+## Artifact Repository Integration
+
+oxide-sloc can push scan artifacts (JSON, HTML, PDF) to an external artifact repository at the end of every CI build. The integration is implemented in `ci/artifact-push.sh` and wired into the Jenkinsfile as the **Push to Artifact Repository** stage (stage 8).
+
+All configuration is passed via the `ARTIFACT_REPO_*` build parameters described in [Build parameters](#build-parameters). The push stage is skipped entirely when `ARTIFACT_REPO_TYPE` is `none` (the default).
+
+The same script can be called from any CI system by sourcing the required environment variables directly.
+
+### JFrog Artifactory
+
+Uses the Artifactory REST API (`PUT /<repo-path>/<filename>`). Supports user/password Basic auth and API-key auth.
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `artifactory` |
+| `ARTIFACT_REPO_URL` | `https://artifactory.example.com/artifactory/sloc-reports` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | _(unused)_ |
+
+**Credentials:**
+
+| Jenkins credential ID | Content |
+|-----------------------|---------|
+| `SLOC_ARTIFACT_REPO_USER` | Artifactory username (omit for API-key-only auth) |
+| `SLOC_ARTIFACT_REPO_PASS` | Artifactory password **or** API key (sent as `X-JFrog-Art-Api` when no username) |
+
+**Standalone example:**
+
+```bash
+ARTIFACT_REPO_TYPE=artifactory \
+ARTIFACT_REPO_URL=https://artifactory.example.com/artifactory/sloc-reports \
+ARTIFACT_REPO_PATH=oxide-sloc/my-project/42 \
+ARTIFACT_REPO_USER=ci-user \
+ARTIFACT_REPO_PASS=my-api-token \
+ARTIFACT_DIR=ci-out \
+ARTIFACT_FILES="result.json report.html" \
+bash ci/artifact-push.sh
+```
+
+---
+
+### Sonatype Nexus Repository Manager 3
+
+Uses the Nexus 3 REST API for **raw-format** repositories (`POST /service/rest/v1/components`). One multipart request is sent per file.
+
+**Prerequisites:** create a raw-format hosted repository in Nexus 3 (e.g., `sloc-raw-hosted`) under **Repositories → Create repository → raw (hosted)**.
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `nexus` |
+| `ARTIFACT_REPO_URL` | `https://nexus.example.com` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | `sloc-raw-hosted` ← Nexus repository name |
+
+**Credentials:**
+
+| Jenkins credential ID | Content |
+|-----------------------|---------|
+| `SLOC_ARTIFACT_REPO_USER` | Nexus username |
+| `SLOC_ARTIFACT_REPO_PASS` | Nexus password |
+
+**Standalone example:**
+
+```bash
+ARTIFACT_REPO_TYPE=nexus \
+ARTIFACT_REPO_URL=https://nexus.example.com \
+ARTIFACT_REPO_PATH=oxide-sloc/my-project/42 \
+ARTIFACT_REPO_EXTRA=sloc-raw-hosted \
+ARTIFACT_REPO_USER=ci-user \
+ARTIFACT_REPO_PASS=secret \
+ARTIFACT_DIR=ci-out \
+ARTIFACT_FILES="result.json report.html" \
+bash ci/artifact-push.sh
+```
+
+---
+
+### Sonatype Nexus Repository Manager 2
+
+Uses the Nexus 2 content REST API (`PUT /content/repositories/<repo>/<path>/<file>`). Include the Nexus 2 context path (`/nexus`) in `ARTIFACT_REPO_URL` if your instance uses it.
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `nexus2` |
+| `ARTIFACT_REPO_URL` | `https://nexus.example.com/nexus` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | `sloc-raw-hosted` ← Nexus 2 repository ID |
+
+---
+
+### Amazon S3
+
+Uses the AWS CLI (`aws s3 cp`). Credentials are read from `SLOC_ARTIFACT_REPO_USER` / `SLOC_ARTIFACT_REPO_PASS` (mapped to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`). Omit them to fall back to the standard AWS credential chain (instance profile, `~/.aws/credentials`, etc.).
+
+**Prerequisites:** `aws` CLI must be installed on the Jenkins agent.
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `s3` |
+| `ARTIFACT_REPO_URL` | `s3://my-sloc-bucket` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | `--sse aws:kms` ← optional extra `aws s3 cp` flags |
+
+**Credentials:**
+
+| Jenkins credential ID | Content |
+|-----------------------|---------|
+| `SLOC_ARTIFACT_REPO_USER` | AWS access key ID |
+| `SLOC_ARTIFACT_REPO_PASS` | AWS secret access key |
+
+---
+
+### MinIO
+
+Same as S3 but with a custom `--endpoint-url`. Provide the MinIO server URL in `ARTIFACT_REPO_EXTRA`.
+
+**Prerequisites:** `aws` CLI must be installed on the Jenkins agent.
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `minio` |
+| `ARTIFACT_REPO_URL` | `s3://my-sloc-bucket` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | `https://minio.internal:9000` ← MinIO server URL **(required)** |
+
+**Credentials:**
+
+| Jenkins credential ID | Content |
+|-----------------------|---------|
+| `SLOC_ARTIFACT_REPO_USER` | MinIO access key |
+| `SLOC_ARTIFACT_REPO_PASS` | MinIO secret key |
+
+---
+
+### Azure Blob Storage
+
+Uses the Azure CLI (`az storage blob upload`). Derives the storage account name from the host portion of `ARTIFACT_REPO_URL`. Authentication accepts an account key, a SAS token (detected by the `sv=` prefix), or the ambient Azure CLI credential chain (`az login`, Managed Identity).
+
+**Prerequisites:** `az` CLI must be installed on the Jenkins agent.
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `azure-blob` |
+| `ARTIFACT_REPO_URL` | `https://myaccount.blob.core.windows.net` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | `sloc-reports` ← container name (default: `sloc-reports`) |
+
+**Credentials:**
+
+| Jenkins credential ID | Content |
+|-----------------------|---------|
+| `SLOC_ARTIFACT_REPO_USER` | _(unused — auth is key or SAS-token based)_ |
+| `SLOC_ARTIFACT_REPO_PASS` | Storage account key **or** SAS token (starting with `?sv=` or `sv=`) |
+
+---
+
+### Generic HTTP PUT
+
+Sends each artifact via `curl -X PUT` to `<ARTIFACT_REPO_URL>/<ARTIFACT_REPO_PATH>/<filename>`. Works with any HTTP server that accepts PUT requests (Gitea package registry, custom artifact stores, Sonatype endpoints, etc.).
+
+**Build parameters:**
+
+| Parameter | Example value |
+|-----------|---------------|
+| `ARTIFACT_REPO_TYPE` | `generic-http` |
+| `ARTIFACT_REPO_URL` | `https://artifacts.example.com/sloc` |
+| `ARTIFACT_REPO_PATH` | `oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}` |
+| `ARTIFACT_REPO_EXTRA` | _(unused)_ |
+
+**Auth:** `SLOC_ARTIFACT_REPO_USER` + `SLOC_ARTIFACT_REPO_PASS` → HTTP Basic. `SLOC_ARTIFACT_REPO_PASS` alone → `Authorization: Bearer` header.
+
+---
+
+### Registering artifact repo credentials
+
+Register the following Secret Text credentials in Jenkins before triggering a push build. The Jenkinsfile binds them with `optional: true` (Credentials Binding plugin ≥ 1.27), so builds without these credentials will attempt an unauthenticated push rather than aborting.
+
+```bash
+set -a; source ci/jenkins/.env; set +a
+
+for ID_SECRET in \
+    "SLOC_ARTIFACT_REPO_USER:my-repo-username" \
+    "SLOC_ARTIFACT_REPO_PASS:my-api-token-or-password"
+do
+    ID="${ID_SECRET%%:*}"
+    SECRET="${ID_SECRET#*:}"
+    crumb=$(curl -sS -u "$JENKINS_USER:$JENKINS_TOKEN" \
+        "$JENKINS_URL/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,\":\",//crumb)")
+    curl -sS -u "$JENKINS_USER:$JENKINS_TOKEN" -H "$crumb" \
+        -X POST "$JENKINS_URL/credentials/store/system/domain/_/createCredentials" \
+        --data-urlencode "json={
+            \"\": \"0\",
+            \"credentials\": {
+                \"scope\": \"GLOBAL\",
+                \"id\": \"${ID}\",
+                \"secret\": \"${SECRET}\",
+                \"description\": \"oxide-sloc artifact repository\",
+                \"\$class\": \"org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl\"
+            }
+        }"
+    echo "Registered: ${ID}"
+done
+```
+
+Or via **Manage Jenkins → Credentials → System → Global credentials → Add Credentials** (Kind: Secret text).
+
+---
+
 ## Environment variables reference
 
 | Variable              | Used by     | Purpose                                                                |
@@ -819,6 +1057,12 @@ Store credentials in **Settings → CI/CD → Variables** as `CONFLUENCE_USER` a
 | `SLOC_SMTP_PASS`      | `send`      | SMTP password — prefer this over `--smtp-pass` to keep creds out of process listings |
 | `SLOC_WEBHOOK_TOKEN`  | `send`      | Bearer token for webhook delivery (alternative to `--webhook-token`)   |
 | `VT_API_KEY`          | `release.yml` | VirusTotal API v3 key; enables binary scanning on every tagged release |
+| `ARTIFACT_REPO_TYPE`  | Artifact push | Backend: `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http` |
+| `ARTIFACT_REPO_URL`   | Artifact push | Base URL of the artifact repository (see [Artifact Repository Integration](#artifact-repository-integration)) |
+| `ARTIFACT_REPO_PATH`  | Artifact push | Path prefix / key prefix for uploaded artifacts |
+| `ARTIFACT_REPO_EXTRA` | Artifact push | Provider-specific config (Nexus repo name, Azure container, MinIO endpoint, S3 flags) |
+| `ARTIFACT_REPO_USER`  | Artifact push | Username or access-key ID (set via `SLOC_ARTIFACT_REPO_USER` Jenkins credential) |
+| `ARTIFACT_REPO_PASS`  | Artifact push | Password, API token, or secret key (set via `SLOC_ARTIFACT_REPO_PASS` Jenkins credential) |
 
 ---
 

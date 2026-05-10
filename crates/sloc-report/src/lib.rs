@@ -88,6 +88,132 @@ fn load_custom_logo(path: &std::path::Path) -> Option<String> {
     Some(format!("data:{mime};base64,{}", base64_encode(&bytes)))
 }
 
+// ── Chart JSON builders ───────────────────────────────────────────────────────
+
+/// Escape a string for safe embedding inside a JSON string literal.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn build_lang_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .totals_by_language
+        .iter()
+        .take(12)
+        .map(|l| {
+            format!(
+                r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"functions":{},"classes":{},"variables":{},"imports":{},"tests":{},"files":{}}}"#,
+                json_escape(l.language.display_name()),
+                l.code_lines, l.comment_lines, l.blank_lines,
+                l.functions, l.classes, l.variables, l.imports,
+                l.test_count, l.files,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+fn build_submodule_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .submodule_summaries
+        .iter()
+        .map(|s| {
+            format!(
+                r#"{{"name":"{}","path":"{}","code":{},"comment":{},"blank":{},"physical":{},"files":{}}}"#,
+                json_escape(&s.name), json_escape(&s.relative_path),
+                s.code_lines, s.comment_lines, s.blank_lines,
+                s.total_physical_lines, s.files_analyzed,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+fn build_scatter_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .totals_by_language
+        .iter()
+        .map(|l| {
+            format!(
+                r#"{{"lang":"{}","files":{},"code":{},"physical":{}}}"#,
+                json_escape(l.language.display_name()),
+                l.files,
+                l.code_lines,
+                l.total_physical_lines,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+fn build_semantic_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .totals_by_language
+        .iter()
+        .filter(|l| l.functions > 0 || l.classes > 0 || l.variables > 0 || l.imports > 0 || l.test_count > 0)
+        .map(|l| {
+            format!(
+                r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{},"tests":{}}}"#,
+                json_escape(l.language.display_name()),
+                l.functions, l.classes, l.variables, l.imports, l.test_count,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+// ── Coverage / density helpers ────────────────────────────────────────────────
+
+fn coverage_pct_str(hit: u64, found: u64) -> String {
+    if found > 0 {
+        format!("{:.1}", hit as f64 / found as f64 * 100.0)
+    } else {
+        String::new()
+    }
+}
+
+fn coverage_class(hit: u64, found: u64) -> String {
+    if found > 0 {
+        let pct = hit as f64 / found as f64 * 100.0;
+        if pct >= 80.0 {
+            "good"
+        } else if pct >= 60.0 {
+            "warn"
+        } else {
+            "danger"
+        }
+    } else {
+        "muted"
+    }
+    .to_string()
+}
+
+fn format_test_density(code_lines: u64, test_count: u64) -> String {
+    if code_lines > 0 && test_count > 0 {
+        format!("{:.1}", test_count as f64 / code_lines as f64 * 1000.0)
+    } else {
+        String::from("0.0")
+    }
+}
+
+fn test_density_class(code_lines: u64, test_count: u64) -> String {
+    if code_lines > 0 && test_count > 0 {
+        let d = test_count as f64 / code_lines as f64 * 1000.0;
+        if d >= 5.0 {
+            "good"
+        } else if d >= 1.0 {
+            "warn"
+        } else {
+            "danger"
+        }
+    } else {
+        "danger"
+    }
+    .to_string()
+}
+
+// ── Main renderer ─────────────────────────────────────────────────────────────
+
 fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
     let config_json = serde_json::to_string_pretty(&run.effective_configuration)
         .context("failed to serialize effective configuration")?;
@@ -103,6 +229,8 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
     let company_name = rep.company_name.clone();
     let accent_hex = rep.accent_color.clone();
     let report_header_footer = rep.report_header_footer.clone();
+
+    let totals = &run.summary_totals;
 
     let template = ReportTemplate {
         // Empty nonce for disk-saved reports; patch_html_nonce replaces it
@@ -135,109 +263,60 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
                 variables: row.variables,
                 imports: row.imports,
                 test_count: row.test_count,
+                test_assertion_count: row.test_assertion_count,
+                test_suite_count: row.test_suite_count,
+                test_density_str: if row.code_lines > 0 {
+                    format!(
+                        "{:.1}",
+                        row.test_count as f64 / row.code_lines as f64 * 1000.0
+                    )
+                } else {
+                    "—".to_string()
+                },
             })
             .collect(),
         file_rows: run.per_file_records.iter().map(file_row_view).collect(),
         skipped_rows: run.skipped_file_records.iter().map(file_row_view).collect(),
         config_json,
-        lang_chart_json: {
-            let entries: Vec<String> = run
-                .totals_by_language
-                .iter()
-                .take(12)
-                .map(|l| {
-                    let name = l
-                        .language
-                        .display_name()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    format!(
-                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"functions":{},"classes":{},"variables":{},"imports":{},"tests":{},"files":{}}}"#,
-                        name,
-                        l.code_lines,
-                        l.comment_lines,
-                        l.blank_lines,
-                        l.functions,
-                        l.classes,
-                        l.variables,
-                        l.imports,
-                        l.test_count,
-                        l.files,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
-        submodule_chart_json: {
-            let entries: Vec<String> = run
-                .submodule_summaries
-                .iter()
-                .map(|s| {
-                    let name = s.name.replace('\\', "\\\\").replace('"', "\\\"");
-                    let path = s.relative_path.replace('\\', "\\\\").replace('"', "\\\"");
-                    format!(
-                        r#"{{"name":"{}","path":"{}","code":{},"comment":{},"blank":{},"physical":{},"files":{}}}"#,
-                        name,
-                        path,
-                        s.code_lines,
-                        s.comment_lines,
-                        s.blank_lines,
-                        s.total_physical_lines,
-                        s.files_analyzed,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
-        scatter_chart_json: {
-            let entries: Vec<String> = run
-                .totals_by_language
-                .iter()
-                .map(|l| {
-                    let name = l
-                        .language
-                        .display_name()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    format!(
-                        r#"{{"lang":"{}","files":{},"code":{},"physical":{}}}"#,
-                        name, l.files, l.code_lines, l.total_physical_lines,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
-        semantic_chart_json: {
-            let entries: Vec<String> = run
-                .totals_by_language
-                .iter()
-                .filter(|l| {
-                    l.functions > 0
-                        || l.classes > 0
-                        || l.variables > 0
-                        || l.imports > 0
-                        || l.test_count > 0
-                })
-                .map(|l| {
-                    let name = l
-                        .language
-                        .display_name()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    format!(
-                        r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{},"tests":{}}}"#,
-                        name, l.functions, l.classes, l.variables, l.imports, l.test_count,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
+        lang_chart_json: build_lang_chart_json(run),
+        submodule_chart_json: build_submodule_chart_json(run),
+        scatter_chart_json: build_scatter_chart_json(run),
+        semantic_chart_json: build_semantic_chart_json(run),
         has_submodule_data: !run.submodule_summaries.is_empty(),
         has_semantic_data: run
             .totals_by_language
             .iter()
             .any(|l| l.functions > 0 || l.classes > 0 || l.test_count > 0),
         has_coverage_data: run.per_file_records.iter().any(|f| f.coverage.is_some()),
+        has_fn_coverage: totals.coverage_functions_found > 0,
+        has_branch_coverage: totals.coverage_branches_found > 0,
+        test_files_count: run
+            .per_file_records
+            .iter()
+            .filter(|f| f.raw_line_categories.test_count > 0)
+            .count() as u64,
+        test_assertion_count: totals.test_assertion_count,
+        test_suite_count: totals.test_suite_count,
+        test_density: format_test_density(totals.code_lines, totals.test_count),
+        test_density_class: test_density_class(totals.code_lines, totals.test_count),
+        cov_line_pct: coverage_pct_str(totals.coverage_lines_hit, totals.coverage_lines_found),
+        cov_fn_pct: coverage_pct_str(
+            totals.coverage_functions_hit,
+            totals.coverage_functions_found,
+        ),
+        cov_branch_pct: coverage_pct_str(
+            totals.coverage_branches_hit,
+            totals.coverage_branches_found,
+        ),
+        cov_line_class: coverage_class(totals.coverage_lines_hit, totals.coverage_lines_found),
+        cov_fn_class: coverage_class(
+            totals.coverage_functions_hit,
+            totals.coverage_functions_found,
+        ),
+        cov_branch_class: coverage_class(
+            totals.coverage_branches_hit,
+            totals.coverage_branches_found,
+        ),
         has_run_warnings: !run.warnings.is_empty(),
         warning_count: run.warnings.len(),
         warning_summary_rows,
@@ -534,6 +613,8 @@ fn file_row_view(file: &FileRecord) -> FileRow {
         variables: file.raw_line_categories.variables,
         imports: file.raw_line_categories.imports,
         test_count: file.raw_line_categories.test_count,
+        test_assertion_count: file.raw_line_categories.test_assertion_count,
+        test_suite_count: file.raw_line_categories.test_suite_count,
         line_cov_pct: file
             .coverage
             .as_ref()
@@ -783,6 +864,9 @@ struct LanguageRow {
     variables: u64,
     imports: u64,
     test_count: u64,
+    test_assertion_count: u64,
+    test_suite_count: u64,
+    test_density_str: String,
 }
 
 #[derive(Debug, Clone)]
@@ -799,6 +883,8 @@ struct FileRow {
     variables: u64,
     imports: u64,
     test_count: u64,
+    test_assertion_count: u64,
+    test_suite_count: u64,
     /// Line coverage percentage, e.g. "96.7" — empty string when no coverage data.
     line_cov_pct: String,
     /// Function coverage percentage — empty string when no coverage data.
@@ -1352,7 +1438,7 @@ struct WarningOpportunityRow {
           {% if let Some(name) = company_name %}
           <div class="brand-title">{{ name }}</div>
           {% else %}
-          <div class="brand-title">OxideSLOC Local analysis workbench</div>
+          <div class="brand-title">OxideSLOC — local code analysis - metrics, history and reports</div>
           {% endif %}
           <div class="brand-subtitle">Saved HTML report</div>
         </div>
@@ -1544,6 +1630,96 @@ struct WarningOpportunityRow {
         {% endif %}
       </div>
 
+      <!-- ── Tests & Coverage ──────────────────────────────────────────── -->
+      <section class="panel stack">
+        <div>
+          <div class="toolbar">
+            <div class="toolbar-left"><h2>Tests &amp; Coverage</h2></div>
+            {% if has_coverage_data %}<div class="pill-row"><span class="pill good">LCOV coverage data present</span></div>{% endif %}
+          </div>
+          <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px;">
+            <div class="stat-chip">
+              <div class="stat-chip-val" data-fmt="{{ run.summary_totals.test_count }}">{{ run.summary_totals.test_count }}</div>
+              <div class="stat-chip-label">Test Functions</div>
+              <div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div>
+              <span class="stat-chip-exact">{{ run.summary_totals.test_count }}</span>
+            </div>
+            <div class="stat-chip">
+              <div class="stat-chip-val" data-fmt="{{ test_assertion_count }}">{{ test_assertion_count }}</div>
+              <div class="stat-chip-label">Assertions</div>
+              <div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div>
+              <span class="stat-chip-exact">{{ test_assertion_count }}</span>
+            </div>
+            <div class="stat-chip">
+              <div class="stat-chip-val" data-fmt="{{ test_suite_count }}">{{ test_suite_count }}</div>
+              <div class="stat-chip-label">Test Suites</div>
+              <div class="stat-chip-tip">Test suite / fixture / group declarations (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], etc.)</div>
+              <span class="stat-chip-exact">{{ test_suite_count }}</span>
+            </div>
+            <div class="stat-chip">
+              <div class="stat-chip-val">{{ test_files_count }} / {{ run.summary_totals.files_analyzed }}</div>
+              <div class="stat-chip-label">Test Files</div>
+              <div class="stat-chip-tip">Files containing at least one detected test definition out of total analyzed files</div>
+            </div>
+          </div>
+          <div style="margin-bottom:14px;">
+            <span class="pill" style="background:var(--{{ test_density_class }}-bg);color:var(--{{ test_density_class }}-text);font-size:13px;padding:5px 14px;">{{ test_density }} tests per 1 K SLOC</span>
+          </div>
+          {% if has_coverage_data %}
+          <h3 style="margin:0 0 10px;font-size:14px;font-weight:700;">Coverage Summary (LCOV)</h3>
+          <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:18px;">
+            <div style="flex:1;min-width:160px;">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Line Coverage</div>
+              <div style="font-size:28px;font-weight:900;color:var(--{{ cov_line_class }}-text);">{{ cov_line_pct }}%</div>
+              <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{{ cov_line_pct }}%;border-radius:4px;background:var(--{{ cov_line_class }}-text);transition:width .4s ease;"></div></div>
+            </div>
+            {% if has_fn_coverage %}
+            <div style="flex:1;min-width:160px;">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Function Coverage</div>
+              <div style="font-size:28px;font-weight:900;color:var(--{{ cov_fn_class }}-text);">{{ cov_fn_pct }}%</div>
+              <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{{ cov_fn_pct }}%;border-radius:4px;background:var(--{{ cov_fn_class }}-text);transition:width .4s ease;"></div></div>
+            </div>
+            {% endif %}
+            {% if has_branch_coverage %}
+            <div style="flex:1;min-width:160px;">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Branch Coverage</div>
+              <div style="font-size:28px;font-weight:900;color:var(--{{ cov_branch_class }}-text);">{{ cov_branch_pct }}%</div>
+              <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{{ cov_branch_pct }}%;border-radius:4px;background:var(--{{ cov_branch_class }}-text);transition:width .4s ease;"></div></div>
+            </div>
+            {% endif %}
+          </div>
+          {% else %}
+          <p style="margin:0;font-size:13px;color:var(--muted);">No LCOV coverage data provided. Re-run with <code>--lcov-path coverage.info</code> to see line, function, and branch coverage here.</p>
+          {% endif %}
+          <div class="table-shell" style="margin-top:16px;">
+            <table data-sort-table style="min-width:560px;">
+              <thead>
+                <tr>
+                  <th data-sort-type="text">Language</th>
+                  <th data-sort-type="number">Test Fns</th>
+                  <th data-sort-type="number">Assertions</th>
+                  <th data-sort-type="number">Suites</th>
+                  <th data-sort-type="text">Density (per 1K SLOC)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in language_rows %}
+                {% if row.test_count > 0 || row.test_assertion_count > 0 %}
+                <tr>
+                  <td>{{ row.language }}</td>
+                  <td>{{ row.test_count }}</td>
+                  <td>{{ row.test_assertion_count }}</td>
+                  <td>{{ row.test_suite_count }}</td>
+                  <td>{{ row.test_density_str }}</td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- ── Submodule Breakdown (full-width, conditional) ─────────────── -->
       {% if has_submodule_data %}
       <section class="panel stack chart-section">
@@ -1604,6 +1780,8 @@ struct WarningOpportunityRow {
                   <th data-sort-type="number">Variables</th>
                   <th data-sort-type="number">Imports</th>
                   <th data-sort-type="number">Tests</th>
+                  <th data-sort-type="number">Assertions</th>
+                  <th data-sort-type="number">Suites</th>
                 </tr>
               </thead>
               <tbody>
@@ -1621,6 +1799,8 @@ struct WarningOpportunityRow {
                   <td>{{ row.variables }}</td>
                   <td>{{ row.imports }}</td>
                   <td>{{ row.test_count }}</td>
+                  <td>{{ row.test_assertion_count }}</td>
+                  <td>{{ row.test_suite_count }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -1634,7 +1814,7 @@ struct WarningOpportunityRow {
         <div class="table-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <colgroup>
-              <col><col><col><col><col><col><col><col><col><col><col><col>
+              <col><col><col><col><col><col><col><col><col><col><col><col><col><col>
             </colgroup>
             <thead>
               <tr>
@@ -1650,6 +1830,8 @@ struct WarningOpportunityRow {
                 <th data-sort-type="number" class="num-col">Variables<div class="col-resize-handle"></div></th>
                 <th data-sort-type="number" class="num-col">Imports<div class="col-resize-handle"></div></th>
                 <th data-sort-type="number" class="num-col">Tests<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Assertions<div class="col-resize-handle"></div></th>
+                <th data-sort-type="number" class="num-col">Suites<div class="col-resize-handle"></div></th>
                 {% if has_coverage_data %}<th data-sort-type="text" class="num-col">Line Cov %<div class="col-resize-handle"></div></th><th data-sort-type="text" class="num-col">Fn Cov %<div class="col-resize-handle"></div></th>{% endif %}
               </tr>
             </thead>
@@ -1668,6 +1850,8 @@ struct WarningOpportunityRow {
                 <td class="num-col">{{ row.variables }}</td>
                 <td class="num-col">{{ row.imports }}</td>
                 <td class="num-col">{{ row.test_count }}</td>
+                <td class="num-col">{{ row.test_assertion_count }}</td>
+                <td class="num-col">{{ row.test_suite_count }}</td>
                 {% if has_coverage_data %}<td class="num-col">{{ row.line_cov_pct }}</td><td class="num-col">{{ row.fn_cov_pct }}</td>{% endif %}
               </tr>
               {% endfor %}
@@ -2550,6 +2734,19 @@ struct ReportTemplate<'a> {
     has_submodule_data: bool,
     has_semantic_data: bool,
     has_coverage_data: bool,
+    has_fn_coverage: bool,
+    has_branch_coverage: bool,
+    test_files_count: u64,
+    test_assertion_count: u64,
+    test_suite_count: u64,
+    test_density: String,
+    test_density_class: String,
+    cov_line_pct: String,
+    cov_fn_pct: String,
+    cov_branch_pct: String,
+    cov_line_class: String,
+    cov_fn_class: String,
+    cov_branch_class: String,
     has_run_warnings: bool,
     warning_count: usize,
     warning_summary_rows: Vec<WarningSummaryRow>,

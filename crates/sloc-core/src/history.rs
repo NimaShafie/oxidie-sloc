@@ -25,6 +25,8 @@ pub struct ScanSummarySnapshot {
     pub variables: u64,
     #[serde(default)]
     pub imports: u64,
+    #[serde(default)]
+    pub test_count: u64,
 }
 
 /// One entry in the scan registry — one per completed analysis run.
@@ -57,6 +59,44 @@ pub struct RegistryEntry {
     /// ISO 8601 author-date of the last git commit at scan time.
     #[serde(default)]
     pub git_commit_date: Option<String>,
+}
+
+/// Persistent list of directories the user has chosen to watch for new reports.
+/// Stored as `watched_dirs.json` adjacent to `registry.json`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct WatchedDirsStore {
+    pub dirs: Vec<PathBuf>,
+}
+
+impl WatchedDirsStore {
+    #[must_use]
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    pub fn add(&mut self, dir: PathBuf) {
+        if !self.dirs.contains(&dir) {
+            self.dirs.push(dir);
+        }
+    }
+
+    pub fn remove(&mut self, dir: &Path) {
+        self.dirs.retain(|d| d != dir);
+    }
 }
 
 /// Persistent on-disk index of all past scans for this workspace.

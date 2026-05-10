@@ -252,11 +252,11 @@ pub(super) struct CompareRefsQuery {
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
-            <a href="/view-reports"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>All Reports</a>
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -773,7 +773,7 @@ pub(super) struct CompareRefsQuery {
     })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -827,10 +827,24 @@ pub(super) async fn api_list_refs(
     }
 }
 
+/// Allow the same character set git itself accepts for ref names, plus a conservative length cap.
+/// Blocks path traversal via `..`, absolute paths, and shell-special characters.
+fn is_valid_git_ref(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '@' | '+'))
+        && !s.starts_with('/')
+        && !s.contains("..")
+}
+
 pub(super) async fn api_scan_ref(
     State(state): State<AppState>,
     Query(q): Query<ScanRefQuery>,
 ) -> impl IntoResponse {
+    if !is_valid_git_ref(&q.ref_name) {
+        return json_error(StatusCode::BAD_REQUEST, "invalid ref_name");
+    }
     let clones_dir = state.git_clones_dir.clone();
     let base_config = state.base_config.clone();
     let label = q
@@ -863,6 +877,9 @@ pub(super) async fn api_compare_refs(
     State(state): State<AppState>,
     Query(q): Query<CompareRefsQuery>,
 ) -> impl IntoResponse {
+    if !is_valid_git_ref(&q.baseline_ref) || !is_valid_git_ref(&q.current_ref) {
+        return json_error(StatusCode::BAD_REQUEST, "invalid ref name").into_response();
+    }
     let clones_dir = state.git_clones_dir.clone();
     let base_config = state.base_config.clone();
     let label = q

@@ -1,13 +1,13 @@
 # sloc-core
 
-Core analysis engine for [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc).
+Core analysis engine for [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc) — a local code analysis tool.
 
 ## Overview
 
 This crate is the main entry point for analysis:
 
 - **`analyze(config) -> Result<AnalysisRun>`** — file discovery, byte decoding (UTF-8 → UTF-16 → Windows-1252 fallback), language detection, per-file SLOC analysis, and aggregation
-- **`AnalysisRun`** — canonical serializable result; read/write via `write_json` / `read_json`
+- **`AnalysisRun`** — canonical serializable result; read/write via `write_json` / `read_json`; includes `summary_totals.test_count`, `test_assertion_count`, `test_suite_count`, per-language equivalents, and optional per-file `coverage` (LCOV line-hit data)
 - **`FileRecord`** — per-file details including effective counts after policy application
 - Binary detection via long-line + low-whitespace heuristic
 - Generated/vendor/lockfile skip logic

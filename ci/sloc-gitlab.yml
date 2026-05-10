@@ -12,34 +12,60 @@
 #   SLOC_SERVER  — base URL of your oxide-sloc instance, e.g. http://sloc.internal:4317
 #
 # Optional variables:
-#   SLOC_API_KEY — bearer token (required if the server was started with SLOC_API_KEY set)
-#   SLOC_LABEL   — display name in /view-reports (defaults to $CI_PROJECT_PATH)
+#   SLOC_API_KEY         — bearer token (required if the server was started with SLOC_API_KEY set)
+#   SLOC_LABEL           — display name in /view-reports (defaults to $CI_PROJECT_PATH)
+#
+# Artifact repository push — all optional (see ci/artifact-push.sh for full docs):
+#   ARTIFACT_REPO_TYPE   — artifactory | nexus | nexus2 | s3 | minio | azure-blob | generic-http
+#   ARTIFACT_REPO_URL    — base URL of the artifact repository
+#   ARTIFACT_REPO_PATH   — path prefix (default: oxide-sloc/<project>/<pipeline-id>)
+#   ARTIFACT_REPO_EXTRA  — provider-specific extra config (Nexus repo, Azure container, MinIO endpoint)
+#   ARTIFACT_REPO_USER   — username / access key (store as masked CI/CD variable)
+#   ARTIFACT_REPO_PASS   — password / API token   (store as masked CI/CD variable)
 #
 # How it works:
 #   1. oxide-sloc analyze runs inside the GitLab runner — no network call to the server.
 #   2. oxide-sloc send POSTs the result JSON to /api/ingest on your server.
-#   3. The server renders HTML, stores the artifact, and the scan appears in /view-reports.
+#   3. (optional) ci/artifact-push.sh pushes JSON/HTML to the configured artifact repository.
+#   4. The server renders HTML, stores the artifact, and the scan appears in /view-reports.
 
 sloc-analysis:
   stage: test
   image: rust:latest
   variables:
     SLOC_LABEL: ${CI_PROJECT_PATH}
+    ARTIFACT_REPO_TYPE: ""
+    ARTIFACT_REPO_URL: ""
+    ARTIFACT_REPO_PATH: "oxide-sloc/${CI_PROJECT_PATH}/${CI_PIPELINE_ID}"
+    ARTIFACT_REPO_EXTRA: ""
+    ARTIFACT_DIR: sloc-out
+    ARTIFACT_FILES: "result.json report.html"
   before_script:
     - cargo install oxide-sloc --locked
   script:
-    - oxide-sloc analyze . --json-out sloc-result.json
+    - mkdir -p sloc-out
+    - |
+      oxide-sloc analyze . \
+        --json-out sloc-out/result.json \
+        --html-out sloc-out/report.html
     - |
       if [ -n "${SLOC_SERVER}" ]; then
-        oxide-sloc send sloc-result.json \
+        oxide-sloc send sloc-out/result.json \
           --webhook-url "${SLOC_SERVER}/api/ingest?label=${SLOC_LABEL}" \
           ${SLOC_API_KEY:+--webhook-token "${SLOC_API_KEY}"}
       else
         echo "SLOC_SERVER not set — skipping upload"
       fi
+    - |
+      if [ -n "${ARTIFACT_REPO_TYPE}" ] && [ "${ARTIFACT_REPO_TYPE}" != "none" ] && [ -n "${ARTIFACT_REPO_URL}" ]; then
+        echo "Pushing artifacts to ${ARTIFACT_REPO_TYPE}..."
+        bash ci/artifact-push.sh
+      else
+        echo "ARTIFACT_REPO_TYPE not set or 'none' — skipping artifact repository push"
+      fi
   artifacts:
     paths:
-      - sloc-result.json
+      - sloc-out/
     expire_in: 7 days
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'

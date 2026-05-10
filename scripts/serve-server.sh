@@ -275,11 +275,14 @@ do_launch_cargo() {
     assert_port_free
     check_firewall
     maybe_open_firewall
-    print_banner
+    printf '\n  Building oxide-sloc (first run may take a few minutes)...\n\n'
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
-    export CARGO_INCREMENTAL=0
-    cargo run -p oxide-sloc -- serve --server
+    cargo build -p oxide-sloc
+    print_banner
+    local bin="$REPO_ROOT/target/debug/oxide-sloc"
+    [[ "$PLATFORM" == windows ]] && bin="$REPO_ROOT/target/debug/oxide-sloc.exe"
+    "$bin" serve --server
 }
 
 if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then

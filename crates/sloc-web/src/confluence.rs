@@ -499,7 +499,11 @@ pub(super) async fn api_test_confluence(State(state): State<AppState>) -> Respon
     let client = ConfluenceClient::new(&config);
     match client.test_connection().await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+        Err(e) => {
+            tracing::warn!("Confluence connection test failed: {e:#}");
+            Json(serde_json::json!({ "ok": false, "error": "Connection test failed." }))
+                .into_response()
+        }
     }
 }
 
@@ -507,7 +511,13 @@ pub(super) async fn api_post_to_confluence(
     State(state): State<AppState>,
     Json(body): Json<PostToConfluenceRequest>,
 ) -> Response {
-    if body.run_id.len() > 128 || body.run_id.contains('/') || body.run_id.contains('\\') {
+    if body.run_id.is_empty()
+        || body.run_id.len() > 128
+        || !body
+            .run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "ok": false, "error": "Invalid run_id" })),
@@ -587,11 +597,16 @@ pub(super) async fn api_post_to_confluence(
 
     match post_to_confluence(&client, &run, &body.page_title, report_url).await {
         Ok(page_id) => Json(serde_json::json!({ "ok": true, "page_id": page_id })).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::warn!("Confluence publish failed for run '{}': {e:#}", body.run_id);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({ "ok": false, "error": "Failed to publish to Confluence." }),
+                ),
+            )
+                .into_response()
+        }
     }
 }
 

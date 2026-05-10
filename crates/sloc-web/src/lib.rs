@@ -64,7 +64,7 @@ static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
 
 use sloc_core::{
     analyze, compute_delta, read_json, AnalysisRun, FileChangeStatus, RegistryEntry, ScanRegistry,
-    ScanSummarySnapshot, SummaryTotals,
+    ScanSummarySnapshot, SummaryTotals, WatchedDirsStore,
 };
 use sloc_report::{render_html, render_sub_report_html, write_pdf_from_html};
 const MAX_CONCURRENT_ANALYSES: usize = 4;
@@ -361,6 +361,9 @@ struct AppState {
     /// Persisted Confluence integration settings.
     confluence: Arc<Mutex<confluence::ConfluenceConfigStore>>,
     confluence_path: PathBuf,
+    /// Directories the user has pinned for auto-scanning of external reports.
+    watched_dirs: Arc<Mutex<WatchedDirsStore>>,
+    watched_dirs_path: PathBuf,
 }
 
 type PendingPdf = Option<(PathBuf, PathBuf, bool)>;
@@ -391,6 +394,9 @@ fn build_router(state: AppState) -> Router {
         .route("/pick-file", get(pick_file_handler))
         .route("/locate-report", post(locate_report_handler))
         .route("/locate-reports-dir", post(locate_reports_dir_handler))
+        .route("/watched-dirs/add", post(add_watched_dir_handler))
+        .route("/watched-dirs/remove", post(remove_watched_dir_handler))
+        .route("/watched-dirs/refresh", post(refresh_watched_dirs_handler))
         .route("/view-reports", get(history_handler))
         .route("/compare-scans", get(compare_select_handler))
         .route("/compare", get(compare_handler))
@@ -406,6 +412,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/ingest", post(api_ingest_handler))
         .route("/api/project-history", get(project_history_handler))
         .route("/trend-reports", get(trend_report_handler))
+        .route("/test-metrics", get(test_metrics_handler))
         .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
         .route("/api/runs/{wait_id}/cancel", post(cancel_run_handler))
         .route("/api/runs/{run_id}/pdf-status", get(pdf_status_handler))
@@ -519,6 +526,8 @@ pub fn make_test_router() -> Router {
         scan_profiles_path: tmp.join("scan_profiles.json"),
         confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
         confluence_path: tmp.join("confluence_config.json"),
+        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
+        watched_dirs_path: tmp.join("watched_dirs.json"),
     };
     build_router(state)
 }
@@ -612,6 +621,9 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         PathBuf::from,
     );
     let confluence = confluence::ConfluenceConfigStore::load(&confluence_path);
+    let watched_dirs_path = std::env::var("SLOC_WATCHED_DIRS_PATH")
+        .map_or_else(|_| output_root.join("watched_dirs.json"), PathBuf::from);
+    let watched_dirs = WatchedDirsStore::load(&watched_dirs_path);
 
     let state = AppState {
         base_config: config,
@@ -632,6 +644,8 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         scan_profiles_path,
         confluence: Arc::new(Mutex::new(confluence)),
         confluence_path,
+        watched_dirs: Arc::new(Mutex::new(watched_dirs)),
+        watched_dirs_path,
     };
 
     restart_poll_schedules(&state).await;
@@ -1651,6 +1665,7 @@ fn registry_entry_from_run(
             classes: run.summary_totals.classes,
             variables: run.summary_totals.variables,
             imports: run.summary_totals.imports,
+            test_count: run.summary_totals.test_count,
         },
         git_branch: None,
         git_commit: None,
@@ -1933,6 +1948,7 @@ async fn locate_reports_dir_handler(
                 classes: run.summary_totals.classes,
                 variables: run.summary_totals.variables,
                 imports: run.summary_totals.imports,
+                test_count: run.summary_totals.test_count,
             },
             git_branch: run.git_branch.clone(),
             git_commit: run.git_commit_short.clone(),
@@ -1954,6 +1970,245 @@ async fn locate_reports_dir_handler(
         .into_response();
     }
     axum::response::Redirect::to(&format!("/view-reports?linked={linked_count}")).into_response()
+}
+
+// ── Watched-directory helpers ─────────────────────────────────────────────────
+
+/// Scan `folder` (and one level of subdirs) for `result*.json` files and add any new ones to `reg`.
+/// Returns the number of newly linked entries.
+fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -> usize {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(j) = find_result_json_in_dir(folder) {
+        candidates.push(j);
+    }
+    if let Ok(dir_entries) = fs::read_dir(folder) {
+        for entry in dir_entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() {
+                if let Some(j) = find_result_json_in_dir(&sub) {
+                    candidates.push(j);
+                }
+            }
+        }
+    }
+
+    let mut linked = 0usize;
+    for json_path in candidates {
+        let parent = match json_path.parent() {
+            Some(p) => p.to_path_buf(),
+            None => continue,
+        };
+        let already = reg.entries.iter().any(|e| {
+            e.json_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .is_some_and(|p| p == parent)
+                || e.html_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .is_some_and(|p| p == parent)
+        });
+        if already {
+            continue;
+        }
+        let html_path = fs::read_dir(&parent).ok().and_then(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
+        });
+        let run = match read_json(&json_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let project_label = run.input_roots.first().map_or_else(
+            || "Unknown Project".to_string(),
+            |r| sanitize_project_label(r),
+        );
+        let entry = RegistryEntry {
+            run_id: run.tool.run_id.clone(),
+            timestamp_utc: run.tool.timestamp_utc,
+            project_label,
+            input_roots: run.input_roots.clone(),
+            json_path: Some(json_path),
+            html_path,
+            pdf_path: None,
+            summary: ScanSummarySnapshot {
+                files_analyzed: run.summary_totals.files_analyzed,
+                files_skipped: run.summary_totals.files_skipped,
+                total_physical_lines: run.summary_totals.total_physical_lines,
+                code_lines: run.summary_totals.code_lines,
+                comment_lines: run.summary_totals.comment_lines,
+                blank_lines: run.summary_totals.blank_lines,
+                functions: run.summary_totals.functions,
+                classes: run.summary_totals.classes,
+                variables: run.summary_totals.variables,
+                imports: run.summary_totals.imports,
+                test_count: run.summary_totals.test_count,
+            },
+            git_branch: run.git_branch.clone(),
+            git_commit: run.git_commit_short.clone(),
+            git_author: run.git_commit_author.clone(),
+            git_tags: run.git_tags.clone(),
+            git_nearest_tag: run.git_nearest_tag.clone(),
+            git_commit_date: run.git_commit_date.clone(),
+        };
+        reg.add_entry(entry);
+        linked += 1;
+    }
+    linked
+}
+
+/// Scan all watched directories (plus the default output root) into `reg`.
+async fn auto_scan_watched_dirs(state: &AppState) {
+    let dirs: Vec<PathBuf> = {
+        let wd = state.watched_dirs.lock().await;
+        wd.dirs.clone()
+    };
+    if dirs.is_empty() {
+        return;
+    }
+    let mut reg = state.registry.lock().await;
+    let mut total = 0usize;
+    for dir in &dirs {
+        if dir.is_dir() {
+            total += scan_folder_into_registry(dir, &mut reg);
+        }
+    }
+    if total > 0 {
+        let _ = reg.save(&state.registry_path);
+    }
+}
+
+// ── Watched-dir route forms ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct WatchedDirForm {
+    folder_path: String,
+    #[serde(default = "default_redirect")]
+    redirect_to: String,
+}
+
+fn default_redirect() -> String {
+    "/view-reports".to_string()
+}
+
+#[derive(Deserialize)]
+struct WatchedDirRefreshForm {
+    #[serde(default = "default_redirect")]
+    redirect_to: String,
+}
+
+// ── Watched-dir helpers ───────────────────────────────────────────────────────
+
+/// Reject any redirect target that is not a relative path to prevent open-redirect attacks.
+fn safe_redirect(dest: &str) -> &str {
+    if dest.starts_with('/') {
+        dest
+    } else {
+        "/"
+    }
+}
+
+// ── Watched-dir handlers ──────────────────────────────────────────────────────
+
+async fn add_watched_dir_handler(
+    State(state): State<AppState>,
+    Form(form): Form<WatchedDirForm>,
+) -> impl IntoResponse {
+    if state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let folder = match fs::canonicalize(PathBuf::from(&form.folder_path)) {
+        Ok(p) => strip_unc_prefix(p),
+        Err(_) => {
+            let dest = format!(
+                "{}?error=Folder+not+found+or+path+is+invalid.",
+                safe_redirect(&form.redirect_to)
+            );
+            return axum::response::Redirect::to(&dest).into_response();
+        }
+    };
+    if !folder.is_dir() {
+        let dest = format!(
+            "{}?error=Selected+path+is+not+a+directory.",
+            safe_redirect(&form.redirect_to)
+        );
+        return axum::response::Redirect::to(&dest).into_response();
+    }
+
+    // Persist the watched directory.
+    {
+        let mut wd = state.watched_dirs.lock().await;
+        wd.add(folder.clone());
+        let _ = wd.save(&state.watched_dirs_path);
+    }
+
+    // Immediately scan the folder and add any new reports.
+    let linked = {
+        let mut reg = state.registry.lock().await;
+        let n = scan_folder_into_registry(&folder, &mut reg);
+        if n > 0 {
+            let _ = reg.save(&state.registry_path);
+        }
+        n
+    };
+
+    let dest = if linked > 0 {
+        format!("{}?linked={linked}", safe_redirect(&form.redirect_to))
+    } else {
+        format!(
+            "{}?error=Folder+added+to+watch+list+but+no+new+reports+were+found.",
+            safe_redirect(&form.redirect_to)
+        )
+    };
+    axum::response::Redirect::to(&dest).into_response()
+}
+
+async fn remove_watched_dir_handler(
+    State(state): State<AppState>,
+    Form(form): Form<WatchedDirForm>,
+) -> impl IntoResponse {
+    if state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let folder = PathBuf::from(&form.folder_path);
+    {
+        let mut wd = state.watched_dirs.lock().await;
+        wd.remove(&folder);
+        let _ = wd.save(&state.watched_dirs_path);
+    }
+    axum::response::Redirect::to(safe_redirect(&form.redirect_to)).into_response()
+}
+
+async fn refresh_watched_dirs_handler(
+    State(state): State<AppState>,
+    Form(form): Form<WatchedDirRefreshForm>,
+) -> impl IntoResponse {
+    if state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let dirs: Vec<PathBuf> = {
+        let wd = state.watched_dirs.lock().await;
+        wd.dirs.clone()
+    };
+    let mut total = 0usize;
+    {
+        let mut reg = state.registry.lock().await;
+        for dir in &dirs {
+            if dir.is_dir() {
+                total += scan_folder_into_registry(dir, &mut reg);
+            }
+        }
+        if total > 0 {
+            let _ = reg.save(&state.registry_path);
+        }
+    }
+    let dest = if total > 0 {
+        format!("{}?linked={total}", safe_redirect(&form.redirect_to))
+    } else {
+        safe_redirect(&form.redirect_to).to_owned()
+    };
+    axum::response::Redirect::to(&dest).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2231,6 +2486,7 @@ const fn summary_snapshot_from_run(run: &AnalysisRun) -> ScanSummarySnapshot {
         classes: run.summary_totals.classes,
         variables: run.summary_totals.variables,
         imports: run.summary_totals.imports,
+        test_count: run.summary_totals.test_count,
     }
 }
 
@@ -3543,7 +3799,7 @@ async fn artifact_handler(
                          <img class=\"brand-logo\" src=\"/images/logo/small-logo.png\" alt=\"OxideSLOC logo\" />\
                          <div class=\"brand-copy\">\
                            <div class=\"brand-title\">OxideSLOC</div>\
-                           <div class=\"brand-subtitle\">Local analysis workbench</div>\
+                           <div class=\"brand-subtitle\">local code analysis - metrics, history and reports</div>\
                          </div>\
                        </a>\
                        <div class=\"nav-right\">\
@@ -3786,6 +4042,12 @@ async fn history_handler(
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Query(query): Query<HistoryQuery>,
 ) -> impl IntoResponse {
+    // Auto-scan all watched directories before rendering so the list stays fresh.
+    auto_scan_watched_dirs(&state).await;
+    let watched_dirs: Vec<String> = {
+        let wd = state.watched_dirs.lock().await;
+        wd.dirs.iter().map(|p| p.display().to_string()).collect()
+    };
     let mut entries = {
         let reg = state.registry.lock().await;
         make_history_rows(&reg)
@@ -3804,6 +4066,7 @@ async fn history_handler(
         total_scans,
         linked_count,
         browse_error,
+        watched_dirs,
         csp_nonce,
     };
     Html(
@@ -3818,6 +4081,11 @@ async fn compare_select_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
 ) -> impl IntoResponse {
+    auto_scan_watched_dirs(&state).await;
+    let watched_dirs: Vec<String> = {
+        let wd = state.watched_dirs.lock().await;
+        wd.dirs.iter().map(|p| p.display().to_string()).collect()
+    };
     let mut entries = {
         let reg = state.registry.lock().await;
         make_history_rows(&reg)
@@ -3828,6 +4096,7 @@ async fn compare_select_handler(
         version: env!("CARGO_PKG_VERSION"),
         entries,
         total_scans,
+        watched_dirs,
         csp_nonce,
     };
     Html(
@@ -4584,6 +4853,7 @@ struct MetricsHistoryEntry {
     physical_lines: u64,
     files_analyzed: u64,
     files_skipped: u64,
+    test_count: u64,
     project_label: String,
     html_url: Option<String>,
     has_pdf: bool,
@@ -4683,6 +4953,7 @@ async fn api_metrics_history_handler(
                 physical_lines: e.summary.total_physical_lines,
                 files_analyzed: e.summary.files_analyzed,
                 files_skipped: e.summary.files_skipped,
+                test_count: e.summary.test_count,
                 project_label: e.project_label.clone(),
                 html_url,
                 has_pdf,
@@ -4873,6 +5144,13 @@ async fn trend_report_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
 ) -> Response {
+    auto_scan_watched_dirs(&state).await;
+
+    let watched_dirs_list: Vec<String> = {
+        let wd = state.watched_dirs.lock().await;
+        wd.dirs.iter().map(|p| p.display().to_string()).collect()
+    };
+
     // Collect distinct project roots for the root selector dropdown.
     let roots: Vec<String> = {
         let reg = state.registry.lock().await;
@@ -4887,6 +5165,25 @@ async fn trend_report_handler(
     let roots_json = serde_json::to_string(&roots).unwrap_or_else(|_| "[]".to_string());
     let nonce = &csp_nonce;
     let version = env!("CARGO_PKG_VERSION");
+
+    // Build the watched-dirs bar HTML (outside the format! so braces don't need escaping).
+    let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
+        r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
+            .to_string()
+    } else {
+        watched_dirs_list
+            .iter()
+            .map(|d| {
+                let escaped = d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+                format!(
+                    r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
+                )
+            })
+            .collect()
+    };
+    let watched_dirs_html = format!(
+        r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="btn">&#8635; Refresh</button></form></div><div class="toolbar-divider"></div><div class="toolbar-right"><button type="button" class="export-btn" id="export-xlsx-btn" title="Download scan history as Excel workbook (.xlsx)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel</button><button type="button" class="export-btn" id="export-png-btn" title="Save chart as PNG image"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Export PNG</button></div></div>"#
+    );
 
     let html = format!(
         r##"<!doctype html>
@@ -4971,6 +5268,19 @@ async fn trend_report_handler(
     .data-table tbody tr:hover td{{background:var(--surface-2);cursor:pointer;}}
     .num{{text-align:right;font-variant-numeric:tabular-nums;}}
     .tag-chip{{display:inline-flex;padding:2px 8px;border-radius:999px;background:var(--info-bg);color:var(--info-text);font-size:11px;font-weight:700;margin-right:4px;}}
+    .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;flex-wrap:wrap;margin-bottom:16px;position:relative;z-index:1;}}
+    .toolbar-divider{{width:1px;background:var(--line);align-self:stretch;flex-shrink:0;margin:0 6px;}}
+    .toolbar-right{{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;}}
+    .watched-bar-left{{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;}}
+    .watched-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
+    .watched-chips{{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;align-items:center;}}
+    .watched-chip{{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 8px;font-size:11px;max-width:300px;}}
+    .watched-chip-path{{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
+    .watched-chip-rm{{background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;padding:0 2px;flex-shrink:0;}}
+    .watched-chip-rm:hover{{color:var(--oxide);}}
+    .watched-none{{font-size:11px;color:var(--muted);font-style:italic;}}
+    .watched-bar-right{{display:flex;gap:6px;align-items:center;flex-shrink:0;}}
+    body.dark-theme .watched-chip{{background:rgba(255,255,255,0.05);}}
     .mono{{font-family:ui-monospace,monospace;font-size:11px;}}
     a.run-link{{color:var(--accent-2);font-weight:700;text-decoration:none;}}
     a.run-link:hover{{text-decoration:underline;}}
@@ -5025,6 +5335,7 @@ async fn trend_report_handler(
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -5049,6 +5360,7 @@ async fn trend_report_handler(
   </div>
 
   <div class="page">
+    {watched_dirs_html}
     <div class="summary-strip" id="trend-stats"></div>
     <div class="panel">
       <div class="trend-header">
@@ -5059,16 +5371,6 @@ async fn trend_report_handler(
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
             Click a dot or row to view its full report &nbsp;·&nbsp; <span class="dot" style="background:#C45C10;"></span>&thinsp;regular scan &nbsp;<span class="dot" style="background:#4472C4;"></span>&thinsp;tagged / release scan
           </span>
-        </div>
-        <div class="chart-actions">
-          <button type="button" class="export-btn" id="export-xlsx-btn" title="Download scan history as Excel workbook (.xlsx)">
-            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export Excel
-          </button>
-          <button type="button" class="export-btn" id="export-png-btn" title="Save chart as PNG image">
-            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-            Export PNG
-          </button>
         </div>
       </div>
 
@@ -5153,6 +5455,31 @@ async fn trend_report_handler(
             container.appendChild(el);
           }})(i);
         }}
+      }})();
+
+      // Watched folder picker
+      (function() {{
+        var btn = document.getElementById('add-watched-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function() {{
+          fetch('/pick-directory?kind=reports')
+            .then(function(r) {{ return r.json(); }})
+            .then(function(data) {{
+              if (!data.cancelled && data.selected_path) {{
+                var form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/watched-dirs/add';
+                var ri = document.createElement('input');
+                ri.type = 'hidden'; ri.name = 'redirect_to'; ri.value = window.location.pathname;
+                var fi = document.createElement('input');
+                fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
+                form.appendChild(ri); form.appendChild(fi);
+                document.body.appendChild(form);
+                form.submit();
+              }}
+            }})
+            .catch(function(e) {{ alert('Could not open folder picker: ' + e); }});
+        }});
       }})();
 
       // Settings / color-scheme modal
@@ -5766,7 +6093,7 @@ async fn trend_report_handler(
     }})();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{version} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{version} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -5777,8 +6104,710 @@ async fn trend_report_handler(
         nonce = nonce,
         roots_json = roots_json,
         version = version,
+        watched_dirs_html = watched_dirs_html,
     );
 
+    Html(html).into_response()
+}
+
+// GET /test-metrics
+async fn test_metrics_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+) -> Response {
+    let latest_run: Option<AnalysisRun> = {
+        let reg = state.registry.lock().await;
+        let json_str: Option<String> = reg
+            .entries
+            .first()
+            .and_then(|e| e.json_path.as_ref())
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        drop(reg);
+        json_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+    };
+
+    // Build per-language chart JSON, sorted by test_count desc.
+    let lang_tests_json: String = match &latest_run {
+        Some(r) => {
+            let mut langs: Vec<&sloc_core::LanguageSummary> = r
+                .totals_by_language
+                .iter()
+                .filter(|l| l.test_count > 0)
+                .collect();
+            langs.sort_by_key(|l| std::cmp::Reverse(l.test_count));
+            let parts: Vec<String> = langs
+                .iter()
+                .map(|l| {
+                    let name = l.language.display_name().replace('"', "\\\"");
+                    let density = if l.code_lines > 0 {
+                        l.test_count as f64 / l.code_lines as f64 * 1000.0
+                    } else {
+                        0.0
+                    };
+                    format!(
+                        r#"{{"lang":"{name}","tests":{t},"assertions":{a},"suites":{s},"code":{c},"density":{d:.2},"files":{f}}}"#,
+                        name = name,
+                        t = l.test_count,
+                        a = l.test_assertion_count,
+                        s = l.test_suite_count,
+                        c = l.code_lines,
+                        d = density,
+                        f = l.files,
+                    )
+                })
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        None => "[]".to_string(),
+    };
+
+    // Build coverage chart JSON (per-language avg line coverage %).
+    let cov_json: String = match &latest_run {
+        Some(r) if r.per_file_records.iter().any(|f| f.coverage.is_some()) => {
+            use std::collections::HashMap;
+            let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+            for rec in &r.per_file_records {
+                if let (Some(lang), Some(cov)) = (rec.language, &rec.coverage) {
+                    let e = totals.entry(lang.display_name().to_string()).or_default();
+                    e.0 += u64::from(cov.lines_found);
+                    e.1 += u64::from(cov.lines_hit);
+                }
+            }
+            let mut pairs: Vec<(String, f64)> = totals
+                .into_iter()
+                .filter(|(_, (found, _))| *found > 0)
+                .map(|(lang, (found, hit))| (lang, hit as f64 / found as f64 * 100.0))
+                .collect();
+            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let parts: Vec<String> = pairs
+                .iter()
+                .map(|(lang, pct)| {
+                    let name = lang.replace('"', "\\\"");
+                    format!(r#"{{"lang":"{name}","pct":{pct:.1}}}"#)
+                })
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        _ => "[]".to_string(),
+    };
+
+    let total_tests: u64 = latest_run
+        .as_ref()
+        .map(|r| r.summary_totals.test_count)
+        .unwrap_or(0);
+    let total_assertions: u64 = latest_run
+        .as_ref()
+        .map(|r| r.summary_totals.test_assertion_count)
+        .unwrap_or(0);
+    let total_suites: u64 = latest_run
+        .as_ref()
+        .map(|r| r.summary_totals.test_suite_count)
+        .unwrap_or(0);
+    let total_code: u64 = latest_run
+        .as_ref()
+        .map(|r| r.summary_totals.code_lines)
+        .unwrap_or(0);
+    let workspace_density: f64 = if total_code > 0 {
+        total_tests as f64 / total_code as f64 * 1000.0
+    } else {
+        0.0
+    };
+    let langs_with_tests: usize = latest_run
+        .as_ref()
+        .map(|r| {
+            r.totals_by_language
+                .iter()
+                .filter(|l| l.test_count > 0)
+                .count()
+        })
+        .unwrap_or(0);
+    let most_tested: String = latest_run
+        .as_ref()
+        .and_then(|r| {
+            r.totals_by_language
+                .iter()
+                .filter(|l| l.test_count > 0)
+                .max_by_key(|l| l.test_count)
+        })
+        .map(|l| l.language.display_name().to_string())
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    let test_files_count: u64 = latest_run
+        .as_ref()
+        .map(|r| {
+            r.per_file_records
+                .iter()
+                .filter(|f| f.raw_line_categories.test_count > 0)
+                .count() as u64
+        })
+        .unwrap_or(0);
+    let total_files_analyzed: u64 = latest_run
+        .as_ref()
+        .map(|r| r.summary_totals.files_analyzed)
+        .unwrap_or(0);
+    let _has_data = total_tests > 0;
+    let has_coverage = !cov_json.starts_with("[]") && cov_json.len() > 2;
+
+    // Aggregated coverage percentages from summary_totals
+    let cov_line_pct_str: String = latest_run
+        .as_ref()
+        .filter(|r| r.summary_totals.coverage_lines_found > 0)
+        .map(|r| {
+            format!(
+                "{:.1}",
+                r.summary_totals.coverage_lines_hit as f64
+                    / r.summary_totals.coverage_lines_found as f64
+                    * 100.0
+            )
+        })
+        .unwrap_or_default();
+    let cov_fn_pct_str: String = latest_run
+        .as_ref()
+        .filter(|r| r.summary_totals.coverage_functions_found > 0)
+        .map(|r| {
+            format!(
+                "{:.1}",
+                r.summary_totals.coverage_functions_hit as f64
+                    / r.summary_totals.coverage_functions_found as f64
+                    * 100.0
+            )
+        })
+        .unwrap_or_default();
+    let cov_branch_pct_str: String = latest_run
+        .as_ref()
+        .filter(|r| r.summary_totals.coverage_branches_found > 0)
+        .map(|r| {
+            format!(
+                "{:.1}",
+                r.summary_totals.coverage_branches_hit as f64
+                    / r.summary_totals.coverage_branches_found as f64
+                    * 100.0
+            )
+        })
+        .unwrap_or_default();
+
+    let cov_no_data_notice = if has_coverage {
+        String::new()
+    } else {
+        String::from(
+            r#"<div class="empty-state" style="margin-bottom:18px;">No LCOV coverage data found for the latest scan. Re-run with <code>--lcov-path coverage.info</code> to enable line, function, and branch coverage metrics.</div>"#,
+        )
+    };
+
+    let workspace_density_str = format!("{workspace_density:.1}");
+    let nonce = &csp_nonce;
+    let version = env!("CARGO_PKG_VERSION");
+
+    let html = format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OxideSLOC | Test Metrics</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{nonce}">
+    :root {{
+      --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.82); --surface-2:#fbf7f2;
+      --line:#e6d0bf; --line-strong:#d8bfad; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#2563eb;
+      --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
+      --info-bg:#eef3ff; --info-text:#4467d8;
+    }}
+    body.dark-theme {{ --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }}
+    *{{box-sizing:border-box;}} html,body{{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}}
+    .background-watermarks{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}
+    .background-watermarks img{{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}}
+    .code-particles{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}.code-particle{{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}}
+    @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
+    .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
+    .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
+    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
+    .brand-copy{{display:flex;flex-direction:column;justify-content:center;min-width:0;}}
+    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}}
+    .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;}}
+    @media (max-width:1400px) {{ .nav-right {{ gap:6px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 10px; }} }}
+    @media (max-width:1150px) {{ .nav-right {{ gap:4px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 8px;font-size:11px;min-height:34px; }} .brand-subtitle {{ display:none; }} .server-online-pill {{ width:34px;padding:0;justify-content:center;font-size:0;gap:0;min-height:34px; }} }}
+    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
+    .nav-pill:hover{{background:rgba(255,255,255,0.18);transform:translateY(-1px);}}
+    .theme-toggle{{width:38px;justify-content:center;padding:0;cursor:pointer;}} .theme-toggle:hover{{transform:translateY(-1px);background:rgba(255,255,255,0.16);}}
+    .theme-toggle svg{{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}}
+    .theme-toggle .icon-sun{{display:none;}} body.dark-theme .theme-toggle .icon-sun{{display:block;}} body.dark-theme .theme-toggle .icon-moon{{display:none;}}
+    .status-dot{{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}}
+    .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{{display:block;}}
+    .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
+    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
+    .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
+    .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
+    .settings-close{{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}}
+    .settings-close:hover{{color:var(--text);background:var(--surface-2);}} .settings-close svg{{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}}
+    .settings-modal-body{{padding:14px 16px 16px;}} .settings-modal-label{{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}}
+    .scheme-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}}
+    .scheme-swatch{{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}}
+    .scheme-swatch:hover{{border-color:var(--line-strong);transform:translateY(-1px);}} .scheme-swatch.active{{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}}
+    .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}} .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
+    .page{{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}}
+    .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
+    h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
+    .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
+    .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
+    @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
+    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}}
+    .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}}
+    .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
+    .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
+    .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;}}
+    .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
+    .stat-chip:hover .stat-chip-tip{{opacity:1;}}
+    .section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
+    .section-header:first-child{{margin-top:0;padding-top:0;border-top:none;}}
+    .chart-row{{display:grid;gap:18px;grid-template-columns:1fr 1fr;margin-bottom:18px;}}
+    @media(max-width:900px){{.chart-row{{grid-template-columns:1fr;}}}}
+    .chart-box{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;}}
+    .chart-box-title{{font-size:12px;font-weight:800;color:var(--muted-2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;}}
+    .chart-canvas-wrap{{position:relative;height:280px;}}
+    .data-table{{width:100%;border-collapse:collapse;font-size:13px;}}
+    .data-table th{{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;}}
+    .data-table td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}}
+    .data-table tr:last-child td{{border-bottom:none;}}
+    .data-table tbody tr:hover td{{background:var(--surface-2);}}
+    .num{{text-align:right!important;font-variant-numeric:tabular-nums;}}
+    .density-bar-wrap{{display:flex;align-items:center;gap:8px;}}
+    .density-bar{{height:6px;border-radius:3px;background:var(--oxide);opacity:0.75;min-width:2px;flex-shrink:0;}}
+    .controls-row{{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px;}}
+    .chart-select{{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:5px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}}
+    .chart-select:focus{{border-color:var(--accent);}}
+    .empty-state{{padding:32px;text-align:center;color:var(--muted);font-size:14px;border:1px dashed var(--line-strong);border-radius:12px;}}
+    .trend-canvas-wrap{{position:relative;height:260px;}}
+    .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
+    .site-footer a{{color:var(--muted);}}
+    body.dark-theme .chart-box{{border-color:var(--line-strong);}}
+  </style>
+</head>
+<body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  <div class="top-nav">
+    <div class="top-nav-inner">
+      <a class="brand" href="/">
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Test metrics</div></div>
+      </a>
+      <div class="nav-right">
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
+          </div>
+        </div>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics" style="background:rgba(255,255,255,0.22);">Test Metrics</a>
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
+            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+          </div>
+        </div>
+        <div class="server-status-wrap">
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
+          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-total">{total_tests}</div><div class="stat-chip-label">Test Functions</div><div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val">{total_assertions}</div><div class="stat-chip-label">Assertions</div><div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val">{total_suites}</div><div class="stat-chip-label">Test Suites</div><div class="stat-chip-tip">Test suite / fixture / group declarations (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], etc.)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val">{test_files_count} / {total_files_analyzed}</div><div class="stat-chip-label">Test Files</div><div class="stat-chip-tip">Files containing at least one test definition out of total analyzed files</div></div>
+    </div>
+    <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-density">{workspace_density_str}</div><div class="stat-chip-label">Tests per 1K SLOC</div><div class="stat-chip-tip">Workspace-wide test density: test functions ÷ code lines × 1000</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-most">{most_tested}</div><div class="stat-chip-label">Most Tested Language</div><div class="stat-chip-tip">Language with the highest absolute test function count</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-langs">{langs_with_tests}</div><div class="stat-chip-label">Languages with Tests</div><div class="stat-chip-tip">Number of distinct languages where test definitions were detected</div></div>
+      <div class="stat-chip"><div class="stat-chip-val">{cov_line_pct_str}%</div><div class="stat-chip-label">Line Coverage</div><div class="stat-chip-tip">Overall line coverage across all LCOV-instrumented files (empty if no LCOV data)</div></div>
+    </div>
+
+    <div class="panel">
+      <h1>Test Metrics</h1>
+      <p class="muted">Lexical test definition counts across your codebase — how many test functions, test cases, and test decorators were detected per language, and how dense the test coverage is relative to production code.</p>
+
+      <div class="chart-row">
+        <div class="chart-box">
+          <div class="chart-box-title">Test Definitions by Language</div>
+          <div class="chart-canvas-wrap"><canvas id="canvas-tests"></canvas></div>
+        </div>
+        <div class="chart-box">
+          <div class="chart-box-title">Test Density (per 1 000 code lines)</div>
+          <div class="chart-canvas-wrap"><canvas id="canvas-density"></canvas></div>
+        </div>
+      </div>
+
+      <div class="section-header">Language Breakdown</div>
+      {cov_no_data_notice}
+      <div style="overflow-x:auto;">
+        <table class="data-table" id="lang-table">
+          <thead><tr>
+            <th>Language</th>
+            <th class="num">Test Fns</th>
+            <th class="num">Assertions</th>
+            <th class="num">Suites</th>
+            <th class="num">Code Lines</th>
+            <th class="num">Files</th>
+            <th class="num">Density / 1K</th>
+            <th>Relative Density</th>
+          </tr></thead>
+          <tbody id="lang-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" id="cov-panel" style="display:none;">
+      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">LCOV Coverage Summary</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:18px;" id="cov-gauges">
+        <div style="flex:1;min-width:160px;">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Line Coverage</div>
+          <div id="cov-line-val" style="font-size:28px;font-weight:900;">{cov_line_pct_str}%</div>
+          <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div id="cov-line-bar" style="height:100%;width:{cov_line_pct_str}%;border-radius:4px;background:#2a6846;transition:width .4s ease;"></div></div>
+        </div>
+        <div style="flex:1;min-width:160px;">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Function Coverage</div>
+          <div style="font-size:28px;font-weight:900;">{cov_fn_pct_str}%</div>
+          <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{cov_fn_pct_str}%;border-radius:4px;background:#1a6b96;transition:width .4s ease;"></div></div>
+        </div>
+        <div style="flex:1;min-width:160px;">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Branch Coverage</div>
+          <div style="font-size:28px;font-weight:900;">{cov_branch_pct_str}%</div>
+          <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{cov_branch_pct_str}%;border-radius:4px;background:#7a4fa0;transition:width .4s ease;"></div></div>
+        </div>
+      </div>
+      <div class="chart-row">
+        <div class="chart-box" style="grid-column:1/-1;">
+          <div class="chart-box-title">Line Coverage % by Language</div>
+          <div class="chart-canvas-wrap"><canvas id="canvas-cov"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">Test Count Trend</div>
+      <p class="muted" style="margin-bottom:14px;">Test definition count across all saved scans — select a project root to filter.</p>
+      <div class="controls-row">
+        <label style="font-size:13px;font-weight:700;color:var(--muted);">Project Root:
+          <select class="chart-select" id="trend-root-sel"><option value="">All projects</option></select>
+        </label>
+      </div>
+      <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
+      <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    oxide-sloc v{version} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
+
+  <script nonce="{nonce}">
+  (function() {{
+    // Theme
+    var b = document.body;
+    try {{ var s = localStorage.getItem('oxide-theme'); if (s === 'dark') b.classList.add('dark-theme'); }} catch(e) {{}}
+    var tgl = document.getElementById('theme-toggle');
+    if (tgl) tgl.addEventListener('click', function() {{
+      var d = b.classList.toggle('dark-theme');
+      try {{ localStorage.setItem('oxide-theme', d ? 'dark' : 'light'); }} catch(e) {{}}
+    }});
+
+    // Watermarks
+    (function() {{
+      var wms = Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+      if (!wms.length) return;
+      var placed = [];
+      function tooClose(t,l){{for(var i=0;i<placed.length;i++){{if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}}return false;}}
+      function pick(lb){{for(var a=0;a<50;a++){{var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){{placed.push([t,l]);return[t,l];}}}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}}
+      var half=Math.floor(wms.length/2);
+      wms.forEach(function(img,i){{var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.width=sz+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;}});
+    }})();
+
+    // Code particles
+    (function() {{
+      var container = document.getElementById('code-particles');
+      if (!container) return;
+      var snippets = ['#[test]','def test_','@Test','it(\'should','func Test','describe(','TEST(','test_that(','expect(','assert_eq!','@Fact','it \"passes\"','test {{','Describe'];
+      for (var i = 0; i < 36; i++) {{
+        (function(idx) {{
+          var el = document.createElement('span');
+          el.className = 'code-particle';
+          el.textContent = snippets[idx % snippets.length];
+          var left = Math.random() * 94 + 2, top = Math.random() * 88 + 6;
+          var dur = (Math.random() * 10 + 9).toFixed(1), delay = (Math.random() * 18).toFixed(1);
+          var rot = (Math.random() * 26 - 13).toFixed(1), op = (Math.random() * 0.09 + 0.06).toFixed(3);
+          el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';
+          container.appendChild(el);
+        }})(i);
+      }}
+    }})();
+
+    // Settings modal
+    (function() {{
+      var S=[{{n:'Classic',a:'#b85d33',b:'#7a371b'}},{{n:'Navy',a:'#283790',b:'#1e1e24'}},{{n:'Ember',a:'#ce5d3d',b:'#1e1e24'}},{{n:'Ocean',a:'#1f439b',b:'#1e1e24'}},{{n:'Royal',a:'#003184',b:'#1e1e24'}}];
+      function ap(s){{document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{{localStorage.setItem('sloc-ns',JSON.stringify(s));}}catch(e){{}}document.querySelectorAll('.scheme-swatch').forEach(function(x){{x.classList.toggle('active',x.dataset.n===s.n);}});}}
+      try{{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){{ap(sv);}}else{{ap(S[0]);}}}}catch(e){{ap(S[0]);}}
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){{var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}}catch(e){{}}el.addEventListener('click',function(){{ap(s);}});g.appendChild(el);}});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){{e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');}});
+      if(cl)cl.addEventListener('click',function(){{m.classList.remove('open');}});
+      document.addEventListener('click',function(e){{if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');}});
+    }})();
+  }})();
+  </script>
+
+  <script src="/static/chart.js" nonce="{nonce}"></script>
+  <script nonce="{nonce}">
+  (function() {{
+    var D = {lang_tests_json};
+    var COV_D = {cov_json};
+    var HAS_COV = {has_coverage};
+
+    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
+    function fmtFull(n){{return Number(n).toLocaleString();}}
+    function isDark(){{return document.body.classList.contains('dark-theme');}}
+    function clr(){{return isDark()?'rgba(245,236,230,0.12)':'rgba(67,52,45,0.10)';}}
+    function txtClr(){{return isDark()?'#c7b7aa':'#7b675b';}}
+    var PALETTE=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082','#D0743C','#5BA8A0'];
+    var ALL_CHARTS = [];
+
+    var chartDefaults = {{
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {{
+        legend: {{ display: false }},
+        tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x !== undefined ? ctx.parsed.x : ctx.parsed.y); }} }} }}
+      }},
+      scales: {{
+        x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font: {{ size:11 }} }} }},
+        y: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font: {{ size:11 }}, callback: function(v){{ return fmt(v); }} }} }}
+      }}
+    }};
+
+    // Chart 1: Test definitions by language (horizontal bar)
+    (function() {{
+      if (!D || !D.length) return;
+      var top = D.slice(0, 15);
+      var canvas = document.getElementById('canvas-tests');
+      if (!canvas) return;
+      var chart = new Chart(canvas, {{
+        type: 'bar',
+        data: {{
+          labels: top.map(function(d){{ return d.lang; }}),
+          datasets: [{{ label: 'Test Definitions', data: top.map(function(d){{ return d.tests; }}), backgroundColor: top.map(function(_,i){{ return PALETTE[i % PALETTE.length]; }}), borderRadius: 4 }}]
+        }},
+        options: Object.assign({{}}, chartDefaults, {{
+          indexAxis: 'y',
+          scales: {{
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+            y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+          }}
+        }})
+      }});
+      ALL_CHARTS.push(chart);
+    }})();
+
+    // Chart 2: Test density by language (horizontal bar)
+    (function() {{
+      if (!D || !D.length) return;
+      var top = D.slice(0, 15).slice().sort(function(a,b){{ return b.density - a.density; }});
+      var canvas = document.getElementById('canvas-density');
+      if (!canvas) return;
+      var chart = new Chart(canvas, {{
+        type: 'bar',
+        data: {{
+          labels: top.map(function(d){{ return d.lang; }}),
+          datasets: [{{ label: 'Tests / 1K Code Lines', data: top.map(function(d){{ return d.density; }}), backgroundColor: top.map(function(_,i){{ return PALETTE[(i+4) % PALETTE.length]; }}), borderRadius: 4 }}]
+        }},
+        options: Object.assign({{}}, chartDefaults, {{
+          indexAxis: 'y',
+          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
+          scales: {{
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v.toFixed(1); }} }} }},
+            y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+          }}
+        }})
+      }});
+      ALL_CHARTS.push(chart);
+    }})();
+
+    // Chart 3: LCOV coverage (if present)
+    if (HAS_COV && COV_D && COV_D.length) {{
+      var covPanel = document.getElementById('cov-panel');
+      if (covPanel) covPanel.style.display = '';
+      var covCanvas = document.getElementById('canvas-cov');
+      if (covCanvas) {{
+        var covChart = new Chart(covCanvas, {{
+          type: 'bar',
+          data: {{
+            labels: COV_D.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Line Coverage %', data: COV_D.map(function(d){{ return d.pct; }}), backgroundColor: COV_D.map(function(d,i){{ return d.pct >= 80 ? '#2A6846' : d.pct >= 50 ? '#D4A017' : '#B23030'; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis: 'y',
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + ctx.parsed.x.toFixed(1) + '%'; }} }} }} }},
+            scales: {{
+              x: {{ min: 0, max: 100, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v + '%'; }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+            }}
+          }}
+        }});
+        ALL_CHARTS.push(covChart);
+      }}
+    }}
+
+    // Language breakdown table
+    (function() {{
+      var tbody = document.getElementById('lang-tbody');
+      if (!tbody || !D || !D.length) {{
+        if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No test definitions detected. Run a scan on a project with test files.</td></tr>';
+        return;
+      }}
+      var maxDensity = Math.max.apply(null, D.map(function(d){{ return d.density; }})) || 1;
+      tbody.innerHTML = D.map(function(d) {{
+        var barW = Math.round(d.density / maxDensity * 120);
+        return '<tr>' +
+          '<td><strong>' + d.lang + '</strong></td>' +
+          '<td class="num">' + fmt(d.tests) + '</td>' +
+          '<td class="num">' + fmt(d.assertions || 0) + '</td>' +
+          '<td class="num">' + fmt(d.suites || 0) + '</td>' +
+          '<td class="num">' + fmt(d.code) + '</td>' +
+          '<td class="num">' + fmt(d.files) + '</td>' +
+          '<td class="num">' + d.density.toFixed(2) + '</td>' +
+          '<td><div class="density-bar-wrap"><div class="density-bar" style="width:' + barW + 'px;"></div></div></td>' +
+          '</tr>';
+      }}).join('');
+    }})();
+
+    // Trend chart — fetch history API
+    (function() {{
+      var trendCanvas = document.getElementById('canvas-trend');
+      var trendEmpty = document.getElementById('trend-empty');
+      var rootSel = document.getElementById('trend-root-sel');
+      var trendChart = null;
+
+      function buildTrend(data) {{
+        var pts = data.filter(function(d){{ return d.test_count > 0 || data.some(function(x){{ return x.test_count > 0; }}); }});
+        pts = pts.slice().reverse();
+        if (!pts.length) {{
+          if (trendCanvas) trendCanvas.style.display = 'none';
+          if (trendEmpty) trendEmpty.style.display = '';
+          return;
+        }}
+        if (trendCanvas) trendCanvas.style.display = '';
+        if (trendEmpty) trendEmpty.style.display = 'none';
+        if (trendChart) {{ trendChart.destroy(); trendChart = null; }}
+        trendChart = new Chart(trendCanvas, {{
+          type: 'line',
+          data: {{
+            labels: pts.map(function(d){{ return d.timestamp ? d.timestamp.slice(0,10) : d.run_id_short; }}),
+            datasets: [{{
+              label: 'Test Definitions',
+              data: pts.map(function(d){{ return d.test_count; }}),
+              borderColor: '#C45C10',
+              backgroundColor: 'rgba(196,92,16,0.10)',
+              pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : '#C45C10'; }}),
+              pointRadius: 5,
+              fill: true,
+              tension: 0.3
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
+              y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+            }}
+          }}
+        }});
+        ALL_CHARTS.push(trendChart);
+      }}
+
+      function loadTrend() {{
+        var url = '/api/metrics/history?limit=100';
+        if (rootSel && rootSel.value) url += '&root=' + encodeURIComponent(rootSel.value);
+        fetch(url).then(function(r){{ return r.json(); }}).then(function(data){{
+          // Populate root selector on first load
+          if (rootSel && rootSel.options.length <= 1) {{
+            var roots = {{}};
+            data.forEach(function(d){{ if (d.project_label) roots[d.project_label] = true; }});
+            Object.keys(roots).forEach(function(r){{ var o=document.createElement('option');o.value=r;o.textContent=r;rootSel.appendChild(o); }});
+          }}
+          buildTrend(data);
+        }}).catch(function(){{ if (trendEmpty) {{ trendEmpty.style.display=''; trendEmpty.textContent='Failed to load trend data.'; }} }});
+      }}
+
+      loadTrend();
+      if (rootSel) rootSel.addEventListener('change', loadTrend);
+    }})();
+
+    // Re-render charts on theme toggle
+    document.getElementById('theme-toggle') && document.getElementById('theme-toggle').addEventListener('click', function() {{
+      setTimeout(function() {{
+        ALL_CHARTS.forEach(function(c) {{
+          if (c && c.options && c.options.scales) {{
+            Object.values(c.options.scales).forEach(function(ax) {{
+              if (ax.grid) ax.grid.color = clr();
+              if (ax.ticks) ax.ticks.color = txtClr();
+            }});
+            c.update();
+          }}
+        }});
+      }}, 80);
+    }});
+  }})();
+  </script>
+</body>
+</html>"##,
+        nonce = nonce,
+        version = version,
+        lang_tests_json = lang_tests_json,
+        cov_json = cov_json,
+        total_tests = total_tests,
+        workspace_density_str = workspace_density_str,
+        most_tested = most_tested,
+        langs_with_tests = langs_with_tests,
+        has_coverage = has_coverage,
+    );
     Html(html).into_response()
 }
 
@@ -6283,6 +7312,14 @@ fn build_sub_run(
             variables: 0,
             imports: 0,
             test_count: 0,
+            test_assertion_count: 0,
+            test_suite_count: 0,
+            coverage_lines_found: 0,
+            coverage_lines_hit: 0,
+            coverage_functions_found: 0,
+            coverage_functions_hit: 0,
+            coverage_branches_found: 0,
+            coverage_branches_hit: 0,
         },
         totals_by_language: sub.language_summaries.clone(),
         per_file_records: sub_files,
@@ -7263,8 +8300,8 @@ struct SubmoduleRow {
     .ws-mini-box-lg { flex:2 1 0; }
     .ws-mini-box-lg .ws-mini-value { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .ws-mini-box-br { flex:1.5 1 0; }
-    .scope-legend-row { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:13px; flex-shrink:0; border-left:3px solid var(--line-strong); }
-    .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; }
+    .scope-legend-row { display:inline-flex; flex-direction:column; align-items:flex-start; gap:6px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:13px; flex-shrink:0; border-left:3px solid var(--line-strong); }
+    .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; margin-bottom:2px; }
     .path-scope-grid { display:grid; grid-template-columns: 1fr 1px auto; gap:0; align-items:stretch; }
     .path-scope-grid .input-group { width:100%; align-self:start; }
     .git-source-banner { display:flex; align-items:center; gap:10px; padding:10px 14px; background:linear-gradient(135deg,rgba(124,58,237,0.07),rgba(99,40,217,0.05)); border:1.5px solid rgba(124,58,237,0.22); border-radius:9px; margin-bottom:12px; font-size:13px; color:var(--text); flex-wrap:wrap; }
@@ -7645,7 +8682,7 @@ struct SubmoduleRow {
         <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo" />
         <div class="brand-copy">
           <div class="brand-title">OxideSLOC</div>
-          <div class="brand-subtitle">Local analysis workbench</div>
+          <div class="brand-subtitle">local code analysis - metrics, history and reports</div>
         </div>
       </a>
       <div class="nav-project-slot">
@@ -7663,6 +8700,7 @@ struct SubmoduleRow {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -7772,7 +8810,7 @@ struct SubmoduleRow {
             </span>
           </div>
           <div class="ws-divider"></div>
-          <div class="ws-stat"><span class="ws-label">Mode</span><span class="ws-value">Localhost workbench</span></div>
+          <div class="ws-stat"><span class="ws-label">Mode</span><span class="ws-value">Localhost</span></div>
           <div class="ws-divider"></div>
           <div class="ws-stat ws-stat-clamp"><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
           <div class="ws-divider"></div>
@@ -8207,7 +9245,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
                   </div>
                   <div class="output-field-aside">
                     <strong>Shown in exported artifacts</strong>
-                    This title is embedded in the HTML and PDF reports and stays visible in the workbench header while you configure the run. It defaults to the last folder name of the selected project path.
+                    This title is embedded in the HTML and PDF reports and stays visible in the tool header while you configure the run. It defaults to the last folder name of the selected project path.
                   </div>
                 </div>
               </div>
@@ -9706,7 +10744,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
   }());
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -9737,7 +10775,7 @@ struct IndexTemplate {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OxideSLOC — Source Line Analysis Workbench</title>
+  <title>OxideSLOC — local code analysis - metrics, history and reports</title>
   <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
   <style nonce="{{ csp_nonce }}">
     :root {
@@ -9758,7 +10796,7 @@ struct IndexTemplate {
     .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1400px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
@@ -9787,40 +10825,43 @@ struct IndexTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
-    .page{max-width:1720px;margin:0 auto;padding:28px 24px 16px;position:relative;z-index:1;}
-    .hero{text-align:center;margin:0 auto 32px;max-width:1100px;}
+    .page{max-width:1400px;margin:0 auto;padding:18px 24px 12px;position:relative;z-index:1;}
+    .hero{text-align:center;margin:0 auto 18px;}
     .hero-logo-wrap{display:inline-block;cursor:default;}
-    .hero-logo{width:76px;height:84px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));display:block;}
-    .hero-logo-shadow{width:60px;height:10px;background:radial-gradient(ellipse,rgba(211,122,76,0.55),transparent 70%);border-radius:50%;margin:0 auto 10px;}
+    .hero-logo{width:66px;height:73px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));display:block;}
+    .hero-logo-shadow{width:52px;height:8px;background:radial-gradient(ellipse,rgba(211,122,76,0.55),transparent 70%);border-radius:50%;margin:0 auto 6px;}
     .hero-title-wrap{position:relative;display:inline-flex;flex-direction:column;align-items:center;}
     .hero-title-aura{position:absolute;inset:-40px -80px;background:radial-gradient(ellipse at 50% 55%,rgba(211,122,76,0.20) 0%,rgba(211,122,76,0.056) 45%,transparent 72%);pointer-events:none;z-index:0;}
     body.dark-theme .hero-title-aura{background:radial-gradient(ellipse at 50% 55%,rgba(211,122,76,0.29) 0%,rgba(211,122,76,0.10) 45%,transparent 72%);}
-    .hero-title{font-size:42px;font-weight:900;letter-spacing:-0.04em;margin:0 0 8px;display:inline-block;position:relative;z-index:1;will-change:transform;transition:transform 0.08s linear;
+    .hero-title{font-size:36px;font-weight:900;letter-spacing:-0.04em;margin:0 0 6px;display:inline-block;position:relative;z-index:1;will-change:transform;transition:transform 0.08s linear;
       background:linear-gradient(90deg,#b85d33 0%,#d37a4c 25%,#6f9bff 50%,#b85d33 75%,#d37a4c 100%);
       background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
       clip-path:inset(0 100% 0 0);animation:titleReveal 0.65s cubic-bezier(.4,0,.2,1) 0.12s forwards,titleShimmer 4s linear 0.82s infinite;}
     @keyframes titleReveal{to{clip-path:inset(0 0% 0 0);}}
     @keyframes titleShimmer{0%{background-position:0% center;}100%{background-position:200% center;}}
     body.dark-theme .hero-title{background:linear-gradient(90deg,#d37a4c 0%,#f0a070 25%,#9bb8ff 50%,#d37a4c 75%,#f0a070 100%);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
-    .hero-subtitle{font-size:16px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:3em;opacity:0;}
+    .hero-subtitle{font-size:15px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:2.5em;opacity:0;}
     .hero-cursor{display:inline-block;width:2px;height:0.9em;background:var(--oxide);vertical-align:text-bottom;margin-left:1px;border-radius:1px;animation:cursorBlink 0.72s step-end infinite;}
     @keyframes cursorBlink{0%,100%{opacity:1;}50%{opacity:0;}}
-    .action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:0 auto 20px;max-width:1100px;}
-    @media(max-width:900px){.action-grid{grid-template-columns:1fr 1fr;}}
-    @media(max-width:480px){.action-grid{grid-template-columns:1fr;}}
-    .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:20px 22px 18px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
-    .action-card:nth-child(1){animation-delay:0.1s;} .action-card:nth-child(2){animation-delay:0.2s;} .action-card:nth-child(3){animation-delay:0.3s;} .action-card:nth-child(4){animation-delay:0.4s;} .action-card:nth-child(5){animation-delay:0.5s;} .action-card:nth-child(6){animation-delay:0.6s;}
+    .card-sections{display:flex;flex-direction:column;gap:12px;margin:0 0 12px;}
+    .card-section-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px;padding-left:2px;}
+    .card-section-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+    .card-section-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}
+    @media(max-width:900px){.card-section-grid-2,.card-section-grid-3{grid-template-columns:1fr 1fr;}}
+    @media(max-width:480px){.card-section-grid-2,.card-section-grid-3{grid-template-columns:1fr;}}
+    .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:14px 18px 12px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
+    .action-card:nth-child(1){animation-delay:0.1s;} .action-card:nth-child(2){animation-delay:0.2s;} .action-card:nth-child(3){animation-delay:0.3s;} .action-card:nth-child(4){animation-delay:0.4s;} .action-card:nth-child(5){animation-delay:0.5s;} .action-card:nth-child(6){animation-delay:0.6s;} .action-card:nth-child(7){animation-delay:0.7s;}
     @keyframes cardRise{from{opacity:0;}to{opacity:1;}}
     .action-card:hover{transform:translateY(-5px) scale(1.04);box-shadow:var(--shadow-strong);border-color:var(--oxide-2);}
-    .action-card-icon{width:46px;height:46px;border-radius:14px;display:flex;align-items:center;justify-content:center;margin-bottom:12px;flex:0 0 auto;transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
+    .action-card-icon{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;margin-bottom:8px;flex:0 0 auto;transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
     .action-card:hover .action-card-icon{transform:rotate(-8deg) scale(1.12);}
-    .action-card-icon svg{width:26px;height:26px;stroke:currentColor;fill:none;stroke-width:2;}
+    .action-card-icon svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;}
     .action-card.scan .action-card-icon{background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;box-shadow:0 8px 22px rgba(184,80,40,0.30);}
     .action-card.view .action-card-icon{background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;box-shadow:0 8px 22px rgba(59,130,246,0.28);}
     .action-card.compare .action-card-icon{background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;box-shadow:0 8px 22px rgba(139,92,246,0.28);}
-    .action-card-title{font-size:17px;font-weight:850;letter-spacing:-0.02em;margin:0 0 6px;}
-    .action-card-desc{font-size:13px;color:var(--muted);line-height:1.55;margin:0 0 14px;flex:1;}
-    .action-card-cta{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:800;color:var(--oxide-2);transition:gap 0.15s ease;}
+    .action-card-title{font-size:15px;font-weight:850;letter-spacing:-0.02em;margin:0 0 4px;}
+    .action-card-desc{font-size:12px;color:var(--muted);line-height:1.55;margin:0 0 10px;flex:1;text-wrap:balance;}
+    .action-card-cta{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:800;color:var(--oxide-2);transition:gap 0.15s ease;}
     body.dark-theme .action-card-cta{color:var(--oxide);}
     .action-card.view .action-card-cta{color:var(--accent-2);}
     body.dark-theme .action-card.view .action-card-cta{color:var(--accent);}
@@ -9835,26 +10876,31 @@ struct IndexTemplate {
     .action-card.automation .action-card-icon{background:linear-gradient(135deg,#d97706,#b45309);color:#fff;box-shadow:0 8px 22px rgba(217,119,6,0.28);}
     .action-card.automation .action-card-cta{color:#b45309;}
     body.dark-theme .action-card.automation .action-card-cta{color:#fbbf24;}
+    .action-card.test-metrics .action-card-icon{background:linear-gradient(135deg,#ec4899,#be185d);color:#fff;box-shadow:0 8px 22px rgba(236,72,153,0.28);}
+    .action-card.test-metrics .action-card-cta{color:#be185d;}
+    body.dark-theme .action-card.test-metrics .action-card-cta{color:#f472b6;}
     .action-card:hover .action-card-cta{gap:12px;}
-    .divider{height:1px;background:var(--line);margin:22px auto;max-width:1100px;}
-    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;max-width:1100px;margin:0 auto;}
+    .divider{height:1px;background:var(--line);margin:12px 0;}
+    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
     @media(max-width:960px){.info-strip{grid-template-columns:repeat(3,1fr);}}
     @media(max-width:600px){.info-strip{grid-template-columns:repeat(2,1fr);}}
-    .info-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 16px;text-align:center;position:relative;cursor:default;
+    .info-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:9px 12px;text-align:center;position:relative;cursor:default;
       transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;}
     .info-chip:hover{transform:translateY(-5px) scale(1.04);box-shadow:var(--shadow-strong);border-color:var(--oxide-2);}
-    .info-chip-val{font-size:18px;font-weight:900;color:var(--oxide);}
+    .info-chip-val{font-size:15px;font-weight:900;color:var(--oxide);}
     body.dark-theme .info-chip-val{color:var(--oxide);}
-    .info-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
+    .info-chip-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:2px;}
     .info-chip-tip{display:none;position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);z-index:50;
       background:var(--text);color:var(--bg);border-radius:9px;padding:8px 13px;font-size:12px;font-weight:600;line-height:1.4;
       white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.22);pointer-events:none;}
     .info-chip-tip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);
       border:6px solid transparent;border-top-color:var(--text);}
     .info-chip:hover .info-chip-tip{display:block;}
+    .chip-slide{transition:filter 0.35s ease,opacity 0.35s ease;}
+    .chip-slide.fading{filter:blur(5px);opacity:0;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
-    .lan-card{border-radius:var(--radius);border:1.5px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);padding:24px 28px;margin:0 auto 32px;max-width:1100px;animation:cardRise 0.7s ease both;}
+    .lan-card{border-radius:var(--radius);border:1.5px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);padding:18px 22px;margin:0 0 20px;animation:cardRise 0.7s ease both;}
     .lan-card.server{border-color:#3b82f6;background:linear-gradient(135deg,rgba(59,130,246,0.06),var(--surface));}
     body.dark-theme .lan-card.server{background:linear-gradient(135deg,rgba(59,130,246,0.10),var(--surface));}
     .lan-card-header{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:800;margin-bottom:16px;letter-spacing:-0.01em;}
@@ -9891,7 +10937,7 @@ struct IndexTemplate {
     <div class="top-nav-inner">
       <a class="brand" href="/">
         <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
-        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Source line analysis workbench</div></div>
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">local code analysis - metrics, history and reports</div></div>
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
@@ -9902,6 +10948,7 @@ struct IndexTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -9940,63 +10987,85 @@ struct IndexTemplate {
         <div class="hero-title-aura" aria-hidden="true"></div>
         <h1 class="hero-title" id="hero-title">OxideSLOC</h1>
       </div>
-      <p class="hero-subtitle" id="hero-subtitle">A fast, self-contained source line analysis workbench. Count code, track trends, compare snapshots, and automate scans via webhook — no setup required.</p>
+      <p class="hero-subtitle" id="hero-subtitle">A fast, self-contained local code analysis tool. Count SLOC, measure test coverage, track trends, compare snapshots, and automate scans via webhook — no setup required.</p>
     </div>
 
-    <div class="action-grid">
-      <a class="action-card scan" href="/scan-setup">
-        <div class="action-card-icon">
-          <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-        </div>
-        <div class="action-card-title">Scan Project</div>
-        <p class="action-card-desc">Start a new scan, reload saved settings from a config file, or quickly re-run a recent project with one click.</p>
-        <span class="action-card-cta">Start scanning <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
-      </a>
+    <div class="card-sections">
 
-      <a class="action-card view" href="/view-reports">
-        <div class="action-card-icon">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+      <div>
+        <div class="card-section-label">Analysis</div>
+        <div class="card-section-grid-2">
+          <a class="action-card scan" href="/scan-setup">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            </div>
+            <div class="action-card-title">Scan Project</div>
+            <p class="action-card-desc">Start a new scan, reload saved settings from a config file, or quickly re-run a recent project with one click. All scan history stays accessible for instant revisiting.</p>
+            <span class="action-card-cta">Start scanning <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
+          <a class="action-card test-metrics" href="/test-metrics">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+            </div>
+            <div class="action-card-title">Test Metrics</div>
+            <p class="action-card-desc">Detect test files and functions across your codebase, measure test-to-code ratios, and view unit test coverage data alongside your SLOC metrics.</p>
+            <span class="action-card-cta">View test metrics <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
         </div>
-        <div class="action-card-title">View Reports</div>
-        <p class="action-card-desc">Browse previously recorded scans, open HTML reports, and review historical metrics — code, comments, blank lines, and git branch info.</p>
-        <span class="action-card-cta">Open reports <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
-      </a>
+      </div>
 
-      <a class="action-card compare" href="/compare-scans">
-        <div class="action-card-icon">
-          <svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+      <div>
+        <div class="card-section-label">Reports &amp; Insights</div>
+        <div class="card-section-grid-3">
+          <a class="action-card view" href="/view-reports">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            </div>
+            <div class="action-card-title">View Reports</div>
+            <p class="action-card-desc">Browse recorded scans, open HTML reports, and review historical metrics — code, comments, blank lines, and git branch info.</p>
+            <span class="action-card-cta">Open reports <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
+          <a class="action-card compare" href="/compare-scans">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+            </div>
+            <div class="action-card-title">Compare Scans</div>
+            <p class="action-card-desc">Pick any two builds for a side-by-side diff — added, removed, and changed files with exact line-count deltas.</p>
+            <span class="action-card-cta">Compare builds <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
+          <a class="action-card trend" href="/trend-reports">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            </div>
+            <div class="action-card-title">Trend Report</div>
+            <p class="action-card-desc">Visualize how SLOC, comments, and blank lines evolve over time. Spot regressions and chart the full scan history.</p>
+            <span class="action-card-cta">View trends <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
         </div>
-        <div class="action-card-title">Compare Scans</div>
-        <p class="action-card-desc">Pick any two scan builds to see a side-by-side delta — added, removed, and modified files with exact line-count changes.</p>
-        <span class="action-card-cta">Compare builds <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
-      </a>
+      </div>
 
-      <a class="action-card git-tools" href="/git-browser">
-        <div class="action-card-icon">
-          <svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+      <div>
+        <div class="card-section-label">Developer Tools</div>
+        <div class="card-section-grid-2">
+          <a class="action-card git-tools" href="/git-browser">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+            </div>
+            <div class="action-card-title">Git Browser</div>
+            <p class="action-card-desc">Browse branches and commits, scan any ref on demand, and diff two refs side-by-side — all from within the browser, without any local setup.</p>
+            <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
+          <a class="action-card automation" href="/integrations">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            </div>
+            <div class="action-card-title">Integrations</div>
+            <p class="action-card-desc">Connect GitHub, GitLab, or Bitbucket webhooks to trigger scans on every push, or publish results directly to Atlassian Confluence.</p>
+            <span class="action-card-cta">Set up integrations <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+          </a>
         </div>
-        <div class="action-card-title">Git Browser</div>
-        <p class="action-card-desc">Browse repository branches and commits, scan any ref on demand, and diff two refs side-by-side — all without leaving the browser.</p>
-        <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
-      </a>
+      </div>
 
-      <a class="action-card trend" href="/trend-reports">
-        <div class="action-card-icon">
-          <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
-        </div>
-        <div class="action-card-title">Trend Report</div>
-        <p class="action-card-desc">Visualize how code, comment, and blank-line counts evolve over time. Spot regressions, track growth, and chart the full history across all recorded scans.</p>
-        <span class="action-card-cta">View trends <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
-      </a>
-
-      <a class="action-card automation" href="/integrations">
-        <div class="action-card-icon">
-          <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-        </div>
-        <div class="action-card-title">Integrations</div>
-        <p class="action-card-desc">Connect GitHub, GitLab, or Bitbucket webhooks to trigger scans automatically, or publish results directly to Atlassian Confluence.</p>
-        <span class="action-card-cta">Set up integrations <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
-      </a>
     </div>
 
     {% if server_mode %}
@@ -10026,28 +11095,38 @@ struct IndexTemplate {
     <div class="info-strip">
       <div class="info-chip">
         <div class="info-chip-tip">C · C++ · Rust · Go · Python · Java · Kotlin · Swift<br>TypeScript · Zig · Haskell · Elixir · and 29 more</div>
-        <div class="info-chip-val">41</div>
-        <div class="info-chip-label">Languages</div>
+        <div class="chip-slide">
+          <div class="info-chip-val">41</div>
+          <div class="info-chip-label">Languages</div>
+        </div>
       </div>
       <div class="info-chip">
         <div class="info-chip-tip">Single binary — no runtime, no daemon,<br>no install beyond the executable</div>
-        <div class="info-chip-val">100%</div>
-        <div class="info-chip-label">Self-contained</div>
+        <div class="chip-slide">
+          <div class="info-chip-val">100%</div>
+          <div class="info-chip-label">Self-contained</div>
+        </div>
       </div>
       <div class="info-chip">
         <div class="info-chip-tip">Self-contained HTML reports with light/dark theme<br>— shareable without a server. PDF via headless Chromium (CLI).</div>
-        <div class="info-chip-val">HTML+PDF</div>
-        <div class="info-chip-label">Exportable reports</div>
+        <div class="chip-slide">
+          <div class="info-chip-val">HTML+PDF</div>
+          <div class="info-chip-label">Exportable reports</div>
+        </div>
       </div>
       <div class="info-chip">
         <div class="info-chip-tip">GitHub, GitLab, and Bitbucket push events<br>trigger scans automatically via webhook</div>
-        <div class="info-chip-val">Webhook</div>
-        <div class="info-chip-label">3 platforms</div>
+        <div class="chip-slide">
+          <div class="info-chip-val">Webhook</div>
+          <div class="info-chip-label">3 platforms</div>
+        </div>
       </div>
       <div class="info-chip">
         <div class="info-chip-tip">Physical SLOC counted per<br>IEEE Std 1045-1992 Software Productivity Metrics</div>
-        <div class="info-chip-val">IEEE</div>
-        <div class="info-chip-label">1045-1992</div>
+        <div class="chip-slide">
+          <div class="info-chip-val">IEEE</div>
+          <div class="info-chip-label">1045-1992</div>
+        </div>
       </div>
     </div>
 
@@ -10060,7 +11139,7 @@ struct IndexTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -10248,6 +11327,39 @@ struct IndexTemplate {
           });
         });
       })();
+      (function chipSlideshow() {
+        var slides = [
+          [{v:'41',l:'Languages'},{v:'Rust · Go · Python',l:'and 38 more'},{v:'C · Java · TypeScript',l:'Swift · Kotlin · Zig'}],
+          [{v:'100%',l:'Self-contained'},{v:'Zero',l:'Dependencies'},{v:'Single',l:'Binary'}],
+          [{v:'HTML+PDF',l:'Exportable reports'},{v:'Light+Dark',l:'Themed'},{v:'Offline',l:'No server needed'}],
+          [{v:'Webhook',l:'3 platforms'},{v:'GitHub + GitLab',l:'+ Bitbucket'},{v:'Auto-scan',l:'On every push'}],
+          [{v:'IEEE',l:'1045-1992'},{v:'Physical',l:'SLOC standard'},{v:'Blank lines',l:'Configurable'}]
+        ];
+        var chips = Array.prototype.slice.call(document.querySelectorAll('.info-chip'));
+        var indices = [0,0,0,0,0];
+        var paused = [false,false,false,false,false];
+        chips.forEach(function(chip, i) {
+          chip.addEventListener('mouseenter', function() { paused[i] = true; });
+          chip.addEventListener('mouseleave', function() { paused[i] = false; });
+        });
+        function advance(i) {
+          if (paused[i]) return;
+          var chip = chips[i];
+          var inner = chip.querySelector('.chip-slide');
+          if (!inner) return;
+          inner.classList.add('fading');
+          setTimeout(function() {
+            indices[i] = (indices[i] + 1) % slides[i].length;
+            var s = slides[i][indices[i]];
+            chip.querySelector('.info-chip-val').textContent = s.v;
+            chip.querySelector('.info-chip-label').textContent = s.l;
+            inner.classList.remove('fading');
+          }, 360);
+        }
+        chips.forEach(function(chip, i) {
+          setTimeout(function() { setInterval(function() { advance(i); }, 3000); }, i * 600);
+        });
+      })();
     })();
   </script>
   <script nonce="{{ csp_nonce }}">
@@ -10309,7 +11421,7 @@ struct SplashTemplate {
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:960px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
@@ -10339,11 +11451,11 @@ struct SplashTemplate {
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page{max-width:960px;margin:0 auto;padding:40px 24px 64px;position:relative;z-index:1;}
-    .page-header{text-align:center;margin-bottom:32px;}
+    .page-header{text-align:center;margin-bottom:16px;}
     .page-header h1{font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;}
     .page-header p{font-size:15px;color:var(--muted);line-height:1.6;white-space:nowrap;margin:0 auto;}
     /* Cards */
-    .option-grid{display:flex;flex-direction:column;gap:16px;padding-top:42px;}
+    .option-grid{display:flex;flex-direction:column;gap:16px;padding-top:16px;}
     .option-card-wrap{position:relative;}
     .option-card{background:var(--surface);border:1.5px solid var(--line-strong);border-radius:var(--radius);padding:20px 24px;box-shadow:var(--shadow);transition:border-color 0.18s ease,box-shadow 0.18s ease;position:relative;z-index:1;display:flex;align-items:center;gap:20px;}
     .option-card:hover{border-color:var(--oxide-2);box-shadow:var(--shadow-strong);}
@@ -10423,7 +11535,7 @@ struct SplashTemplate {
     <div class="top-nav-inner">
       <a class="brand" href="/">
         <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
-        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Source line analysis workbench</div></div>
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">local code analysis - metrics, history and reports</div></div>
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
@@ -10434,6 +11546,7 @@ struct SplashTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -10566,7 +11679,7 @@ struct SplashTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -10998,6 +12111,7 @@ struct ScanSetupTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans" style="text-decoration:none;">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -11027,7 +12141,7 @@ struct ScanSetupTemplate {
         <div>
           <div class="soft-chip success">Run finished successfully</div>
           <h1 class="hero-title">{{ report_title }}</h1>
-          <p class="hero-subtitle">Your HTML, PDF, and JSON artifacts are now saved. Use the quick actions below to view, download, or copy the saved paths for sharing outside the local workbench.</p>
+          <p class="hero-subtitle">Your HTML, PDF, and JSON artifacts are now saved. Use the quick actions below to view, download, or copy the saved paths for sharing outside oxide-sloc.</p>
         </div>
         <div class="hero-quick-actions">
           <button type="button" class="copy-button secondary" data-copy-value="{{ output_dir }}">Copy output folder</button>
@@ -11943,7 +13057,7 @@ struct ScanSetupTemplate {
   }());
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -12191,7 +13305,7 @@ struct ResultTemplate {
         <img src="/images/logo/logo-text.png" alt="OxideSLOC" class="brand-logo">
         <div class="brand-copy">
           <h1 class="brand-title">OxideSLOC</h1>
-          <div class="brand-subtitle">Source Line Analysis</div>
+          <div class="brand-subtitle">local code analysis - metrics, history and reports</div>
         </div>
       </a>
       <div class="nav-right">
@@ -12203,6 +13317,7 @@ struct ResultTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -12326,7 +13441,7 @@ struct ResultTemplate {
     })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -12481,7 +13596,7 @@ struct ScanWaitTemplate {
         <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo" />
         <div class="brand-copy">
           <div class="brand-title">OxideSLOC</div>
-          <div class="brand-subtitle">Local analysis workbench</div>
+          <div class="brand-subtitle">local code analysis - metrics, history and reports</div>
         </div>
       </a>
       <div class="nav-right">
@@ -12493,6 +13608,7 @@ struct ScanWaitTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -12724,10 +13840,19 @@ struct ErrorTemplate {
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
-    .vr-toolbar{display:grid;grid-template-columns:1fr auto;gap:6px 20px;margin-bottom:14px;align-items:center;}
-    .vr-filters{grid-column:1;grid-row:2;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
-    .vr-hint{grid-column:2;grid-row:1;text-align:right;margin:0;font-size:13px;color:var(--muted);white-space:nowrap;}
-    .vr-browse{grid-column:2;grid-row:2;justify-self:end;white-space:nowrap;}
+    .watched-bar{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;flex-wrap:wrap;margin-bottom:14px;position:relative;z-index:1;}
+    .toolbar-divider{width:1px;background:var(--line);align-self:stretch;flex-shrink:0;margin:0 6px;}
+    .toolbar-right{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;}
+    .watched-bar-left{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;}
+    .watched-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}
+    .watched-chips{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;align-items:center;}
+    .watched-chip{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 8px;font-size:11px;max-width:300px;}
+    .watched-chip-path{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .watched-chip-rm{background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;padding:0 2px;flex-shrink:0;}
+    .watched-chip-rm:hover{color:var(--oxide);}
+    .watched-none{font-size:11px;color:var(--muted);font-style:italic;}
+    .watched-bar-right{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+    body.dark-theme .watched-chip{background:rgba(255,255,255,0.05);}
     .rpt-btn{min-width:58px;justify-content:center;}
     .flex-row{display:flex;align-items:center;gap:8px;}
     .report-cell{overflow:visible;white-space:normal;}
@@ -12776,6 +13901,7 @@ struct ErrorTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -12812,6 +13938,45 @@ struct ErrorTemplate {
       {% if linked_count == 1 %}Report linked — it now appears{% else %}{{ linked_count }} reports linked — they now appear{% endif %} in the list below.
     </div>
     {% endif %}
+    <div class="watched-bar">
+      <div class="watched-bar-left">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+        <span class="watched-label">Watched Folders</span>
+        <div class="watched-chips">
+          {% for dir in watched_dirs %}
+          <span class="watched-chip">
+            <span class="watched-chip-path" title="{{ dir }}">{{ dir }}</span>
+            <form method="POST" action="/watched-dirs/remove" style="display:contents">
+              <input type="hidden" name="folder_path" value="{{ dir }}">
+              <input type="hidden" name="redirect_to" value="/view-reports">
+              <button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button>
+            </form>
+          </span>
+          {% endfor %}
+          {% if watched_dirs.is_empty() %}
+          <span class="watched-none">No folders watched — click Choose to add one</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="watched-bar-right">
+        <button type="button" class="btn" id="add-watched-btn">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          Choose
+        </button>
+        <form method="POST" action="/watched-dirs/refresh" style="display:contents">
+          <input type="hidden" name="redirect_to" value="/view-reports">
+          <button type="submit" class="btn">&#8635; Refresh</button>
+        </form>
+      </div>
+      {% if !entries.is_empty() %}
+      <div class="toolbar-divider"></div>
+      <div class="toolbar-right">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
+        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
+        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
+      </div>
+      {% endif %}
+    </div>
     {% if total_scans > 0 %}
     <div class="summary-strip">
       <div class="stat-chip"><div class="stat-chip-tip">Total scan runs recorded in this workspace</div><div class="stat-chip-val">{{ total_scans }}</div><div class="stat-chip-label">Total scans</div></div>
@@ -12836,32 +14001,13 @@ struct ErrorTemplate {
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export Excel
           </button>
-          <a class="btn-back" href="/">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>
-            Home
-          </a>
         </div>
-      </div>
-
-      <div class="vr-toolbar">
-        <div class="vr-filters">
-          {% if !entries.is_empty() %}
-          <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
-          <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
-          <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
-          {% endif %}
-        </div>
-        <p class="vr-hint">Have reports saved on disk? Select a folder to load them into the list.</p>
-        <button type="button" class="btn vr-browse" id="browse-report-btn">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-          Browse for Reports…
-        </button>
       </div>
 
       {% if entries.is_empty() %}
       <div class="empty-state">
         <strong>No reports with viewable HTML yet</strong>
-        Run a new analysis from the <a href="/scan">scan page</a>, or use the browse button above to link an existing report.
+        Run a new analysis from the <a href="/scan">scan page</a>, or click <strong>Choose</strong> above to watch a folder containing saved reports.
       </div>
       {% else %}
       <div class="table-wrap">
@@ -12944,7 +14090,7 @@ struct ErrorTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -13175,7 +14321,7 @@ struct ErrorTemplate {
         if (el) el.addEventListener('change', window.applyFilters);
         el = document.getElementById('per-page-sel');
         if (el) el.addEventListener('change', function() { window.setPerPage(this.value); });
-        el = document.getElementById('browse-report-btn');
+        el = document.getElementById('add-watched-btn');
         if (el) el.addEventListener('click', function() {
           fetch('/pick-directory?kind=reports')
             .then(function(r) { return r.json(); })
@@ -13183,12 +14329,12 @@ struct ErrorTemplate {
               if (!data.cancelled && data.selected_path) {
                 var form = document.createElement('form');
                 form.method = 'POST';
-                form.action = '/locate-reports-dir';
-                var input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = 'folder_path';
-                input.value = data.selected_path;
-                form.appendChild(input);
+                form.action = '/watched-dirs/add';
+                var ri = document.createElement('input');
+                ri.type = 'hidden'; ri.name = 'redirect_to'; ri.value = window.location.pathname;
+                var fi = document.createElement('input');
+                fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
+                form.appendChild(ri); form.appendChild(fi);
                 document.body.appendChild(form);
                 form.submit();
               }
@@ -13260,6 +14406,7 @@ struct HistoryTemplate {
     total_scans: usize,
     linked_count: usize,
     browse_error: Option<String>,
+    watched_dirs: Vec<String>,
     csp_nonce: String,
 }
 
@@ -13353,8 +14500,19 @@ struct HistoryTemplate {
     .btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
     .btn.primary:hover{opacity:.9;}
     .btn:disabled{opacity:.35;cursor:default;pointer-events:none;}
-    .filter-row{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
-    .filter-row>*{height:30px;box-sizing:border-box;}
+    .watched-bar{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;flex-wrap:wrap;margin-bottom:14px;position:relative;z-index:1;}
+    .toolbar-divider{width:1px;background:var(--line);align-self:stretch;flex-shrink:0;margin:0 6px;}
+    .toolbar-right{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;}
+    .watched-bar-left{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;}
+    .watched-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}
+    .watched-chips{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;align-items:center;}
+    .watched-chip{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 8px;font-size:11px;max-width:300px;}
+    .watched-chip-path{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .watched-chip-rm{background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;padding:0 2px;flex-shrink:0;}
+    .watched-chip-rm:hover{color:var(--oxide);}
+    .watched-none{font-size:11px;color:var(--muted);font-style:italic;}
+    .watched-bar-right{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+    body.dark-theme .watched-chip{background:rgba(255,255,255,0.05);}
     .submod-chips-cell{display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-height:50px;overflow:hidden;}
     .submod-overflow-badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px;background:var(--surface);border:1px solid var(--line-strong);color:var(--muted);white-space:nowrap;}
     .btn-back{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;}
@@ -13435,6 +14593,7 @@ struct HistoryTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -13459,6 +14618,45 @@ struct HistoryTemplate {
   </div>
 
   <div class="page">
+    <div class="watched-bar">
+      <div class="watched-bar-left">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+        <span class="watched-label">Watched Folders</span>
+        <div class="watched-chips">
+          {% for dir in watched_dirs %}
+          <span class="watched-chip">
+            <span class="watched-chip-path" title="{{ dir }}">{{ dir }}</span>
+            <form method="POST" action="/watched-dirs/remove" style="display:contents">
+              <input type="hidden" name="folder_path" value="{{ dir }}">
+              <input type="hidden" name="redirect_to" value="/compare-scans">
+              <button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button>
+            </form>
+          </span>
+          {% endfor %}
+          {% if watched_dirs.is_empty() %}
+          <span class="watched-none">No folders watched — click Choose to add one</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="watched-bar-right">
+        <button type="button" class="btn" id="add-watched-btn">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          Choose
+        </button>
+        <form method="POST" action="/watched-dirs/refresh" style="display:contents">
+          <input type="hidden" name="redirect_to" value="/compare-scans">
+          <button type="submit" class="btn">&#8635; Refresh</button>
+        </form>
+      </div>
+      {% if !entries.is_empty() %}
+      <div class="toolbar-divider"></div>
+      <div class="toolbar-right">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
+        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
+        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
+      </div>
+      {% endif %}
+    </div>
     {% if total_scans > 0 %}
     <div class="summary-strip">
       <div class="stat-chip"><div class="stat-chip-tip">Total scan runs available for comparison</div><div class="stat-chip-val">{{ total_scans }}</div><div class="stat-chip-label">Total scans</div></div>
@@ -13479,10 +14677,6 @@ struct HistoryTemplate {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
               Compare <span class="sel-count" id="sel-count">0/2</span>
             </button>
-            <a class="btn-back" href="/">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>
-              Home
-            </a>
           </div>
         </div>
       </div>
@@ -13490,14 +14684,9 @@ struct HistoryTemplate {
       {% if entries.is_empty() %}
       <div class="empty-state">
         <strong>No scans yet</strong>
-        Run your first analysis from the <a href="/scan">scan page</a>.
+        Run your first analysis from the <a href="/scan">scan page</a>, or click <strong>Choose</strong> above to watch a folder containing saved reports.
       </div>
       {% else %}
-      <div class="filter-row">
-        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
-        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
-        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
-      </div>
       <div class="scope-panel hidden" id="scope-panel">
         <div class="scope-panel-label">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
@@ -13590,7 +14779,7 @@ struct HistoryTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -13898,6 +15087,31 @@ struct HistoryTemplate {
         }
       })();
 
+      // ── Watched folder picker ─────────────────────────────────────────────
+      (function() {
+        var btn = document.getElementById('add-watched-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function() {
+          fetch('/pick-directory?kind=reports')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (!data.cancelled && data.selected_path) {
+                var form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/watched-dirs/add';
+                var ri = document.createElement('input');
+                ri.type = 'hidden'; ri.name = 'redirect_to'; ri.value = window.location.pathname;
+                var fi = document.createElement('input');
+                fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
+                form.appendChild(ri); form.appendChild(fi);
+                document.body.appendChild(form);
+                form.submit();
+              }
+            })
+            .catch(function(e) { alert('Could not open folder picker: ' + e); });
+        });
+      })();
+
       // ── Submodule chip truncation ─────────────────────────────────────────
       document.querySelectorAll('.submod-chips-cell').forEach(function(cell) {
         var chips = cell.querySelectorAll('.submod-chip');
@@ -13942,6 +15156,7 @@ struct CompareSelectTemplate {
     version: &'static str,
     entries: Vec<HistoryEntryRow>,
     total_scans: usize,
+    watched_dirs: Vec<String>,
     csp_nonce: String,
 }
 
@@ -14198,6 +15413,7 @@ struct CompareSelectTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -14494,7 +15710,7 @@ struct CompareSelectTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -15262,7 +16478,7 @@ struct LoginTemplate {
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
+    .top-nav-inner{max-width:960px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;}
@@ -15403,6 +16619,7 @@ struct LoginTemplate {
           </div>
         </div>
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
@@ -16051,7 +17268,7 @@ ok</div>
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local source line analysis workbench &nbsp;·&nbsp;
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>

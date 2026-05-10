@@ -4,10 +4,18 @@
 # Set SLOC_SERVER as a repository variable (Settings → Variables → Actions)
 # and optionally SLOC_API_KEY as a repository secret.
 #
+# Artifact repository push (optional):
+#   Set ARTIFACT_REPO_TYPE as a repository variable and ARTIFACT_REPO_URL,
+#   ARTIFACT_REPO_PATH, ARTIFACT_REPO_EXTRA as needed.  For authenticated repos
+#   set ARTIFACT_REPO_USER / ARTIFACT_REPO_PASS as repository secrets.
+#   Supported backends: artifactory | nexus | nexus2 | s3 | minio | azure-blob | generic-http
+#   See ci/artifact-push.sh and docs/ci-integrations.md for full details.
+#
 # How it works:
 #   1. oxide-sloc analyze runs inside the CI runner — no network call to the server.
 #   2. oxide-sloc send POSTs the result JSON to /api/ingest on your server.
-#   3. The server renders HTML, stores the artifact, and the scan appears in /view-reports.
+#   3. (optional) ci/artifact-push.sh pushes JSON/HTML to the artifact repository.
+#   4. The server renders HTML, stores the artifact, and the scan appears in /view-reports.
 
 name: SLOC Analysis
 
@@ -35,21 +43,38 @@ jobs:
         run: cargo install oxide-sloc --locked
 
       - name: Analyze
-        run: oxide-sloc analyze . --json-out sloc-result.json
+        run: |
+          mkdir -p sloc-out
+          oxide-sloc analyze . \
+            --json-out sloc-out/result.json \
+            --html-out sloc-out/report.html
 
       - name: Upload to oxide-sloc server
-        if: env.SLOC_SERVER != ''
+        if: vars.SLOC_SERVER != ''
         env:
           SLOC_SERVER: ${{ vars.SLOC_SERVER }}
           SLOC_API_KEY: ${{ secrets.SLOC_API_KEY }}
         run: |
-          oxide-sloc send sloc-result.json \
+          oxide-sloc send sloc-out/result.json \
             --webhook-url "${SLOC_SERVER}/api/ingest?label=${{ github.repository }}" \
             ${SLOC_API_KEY:+--webhook-token "${SLOC_API_KEY}"}
+
+      - name: Push to artifact repository
+        if: vars.ARTIFACT_REPO_TYPE != '' && vars.ARTIFACT_REPO_TYPE != 'none' && vars.ARTIFACT_REPO_URL != ''
+        env:
+          ARTIFACT_REPO_TYPE:  ${{ vars.ARTIFACT_REPO_TYPE }}
+          ARTIFACT_REPO_URL:   ${{ vars.ARTIFACT_REPO_URL }}
+          ARTIFACT_REPO_PATH:  ${{ vars.ARTIFACT_REPO_PATH || format('oxide-sloc/{0}/{1}', github.repository, github.run_number) }}
+          ARTIFACT_REPO_EXTRA: ${{ vars.ARTIFACT_REPO_EXTRA }}
+          ARTIFACT_REPO_USER:  ${{ secrets.ARTIFACT_REPO_USER }}
+          ARTIFACT_REPO_PASS:  ${{ secrets.ARTIFACT_REPO_PASS }}
+          ARTIFACT_DIR:        sloc-out
+          ARTIFACT_FILES:      "result.json report.html"
+        run: bash ci/artifact-push.sh
 
       - name: Archive result
         uses: actions/upload-artifact@v4
         with:
           name: sloc-result
-          path: sloc-result.json
+          path: sloc-out/
           retention-days: 7
