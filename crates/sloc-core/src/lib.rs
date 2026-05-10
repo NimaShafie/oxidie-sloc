@@ -9,7 +9,7 @@ pub mod history;
 pub use baseline::{check_against_baseline, resolve_baselines_path, BaselineEntry, BaselineStore};
 pub use coverage::{aggregate_line_coverage, lookup_coverage, parse_lcov, FileCoverage};
 pub use delta::{compute_delta, FileChangeStatus, FileDelta, ScanComparison, SummaryDelta};
-pub use history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot};
+pub use history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot, WatchedDirsStore};
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -100,6 +100,25 @@ pub struct SummaryTotals {
     pub imports: u64,
     #[serde(default)]
     pub test_count: u64,
+    /// Lexically detected test assertion call lines across all analyzed files.
+    #[serde(default)]
+    pub test_assertion_count: u64,
+    /// Lexically detected test suite / fixture / group declaration lines across all analyzed files.
+    #[serde(default)]
+    pub test_suite_count: u64,
+    /// Aggregated from LCOV data when provided.
+    #[serde(default)]
+    pub coverage_lines_found: u64,
+    #[serde(default)]
+    pub coverage_lines_hit: u64,
+    #[serde(default)]
+    pub coverage_functions_found: u64,
+    #[serde(default)]
+    pub coverage_functions_hit: u64,
+    #[serde(default)]
+    pub coverage_branches_found: u64,
+    #[serde(default)]
+    pub coverage_branches_hit: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +140,22 @@ pub struct LanguageSummary {
     pub imports: u64,
     #[serde(default)]
     pub test_count: u64,
+    #[serde(default)]
+    pub test_assertion_count: u64,
+    #[serde(default)]
+    pub test_suite_count: u64,
+    #[serde(default)]
+    pub coverage_lines_found: u64,
+    #[serde(default)]
+    pub coverage_lines_hit: u64,
+    #[serde(default)]
+    pub coverage_functions_found: u64,
+    #[serde(default)]
+    pub coverage_functions_hit: u64,
+    #[serde(default)]
+    pub coverage_branches_found: u64,
+    #[serde(default)]
+    pub coverage_branches_hit: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -556,6 +591,23 @@ fn push_record(
     }
 }
 
+/// Convenience wrapper: build a boxed `Skip` outcome with a single-item warning message.
+#[inline]
+fn skip_with_reason(
+    path: &Path,
+    root: &Path,
+    size: u64,
+    reason: impl Into<String>,
+) -> MetadataPolicyOutcome {
+    MetadataPolicyOutcome::Skip(Box::new(skipped_record(
+        path,
+        root,
+        size,
+        FileStatus::SkippedByPolicy,
+        vec![reason.into()],
+    )))
+}
+
 /// Apply metadata-level policy checks (symlink, name, dir exclusion, size, globs, lockfile).
 /// Returns `Skip(record)` to skip, `Exclude` to omit from output entirely (include-glob miss),
 /// or `Continue` to proceed to content checks.
@@ -569,139 +621,115 @@ fn check_metadata_policy(
     include_globs: Option<&GlobSet>,
     exclude_globs: Option<&GlobSet>,
 ) -> MetadataPolicyOutcome {
+    let size = metadata.len();
+
     if metadata.file_type().is_symlink() && !config.discovery.follow_symlinks {
-        return MetadataPolicyOutcome::Skip(Box::new(skipped_record(
-            path,
-            root,
-            metadata.len(),
-            FileStatus::SkippedByPolicy,
-            vec!["symlink skipped by policy".into()],
-        )));
+        return skip_with_reason(path, root, size, "symlink skipped by policy");
     }
-
     if file_name_eq(path, ".gitignore") {
-        return MetadataPolicyOutcome::Skip(Box::new(skipped_record(
-            path,
-            root,
-            metadata.len(),
-            FileStatus::SkippedByPolicy,
-            vec![".gitignore is always excluded".into()],
-        )));
+        return skip_with_reason(path, root, size, ".gitignore is always excluded");
     }
-
     if is_excluded_dir_path(path, &config.discovery.excluded_directories) {
-        return MetadataPolicyOutcome::Skip(Box::new(skipped_record(
-            path,
-            root,
-            metadata.len(),
-            FileStatus::SkippedByPolicy,
-            vec!["path matched excluded directory setting".into()],
-        )));
+        return skip_with_reason(path, root, size, "path matched excluded directory setting");
     }
-
-    if metadata.len() > config.discovery.max_file_size_bytes {
-        return MetadataPolicyOutcome::Skip(Box::new(skipped_record(
+    if size > config.discovery.max_file_size_bytes {
+        return skip_with_reason(
             path,
             root,
-            metadata.len(),
-            FileStatus::SkippedByPolicy,
-            vec![format!(
+            size,
+            format!(
                 "file exceeded max_file_size_bytes ({})",
                 config.discovery.max_file_size_bytes
-            )],
-        )));
+            ),
+        );
     }
-
     if let Some(globs) = include_globs {
         if !globs.is_match(Path::new(relative_path)) && !globs.is_match(path) {
             return MetadataPolicyOutcome::Exclude;
         }
     }
-
     if let Some(globs) = exclude_globs {
         if globs.is_match(Path::new(relative_path)) || globs.is_match(path) {
-            return MetadataPolicyOutcome::Skip(Box::new(skipped_record(
-                path,
-                root,
-                metadata.len(),
-                FileStatus::SkippedByPolicy,
-                vec!["path matched exclude glob".into()],
-            )));
+            return skip_with_reason(path, root, size, "path matched exclude glob");
         }
     }
-
     if is_known_lockfile(path) && !config.analysis.include_lockfiles {
-        return MetadataPolicyOutcome::Skip(Box::new(skipped_record(
-            path,
-            root,
-            metadata.len(),
-            FileStatus::SkippedByPolicy,
-            vec!["lockfile skipped by default policy".into()],
-        )));
+        return skip_with_reason(path, root, size, "lockfile skipped by default policy");
     }
 
     MetadataPolicyOutcome::Continue
 }
 
-/// Apply content-level policy checks (vendor, generated, minified, binary).
-/// Returns `(vendor, generated, minified, skip_record)` where `skip_record` is `Some` when
-/// the file should be skipped.
+struct ContentPolicyResult {
+    vendor: bool,
+    generated: bool,
+    minified: bool,
+    skip_record: Option<FileRecord>,
+}
+
+/// Apply content-level policy checks (vendor, generated, minified).
+/// `skip_record` is `Some` when the file should be skipped.
 fn check_content_policy(
     path: &Path,
     root: &Path,
     size_bytes: u64,
     bytes: &[u8],
     config: &AppConfig,
-) -> (bool, bool, bool, Option<FileRecord>) {
+) -> ContentPolicyResult {
     let vendor = is_vendor_path(path);
     if vendor && config.analysis.vendor_directory_detection {
-        return (
+        return ContentPolicyResult {
             vendor,
-            false,
-            false,
-            Some(skipped_record(
+            generated: false,
+            minified: false,
+            skip_record: Some(skipped_record(
                 path,
                 root,
                 size_bytes,
                 FileStatus::SkippedByPolicy,
                 vec!["vendor file skipped by policy".into()],
             )),
-        );
+        };
     }
 
     let generated = config.analysis.generated_file_detection && looks_generated(path, bytes);
     if generated {
-        return (
+        return ContentPolicyResult {
             vendor,
             generated,
-            false,
-            Some(skipped_record(
+            minified: false,
+            skip_record: Some(skipped_record(
                 path,
                 root,
                 size_bytes,
                 FileStatus::SkippedByPolicy,
                 vec!["generated file skipped by policy".into()],
             )),
-        );
+        };
     }
 
     let minified = config.analysis.minified_file_detection && looks_minified(path, bytes);
     if minified {
-        return (
+        return ContentPolicyResult {
             vendor,
             generated,
             minified,
-            Some(skipped_record(
+            skip_record: Some(skipped_record(
                 path,
                 root,
                 size_bytes,
                 FileStatus::SkippedByPolicy,
                 vec!["minified file skipped by policy".into()],
             )),
-        );
+        };
     }
 
-    (vendor, generated, minified, None)
+    ContentPolicyResult {
+        vendor,
+        generated,
+        minified,
+        skip_record: None,
+    }
 }
 
 /// Decode file bytes to a UTF-8 string, handling binary detection and decode failures.
@@ -791,11 +819,15 @@ fn analyze_candidate_file(
     };
 
     // Content-level policy checks (vendor, generated, minified).
-    let (vendor, generated, minified, skip_record) =
-        check_content_policy(path, root, metadata.len(), &bytes, config);
-    if let Some(record) = skip_record {
+    let content_policy = check_content_policy(path, root, metadata.len(), &bytes, config);
+    if let Some(record) = content_policy.skip_record {
         return Ok(Some(record));
     }
+    let (vendor, generated, minified) = (
+        content_policy.vendor,
+        content_policy.generated,
+        content_policy.minified,
+    );
 
     // Decode content, handling binary and decode failures.
     let (text, encoding, decode_warnings) =
@@ -957,9 +989,71 @@ fn build_summary(analyzed: &[FileRecord], skipped: &[FileRecord]) -> SummaryTota
         summary.variables += record.raw_line_categories.variables;
         summary.imports += record.raw_line_categories.imports;
         summary.test_count += record.raw_line_categories.test_count;
+        summary.test_assertion_count += record.raw_line_categories.test_assertion_count;
+        summary.test_suite_count += record.raw_line_categories.test_suite_count;
+        if let Some(cov) = &record.coverage {
+            summary.coverage_lines_found += u64::from(cov.lines_found);
+            summary.coverage_lines_hit += u64::from(cov.lines_hit);
+            summary.coverage_functions_found += u64::from(cov.functions_found);
+            summary.coverage_functions_hit += u64::from(cov.functions_hit);
+            summary.coverage_branches_found += u64::from(cov.branches_found);
+            summary.coverage_branches_hit += u64::from(cov.branches_hit);
+        }
     }
 
     summary
+}
+
+/// Construct a zero-filled `LanguageSummary` for the given language.
+fn zeroed_summary(language: Language) -> LanguageSummary {
+    LanguageSummary {
+        language,
+        files: 0,
+        total_physical_lines: 0,
+        code_lines: 0,
+        comment_lines: 0,
+        blank_lines: 0,
+        mixed_lines_separate: 0,
+        functions: 0,
+        classes: 0,
+        variables: 0,
+        imports: 0,
+        test_count: 0,
+        test_assertion_count: 0,
+        test_suite_count: 0,
+        coverage_lines_found: 0,
+        coverage_lines_hit: 0,
+        coverage_functions_found: 0,
+        coverage_functions_hit: 0,
+        coverage_branches_found: 0,
+        coverage_branches_hit: 0,
+    }
+}
+
+/// Accumulate all per-file counters from `record` into an existing `LanguageSummary`.
+fn accumulate_record_into_summary(entry: &mut LanguageSummary, record: &FileRecord) {
+    entry.files += 1;
+    let r = &record.raw_line_categories;
+    entry.total_physical_lines += r.total_physical_lines;
+    entry.code_lines += record.effective_counts.code_lines;
+    entry.comment_lines += record.effective_counts.comment_lines;
+    entry.blank_lines += record.effective_counts.blank_lines;
+    entry.mixed_lines_separate += record.effective_counts.mixed_lines_separate;
+    entry.functions += r.functions;
+    entry.classes += r.classes;
+    entry.variables += r.variables;
+    entry.imports += r.imports;
+    entry.test_count += r.test_count;
+    entry.test_assertion_count += r.test_assertion_count;
+    entry.test_suite_count += r.test_suite_count;
+    if let Some(cov) = &record.coverage {
+        entry.coverage_lines_found += u64::from(cov.lines_found);
+        entry.coverage_lines_hit += u64::from(cov.lines_hit);
+        entry.coverage_functions_found += u64::from(cov.functions_found);
+        entry.coverage_functions_hit += u64::from(cov.functions_hit);
+        entry.coverage_branches_found += u64::from(cov.branches_found);
+        entry.coverage_branches_hit += u64::from(cov.branches_hit);
+    }
 }
 
 fn build_language_summaries(analyzed: &[FileRecord]) -> Vec<LanguageSummary> {
@@ -968,33 +1062,11 @@ fn build_language_summaries(analyzed: &[FileRecord]) -> Vec<LanguageSummary> {
         let Some(language) = record.language else {
             continue;
         };
-        let entry = by_language.entry(language).or_insert(LanguageSummary {
-            language,
-            files: 0,
-            total_physical_lines: 0,
-            code_lines: 0,
-            comment_lines: 0,
-            blank_lines: 0,
-            mixed_lines_separate: 0,
-            functions: 0,
-            classes: 0,
-            variables: 0,
-            imports: 0,
-            test_count: 0,
-        });
-        entry.files += 1;
-        entry.total_physical_lines += record.raw_line_categories.total_physical_lines;
-        entry.code_lines += record.effective_counts.code_lines;
-        entry.comment_lines += record.effective_counts.comment_lines;
-        entry.blank_lines += record.effective_counts.blank_lines;
-        entry.mixed_lines_separate += record.effective_counts.mixed_lines_separate;
-        entry.functions += record.raw_line_categories.functions;
-        entry.classes += record.raw_line_categories.classes;
-        entry.variables += record.raw_line_categories.variables;
-        entry.imports += record.raw_line_categories.imports;
-        entry.test_count += record.raw_line_categories.test_count;
+        let entry = by_language
+            .entry(language)
+            .or_insert_with(|| zeroed_summary(language));
+        accumulate_record_into_summary(entry, record);
     }
-
     by_language.into_values().collect()
 }
 
@@ -1112,32 +1184,11 @@ fn build_submodule_summaries(
 fn build_language_summaries_from_slice(files: &[&FileRecord]) -> Vec<LanguageSummary> {
     let mut map: BTreeMap<String, LanguageSummary> = BTreeMap::new();
     for file in files {
-        if let Some(lang) = file.language {
-            let entry = map
-                .entry(lang.display_name().to_string())
-                .or_insert_with(|| LanguageSummary {
-                    language: lang,
-                    files: 0,
-                    total_physical_lines: 0,
-                    code_lines: 0,
-                    comment_lines: 0,
-                    blank_lines: 0,
-                    mixed_lines_separate: 0,
-                    functions: 0,
-                    classes: 0,
-                    variables: 0,
-                    imports: 0,
-                    test_count: 0,
-                });
-            entry.files += 1;
-            let r = &file.raw_line_categories;
-            entry.total_physical_lines += r.total_physical_lines;
-            entry.code_lines += file.effective_counts.code_lines;
-            entry.comment_lines += file.effective_counts.comment_lines;
-            entry.blank_lines += file.effective_counts.blank_lines;
-            entry.mixed_lines_separate += file.effective_counts.mixed_lines_separate;
-            entry.test_count += r.test_count;
-        }
+        let Some(lang) = file.language else { continue };
+        let entry = map
+            .entry(lang.display_name().to_string())
+            .or_insert_with(|| zeroed_summary(lang));
+        accumulate_record_into_summary(entry, file);
     }
     map.into_values().collect()
 }
@@ -1223,28 +1274,31 @@ fn is_binary(bytes: &[u8]) -> bool {
     sample.contains(&0)
 }
 
+/// Decode a BOM-stripped UTF-16 byte slice using the given encoding.
+/// Returns `(text, encoding_label, warnings)`.
+fn decode_utf16_bom(
+    bom_stripped: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    label: &str,
+) -> (String, String, Vec<String>) {
+    let (cow, _, had_errors) = encoding.decode(bom_stripped);
+    let mut warnings = Vec::new();
+    if had_errors {
+        warnings.push(format!("{label} decode contained replacement characters"));
+    }
+    (cow.into_owned(), label.into(), warnings)
+}
+
 fn decode_bytes(bytes: &[u8]) -> std::result::Result<(String, String, Vec<String>), String> {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         let text = String::from_utf8(bytes[3..].to_vec()).map_err(|err| err.to_string())?;
         return Ok((text, "utf-8-bom".into(), vec![]));
     }
-
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        let (cow, _, had_errors) = UTF_16LE.decode(&bytes[2..]);
-        let mut warnings = Vec::new();
-        if had_errors {
-            warnings.push("utf-16le decode contained replacement characters".into());
-        }
-        return Ok((cow.into_owned(), "utf-16le".into(), warnings));
+        return Ok(decode_utf16_bom(&bytes[2..], UTF_16LE, "utf-16le"));
     }
-
     if bytes.starts_with(&[0xFE, 0xFF]) {
-        let (cow, _, had_errors) = UTF_16BE.decode(&bytes[2..]);
-        let mut warnings = Vec::new();
-        if had_errors {
-            warnings.push("utf-16be decode contained replacement characters".into());
-        }
-        return Ok((cow.into_owned(), "utf-16be".into(), warnings));
+        return Ok(decode_utf16_bom(&bytes[2..], UTF_16BE, "utf-16be"));
     }
 
     // Multiple statements in the else branch make map_or_else awkward here.

@@ -152,24 +152,12 @@ launch_cargo() {
     assert_port_free
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
-    export CARGO_INCREMENTAL=0
     if [[ "$HOST_MODE" == "1" ]]; then
         check_firewall
-        printf '\n  oxide-sloc starting in LAN server mode\n  Local   \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n' "$SLOC_PORT" "$SLOC_PORT"
-        print_lan_ip
-        if [[ "$PLATFORM" == linux ]]; then
-            printf '  Firewall: %s\n' "$FIREWALL_STATUS"
-            if [[ -n "$FIREWALL_FIX" ]]; then
-                printf '    Other LAN hosts cannot reach this server until you run:\n'
-                printf '      %s\n' "$FIREWALL_FIX"
-            fi
-        fi
-        printf '\n'
-        [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
-        printf '  Press Ctrl+C to stop.\n\n'
+        printf '\n  Building oxide-sloc (first run may take a few minutes)...\n\n'
         cargo run -p oxide-sloc -- serve --server
     else
-        printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s  (will auto-select next port if %s is blocked)\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT" "$SLOC_PORT"
+        printf '\n  Building oxide-sloc (first run may take a few minutes)...\n\n'
         cargo run -p oxide-sloc
     fi
 }

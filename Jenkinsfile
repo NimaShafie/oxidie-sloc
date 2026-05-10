@@ -206,6 +206,80 @@ pipeline {
             description:  'Comma-separated email addresses to receive the scan report (empty = skip). ' +
                           'Requires Jenkins Secret Text credentials: SLOC_SMTP_HOST, SLOC_SMTP_USER, SLOC_SMTP_PASS.'
         )
+
+        // ── Artifact repository ────────────────────────────────────────────────
+        // Push scan artifacts (JSON, HTML, PDF) to an external artifact repository
+        // after each successful build.  Supported backends: JFrog Artifactory,
+        // Sonatype Nexus 3 & 2, AWS S3, MinIO, Azure Blob Storage, and any server
+        // that accepts HTTP PUT.  Set ARTIFACT_REPO_TYPE to "none" (the default) to
+        // skip this stage entirely.
+        //
+        // Credentials — add these as Jenkins Secret Text credentials before use:
+        //   SLOC_ARTIFACT_REPO_USER  username or access-key ID
+        //   SLOC_ARTIFACT_REPO_PASS  password, API token, account key, or secret key
+        //
+        // The actual push is performed by ci/artifact-push.sh.  See that script and
+        // docs/ci-integrations.md § Artifact Repository Integration for full details.
+        choice(
+            name:    'ARTIFACT_REPO_TYPE',
+            choices: ['none', 'artifactory', 'nexus', 'nexus2', 's3', 'minio', 'azure-blob', 'generic-http'],
+            description: 'Artifact repository backend to push scan results to after a successful build.\n' +
+                         '  none         — skip artifact repository push (default)\n' +
+                         '  artifactory  — JFrog Artifactory (REST PUT, user/pass or API key)\n' +
+                         '  nexus        — Sonatype Nexus Repository Manager 3 (raw-format REST upload)\n' +
+                         '  nexus2       — Sonatype Nexus Repository Manager 2 (PUT to content REST API)\n' +
+                         '  s3           — Amazon S3 (requires aws CLI on the agent)\n' +
+                         '  minio        — MinIO via aws CLI with custom --endpoint-url\n' +
+                         '  azure-blob   — Azure Blob Storage (requires az CLI on the agent)\n' +
+                         '  generic-http — any HTTP/HTTPS server accepting PUT requests'
+        )
+        string(
+            name:         'ARTIFACT_REPO_URL',
+            defaultValue: '',
+            description:  'Base URL of the artifact repository (leave empty to skip push).\n' +
+                          '  Artifactory : https://repo.example.com/artifactory/sloc-reports\n' +
+                          '  Nexus 3     : https://nexus.example.com\n' +
+                          '  Nexus 2     : https://nexus.example.com/nexus\n' +
+                          '  S3 / MinIO  : s3://my-bucket\n' +
+                          '  Azure Blob  : https://myaccount.blob.core.windows.net\n' +
+                          '  Generic HTTP: https://artifacts.example.com/sloc'
+        )
+        string(
+            name:         'ARTIFACT_REPO_PATH',
+            defaultValue: 'oxide-sloc/${JOB_NAME}/${BUILD_NUMBER}',
+            description:  'Path prefix / key prefix under which artifacts are stored in the repository. ' +
+                          'The tokens ${JOB_NAME} and ${BUILD_NUMBER} are substituted at runtime. ' +
+                          'For Nexus 3/2 this is the directory within the raw repository. ' +
+                          'For Azure Blob this is the blob name prefix within the container. ' +
+                          'Leading slashes are stripped automatically.'
+        )
+        string(
+            name:         'ARTIFACT_REPO_EXTRA',
+            defaultValue: '',
+            description:  'Provider-specific extra configuration (leave empty when unused):\n' +
+                          '  nexus / nexus2 — Nexus repository name (e.g. sloc-raw-hosted)\n' +
+                          '  azure-blob     — storage container name (e.g. sloc-reports)\n' +
+                          '  minio          — MinIO server endpoint URL (e.g. https://minio.internal:9000)\n' +
+                          '  s3             — extra flags for aws s3 cp (e.g. --sse aws:kms)\n' +
+                          '  others         — unused'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_JSON',
+            defaultValue: true,
+            description:  'Include result.json in the artifact repository push.'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_HTML',
+            defaultValue: true,
+            description:  'Include report.html in the artifact repository push ' +
+                          '(only when GENERATE_HTML is checked).'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_PDF',
+            defaultValue: false,
+            description:  'Include report.pdf in the artifact repository push ' +
+                          '(only when GENERATE_PDF is checked).'
+        )
     }
 
     environment {
@@ -708,6 +782,79 @@ PYEOF"""
                             reportFiles          : 'report.html',
                             reportName           : 'SLOC Report',
                         ])
+                    }
+                }
+            }
+        }
+
+        // ── 8. Push to artifact repository ────────────────────────────────────
+        // Pushes scan artifacts (JSON, HTML, PDF) to an external artifact repository.
+        // Only runs when ARTIFACT_REPO_TYPE is not "none" and ARTIFACT_REPO_URL is set.
+        //
+        // The push is delegated to ci/artifact-push.sh which handles all provider
+        // differences.  Credentials are bound via withCredentials using optional: true
+        // so the stage does not fail when the credential IDs are not yet registered —
+        // the script will simply perform an unauthenticated push (or fail with a 401
+        // if the repository requires auth, which surfaces as a clear error).
+        //
+        // Jenkins credential IDs to pre-register (Kind: Secret Text):
+        //   SLOC_ARTIFACT_REPO_USER  — username or access key ID
+        //   SLOC_ARTIFACT_REPO_PASS  — password, API token, or secret key
+        stage('Push to Artifact Repository') {
+            when {
+                allOf {
+                    expression { params.ARTIFACT_REPO_TYPE != 'none' }
+                    expression { params.ARTIFACT_REPO_URL?.trim() as Boolean }
+                }
+            }
+            steps {
+                script {
+                    def allowedTypes = [
+                        'artifactory', 'nexus', 'nexus2', 's3', 'minio', 'azure-blob', 'generic-http'
+                    ]
+                    if (!allowedTypes.contains(params.ARTIFACT_REPO_TYPE)) {
+                        error("Invalid ARTIFACT_REPO_TYPE: ${params.ARTIFACT_REPO_TYPE}")
+                    }
+
+                    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+
+                    // Substitute runtime tokens in the repo path
+                    def repoPath = params.ARTIFACT_REPO_PATH
+                        .replace('${JOB_NAME}',    env.JOB_NAME    ?: 'unknown-job')
+                        .replace('${BUILD_NUMBER}', env.BUILD_NUMBER ?: '0')
+
+                    def filesToPush = []
+                    if (params.ARTIFACT_PUSH_JSON)                           filesToPush << 'result.json'
+                    if (params.ARTIFACT_PUSH_HTML && params.GENERATE_HTML)   filesToPush << 'report.html'
+                    if (params.ARTIFACT_PUSH_PDF  && params.GENERATE_PDF)    filesToPush << 'report.pdf'
+
+                    if (filesToPush.isEmpty()) {
+                        echo 'No artifact files selected for push — skipping.'
+                        return
+                    }
+
+                    // Bind credentials as optional so the stage does not abort when
+                    // the credential IDs are absent (Credentials Binding plugin ≥ 1.27).
+                    withCredentials([
+                        string(credentialsId: 'SLOC_ARTIFACT_REPO_USER',
+                               variable:      'SLOC_AR_USER',
+                               optional:      true),
+                        string(credentialsId: 'SLOC_ARTIFACT_REPO_PASS',
+                               variable:      'SLOC_AR_PASS',
+                               optional:      true),
+                    ]) {
+                        withEnv([
+                            "ARTIFACT_REPO_TYPE=${params.ARTIFACT_REPO_TYPE}",
+                            "ARTIFACT_REPO_URL=${params.ARTIFACT_REPO_URL}",
+                            "ARTIFACT_REPO_PATH=${repoPath}",
+                            "ARTIFACT_REPO_EXTRA=${params.ARTIFACT_REPO_EXTRA ?: ''}",
+                            "ARTIFACT_DIR=${outDir}",
+                            "ARTIFACT_FILES=${filesToPush.join(' ')}",
+                            "ARTIFACT_REPO_USER=${env.SLOC_AR_USER ?: ''}",
+                            "ARTIFACT_REPO_PASS=${env.SLOC_AR_PASS ?: ''}",
+                        ]) {
+                            sh 'bash ci/artifact-push.sh'
+                        }
                     }
                 }
             }

@@ -7,7 +7,7 @@
 [![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
-**oxide-sloc** is a Rust-based source line analysis tool — IEEE 1045-1992 compliant, more than a line counter.
+**oxide-sloc** is a Rust-based local code analysis tool — IEEE 1045-1992 SLOC analysis, unit test detection, and coverage reporting.
 
 ## Quick Start
 
@@ -81,6 +81,7 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 - **CLI + web UI** — `analyze / report / diff / serve / send / init / git-scan / git-compare` commands; guided 4-step web flow with light/dark theme and one-click Quick Scan
 - **IEEE 1045-1992 physical SLOC** — configurable mixed-line policy, continuation lines, compiler directives, and blank-in-comment classification; symbol counting (functions, classes, variables, imports)
+- **Test Metrics** — lexical test function and test-case detection across all 41 supported languages; test-to-code density per language; LCOV line-coverage import with per-language coverage charts at `/test-metrics`
 - **Flexible output** — HTML reports with per-file breakdown and language charts; PDF, CSV, and 4-sheet Excel export; re-render any saved JSON result
 - **Git integration** — browser UI for branches/tags/commits, GitHub/GitLab/Bitbucket webhook and polling automation, point-in-time comparison via git worktree, submodule breakdown
 - **CI/CD and integrations** — Jenkinsfile, GitHub Actions, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable `<iframe>` widget, SMTP/webhook report delivery, Confluence push
@@ -228,6 +229,11 @@ oxide-sloc serve   # → http://127.0.0.1:4317
 
 A guided 4-step flow: select project → counting rules → outputs → review & run. The **Quick Scan** sidebar button submits from step 1 with all defaults.
 
+Additional pages:
+- **Test Metrics** (`/test-metrics`) — per-language test detection counts, test-to-code density, and optional LCOV coverage charts
+- **Trend Reports** (`/trend-reports`) — historical SLOC and test-count trajectory with commit annotation
+- **Compare Scans** (`/compare-scans`) — side-by-side diff of any two saved results with four chart types
+
 Every web UI option maps 1:1 to a CLI flag — see the [Web UI → CLI translation](#web-ui--cli-translation) table below.
 
 ### Configuration file
@@ -269,6 +275,25 @@ oxide-sloc diff baseline.json current.json -j delta.json -c delta.csv -x delta.x
 ## Symbol counting
 
 Best-effort lexical detection of `functions`, `classes`, `variables`, and `imports` per file, surfaced in the JSON output and HTML report. Supported languages: C, C++, C#, Go, Java, JavaScript, Rust, Shell, PowerShell, TypeScript.
+
+---
+
+## Test Metrics
+
+oxide-sloc lexically detects test definitions as part of every scan — no separate runner or coverage tool is required for basic counts. Navigate to `/test-metrics` in the web UI to see:
+
+| Metric | What it measures |
+|---|---|
+| **Total tests** | Sum of detected test functions, test cases, and test decorators across all files |
+| **Test assertions** | Best-effort count of assertion call lines (`assert_eq!`, `ASSERT_EQ`, `assertEquals`, `Assert.AreEqual`, etc.) |
+| **Test suites** | Count of test suite / fixture / group declarations (`TEST_GROUP`, `[TestClass]`, `[TestFixture]`, `BOOST_AUTO_TEST_SUITE`, etc.) |
+| **Workspace density** | Tests per 1,000 code lines — a normalized measure of test thoroughness |
+| **Languages with tests** | Number of languages for which at least one test definition was found |
+| **Coverage (optional)** | Average line-hit percentage per language, loaded from an LCOV report |
+
+Test detection is lexical — it recognizes patterns such as `#[test]` (Rust), `def test_*` / `@pytest.mark` (Python), `@Test` (Java/Kotlin), `it(` / `describe(` (JavaScript/TypeScript), `func Test*` (Go), and equivalent patterns across all supported languages. No execution or instrumentation is required.
+
+To include line coverage data, generate an LCOV report with your test runner (`cargo llvm-cov --lcov`, `pytest --cov`, `jest --coverage`, etc.) and load it via the web UI or CLI. Coverage is aggregated by language and shown as an average line-hit percentage alongside the test-count charts.
 
 ---
 
@@ -421,6 +446,7 @@ CLI flags: `-c result.csv -x result.xlsx` on `analyze`, `report`, and `diff`.
 | `GET /api/project-history?path=<dir>` | Scan history for a project root |
 | `GET /badge/:metric` | SVG badge (`code-lines`, `files`, `comment-lines`, `blank-lines`) |
 | `GET /embed/summary` | Embeddable HTML widget |
+| `GET /test-metrics` | Test detection and coverage dashboard (web UI) |
 | `GET /healthz` | Health check |
 
 ```markdown
@@ -485,7 +511,9 @@ git push origin v1.1.0
 
 A `Jenkinsfile` and `.gitlab-ci.yml` are included at the repo root. On self-hosted or air-gapped runners, `vendor.tar.xz` is committed to the repository — a `git clone` is all that is needed. The pipeline decompresses and caches `vendor/` between runs automatically.
 
-For detailed setup including Confluence publishing, see [`docs/ci-integrations.md`](./docs/ci-integrations.md).
+`ci/artifact-push.sh` pushes JSON, HTML, and PDF scan artifacts to an external artifact repository after each build. Supported backends: JFrog Artifactory, Sonatype Nexus 3 & 2, AWS S3, MinIO, Azure Blob Storage, and any generic HTTP PUT endpoint. Configure via the `ARTIFACT_REPO_TYPE` / `ARTIFACT_REPO_URL` build parameters.
+
+For detailed setup including Confluence publishing and artifact repository integration, see [`docs/ci-integrations.md`](./docs/ci-integrations.md).
 
 ---
 
@@ -529,7 +557,7 @@ crates/
   sloc-languages/   # Language detection, lexical analyzers, symbol counting
   sloc-report/      # HTML rendering, PDF export, CSV/Excel export
   sloc-web/         # Axum web server, scan registry, metrics API, badge endpoint
-ci/                 # CI shell scripts (lint.sh, build.sh, test.sh, release.sh) + config presets
+ci/                 # CI shell scripts (lint.sh, build.sh, test.sh, release.sh, artifact-push.sh) + config presets
 deploy/             # systemd unit + server config template
 dist/               # Release bundles — generated by CI, not tracked in git
 docs/

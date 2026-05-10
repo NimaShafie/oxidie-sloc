@@ -229,6 +229,14 @@ pub struct RawLineCounts {
     /// (GTest, Catch2, PyTest, JUnit, etc.). Always a subset of `code_only_lines`.
     #[serde(default)]
     pub test_count: u64,
+    /// Best-effort count of test assertion call lines detected lexically
+    /// (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.).
+    #[serde(default)]
+    pub test_assertion_count: u64,
+    /// Best-effort count of test suite / fixture / group declaration lines detected lexically
+    /// (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], [TestFixture], etc.).
+    #[serde(default)]
+    pub test_suite_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -475,65 +483,88 @@ pub fn detect_language(
 }
 
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) -> RawFileAnalysis {
-    // IEEE flags shared by all non-preprocessor languages.
-    let base = IeeeFlags {
-        has_preprocessor_directives: false,
+    // tree-sitter fast-paths (compiled out when feature is disabled)
+    #[cfg(feature = "tree-sitter")]
+    {
+        match language {
+            Language::C | Language::Cpp => {
+                if let Some(result) = ts::analyze_c(text) {
+                    return result;
+                }
+            }
+            Language::Python => {
+                if let Some(result) = ts::analyze_python(text) {
+                    return result;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (mut config, has_preprocessor) = language_scan_config(language);
+
+    // Python docstring lines are computed from the text and cannot be a static constant.
+    if language == Language::Python {
+        config.skip_lines = detect_python_docstring_lines(text);
+    }
+
+    // C, C++, and Objective-C have a preprocessor whose directive lines are tracked separately
+    // per IEEE 1045-1992 §4.2; every other language uses base flags.
+    let flags = IeeeFlags {
+        has_preprocessor_directives: has_preprocessor,
         blank_in_block_comment_as_comment: options.blank_in_block_comment_as_comment,
         collapse_continuation_lines: options.collapse_continuation_lines,
     };
-    // C, C++, and Objective-C have a preprocessor whose directive lines are tracked separately
-    // per IEEE 1045-1992 §4.2.
-    let cpp = IeeeFlags {
-        has_preprocessor_directives: true,
-        ..base
-    };
+    analyze_generic(text, config, flags)
+}
 
+/// Returns the lexical scan configuration for `language` and whether it uses a C preprocessor.
+/// All fields are static constants except `skip_lines`, which is always empty here; callers that
+/// need non-empty skip sets (currently only Python) must populate the field after this call.
+#[allow(clippy::too_many_lines)]
+fn language_scan_config(language: Language) -> (ScanConfig, bool) {
     match language {
-        Language::C => {
-            #[cfg(feature = "tree-sitter")]
-            if let Some(result) = ts::analyze_c(text) {
-                return result;
-            }
-            analyze_generic(
-                text,
-                ScanConfig {
-                    line_comments: &["//"],
-                    block_comment: Some(("/*", "*/")),
-                    allow_single_quote_strings: true,
-                    allow_double_quote_strings: true,
-                    allow_triple_quote_strings: false,
-                    allow_csharp_verbatim_strings: false,
-                    skip_lines: HashSet::new(),
-                    symbol_patterns: SP_C,
-                },
-                cpp,
-            )
-        }
-        Language::Cpp => {
-            // tree-sitter-c also parses C++ with acceptable accuracy for SLOC counting.
-            #[cfg(feature = "tree-sitter")]
-            if let Some(result) = ts::analyze_c(text) {
-                return result;
-            }
-            analyze_generic(
-                text,
-                ScanConfig {
-                    line_comments: &["//"],
-                    block_comment: Some(("/*", "*/")),
-                    allow_single_quote_strings: true,
-                    allow_double_quote_strings: true,
-                    allow_triple_quote_strings: false,
-                    allow_csharp_verbatim_strings: false,
-                    skip_lines: HashSet::new(),
-                    symbol_patterns: SP_CPP,
-                },
-                cpp,
-            )
-        }
-        Language::CSharp => analyze_generic(
-            text,
+        Language::C => (
+            ScanConfig {
+                line_comments: &["//"],
+                block_comment: Some(("/*", "*/")),
+                allow_single_quote_strings: true,
+                allow_double_quote_strings: true,
+                allow_triple_quote_strings: false,
+                allow_csharp_verbatim_strings: false,
+                skip_lines: HashSet::new(),
+                symbol_patterns: SP_C,
+            },
+            true,
+        ),
+        Language::Cpp => (
+            ScanConfig {
+                line_comments: &["//"],
+                block_comment: Some(("/*", "*/")),
+                allow_single_quote_strings: true,
+                allow_double_quote_strings: true,
+                allow_triple_quote_strings: false,
+                allow_csharp_verbatim_strings: false,
+                skip_lines: HashSet::new(),
+                symbol_patterns: SP_CPP,
+            },
+            true,
+        ),
+        Language::ObjectiveC => (
+            ScanConfig {
+                line_comments: &["//"],
+                block_comment: Some(("/*", "*/")),
+                allow_single_quote_strings: true,
+                allow_double_quote_strings: true,
+                allow_triple_quote_strings: false,
+                allow_csharp_verbatim_strings: false,
+                skip_lines: HashSet::new(),
+                symbol_patterns: SP_OBJECTIVEC,
+            },
+            true,
+        ),
+        Language::CSharp => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -544,10 +575,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_CSHARP,
             },
-            base,
+            false,
         ),
-        Language::Go => analyze_generic(
-            text,
+        Language::Go => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -558,10 +588,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_GO,
             },
-            base,
+            false,
         ),
-        Language::Java => analyze_generic(
-            text,
+        Language::Java => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -572,10 +601,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_JAVA,
             },
-            base,
+            false,
         ),
-        Language::JavaScript | Language::Svelte | Language::Vue => analyze_generic(
-            text,
+        Language::JavaScript | Language::Svelte | Language::Vue => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -586,10 +614,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_JS,
             },
-            base,
+            false,
         ),
-        Language::Rust => analyze_generic(
-            text,
+        Language::Rust => (
             ScanConfig {
                 // Rust also has //! and /// doc comments — they parse the same as //
                 line_comments: &["//"],
@@ -601,10 +628,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_RUST,
             },
-            base,
+            false,
         ),
-        Language::Shell => analyze_generic(
-            text,
+        Language::Shell => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: None,
@@ -615,10 +641,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_SHELL,
             },
-            base,
+            false,
         ),
-        Language::PowerShell => analyze_generic(
-            text,
+        Language::PowerShell => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: Some(("<#", "#>")),
@@ -629,10 +654,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_POWERSHELL,
             },
-            base,
+            false,
         ),
-        Language::TypeScript => analyze_generic(
-            text,
+        Language::TypeScript => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -643,32 +667,22 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_TS,
             },
-            base,
+            false,
         ),
-        Language::Python => {
-            #[cfg(feature = "tree-sitter")]
-            if let Some(result) = ts::analyze_python(text) {
-                return result;
-            }
-            let docstring_lines = detect_python_docstring_lines(text);
-            analyze_generic(
-                text,
-                ScanConfig {
-                    line_comments: &["#"],
-                    block_comment: None,
-                    allow_single_quote_strings: true,
-                    allow_double_quote_strings: true,
-                    allow_triple_quote_strings: true,
-                    allow_csharp_verbatim_strings: false,
-                    skip_lines: docstring_lines,
-                    symbol_patterns: SP_PYTHON,
-                },
-                base,
-            )
-        }
-        // --- Extended language analyzers ---
-        Language::Assembly => analyze_generic(
-            text,
+        Language::Python => (
+            ScanConfig {
+                line_comments: &["#"],
+                block_comment: None,
+                allow_single_quote_strings: true,
+                allow_double_quote_strings: true,
+                allow_triple_quote_strings: true,
+                allow_csharp_verbatim_strings: false,
+                skip_lines: HashSet::new(), // caller fills this in for Python
+                symbol_patterns: SP_PYTHON,
+            },
+            false,
+        ),
+        Language::Assembly => (
             ScanConfig {
                 line_comments: &[";"],
                 block_comment: None,
@@ -679,10 +693,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_ASSEMBLY,
             },
-            base,
+            false,
         ),
-        Language::Clojure => analyze_generic(
-            text,
+        Language::Clojure => (
             ScanConfig {
                 line_comments: &[";"],
                 block_comment: None,
@@ -693,10 +706,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_CLOJURE,
             },
-            base,
+            false,
         ),
-        Language::Css => analyze_generic(
-            text,
+        Language::Css => (
             ScanConfig {
                 line_comments: &[],
                 block_comment: Some(("/*", "*/")),
@@ -707,10 +719,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_NONE,
             },
-            base,
+            false,
         ),
-        Language::Dart => analyze_generic(
-            text,
+        Language::Dart => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -721,10 +732,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_DART,
             },
-            base,
+            false,
         ),
-        Language::Dockerfile | Language::Makefile => analyze_generic(
-            text,
+        Language::Dockerfile | Language::Makefile => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: None,
@@ -735,10 +745,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_NONE,
             },
-            base,
+            false,
         ),
-        Language::Elixir => analyze_generic(
-            text,
+        Language::Elixir => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: None,
@@ -749,10 +758,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_ELIXIR,
             },
-            base,
+            false,
         ),
-        Language::Erlang => analyze_generic(
-            text,
+        Language::Erlang => (
             ScanConfig {
                 line_comments: &["%"],
                 block_comment: None,
@@ -763,10 +771,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_ERLANG,
             },
-            base,
+            false,
         ),
-        Language::FSharp => analyze_generic(
-            text,
+        Language::FSharp => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("(*", "*)")),
@@ -777,10 +784,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_FSHARP,
             },
-            base,
+            false,
         ),
-        Language::Groovy => analyze_generic(
-            text,
+        Language::Groovy => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -791,10 +797,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_GROOVY,
             },
-            base,
+            false,
         ),
-        Language::Haskell => analyze_generic(
-            text,
+        Language::Haskell => (
             ScanConfig {
                 line_comments: &["--"],
                 block_comment: Some(("{-", "-}")),
@@ -805,10 +810,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_HASKELL,
             },
-            base,
+            false,
         ),
-        Language::Html | Language::Xml => analyze_generic(
-            text,
+        Language::Html | Language::Xml => (
             ScanConfig {
                 line_comments: &[],
                 block_comment: Some(("<!--", "-->")),
@@ -819,10 +823,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_NONE,
             },
-            base,
+            false,
         ),
-        Language::Julia => analyze_generic(
-            text,
+        Language::Julia => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: Some(("#=", "=#")),
@@ -833,10 +836,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_JULIA,
             },
-            base,
+            false,
         ),
-        Language::Kotlin => analyze_generic(
-            text,
+        Language::Kotlin => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -847,10 +849,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_KOTLIN,
             },
-            base,
+            false,
         ),
-        Language::Lua => analyze_generic(
-            text,
+        Language::Lua => (
             ScanConfig {
                 line_comments: &["--"],
                 block_comment: Some(("--[[", "]]")),
@@ -861,10 +862,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_LUA,
             },
-            base,
+            false,
         ),
-        Language::Nim => analyze_generic(
-            text,
+        Language::Nim => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: Some(("#[", "]#")),
@@ -875,24 +875,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_NIM,
             },
-            base,
+            false,
         ),
-        Language::ObjectiveC => analyze_generic(
-            text,
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_OBJECTIVEC,
-            },
-            cpp,
-        ),
-        Language::Ocaml => analyze_generic(
-            text,
+        Language::Ocaml => (
             ScanConfig {
                 line_comments: &[],
                 block_comment: Some(("(*", "*)")),
@@ -903,10 +888,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_OCAML,
             },
-            base,
+            false,
         ),
-        Language::Perl => analyze_generic(
-            text,
+        Language::Perl => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: None,
@@ -917,10 +901,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_PERL,
             },
-            base,
+            false,
         ),
-        Language::Php => analyze_generic(
-            text,
+        Language::Php => (
             ScanConfig {
                 line_comments: &["//", "#"],
                 block_comment: Some(("/*", "*/")),
@@ -931,10 +914,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_PHP,
             },
-            base,
+            false,
         ),
-        Language::R => analyze_generic(
-            text,
+        Language::R => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: None,
@@ -945,10 +927,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_R,
             },
-            base,
+            false,
         ),
-        Language::Ruby => analyze_generic(
-            text,
+        Language::Ruby => (
             ScanConfig {
                 line_comments: &["#"],
                 block_comment: None,
@@ -959,10 +940,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_RUBY,
             },
-            base,
+            false,
         ),
-        Language::Scala => analyze_generic(
-            text,
+        Language::Scala => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -973,10 +953,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_SCALA,
             },
-            base,
+            false,
         ),
-        Language::Scss => analyze_generic(
-            text,
+        Language::Scss => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -987,10 +966,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_NONE,
             },
-            base,
+            false,
         ),
-        Language::Sql => analyze_generic(
-            text,
+        Language::Sql => (
             ScanConfig {
                 line_comments: &["--"],
                 block_comment: Some(("/*", "*/")),
@@ -1001,10 +979,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_SQL,
             },
-            base,
+            false,
         ),
-        Language::Swift => analyze_generic(
-            text,
+        Language::Swift => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: Some(("/*", "*/")),
@@ -1015,10 +992,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_SWIFT,
             },
-            base,
+            false,
         ),
-        Language::Zig => analyze_generic(
-            text,
+        Language::Zig => (
             ScanConfig {
                 line_comments: &["//"],
                 block_comment: None,
@@ -1029,7 +1005,7 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
                 skip_lines: HashSet::new(),
                 symbol_patterns: SP_ZIG,
             },
-            base,
+            false,
         ),
     }
 }
@@ -1046,6 +1022,12 @@ struct SymbolPatterns {
     /// Line prefixes (after stripping leading whitespace) that indicate a test case or test
     /// function definition. Matched against code lines only, same as other symbol categories.
     tests: &'static [&'static str],
+    /// Line prefixes that indicate a test assertion call (ASSERT_EQ, assertEquals, assert_eq!,
+    /// Assert.AreEqual, etc.). Matched against code lines only.
+    assertions: &'static [&'static str],
+    /// Line prefixes that indicate a test suite / fixture / group declaration
+    /// (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], [TestFixture], etc.).
+    test_suites: &'static [&'static str],
 }
 
 impl SymbolPatterns {
@@ -1056,6 +1038,8 @@ impl SymbolPatterns {
             variables: &[],
             imports: &[],
             tests: &[],
+            assertions: &[],
+            test_suites: &[],
         }
     }
 }
@@ -1106,6 +1090,15 @@ const SP_RUST: SymbolPatterns = SymbolPatterns {
         "#[rstest]",
         "#[test_case",
     ],
+    assertions: &[
+        "assert_eq!(",
+        "assert_ne!(",
+        "assert!(",
+        "assert_matches!(",
+        "assert_err!(",
+        "assert_ok!(",
+    ],
+    test_suites: &[],
 };
 
 const SP_PYTHON: SymbolPatterns = SymbolPatterns {
@@ -1115,6 +1108,19 @@ const SP_PYTHON: SymbolPatterns = SymbolPatterns {
     imports: &["import ", "from "],
     // pytest: test_ prefix functions and Test* classes; unittest: test_ methods
     tests: &["def test_", "async def test_", "class Test"],
+    assertions: &[
+        "self.assertEqual(",
+        "self.assertNotEqual(",
+        "self.assertTrue(",
+        "self.assertFalse(",
+        "self.assertIsNone(",
+        "self.assertIsNotNone(",
+        "self.assertIn(",
+        "self.assertNotIn(",
+        "self.assertRaises(",
+        "self.assertAlmostEqual(",
+    ],
+    test_suites: &[],
 };
 
 const SP_JS: SymbolPatterns = SymbolPatterns {
@@ -1144,6 +1150,8 @@ const SP_JS: SymbolPatterns = SymbolPatterns {
         "test.each(",
         "describe.each(",
     ],
+    assertions: &["expect("],
+    test_suites: &[],
 };
 
 const SP_TS: SymbolPatterns = SymbolPatterns {
@@ -1183,6 +1191,8 @@ const SP_TS: SymbolPatterns = SymbolPatterns {
         "test.each(",
         "describe.each(",
     ],
+    assertions: &["expect("],
+    test_suites: &[],
 };
 
 const SP_GO: SymbolPatterns = SymbolPatterns {
@@ -1192,6 +1202,8 @@ const SP_GO: SymbolPatterns = SymbolPatterns {
     imports: &["import "],
     // Go standard testing: Test* functions (convention is practically exclusive to _test.go files)
     tests: &["func Test", "func Benchmark", "func Fuzz"],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_JAVA: SymbolPatterns = SymbolPatterns {
@@ -1223,6 +1235,21 @@ const SP_JAVA: SymbolPatterns = SymbolPatterns {
         "@TestFactory",
         "@TestTemplate",
     ],
+    assertions: &[
+        "assertEquals(",
+        "assertNotEquals(",
+        "assertTrue(",
+        "assertFalse(",
+        "assertNull(",
+        "assertNotNull(",
+        "assertThat(",
+        "assertThrows(",
+        "assertAll(",
+        "assertArrayEquals(",
+        "assertIterableEquals(",
+        "assertLinesMatch(",
+    ],
+    test_suites: &[],
 };
 
 const SP_CSHARP: SymbolPatterns = SymbolPatterns {
@@ -1253,10 +1280,37 @@ const SP_CSHARP: SymbolPatterns = SymbolPatterns {
     variables: &["var "],
     imports: &["using "],
     // MSTest, NUnit, xUnit — attributes on their own line before the method
-    tests: &["[TestMethod]", "[Test]", "[Fact]", "[Theory]", "[TestCase("],
+    tests: &[
+        "[TestMethod]",
+        "[Test]",
+        "[Fact]",
+        "[Theory]",
+        "[TestCase(",
+        "[DataRow(",
+        "[InlineData(",
+        "[MemberData(",
+    ],
+    assertions: &[
+        "Assert.AreEqual(",
+        "Assert.AreNotEqual(",
+        "Assert.IsTrue(",
+        "Assert.IsFalse(",
+        "Assert.IsNull(",
+        "Assert.IsNotNull(",
+        "Assert.Equal(",
+        "Assert.NotEqual(",
+        "Assert.True(",
+        "Assert.False(",
+        "Assert.That(",
+        "Assert.Contains(",
+        "Assert.Throws(",
+        "Assert.ThrowsAsync(",
+        "Assert.IsInstanceOfType(",
+    ],
+    test_suites: &["[TestClass]", "[TestFixture]", "[SetUpFixture]"],
 };
 
-// GTest, Catch2/doctest, Boost.Test patterns shared by C and C++.
+// GTest, Catch2/doctest, Boost.Test, Unity, Check, CMocka, CppUTest patterns for C and C++.
 const TEST_PATTERNS_C_CPP: &[&str] = &[
     // Google Test
     "TEST(",
@@ -1280,6 +1334,104 @@ const TEST_PATTERNS_C_CPP: &[&str] = &[
     // CppUnit
     "CPPUNIT_TEST(",
     "CPPUNIT_TEST_SUITE(",
+    // Unity (embedded C)
+    "RUN_TEST(",
+    "TEST_IGNORE(",
+    "TEST_FAIL(",
+    // Check (libcheck — embedded C)
+    "START_TEST(",
+    "tcase_add_test(",
+    "suite_create(",
+    // CMocka (embedded C)
+    "cmocka_unit_test(",
+    "cmocka_run_group_tests(",
+    // CppUTest
+    "IGNORE_TEST(",
+    "TEST_GROUP(",
+    "TEST_GROUP_BASE(",
+];
+
+// Test assertion patterns shared by C and C++.
+const ASSERT_PATTERNS_C_CPP: &[&str] = &[
+    // Google Test ASSERT_* (test-stopping failures)
+    "ASSERT_EQ(",
+    "ASSERT_NE(",
+    "ASSERT_LT(",
+    "ASSERT_LE(",
+    "ASSERT_GT(",
+    "ASSERT_GE(",
+    "ASSERT_TRUE(",
+    "ASSERT_FALSE(",
+    "ASSERT_STREQ(",
+    "ASSERT_STRNE(",
+    "ASSERT_FLOAT_EQ(",
+    "ASSERT_DOUBLE_EQ(",
+    "ASSERT_NEAR(",
+    "ASSERT_THROW(",
+    "ASSERT_NO_THROW(",
+    "ASSERT_ANY_THROW(",
+    // Google Test EXPECT_* (non-stopping failures)
+    "EXPECT_EQ(",
+    "EXPECT_NE(",
+    "EXPECT_LT(",
+    "EXPECT_LE(",
+    "EXPECT_GT(",
+    "EXPECT_GE(",
+    "EXPECT_TRUE(",
+    "EXPECT_FALSE(",
+    "EXPECT_STREQ(",
+    "EXPECT_STRNE(",
+    "EXPECT_FLOAT_EQ(",
+    "EXPECT_DOUBLE_EQ(",
+    "EXPECT_NEAR(",
+    "EXPECT_THROW(",
+    "EXPECT_NO_THROW(",
+    "EXPECT_ANY_THROW(",
+    // Catch2 / doctest assertions
+    "REQUIRE(",
+    "CHECK(",
+    "REQUIRE_FALSE(",
+    "CHECK_FALSE(",
+    "REQUIRE_NOTHROW(",
+    "CHECK_NOTHROW(",
+    "REQUIRE_THROWS(",
+    "CHECK_THROWS(",
+    "REQUIRE_THAT(",
+    "CHECK_THAT(",
+    // Unity assertions (embedded C)
+    "TEST_ASSERT_EQUAL(",
+    "TEST_ASSERT_EQUAL_INT(",
+    "TEST_ASSERT_EQUAL_STRING(",
+    "TEST_ASSERT_EQUAL_FLOAT(",
+    "TEST_ASSERT_EQUAL_DOUBLE(",
+    "TEST_ASSERT_EQUAL_PTR(",
+    "TEST_ASSERT_TRUE(",
+    "TEST_ASSERT_FALSE(",
+    "TEST_ASSERT_NULL(",
+    "TEST_ASSERT_NOT_NULL(",
+    "TEST_ASSERT_BITS_HIGH(",
+    "TEST_ASSERT_BITS_LOW(",
+    // CMocka assertions (embedded C)
+    "assert_int_equal(",
+    "assert_int_not_equal(",
+    "assert_string_equal(",
+    "assert_string_not_equal(",
+    "assert_true(",
+    "assert_false(",
+    "assert_null(",
+    "assert_non_null(",
+    "assert_ptr_equal(",
+    "assert_memory_equal(",
+    "assert_return_code(",
+];
+
+// Test suite/group declaration patterns for C and C++.
+const SUITE_PATTERNS_C_CPP: &[&str] = &[
+    "TEST_GROUP(",
+    "TEST_GROUP_BASE(",
+    "BOOST_AUTO_TEST_SUITE(",
+    "CPPUNIT_TEST_SUITE(",
+    "CPPUNIT_TEST_SUITE_END(",
 ];
 
 const SP_C: SymbolPatterns = SymbolPatterns {
@@ -1294,6 +1446,8 @@ const SP_C: SymbolPatterns = SymbolPatterns {
     variables: &[],
     imports: &["#include "],
     tests: TEST_PATTERNS_C_CPP,
+    assertions: ASSERT_PATTERNS_C_CPP,
+    test_suites: SUITE_PATTERNS_C_CPP,
 };
 
 const SP_CPP: SymbolPatterns = SymbolPatterns {
@@ -1302,6 +1456,8 @@ const SP_CPP: SymbolPatterns = SymbolPatterns {
     variables: &[],
     imports: &["#include "],
     tests: TEST_PATTERNS_C_CPP,
+    assertions: ASSERT_PATTERNS_C_CPP,
+    test_suites: SUITE_PATTERNS_C_CPP,
 };
 
 const SP_SHELL: SymbolPatterns = SymbolPatterns {
@@ -1310,6 +1466,8 @@ const SP_SHELL: SymbolPatterns = SymbolPatterns {
     variables: &["declare ", "local ", "export "],
     imports: &["source ", ". "],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
@@ -1319,6 +1477,8 @@ const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
     imports: &["Import-Module ", "using "],
     // Pester test framework
     tests: &["Describe ", "It ", "Context "],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
@@ -1357,6 +1517,20 @@ const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
         "\"should ",
         "\"it ",
     ],
+    assertions: &[
+        "assertEquals(",
+        "assertNotEquals(",
+        "assertTrue(",
+        "assertFalse(",
+        "assertNull(",
+        "assertNotNull(",
+        "assertThat(",
+        "assertThrows(",
+        "shouldBe(",
+        "shouldNotBe(",
+        "shouldThrow(",
+    ],
+    test_suites: &[],
 };
 
 const SP_SWIFT: SymbolPatterns = SymbolPatterns {
@@ -1399,6 +1573,20 @@ const SP_SWIFT: SymbolPatterns = SymbolPatterns {
     imports: &["import "],
     // XCTest: test functions are named test* by convention; Swift Testing: @Test attribute
     tests: &["func test", "func Test", "@Test"],
+    assertions: &[
+        "XCTAssertEqual(",
+        "XCTAssertNotEqual(",
+        "XCTAssertTrue(",
+        "XCTAssertFalse(",
+        "XCTAssertNil(",
+        "XCTAssertNotNil(",
+        "XCTAssertGreaterThan(",
+        "XCTAssertLessThan(",
+        "XCTAssertThrowsError(",
+        "XCTAssertNoThrow(",
+        "#expect(",
+    ],
+    test_suites: &[],
 };
 
 const SP_RUBY: SymbolPatterns = SymbolPatterns {
@@ -1408,6 +1596,8 @@ const SP_RUBY: SymbolPatterns = SymbolPatterns {
     imports: &["require ", "require_relative "],
     // RSpec / minitest
     tests: &["it ", "it(", "describe ", "context ", "test "],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_SCALA: SymbolPatterns = SymbolPatterns {
@@ -1424,6 +1614,8 @@ const SP_SCALA: SymbolPatterns = SymbolPatterns {
     imports: &["import "],
     // ScalaTest / MUnit: FunSuite test("..."), FlatSpec it("..."), AnyWordSpec "..." should
     tests: &["test(", "it(", "describe("],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_PHP: SymbolPatterns = SymbolPatterns {
@@ -1462,6 +1654,8 @@ const SP_PHP: SymbolPatterns = SymbolPatterns {
         "#[Test]",
         "#[DataProvider(",
     ],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
@@ -1478,6 +1672,8 @@ const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
     imports: &["import ", "alias ", "use ", "require "],
     // ExUnit
     tests: &["test ", "describe "],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_ERLANG: SymbolPatterns = SymbolPatterns {
@@ -1486,6 +1682,8 @@ const SP_ERLANG: SymbolPatterns = SymbolPatterns {
     variables: &[],
     imports: &["-import(", "-include(", "-include_lib("],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_FSHARP: SymbolPatterns = SymbolPatterns {
@@ -1501,6 +1699,8 @@ const SP_FSHARP: SymbolPatterns = SymbolPatterns {
     imports: &["open "],
     // NUnit / xUnit attributes on their own line; FsUnit uses [<Test>] / [<Fact>]
     tests: &["[<Test>]", "[<Fact>]", "[<Theory>]", "[<TestCase("],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_GROOVY: SymbolPatterns = SymbolPatterns {
@@ -1510,6 +1710,8 @@ const SP_GROOVY: SymbolPatterns = SymbolPatterns {
     imports: &["import "],
     // Spock framework: feature methods; JUnit annotations
     tests: &["def \"", "@Test", "given:", "when:", "then:", "expect:"],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_HASKELL: SymbolPatterns = SymbolPatterns {
@@ -1518,6 +1720,8 @@ const SP_HASKELL: SymbolPatterns = SymbolPatterns {
     variables: &[],
     imports: &["import "],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_LUA: SymbolPatterns = SymbolPatterns {
@@ -1527,6 +1731,8 @@ const SP_LUA: SymbolPatterns = SymbolPatterns {
     imports: &[],
     // busted test framework
     tests: &["it(", "describe(", "pending("],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_NIM: SymbolPatterns = SymbolPatterns {
@@ -1544,6 +1750,8 @@ const SP_NIM: SymbolPatterns = SymbolPatterns {
     imports: &["import ", "from "],
     // unittest module
     tests: &["test "],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
@@ -1553,6 +1761,19 @@ const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
     imports: &["#import ", "#include "],
     // XCTest: test methods start with - (void)test
     tests: &["- (void)test"],
+    assertions: &[
+        "XCTAssertEqual(",
+        "XCTAssertNotEqual(",
+        "XCTAssertTrue(",
+        "XCTAssertFalse(",
+        "XCTAssertNil(",
+        "XCTAssertNotNil(",
+        "XCTAssertGreaterThan(",
+        "XCTAssertLessThan(",
+        "XCTAssertThrowsError(",
+        "XCTAssertNoThrow(",
+    ],
+    test_suites: &[],
 };
 
 const SP_OCAML: SymbolPatterns = SymbolPatterns {
@@ -1561,6 +1782,8 @@ const SP_OCAML: SymbolPatterns = SymbolPatterns {
     variables: &[],
     imports: &["open "],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_PERL: SymbolPatterns = SymbolPatterns {
@@ -1569,6 +1792,8 @@ const SP_PERL: SymbolPatterns = SymbolPatterns {
     variables: &["my ", "our ", "local "],
     imports: &["use ", "require "],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
@@ -1583,6 +1808,8 @@ const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
     imports: &["(ns ", "(require "],
     // clojure.test
     tests: &["(deftest ", "(testing "],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_JULIA: SymbolPatterns = SymbolPatterns {
@@ -1597,6 +1824,8 @@ const SP_JULIA: SymbolPatterns = SymbolPatterns {
     imports: &["import ", "using "],
     // Test.jl standard library
     tests: &["@test ", "@testset "],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_DART: SymbolPatterns = SymbolPatterns {
@@ -1606,6 +1835,8 @@ const SP_DART: SymbolPatterns = SymbolPatterns {
     imports: &["import "],
     // flutter_test / test package
     tests: &["test(", "testWidgets(", "group("],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_R: SymbolPatterns = SymbolPatterns {
@@ -1615,6 +1846,8 @@ const SP_R: SymbolPatterns = SymbolPatterns {
     imports: &["library(", "source("],
     // testthat
     tests: &["test_that(", "it(", "describe(", "expect_"],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_SQL: SymbolPatterns = SymbolPatterns {
@@ -1639,6 +1872,8 @@ const SP_SQL: SymbolPatterns = SymbolPatterns {
     variables: &["declare ", "DECLARE "],
     imports: &[],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
@@ -1647,6 +1882,8 @@ const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
     variables: &[],
     imports: &["include ", "INCLUDE ", "%include "],
     tests: &[],
+    assertions: &[],
+    test_suites: &[],
 };
 
 const SP_ZIG: SymbolPatterns = SymbolPatterns {
@@ -1662,6 +1899,8 @@ const SP_ZIG: SymbolPatterns = SymbolPatterns {
     imports: &[],
     // Zig built-in test blocks
     tests: &["test \"", "test{"],
+    assertions: &[],
+    test_suites: &[],
 };
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1981,12 +2220,14 @@ fn process_physical_line(
     classify_line(raw, &emit, trimmed);
 
     if emit.has_code {
-        let (f, c, v, i, t) = count_symbols(&config.symbol_patterns, trimmed);
+        let (f, c, v, i, t, a, s) = count_symbols(&config.symbol_patterns, trimmed);
         raw.functions += f;
         raw.classes += c;
         raw.variables += v;
         raw.imports += i;
         raw.test_count += t;
+        raw.test_assertion_count += a;
+        raw.test_suite_count += s;
     }
 }
 
@@ -2065,7 +2306,7 @@ const fn classify_line(raw: &mut RawLineCounts, facts: &LineFacts, trimmed: &str
     }
 }
 
-fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64) {
+fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64, u64, u64) {
     let hit = |pats: &[&str]| u64::from(pats.iter().any(|p| trimmed.starts_with(p)));
     (
         hit(patterns.functions),
@@ -2073,6 +2314,8 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
         hit(patterns.variables),
         hit(patterns.imports),
         hit(patterns.tests),
+        hit(patterns.assertions),
+        hit(patterns.test_suites),
     )
 }
 
