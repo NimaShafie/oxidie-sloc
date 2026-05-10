@@ -293,7 +293,7 @@ enum AsyncRunState {
         started_at: std::time::Instant,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
     },
-    /// run_id so the status endpoint can redirect to /runs/{run_id}/result.
+    /// run_id so the status endpoint can redirect to /runs/result/{run_id}.
     Complete {
         run_id: String,
     },
@@ -401,7 +401,7 @@ fn build_router(state: AppState) -> Router {
         .route("/compare-scans", get(compare_select_handler))
         .route("/compare", get(compare_handler))
         .route("/images/{folder}/{file}", get(image_handler))
-        .route("/runs/{run_id}/{artifact}", get(artifact_handler))
+        .route("/runs/{artifact}/{run_id}", get(artifact_handler))
         .route("/api/metrics/latest", get(api_metrics_latest_handler))
         .route("/api/metrics/{run_id}", get(api_metrics_run_handler))
         .route("/api/metrics/history", get(api_metrics_history_handler))
@@ -416,7 +416,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/runs/{wait_id}/status", get(async_run_status_handler))
         .route("/api/runs/{wait_id}/cancel", post(cancel_run_handler))
         .route("/api/runs/{run_id}/pdf-status", get(pdf_status_handler))
-        .route("/runs/{run_id}/result", get(async_run_result_handler))
+        .route("/runs/result/{run_id}", get(async_run_result_handler))
         .route("/embed/summary", get(embed_handler))
         // ── Git browser ────────────────────────────────────────────────────────
         .route("/git-browser", get(git_browser::git_browser_handler))
@@ -2620,7 +2620,7 @@ fn build_submodule_row(
         render_sub_report_html(&sub_run).ok().and_then(|sub_html| {
             let path = run_dir.join(format!("{artifact_key}.html"));
             if fs::write(&path, sub_html.as_bytes()).is_ok() {
-                Some(format!("/runs/{run_id}/{artifact_key}"))
+                Some(format!("/runs/{artifact_key}/{run_id}"))
             } else {
                 None
             }
@@ -2940,7 +2940,7 @@ async fn analyze_handler(
 
         spawn_pdf_background(pending_pdf);
 
-        // Mark complete — client is now polling and will be redirected to /runs/{run_id}/result.
+        // Mark complete — client is now polling and will be redirected to /runs/result/{run_id}.
         let mut runs = state_bg.async_runs.lock().await;
         runs.insert(
             wait_id_bg.clone(),
@@ -3250,27 +3250,27 @@ fn render_result_page(
         html_url: artifacts
             .html_path
             .as_ref()
-            .map(|_| format!("/runs/{run_id}/html")),
+            .map(|_| format!("/runs/html/{run_id}")),
         pdf_url: artifacts
             .pdf_path
             .as_ref()
-            .map(|_| format!("/runs/{run_id}/pdf")),
+            .map(|_| format!("/runs/pdf/{run_id}")),
         json_url: artifacts
             .json_path
             .as_ref()
-            .map(|_| format!("/runs/{run_id}/json")),
+            .map(|_| format!("/runs/json/{run_id}")),
         html_download_url: artifacts
             .html_path
             .as_ref()
-            .map(|_| format!("/runs/{run_id}/html?download=1")),
+            .map(|_| format!("/runs/html/{run_id}?download=1")),
         pdf_download_url: artifacts
             .pdf_path
             .as_ref()
-            .map(|_| format!("/runs/{run_id}/pdf?download=1")),
+            .map(|_| format!("/runs/pdf/{run_id}?download=1")),
         json_download_url: artifacts
             .json_path
             .as_ref()
-            .map(|_| format!("/runs/{run_id}/json?download=1")),
+            .map(|_| format!("/runs/json/{run_id}?download=1")),
         html_path: artifacts.html_path.as_ref().map(|p| display_path(p)),
         pdf_path: artifacts.pdf_path.as_ref().map(|p| display_path(p)),
         json_path: artifacts.json_path.as_ref().map(|p| display_path(p)),
@@ -3329,7 +3329,7 @@ fn render_result_page(
             .as_ref()
             .map(|p| !p.exists())
             .unwrap_or(false),
-        scan_config_url: format!("/runs/{run_id}/scan-config"),
+        scan_config_url: format!("/runs/scan-config/{run_id}"),
         lang_chart_json: {
             let entries: Vec<String> = run
                 .totals_by_language
@@ -3674,7 +3674,7 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
 async fn artifact_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
-    AxumPath((run_id, artifact)): AxumPath<(String, String)>,
+    AxumPath((artifact, run_id)): AxumPath<(String, String)>,
     Query(query): Query<ArtifactQuery>,
 ) -> Response {
     let artifact_set = {
@@ -3724,7 +3724,7 @@ async fn artifact_handler(
                     .to_string();
                 let html = ErrorTemplate {
                     message: msg,
-                    last_report_url: Some(format!("/runs/{run_id}/html")),
+                    last_report_url: Some(format!("/runs/html/{run_id}")),
                     last_report_label: Some("View HTML Report".to_string()),
                     csp_nonce: csp_nonce.clone(),
                 }
@@ -3757,12 +3757,12 @@ async fn artifact_handler(
                      box-shadow:0 4px 14px rgba(0,0,0,0.18);}}\
                      .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;\
                      min-height:56px;display:flex;align-items:center;gap:14px;}}\
-                     .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;}}\
+                     .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}}\
                      .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;\
                      filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}\
-                     .brand-copy{{display:flex;flex-direction:column;justify-content:center;min-width:0;}}\
+                     .brand-copy{{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}}\
                      .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}}\
-                     .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}}\
+                     .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}}\
                      .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;}}\
                      .nav-pill{{display:inline-flex;align-items:center;min-height:38px;padding:0 14px;\
                      border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;\
@@ -3822,7 +3822,7 @@ async fn artifact_handler(
                        <h1>Generating PDF\u{2026}</h1>\
                        <p>The PDF is being rendered from the HTML report.<br>\
                        This page refreshes automatically \u{2014} usually 15\u{2013}45 seconds.</p>\
-                       <a class=\"back-link\" href=\"/runs/{run_id}/pdf\">Refresh now</a>\
+                       <a class=\"back-link\" href=\"/runs/pdf/{run_id}\">Refresh now</a>\
                      </div></div>\
                      <script nonce=\"{csp_nonce}\">\
                      (function(){{\
@@ -3983,7 +3983,7 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                                 let display = stem[4..].replace('-', " ");
                                 links.push(SubmoduleLinkRow {
                                     name: display,
-                                    url: format!("/runs/{}/{stem}", e.run_id),
+                                    url: format!("/runs/{stem}/{}", e.run_id),
                                 });
                             }
                         }
@@ -4902,7 +4902,7 @@ async fn api_metrics_history_handler(
                 .html_path
                 .as_ref()
                 .filter(|p| p.exists())
-                .map(|_| format!("/runs/{}/html", e.run_id));
+                .map(|_| format!("/runs/html/{}", e.run_id));
             let nearest_tag = e.git_nearest_tag.clone();
             let has_pdf = e.pdf_path.as_ref().is_some_and(|p| p.exists());
             let run_id_short: String = e
@@ -4930,7 +4930,7 @@ async fn api_metrics_history_handler(
                                 let display = stem[4..].replace('-', " ");
                                 links.push(MetricsSubmoduleLink {
                                     name: display,
-                                    url: format!("/runs/{}/{stem}", e.run_id),
+                                    url: format!("/runs/{stem}/{}", e.run_id),
                                 });
                             }
                         }
@@ -4973,7 +4973,7 @@ async fn api_metrics_history_handler(
                 let sub_html_url = if let Some(run_dir) = std::path::Path::new(json_path).parent() {
                     let sub_path = run_dir.join(format!("{artifact_key}.html"));
                     if sub_path.exists() {
-                        Some(format!("/runs/{}/{artifact_key}", e.run_id))
+                        Some(format!("/runs/{artifact_key}/{}", e.run_id))
                     } else {
                         base.html_url.clone()
                     }
@@ -5182,7 +5182,7 @@ async fn trend_report_handler(
             .collect()
     };
     let watched_dirs_html = format!(
-        r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="btn">&#8635; Refresh</button></form></div><div class="toolbar-divider"></div><div class="toolbar-right"><button type="button" class="export-btn" id="export-xlsx-btn" title="Download scan history as Excel workbook (.xlsx)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel</button><button type="button" class="export-btn" id="export-png-btn" title="Save chart as PNG image"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Export PNG</button></div></div>"#
+        r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
     );
 
     let html = format!(
@@ -5209,20 +5209,20 @@ async fn trend_report_handler(
     @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
     .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
     .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
-    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
-    .brand-copy{{display:flex;flex-direction:column;justify-content:center;min-width:0;}}
-    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}}
+    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
+    .brand-copy{{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}}
+    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}}
     .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;}}
     @media (max-width:1400px) {{ .nav-right {{ gap:6px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 10px; }} }}
     @media (max-width:1150px) {{ .nav-right {{ gap:4px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 8px;font-size:11px;min-height:34px; }} .brand-subtitle {{ display:none; }} .server-online-pill {{ width:34px;padding:0;justify-content:center;font-size:0;gap:0;min-height:34px; }} }}
-    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
+    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
     .nav-pill:hover{{background:rgba(255,255,255,0.18);transform:translateY(-1px);}}
     .theme-toggle{{width:38px;justify-content:center;padding:0;cursor:pointer;}} .theme-toggle:hover{{transform:translateY(-1px);background:rgba(255,255,255,0.16);}}
     .theme-toggle svg{{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}}
     .theme-toggle .icon-sun{{display:none;}} body.dark-theme .theme-toggle .icon-sun{{display:block;}} body.dark-theme .theme-toggle .icon-moon{{display:none;}}
     .status-dot{{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}}
     .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{{display:block;}}
-    .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
+    .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
     .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
     .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
     .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
@@ -5246,7 +5246,7 @@ async fn trend_report_handler(
     .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
     @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
     .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}}
-    .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}}
+    .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
     .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
@@ -5262,11 +5262,34 @@ async fn trend_report_handler(
     .chart-hint-inline .dot{{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin:0 1px;}}
     .chart-section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
     .data-table{{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}}
-    .data-table th{{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+    .data-table th{{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;user-select:none;}}
     .data-table td{{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}}
     .data-table tr:last-child td{{border-bottom:none;}}
     .data-table tbody tr:hover td{{background:var(--surface-2);cursor:pointer;}}
     .num{{text-align:right;font-variant-numeric:tabular-nums;}}
+    .table-wrap{{width:100%;overflow-x:auto;}}
+    .data-table th.sortable{{cursor:pointer;}} .data-table th.sortable:hover{{color:var(--oxide);}}
+    .sort-icon{{margin-left:4px;font-size:10px;opacity:0.45;display:inline-block;vertical-align:middle;}}
+    .data-table th.sort-asc .sort-icon,.data-table th.sort-desc .sort-icon{{opacity:1;color:var(--oxide);}}
+    .col-resize-handle{{position:absolute;top:0;right:0;bottom:0;width:6px;cursor:col-resize;z-index:2;}}
+    .col-resize-handle:hover,.col-resize-handle.dragging{{background:rgba(211,122,76,0.3);}}
+    .filter-row{{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}}
+    .filter-input{{border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:5px 10px;font-size:13px;cursor:text;min-width:180px;}}
+    .filter-select{{border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:5px 10px;font-size:13px;cursor:pointer;}}
+    .pagination{{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:14px;flex-wrap:wrap;}}
+    .pagination-info{{font-size:13px;color:var(--muted);}}
+    .pagination-btns{{display:flex;gap:6px;}}
+    .pg-btn{{min-width:34px;min-height:34px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:background .12s ease;}}
+    .pg-btn:hover{{background:var(--line);}} .pg-btn.active{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}} .pg-btn:disabled{{opacity:.35;cursor:default;pointer-events:none;}}
+    #scan-history-table col:nth-child(1){{width:155px;}}
+    #scan-history-table col:nth-child(2){{width:240px;}}
+    #scan-history-table col:nth-child(3){{width:82px;}}
+    #scan-history-table col:nth-child(4){{width:82px;}}
+    #scan-history-table col:nth-child(5){{width:90px;}}
+    #scan-history-table col:nth-child(6){{width:90px;}}
+    #scan-history-table col:nth-child(7){{width:88px;}}
+    #scan-history-table col:nth-child(8){{width:150px;}}
+    #scan-history-table td:nth-child(8){{overflow:visible!important;white-space:normal!important;}}
     .tag-chip{{display:inline-flex;padding:2px 8px;border-radius:999px;background:var(--info-bg);color:var(--info-text);font-size:11px;font-weight:700;margin-right:4px;}}
     .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;flex-wrap:wrap;margin-bottom:16px;position:relative;z-index:1;}}
     .toolbar-divider{{width:1px;background:var(--line);align-self:stretch;flex-shrink:0;margin:0 6px;}}
@@ -5308,6 +5331,9 @@ async fn trend_report_handler(
     .export-btn svg{{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.2;}}
     .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
     .site-footer a{{color:var(--muted);}}
+    .loading-state{{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:52px 24px;gap:14px;color:var(--muted);font-size:13px;font-weight:600;}}
+    .loading-spinner{{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--oxide);border-radius:50%;animation:spin-load 0.75s linear infinite;}}
+    @keyframes spin-load{{to{{transform:rotate(360deg);}}}}
   </style>
 </head>
 <body>
@@ -5340,8 +5366,7 @@ async fn trend_report_handler(
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -5371,6 +5396,16 @@ async fn trend_report_handler(
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
             Click a dot or row to view its full report &nbsp;·&nbsp; <span class="dot" style="background:#C45C10;"></span>&thinsp;regular scan &nbsp;<span class="dot" style="background:#4472C4;"></span>&thinsp;tagged / release scan
           </span>
+        </div>
+        <div class="chart-actions">
+          <button type="button" class="export-btn" id="export-xlsx-btn" title="Download scan history as Excel workbook (.xlsx)">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export Excel
+          </button>
+          <button type="button" class="export-btn" id="export-png-btn" title="Save chart as PNG image">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Export PNG
+          </button>
         </div>
       </div>
 
@@ -5411,7 +5446,7 @@ async fn trend_report_handler(
         </label>
       </div>
 
-      <div id="chart-wrap" class="chart-wrap"></div>
+      <div id="chart-wrap" class="chart-wrap"><div class="loading-state"><div class="loading-spinner"></div>Loading scan history…</div></div>
       <div id="data-table-wrap" style="overflow-x:auto;"></div>
     </div>
   </div>
@@ -5571,9 +5606,13 @@ async fn trend_report_handler(
         .catch(function(){{subLabel.style.display='none';}});
     }}
 
+    var LOADING_HTML='<div class="loading-state"><div class="loading-spinner"></div>Loading scan history…</div>';
+
     function loadAndRender(){{
       var root = rootSel.value;
       var sub = subSel ? subSel.value : '';
+      document.getElementById('chart-wrap').innerHTML=LOADING_HTML;
+      document.getElementById('data-table-wrap').innerHTML='';
       var url = '/api/metrics/history?limit=100'
         + (root ? '&root='+encodeURIComponent(root) : '')
         + (sub  ? '&submodule='+encodeURIComponent(sub) : '');
@@ -5699,37 +5738,68 @@ async fn trend_report_handler(
       renderTable(pts, yKey);
     }}
 
-    function renderTable(pts, yKey){{
-      var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comments',blank_lines:'Blanks',physical_lines:'Physical',files_analyzed:'Files'}};
-      var wrap = document.getElementById('data-table-wrap');
-      if(!pts||!pts.length){{wrap.innerHTML='';return;}}
-      var yLabel = Y_LABELS[yKey]||yKey||'';
-      var rows = pts.slice().reverse().map(function(d){{
+    var shData=[], shSortCol=null, shSortOrder='asc', shPage=1, shPerPage=25;
+    var shProjFilter='', shBranchFilter='';
+
+    function fmtPST(isoStr){{
+      if(!isoStr)return'';
+      var d=new Date(isoStr);
+      if(isNaN(d.getTime()))return isoStr.substring(0,16).replace('T',' ');
+      var pst=new Date(d.getTime()-8*3600*1000);
+      function p(n){{return n<10?'0'+n:String(n);}}
+      return pst.getUTCFullYear()+'-'+p(pst.getUTCMonth()+1)+'-'+p(pst.getUTCDate())+' '+p(pst.getUTCHours())+':'+p(pst.getUTCMinutes())+' PST';
+    }}
+
+    function getShRows(){{
+      var proj=shProjFilter.toLowerCase().trim();
+      var branch=shBranchFilter;
+      return shData.filter(function(d){{
+        if(proj&&!(d.project_label||'').toLowerCase().includes(proj))return false;
+        if(branch&&(d.branch||'')!==branch)return false;
+        return true;
+      }});
+    }}
+
+    function renderShPage(){{
+      var filtered=getShRows();
+      if(shSortCol){{
+        filtered.sort(function(a,b){{
+          var va,vb;
+          if(shSortCol==='metric'){{va=a._metricVal||0;vb=b._metricVal||0;return shSortOrder==='asc'?va-vb:vb-va;}}
+          if(shSortCol==='timestamp'){{va=a.timestamp||'';vb=b.timestamp||'';}}
+          else if(shSortCol==='project'){{va=(a.project_label||'').toLowerCase();vb=(b.project_label||'').toLowerCase();}}
+          else if(shSortCol==='branch'){{va=(a.branch||'').toLowerCase();vb=(b.branch||'').toLowerCase();}}
+          else{{va=String(a[shSortCol]||'').toLowerCase();vb=String(b[shSortCol]||'').toLowerCase();}}
+          return shSortOrder==='asc'?(va<vb?-1:va>vb?1:0):(va<vb?1:va>vb?-1:0);
+        }});
+      }}
+      var total=filtered.length,totalPages=Math.max(1,Math.ceil(total/shPerPage));
+      shPage=Math.min(shPage,totalPages);
+      var start=(shPage-1)*shPerPage,end=Math.min(start+shPerPage,total);
+      var visible=filtered.slice(start,end);
+      var tbody=document.getElementById('sh-tbody');
+      if(!tbody)return;
+      tbody.innerHTML=visible.map(function(d){{
+        var tsHtml=esc(fmtPST(d.timestamp));
         var tags=(d.tags&&d.tags.length)?d.tags.map(function(t){{return'<span class="tag-chip">'+esc(t)+'</span>';}}).join(''):'<span style="color:var(--muted)">&#8212;</span>';
         var commitHtml=d.commit?'<span class="git-chip" title="'+esc(d.commit)+'">'+esc(d.commit.substring(0,7))+'</span>':'<span style="color:var(--muted)">&#8212;</span>';
         var branchHtml=d.branch?'<span class="git-chip">'+esc(d.branch)+'</span>':'<span style="color:var(--muted)">&#8212;</span>';
         var runIdHtml=d.run_id_short?'<span class="run-id-chip">'+esc(d.run_id_short)+'</span>':'&#8212;';
-        var metricHtml='<span class="metric-num">'+fmt(Number(d[yKey]))+'</span>';
+        var metricHtml='<span class="metric-num">'+fmt(d._metricVal)+'</span>';
         var reportCell='';
         if(d.html_url){{
-          reportCell+='<div class="actions-cell">';
-          reportCell+='<a class="btn primary rpt-btn" href="'+esc(d.html_url)+'" target="_blank" rel="noopener">View</a>';
-          if(d.has_pdf){{
-            var pdfUrl=d.html_url.replace(/\/html$/,'/pdf');
-            reportCell+='<a class="btn primary rpt-btn" href="'+esc(pdfUrl)+'" target="_blank" rel="noopener">PDF</a>';
-          }}
+          reportCell+='<div class="actions-cell"><a class="btn primary rpt-btn" href="'+esc(d.html_url)+'" target="_blank" rel="noopener">View</a>';
+          if(d.has_pdf){{var pdfUrl=d.html_url.replace(/\/html$/,'/pdf');reportCell+='<a class="btn primary rpt-btn" href="'+esc(pdfUrl)+'" target="_blank" rel="noopener">PDF</a>';}}
           reportCell+='</div>';
-        }}else{{
-          reportCell+='<span style="color:var(--muted);font-size:11px;font-style:italic;">&#8212;</span>';
-        }}
+        }}else{{reportCell='<span style="color:var(--muted);font-size:11px;font-style:italic;">&#8212;</span>';}}
         if(d.submodule_links&&d.submodule_links.length){{
           reportCell+='<details class="submod-details"><summary>&#8627; '+d.submodule_links.length+' submodule(s)</summary><div class="submod-link-list">';
           d.submodule_links.forEach(function(s){{reportCell+='<a href="'+esc(s.url)+'" target="_blank" rel="noopener" class="submod-view-btn">'+esc(s.name)+'</a>';}});
           reportCell+='</div></details>';
         }}
         return '<tr>'
-          +'<td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td>'
-          +'<td>'+esc(d.project_label)+'</td>'
+          +'<td>'+tsHtml+'</td>'
+          +'<td title="'+esc(d.project_label)+'">'+esc(d.project_label)+'</td>'
           +'<td>'+runIdHtml+'</td>'
           +'<td>'+commitHtml+'</td>'
           +'<td>'+branchHtml+'</td>'
@@ -5738,17 +5808,123 @@ async fn trend_report_handler(
           +'<td class="report-cell">'+reportCell+'</td>'
           +'</tr>';
       }}).join('');
-      wrap.innerHTML='<div class="chart-section-header">SCAN HISTORY</div>'
-        +'<table class="data-table" style="min-width:1060px"><thead><tr>'
-        +'<th style="width:160px">Date</th>'
-        +'<th>Project</th>'
-        +'<th style="width:92px">Run ID</th>'
-        +'<th style="width:92px">Commit</th>'
-        +'<th style="width:115px">Branch</th>'
-        +'<th style="width:115px">Tags</th>'
-        +'<th class="num" style="width:100px">'+esc(yLabel)+'</th>'
-        +'<th style="width:155px">Report</th>'
-        +'</tr></thead><tbody>'+rows+'</tbody></table>';
+      var pgRange=document.getElementById('sh-pg-range');
+      if(pgRange)pgRange.textContent=total?'Showing '+(start+1)+'–'+end+' of '+total:'No results';
+      var pgInfo=document.getElementById('sh-pg-info');
+      if(pgInfo)pgInfo.textContent='Page '+shPage+' of '+totalPages;
+      var pgBtns=document.getElementById('sh-pg-btns');
+      if(pgBtns){{
+        pgBtns.innerHTML='';
+        function mkPgBtn(lbl,pg,active,disabled){{
+          var b=document.createElement('button');b.className='pg-btn'+(active?' active':'');b.textContent=lbl;b.disabled=disabled;
+          if(!disabled)b.addEventListener('click',function(){{shPage=pg;renderShPage();}});
+          return b;
+        }}
+        pgBtns.appendChild(mkPgBtn('‹',shPage-1,false,shPage===1));
+        var ws=Math.max(1,shPage-2),we=Math.min(totalPages,ws+4);ws=Math.max(1,we-4);
+        for(var pg=ws;pg<=we;pg++)pgBtns.appendChild(mkPgBtn(String(pg),pg,pg===shPage,false));
+        pgBtns.appendChild(mkPgBtn('›',shPage+1,false,shPage===totalPages));
+      }}
+    }}
+
+    function wireTableBehavior(){{
+      var pf=document.getElementById('sh-proj-filter');
+      if(pf){{pf.value=shProjFilter;pf.addEventListener('input',function(){{shProjFilter=this.value;shPage=1;renderShPage();}});}}
+      var bf=document.getElementById('sh-branch-filter');
+      if(bf){{bf.value=shBranchFilter;bf.addEventListener('change',function(){{shBranchFilter=this.value;shPage=1;renderShPage();}});}}
+      var rb=document.getElementById('sh-reset-btn');
+      if(rb)rb.addEventListener('click',function(){{
+        shProjFilter='';shBranchFilter='';shSortCol=null;shSortOrder='asc';shPage=1;
+        var pf2=document.getElementById('sh-proj-filter');if(pf2)pf2.value='';
+        var bf2=document.getElementById('sh-branch-filter');if(bf2)bf2.value='';
+        document.querySelectorAll('#sh-thead .sortable').forEach(function(t){{var si=t.querySelector('.sort-icon');if(si)si.textContent='↕';t.classList.remove('sort-asc','sort-desc');}});
+        renderShPage();
+      }});
+      var pps=document.getElementById('sh-per-page');
+      if(pps)pps.addEventListener('change',function(){{shPerPage=parseInt(this.value,10)||25;shPage=1;renderShPage();}});
+      var ths=Array.prototype.slice.call(document.querySelectorAll('#sh-thead .sortable'));
+      ths.forEach(function(th){{
+        th.addEventListener('click',function(e){{
+          if(e.target.classList.contains('col-resize-handle'))return;
+          var col=th.dataset.col;
+          if(shSortCol===col){{shSortOrder=shSortOrder==='asc'?'desc':'asc';}}else{{shSortCol=col;shSortOrder='asc';}}
+          ths.forEach(function(t){{var si=t.querySelector('.sort-icon');if(si)si.textContent='↕';t.classList.remove('sort-asc','sort-desc');}});
+          th.classList.add('sort-'+shSortOrder);
+          var si=th.querySelector('.sort-icon');if(si)si.textContent=shSortOrder==='asc'?'↑':'↓';
+          shPage=1;renderShPage();
+        }});
+      }});
+      var table=document.getElementById('scan-history-table');
+      if(!table)return;
+      var cols=Array.prototype.slice.call(table.querySelectorAll('col'));
+      var allThs=Array.prototype.slice.call(table.querySelectorAll('#sh-thead th'));
+      allThs.forEach(function(th,i){{
+        var handle=th.querySelector('.col-resize-handle');
+        if(!handle||!cols[i])return;
+        var startX,startW;
+        handle.addEventListener('mousedown',function(e){{
+          e.stopPropagation();e.preventDefault();
+          startX=e.clientX;startW=cols[i].offsetWidth||th.offsetWidth;
+          handle.classList.add('dragging');
+          function onMove(ev){{cols[i].style.width=Math.max(40,startW+ev.clientX-startX)+'px';}}
+          function onUp(){{handle.classList.remove('dragging');document.removeEventListener('mousemove',onMove);document.removeEventListener('mouseup',onUp);}}
+          document.addEventListener('mousemove',onMove);
+          document.addEventListener('mouseup',onUp);
+        }});
+      }});
+    }}
+
+    function renderTable(pts, yKey){{
+      var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comments',blank_lines:'Blanks',physical_lines:'Physical',files_analyzed:'Files'}};
+      var wrap=document.getElementById('data-table-wrap');
+      if(!pts||!pts.length){{wrap.innerHTML='';return;}}
+      var yLabel=Y_LABELS[yKey]||yKey||'';
+      shData=pts.slice().reverse();
+      shSortCol=null;shSortOrder='asc';shPage=1;shProjFilter='';shBranchFilter='';
+      shData.forEach(function(d){{d._metricVal=Number(d[yKey])||0;}});
+      var branches={{}};
+      shData.forEach(function(d){{if(d.branch)branches[d.branch]=true;}});
+      var branchOpts='<option value="">All branches</option>';
+      Object.keys(branches).sort().forEach(function(b){{branchOpts+='<option value="'+esc(b)+'">'+esc(b)+'</option>';}});
+      wrap.innerHTML=
+        '<div class="chart-section-header">SCAN HISTORY</div>'+
+        '<div class="filter-row">'+
+          '<input class="filter-input" id="sh-proj-filter" type="text" placeholder="Filter by project…">'+
+          '<select class="filter-select" id="sh-branch-filter">'+branchOpts+'</select>'+
+          '<button type="button" class="btn" id="sh-reset-btn">↻ Reset view</button>'+
+        '</div>'+
+        '<div class="table-wrap">'+
+        '<table id="scan-history-table" class="data-table">'+
+        '<colgroup><col><col><col><col><col><col><col><col></colgroup>'+
+        '<thead><tr id="sh-thead">'+
+        '<th class="sortable" data-col="timestamp" data-type="str">Scan Date<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>'+
+        '<th class="sortable" data-col="project" data-type="str">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>'+
+        '<th>Run ID<div class="col-resize-handle"></div></th>'+
+        '<th>Commit<div class="col-resize-handle"></div></th>'+
+        '<th class="sortable" data-col="branch" data-type="str">Branch<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>'+
+        '<th>Tags<div class="col-resize-handle"></div></th>'+
+        '<th class="sortable num" data-col="metric" data-type="num">'+esc(yLabel)+'<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>'+
+        '<th>Report<div class="col-resize-handle"></div></th>'+
+        '</tr></thead>'+
+        '<tbody id="sh-tbody"></tbody>'+
+        '</table>'+
+        '</div>'+
+        '<div class="pagination">'+
+          '<span class="pagination-info" id="sh-pg-info"></span>'+
+          '<div class="pagination-btns" id="sh-pg-btns"></div>'+
+          '<div style="display:flex;align-items:center;gap:8px;">'+
+            '<span style="font-size:13px;color:var(--muted);">Show</span>'+
+            '<select class="filter-select" id="sh-per-page">'+
+              '<option value="10">10 per page</option>'+
+              '<option value="25" selected>25 per page</option>'+
+              '<option value="50">50 per page</option>'+
+              '<option value="100">100 per page</option>'+
+            '</select>'+
+            '<span style="font-size:13px;color:var(--muted);" id="sh-pg-range"></span>'+
+          '</div>'+
+        '</div>';
+      wireTableBehavior();
+      renderShPage();
     }}
 
     function exportXLSX(){{
@@ -6193,6 +6369,32 @@ async fn test_metrics_handler(
         _ => "[]".to_string(),
     };
 
+    // Coverage tier distribution: count files by line coverage tier.
+    let cov_tier_json: String = match &latest_run {
+        Some(r) if r.per_file_records.iter().any(|f| f.coverage.is_some()) => {
+            let mut high = 0u64; // >= 80%
+            let mut mid = 0u64; // 50-79%
+            let mut low = 0u64; // < 50%
+            for rec in &r.per_file_records {
+                if let Some(cov) = &rec.coverage {
+                    if cov.lines_found == 0 {
+                        continue;
+                    }
+                    let pct = cov.lines_hit as f64 / cov.lines_found as f64 * 100.0;
+                    if pct >= 80.0 {
+                        high += 1;
+                    } else if pct >= 50.0 {
+                        mid += 1;
+                    } else {
+                        low += 1;
+                    }
+                }
+            }
+            format!(r#"{{"high":{high},"mid":{mid},"low":{low}}}"#)
+        }
+        _ => r#"{"high":0,"mid":0,"low":0}"#.to_string(),
+    };
+
     let total_tests: u64 = latest_run
         .as_ref()
         .map(|r| r.summary_totals.test_count)
@@ -6261,7 +6463,7 @@ async fn test_metrics_handler(
                     * 100.0
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| "0".to_string());
     let cov_fn_pct_str: String = latest_run
         .as_ref()
         .filter(|r| r.summary_totals.coverage_functions_found > 0)
@@ -6273,7 +6475,7 @@ async fn test_metrics_handler(
                     * 100.0
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| "0".to_string());
     let cov_branch_pct_str: String = latest_run
         .as_ref()
         .filter(|r| r.summary_totals.coverage_branches_found > 0)
@@ -6285,7 +6487,7 @@ async fn test_metrics_handler(
                     * 100.0
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| "0".to_string());
 
     let cov_no_data_notice = if has_coverage {
         String::new()
@@ -6323,20 +6525,20 @@ async fn test_metrics_handler(
     @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
     .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
     .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
-    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
-    .brand-copy{{display:flex;flex-direction:column;justify-content:center;min-width:0;}}
-    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}}
+    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
+    .brand-copy{{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}}
+    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}}
     .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;}}
     @media (max-width:1400px) {{ .nav-right {{ gap:6px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 10px; }} }}
     @media (max-width:1150px) {{ .nav-right {{ gap:4px; }} .nav-pill,.nav-dropdown-btn,.theme-toggle {{ padding:0 8px;font-size:11px;min-height:34px; }} .brand-subtitle {{ display:none; }} .server-online-pill {{ width:34px;padding:0;justify-content:center;font-size:0;gap:0;min-height:34px; }} }}
-    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
+    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
     .nav-pill:hover{{background:rgba(255,255,255,0.18);transform:translateY(-1px);}}
     .theme-toggle{{width:38px;justify-content:center;padding:0;cursor:pointer;}} .theme-toggle:hover{{transform:translateY(-1px);background:rgba(255,255,255,0.16);}}
     .theme-toggle svg{{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}}
     .theme-toggle .icon-sun{{display:none;}} body.dark-theme .theme-toggle .icon-sun{{display:block;}} body.dark-theme .theme-toggle .icon-moon{{display:none;}}
     .status-dot{{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}}
     .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{{display:block;}}
-    .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
+    .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
     .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
     .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
     .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
@@ -6354,7 +6556,7 @@ async fn test_metrics_handler(
     .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
     @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
     .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}}
-    .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}}
+    .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
@@ -6376,6 +6578,15 @@ async fn test_metrics_handler(
     .num{{text-align:right!important;font-variant-numeric:tabular-nums;}}
     .density-bar-wrap{{display:flex;align-items:center;gap:8px;}}
     .density-bar{{height:6px;border-radius:3px;background:var(--oxide);opacity:0.75;min-width:2px;flex-shrink:0;}}
+    .cov-gauge-row{{display:grid!important;grid-template-columns:repeat(3,1fr)!important;gap:16px;margin-bottom:18px;}}
+    .cov-gauge-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .2s ease,box-shadow .2s ease;min-width:0;}}
+    .cov-gauge-card:hover{{transform:translateY(-3px);box-shadow:0 10px 28px rgba(77,44,20,0.15);}}
+    .cov-gauge-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);}}
+    .cov-gauge-val{{font-size:32px;font-weight:900;line-height:1;}}
+    .cov-gauge-track{{height:8px;border-radius:4px;background:var(--line);overflow:hidden;}}
+    .cov-gauge-fill{{height:100%;border-radius:4px;transition:width .5s ease;}}
+    .cov-gauge-sub{{font-size:11px;color:var(--muted);}}
+    @media(max-width:700px){{.cov-gauge-row{{grid-template-columns:1fr!important;}}}}
     .controls-row{{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px;}}
     .chart-select{{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:5px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}}
     .chart-select:focus{{border-color:var(--accent);}}
@@ -6416,8 +6627,7 @@ async fn test_metrics_handler(
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -6485,27 +6695,34 @@ async fn test_metrics_handler(
 
     <div class="panel" id="cov-panel" style="display:none;">
       <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">LCOV Coverage Summary</div>
-      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:18px;" id="cov-gauges">
-        <div style="flex:1;min-width:160px;">
-          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Line Coverage</div>
-          <div id="cov-line-val" style="font-size:28px;font-weight:900;">{cov_line_pct_str}%</div>
-          <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div id="cov-line-bar" style="height:100%;width:{cov_line_pct_str}%;border-radius:4px;background:#2a6846;transition:width .4s ease;"></div></div>
+      <div class="cov-gauge-row" id="cov-gauges">
+        <div class="cov-gauge-card">
+          <div class="cov-gauge-label">Line Coverage</div>
+          <div class="cov-gauge-val" id="cov-line-val" style="color:#2a6846;">{cov_line_pct_str}%</div>
+          <div class="cov-gauge-track"><div id="cov-line-bar" class="cov-gauge-fill" style="width:{cov_line_pct_str}%;background:#2a6846;"></div></div>
+          <div class="cov-gauge-sub">Lines hit / instrumented</div>
         </div>
-        <div style="flex:1;min-width:160px;">
-          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Function Coverage</div>
-          <div style="font-size:28px;font-weight:900;">{cov_fn_pct_str}%</div>
-          <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{cov_fn_pct_str}%;border-radius:4px;background:#1a6b96;transition:width .4s ease;"></div></div>
+        <div class="cov-gauge-card">
+          <div class="cov-gauge-label">Function Coverage</div>
+          <div class="cov-gauge-val" style="color:#1a6b96;">{cov_fn_pct_str}%</div>
+          <div class="cov-gauge-track"><div class="cov-gauge-fill" style="width:{cov_fn_pct_str}%;background:#1a6b96;"></div></div>
+          <div class="cov-gauge-sub">Functions hit / found</div>
         </div>
-        <div style="flex:1;min-width:160px;">
-          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;">Branch Coverage</div>
-          <div style="font-size:28px;font-weight:900;">{cov_branch_pct_str}%</div>
-          <div style="height:8px;border-radius:4px;background:var(--line);margin-top:6px;overflow:hidden;"><div style="height:100%;width:{cov_branch_pct_str}%;border-radius:4px;background:#7a4fa0;transition:width .4s ease;"></div></div>
+        <div class="cov-gauge-card">
+          <div class="cov-gauge-label">Branch Coverage</div>
+          <div class="cov-gauge-val" style="color:#7a4fa0;">{cov_branch_pct_str}%</div>
+          <div class="cov-gauge-track"><div class="cov-gauge-fill" style="width:{cov_branch_pct_str}%;background:#7a4fa0;"></div></div>
+          <div class="cov-gauge-sub">Branches hit / found</div>
         </div>
       </div>
       <div class="chart-row">
-        <div class="chart-box" style="grid-column:1/-1;">
+        <div class="chart-box">
           <div class="chart-box-title">Line Coverage % by Language</div>
           <div class="chart-canvas-wrap"><canvas id="canvas-cov"></canvas></div>
+        </div>
+        <div class="chart-box">
+          <div class="chart-box-title">Coverage Tier Distribution</div>
+          <div class="chart-canvas-wrap" style="height:280px;display:flex;align-items:center;justify-content:center;"><canvas id="canvas-cov-tiers"></canvas></div>
         </div>
       </div>
     </div>
@@ -6596,6 +6813,7 @@ async fn test_metrics_handler(
   (function() {{
     var D = {lang_tests_json};
     var COV_D = {cov_json};
+    var COV_TIERS = {cov_tier_json};
     var HAS_COV = {has_coverage};
 
     function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
@@ -6690,6 +6908,37 @@ async fn test_metrics_handler(
           }}
         }});
         ALL_CHARTS.push(covChart);
+      }}
+
+      // Chart 3b: Coverage tier doughnut
+      var tierCanvas = document.getElementById('canvas-cov-tiers');
+      if (tierCanvas && COV_TIERS) {{
+        var total = (COV_TIERS.high || 0) + (COV_TIERS.mid || 0) + (COV_TIERS.low || 0);
+        var tierChart = new Chart(tierCanvas, {{
+          type: 'doughnut',
+          data: {{
+            labels: ['High (≥80%)', 'Moderate (50–79%)', 'Low (<50%)'],
+            datasets: [{{
+              data: [COV_TIERS.high || 0, COV_TIERS.mid || 0, COV_TIERS.low || 0],
+              backgroundColor: ['#2A6846', '#D4A017', '#B23030'],
+              borderWidth: 2,
+              borderColor: isDark() ? '#1e1e1e' : '#f5efe8'
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '62%',
+            plugins: {{
+              legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }} }},
+              tooltip: {{ callbacks: {{ label: function(ctx) {{
+                var v = ctx.parsed, pct = total > 0 ? (v / total * 100).toFixed(1) : '0';
+                return ' ' + v + ' file' + (v !== 1 ? 's' : '') + ' (' + pct + '%)';
+              }} }} }}
+            }}
+          }}
+        }});
+        ALL_CHARTS.push(tierChart);
       }}
     }}
 
@@ -6802,6 +7051,7 @@ async fn test_metrics_handler(
         version = version,
         lang_tests_json = lang_tests_json,
         cov_json = cov_json,
+        cov_tier_json = cov_tier_json,
         total_tests = total_tests,
         workspace_density_str = workspace_density_str,
         most_tested = most_tested,
@@ -8226,7 +8476,7 @@ struct SubmoduleRow {
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
     .background-watermarks img { position: absolute; opacity: 0.16; filter: blur(0.3px); user-select: none; max-width: none; }
     .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 18px; }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; }
     .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .brand-copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
@@ -8240,7 +8490,7 @@ struct SubmoduleRow {
     .nav-status { display: flex; align-items: center; justify-content:flex-end; gap: 10px; flex-wrap: nowrap; min-width: 0; }
     @media (max-width: 1400px) { .nav-status { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-status { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
-    .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); text-decoration:none; transition:background .15s ease,transform .15s ease; }
+    .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); white-space: nowrap; text-decoration:none; transition:background .15s ease,transform .15s ease; }
     a.nav-pill:hover { background:rgba(255,255,255,0.18); transform:translateY(-1px); }
     .nav-pill code { color: #fff; background: rgba(0,0,0,0.28); border: 1px solid rgba(255,255,255,0.10); padding: 3px 8px; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .theme-toggle { width: 38px; justify-content: center; padding: 0; cursor: pointer; transition: transform 0.15s ease, background 0.15s ease; }
@@ -8268,21 +8518,25 @@ struct SubmoduleRow {
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; flex: 1; width: 100%; }
     .summary-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
     .workbench-strip { display:flex; align-items:stretch; gap:16px; margin-bottom: 18px; flex-wrap: nowrap; overflow: visible; }
-    .workbench-box { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+    .workbench-box { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); transition: transform .2s ease, box-shadow .2s ease; }
+    .workbench-box:hover { transform: translateY(-3px); box-shadow: 0 14px 36px rgba(77,44,20,0.18); }
     body.dark-theme .workbench-box { background: var(--surface); box-shadow: var(--shadow); }
-    .wb-stats { flex: 4 1 0; display:flex; flex-direction:column; overflow: visible; min-width: 0; }
+    .wb-stats { flex: 4 1 0; display:flex; flex-direction:column; overflow: visible; min-width: 0; position: relative; z-index: 1; }
     .wb-stats-header { padding: 10px 24px 0; }
     .wb-stats-title { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted-2); }
     .ws-left { display:flex; align-items:stretch; gap:12px; flex:1 1 auto; flex-wrap:wrap; padding: 14px 20px 18px; overflow: visible; }
-    .ws-stat { display:flex; flex-direction:column; justify-content:center; gap: 6px; flex:0 0 auto; min-width:110px; padding: 12px 18px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); }
+    .ws-stat { display:flex; flex-direction:column; justify-content:center; gap: 6px; flex:0 0 auto; min-width:110px; padding: 12px 18px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); transition: transform .2s ease, box-shadow .2s ease; }
+    .ws-stat:hover { transform: translateY(-4px); box-shadow: 0 12px 32px rgba(77,44,20,0.2); }
     body.dark-theme .ws-stat { background: rgba(211,122,76,0.08); border-color: rgba(211,122,76,0.20); }
     .ws-label { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.10em; color: var(--muted-2); }
     .ws-value { font-size: 13px; font-weight: 700; color: var(--text); }
     .ws-badge { display:inline-flex; align-items:center; padding: 1px 8px; border-radius: 999px; background: rgba(184,93,51,0.10); border: 1px solid rgba(184,93,51,0.20); color: var(--oxide-2); font-size: 12px; font-weight: 800; position:relative; cursor:help; overflow: visible; }
     body.dark-theme .ws-badge { background: rgba(211,122,76,0.15); border-color: rgba(211,122,76,0.25); color: var(--oxide); }
-    .ws-lang-tooltip { display:none; position:absolute; top:calc(100% + 8px); left:0; z-index:200; background:var(--surface); border:1px solid var(--line-strong); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.18); padding:14px 16px; pointer-events:none; min-width:400px; }
-    .ws-badge:hover .ws-lang-tooltip { display:block; }
-    .ws-lang-tooltip-hdr { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.10em; color:var(--muted-2); margin-bottom:9px; }
+    .ws-stat-analyzers { position: relative; }
+    .ws-lang-tooltip { display:none; position:absolute; top:calc(100% + 6px); left:0; z-index:9999; background:var(--surface); border:1px solid var(--line-strong); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.18); padding:14px 16px; pointer-events:none; min-width:400px; }
+    .ws-stat-analyzers:hover .ws-lang-tooltip { display:block; }
+    .ws-lang-tooltip-hdr { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.10em; color:var(--muted-2); margin-bottom:4px; }
+    .ws-lang-tooltip-desc { font-size:12px; color:var(--text); line-height:1.45; margin-bottom:10px; }
     .ws-lang-grid { display:grid; grid-template-columns:repeat(5, 1fr); gap:5px 7px; }
     .ws-lang-item { padding:3px 6px; border-radius:5px; background:rgba(184,93,51,0.08); border:1px solid rgba(184,93,51,0.14); color:var(--oxide-2); font-size:11px; font-weight:700; text-align:center; white-space:nowrap; }
     body.dark-theme .ws-lang-item { background:rgba(211,122,76,0.12); border-color:rgba(211,122,76,0.22); color:var(--oxide); }
@@ -8300,10 +8554,10 @@ struct SubmoduleRow {
     .ws-mini-box-lg { flex:2 1 0; }
     .ws-mini-box-lg .ws-mini-value { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .ws-mini-box-br { flex:1.5 1 0; }
-    .scope-legend-row { display:inline-flex; flex-direction:column; align-items:flex-start; gap:6px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:13px; flex-shrink:0; border-left:3px solid var(--line-strong); }
-    .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; margin-bottom:2px; }
-    .path-scope-grid { display:grid; grid-template-columns: 1fr 1px auto; gap:0; align-items:stretch; }
-    .path-scope-grid .input-group { width:100%; align-self:start; }
+    .scope-legend-row { display:inline-flex; flex-direction:row; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:13px; flex-shrink:0; border-left:3px solid var(--line-strong); }
+    .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; }
+    .path-scope-grid { display:grid; grid-template-columns: 42% auto auto 1px auto; gap:0 8px; align-items:center; }
+    .path-scope-grid > input[type=text] { width:100%; min-width:0; }
     .git-source-banner { display:flex; align-items:center; gap:10px; padding:10px 14px; background:linear-gradient(135deg,rgba(124,58,237,0.07),rgba(99,40,217,0.05)); border:1.5px solid rgba(124,58,237,0.22); border-radius:9px; margin-bottom:12px; font-size:13px; color:var(--text); flex-wrap:wrap; }
     .git-source-banner svg { width:15px; height:15px; stroke:#7c3aed; fill:none; stroke-width:2; flex-shrink:0; }
     .git-source-banner strong { font-weight:800; color:var(--text); }
@@ -8319,9 +8573,14 @@ struct SubmoduleRow {
     .ws-history-group { display:flex; flex-direction:column; justify-content:center; padding: 16px 28px; flex: 3 1 0; min-width: 0; }
     .ws-history-label { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted-2); margin-bottom: 10px; }
     .ws-history-inner { display:flex; align-items:center; gap: 14px; flex-wrap: nowrap; }
-    .ws-mini-box { display:flex; flex-direction:column; gap: 6px; padding: 12px 14px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); min-width: 0; flex: 1 1 0; }
+    .ws-mini-box { display:flex; flex-direction:column; gap: 6px; padding: 12px 14px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); min-width: 0; flex: 1 1 0; transition: transform .2s ease, box-shadow .2s ease; }
+    .ws-mini-box:hover { transform: translateY(-4px); box-shadow: 0 12px 32px rgba(77,44,20,0.2); }
     body.dark-theme .ws-mini-box { background: rgba(211,122,76,0.08); border-color: rgba(211,122,76,0.20); }
     .ws-mini-label { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.10em; color: var(--muted-2); }
+    .wb-ftip { position:fixed; z-index:9000; background:var(--surface); border:1px solid var(--line-strong); border-radius:10px; box-shadow:0 8px 28px rgba(0,0,0,0.18); padding:10px 14px; font-size:12px; line-height:1.55; color:var(--text); max-width:300px; white-space:normal; pointer-events:none; display:none; text-align:left; }
+    .wb-ftip-arrow { position:absolute; bottom:100%; left:20px; width:0; height:0; border:6px solid transparent; border-bottom-color:var(--line-strong); }
+    .wb-ftip-arrow::after { content:''; position:absolute; top:2px; left:-5px; width:0; height:0; border:5px solid transparent; border-bottom-color:var(--surface); }
+    [data-wb-tip] { cursor:help; }
     .ws-mini-value { font-size: 17px; font-weight: 800; color: var(--text); }
     .ws-mini-actions { display:flex; flex-direction:column; gap: 4px; margin-left: 4px; }
     .ws-action-link { display:inline-flex; align-items:center; justify-content:center; gap: 7px; padding: 12px 22px; border-radius: 10px; font-size: 13px; font-weight: 800; color: var(--oxide-2); text-decoration:none; border: 1px solid rgba(184,93,51,0.20); background: rgba(184,93,51,0.06); transition: background 0.15s ease, border-color 0.15s ease; white-space:nowrap; align-self:stretch; }
@@ -8410,6 +8669,8 @@ struct SubmoduleRow {
     .path-history-badge { margin-top: 6px; padding: 4px 10px; border-radius: 6px; font-size: 12px; line-height: 1.4; display: inline-flex; align-items: center; gap: 4px; }
     .path-history-badge.found { background: var(--info-bg, #eef3ff); color: var(--info-text, #4467d8); border: 1px solid rgba(100,130,220,0.25); }
     .path-history-badge.new   { background: var(--success-bg, #e8f5ed); color: var(--success-text, #1a8f47); border: 1px solid rgba(30,143,71,0.2); }
+    .path-history-badge.warning { background: #fff0f0; color: #b91c1c; border: 1px solid #fca5a5; font-weight: 700; padding: 8px 14px; border-radius: 8px; }
+    body.dark-theme .path-history-badge.warning { background: #3a1010; color: #f87171; border-color: #7f1d1d; }
     .input-group { display:grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items:center; }
     .input-group.compact { grid-template-columns: 1fr auto auto; }
     .path-row-grid { display:grid; grid-template-columns: minmax(0, 0.6fr) minmax(220px, 0.4fr); gap: 18px; align-items:end; }
@@ -8500,6 +8761,8 @@ struct SubmoduleRow {
     .artifact-card.artifact-locked { background: rgba(0,0,0,0.055); cursor:not-allowed; }
     .artifact-card.artifact-locked:hover { transform: none !important; box-shadow: 0 0 0 1px rgba(37,99,235,0.18), var(--shadow-strong) !important; }
     body.dark-theme .artifact-card.artifact-locked { background: rgba(255,255,255,0.055); }
+    .artifact-card.artifact-locked .marker { background: #a0aab4 !important; border-color: #a0aab4 !important; color: #fff !important; }
+    body.dark-theme .artifact-card.artifact-locked .marker { background: #6b7280 !important; border-color: #6b7280 !important; }
     .artifact-icon { width: 42px; height: 42px; border-radius: 12px; background: var(--surface-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size: 22px; font-weight: 900; }
     .artifact-card h4 { margin: 12px 0 6px; font-size: 16px; }
     .artifact-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
@@ -8607,7 +8870,7 @@ struct SubmoduleRow {
     body.dark-theme .coverage-suggest-badge { background:rgba(37,99,235,0.12); border-color:rgba(111,155,255,0.25); }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
-    .loading-card { width: min(560px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 28px 32px; }
+    .loading-card { width: min(730px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 36px 42px; }
     .progress-bar { width:100%; height:6px; margin-top:0; background: var(--surface-3); border-radius:999px; overflow:hidden; margin-bottom:0; }
     .progress-bar span { display:block; width:42%; height:100%; background: linear-gradient(90deg, var(--accent-2), var(--oxide,#d37a4c)); animation: pulseBar 1.6s ease-in-out infinite; }
     @keyframes pulseBar { 0% { transform: translateX(-100%) scaleX(0.5); } 50% { transform: translateX(0%) scaleX(0.5); } 100% { transform: translateX(200%) scaleX(0.5); } }
@@ -8617,10 +8880,10 @@ struct SubmoduleRow {
     .lc-title { font-size:1.25rem;font-weight:800;margin:0 0 6px; }
     .lc-sub { color:var(--muted);font-size:0.88rem;margin:0 0 16px; }
     .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:16px; }
-    .lc-metrics { display:flex;gap:12px;margin-bottom:16px; }
-    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 16px;flex:0 0 auto; }
-    .lc-metric-label { font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px; }
-    .lc-metric-value { font-size:1.05rem;font-weight:700;color:var(--text); }
+    .lc-metrics { display:flex;gap:16px;margin-bottom:20px; }
+    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:14px 28px;flex:0 0 auto;min-width:140px; }
+    .lc-metric-label { font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px; }
+    .lc-metric-value { font-size:1.2rem;font-weight:700;color:var(--text); }
     .lc-warn { background:rgba(230,160,50,0.12);border:1px solid rgba(230,160,50,0.3);border-radius:8px;padding:10px 14px;font-size:12px;color:#8a6a10;margin-top:14px; }
     .lc-err { background:rgba(180,40,40,0.08);border:1px solid rgba(180,40,40,0.25);border-radius:8px;padding:12px 16px;margin-top:14px; }
     .lc-err strong { display:block;color:#8b1f1f;margin-bottom:4px;font-size:13px; }
@@ -8648,7 +8911,7 @@ struct SubmoduleRow {
     @media (max-width: 980px) { .field-grid, .artifact-grid, .review-grid, .scope-stats, .explorer-meta-grid, .explorer-meta-grid.split, .glob-guidance-grid { grid-template-columns: 1fr; } .layout { grid-template-columns: 1fr; } .side-stack { width: auto; max-width: none; } .step-nav { position:static; } .top-nav-inner { grid-template-columns: 1fr; justify-items: stretch; } .nav-project-slot, .nav-status { justify-content:flex-start; } .input-group { grid-template-columns: 1fr 1fr; } .input-group.compact { grid-template-columns: 1fr 1fr; } .better-spacing { justify-content:flex-start; } .file-explorer-controls { flex-direction: column; align-items:flex-start; flex-wrap: wrap; } .file-explorer-search-row { margin-left: 0; flex-wrap: wrap; width: 100%; } .explorer-search { min-width: 0; width: 100%; } .file-explorer-header, .tree-row { grid-template-columns: minmax(0, 1fr) 110px 110px 140px; } .advanced-rule-row, .advanced-rule-row.static-note, .output-identity-grid, .counting-top-grid, .preset-inline-row { grid-template-columns: 1fr; } .wizard-progress { max-width: none; } .path-row-grid { grid-template-columns: 1fr; } .ws-left { flex-wrap: wrap; } .scan-pills-row { flex-wrap: wrap; } }
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .submodule-preview-strip { display:flex; align-items:center; gap:14px; padding:12px 16px; border:1px solid rgba(37,99,235,0.2); border-radius:12px; background:linear-gradient(180deg,rgba(37,99,235,0.05),transparent),var(--surface-2); flex-wrap:wrap; }
     .submodule-preview-label { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--text); white-space:nowrap; }
     .submodule-preview-label svg { width:15px; height:15px; stroke:var(--accent-2); fill:none; stroke-width:2; flex:0 0 auto; }
@@ -8705,8 +8968,7 @@ struct SubmoduleRow {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -8752,69 +9014,69 @@ struct SubmoduleRow {
   <div class="page">
     <div class="workbench-strip">
       <div class="workbench-box wb-stats">
-        <div class="wb-stats-header">
+        <div class="wb-stats-header" data-wb-tip="Summarizes this session: active language analyzers, server mode, selected project, and output destination.">
           <span class="wb-stats-title">Analysis session</span>
         </div>
         <div class="ws-left">
-          <div class="ws-stat">
+          <div class="ws-stat ws-stat-analyzers">
             <span class="ws-label">Analyzers</span>
             <span class="ws-value">
-              <span class="ws-badge">41 languages
-                <div class="ws-lang-tooltip">
-                  <div class="ws-lang-tooltip-hdr">41 supported languages</div>
-                  <div class="ws-lang-grid">
-                    <span class="ws-lang-item">Assembly</span>
-                    <span class="ws-lang-item">C</span>
-                    <span class="ws-lang-item">C++</span>
-                    <span class="ws-lang-item">C#</span>
-                    <span class="ws-lang-item">Clojure</span>
-                    <span class="ws-lang-item">CSS</span>
-                    <span class="ws-lang-item">Dart</span>
-                    <span class="ws-lang-item">Dockerfile</span>
-                    <span class="ws-lang-item">Elixir</span>
-                    <span class="ws-lang-item">Erlang</span>
-                    <span class="ws-lang-item">F#</span>
-                    <span class="ws-lang-item">Go</span>
-                    <span class="ws-lang-item">Groovy</span>
-                    <span class="ws-lang-item">Haskell</span>
-                    <span class="ws-lang-item">HTML</span>
-                    <span class="ws-lang-item">Java</span>
-                    <span class="ws-lang-item">JavaScript</span>
-                    <span class="ws-lang-item">Julia</span>
-                    <span class="ws-lang-item">Kotlin</span>
-                    <span class="ws-lang-item">Lua</span>
-                    <span class="ws-lang-item">Makefile</span>
-                    <span class="ws-lang-item">Nim</span>
-                    <span class="ws-lang-item">Obj-C</span>
-                    <span class="ws-lang-item">OCaml</span>
-                    <span class="ws-lang-item">Perl</span>
-                    <span class="ws-lang-item">PHP</span>
-                    <span class="ws-lang-item">PowerShell</span>
-                    <span class="ws-lang-item">Python</span>
-                    <span class="ws-lang-item">R</span>
-                    <span class="ws-lang-item">Ruby</span>
-                    <span class="ws-lang-item">Rust</span>
-                    <span class="ws-lang-item">Scala</span>
-                    <span class="ws-lang-item">SCSS</span>
-                    <span class="ws-lang-item">Shell</span>
-                    <span class="ws-lang-item">SQL</span>
-                    <span class="ws-lang-item">Svelte</span>
-                    <span class="ws-lang-item">Swift</span>
-                    <span class="ws-lang-item">TypeScript</span>
-                    <span class="ws-lang-item">Vue</span>
-                    <span class="ws-lang-item">XML</span>
-                    <span class="ws-lang-item">Zig</span>
-                  </div>
-                </div>
-              </span>
+              <span class="ws-badge">41 languages</span>
             </span>
+            <div class="ws-lang-tooltip">
+              <div class="ws-lang-tooltip-hdr">41 supported languages</div>
+              <div class="ws-lang-tooltip-desc">Language detection engines loaded for this session. Each engine uses a lexical state machine to count code, comment, and blank lines.</div>
+              <div class="ws-lang-grid">
+                <span class="ws-lang-item">Assembly</span>
+                <span class="ws-lang-item">C</span>
+                <span class="ws-lang-item">C++</span>
+                <span class="ws-lang-item">C#</span>
+                <span class="ws-lang-item">Clojure</span>
+                <span class="ws-lang-item">CSS</span>
+                <span class="ws-lang-item">Dart</span>
+                <span class="ws-lang-item">Dockerfile</span>
+                <span class="ws-lang-item">Elixir</span>
+                <span class="ws-lang-item">Erlang</span>
+                <span class="ws-lang-item">F#</span>
+                <span class="ws-lang-item">Go</span>
+                <span class="ws-lang-item">Groovy</span>
+                <span class="ws-lang-item">Haskell</span>
+                <span class="ws-lang-item">HTML</span>
+                <span class="ws-lang-item">Java</span>
+                <span class="ws-lang-item">JavaScript</span>
+                <span class="ws-lang-item">Julia</span>
+                <span class="ws-lang-item">Kotlin</span>
+                <span class="ws-lang-item">Lua</span>
+                <span class="ws-lang-item">Makefile</span>
+                <span class="ws-lang-item">Nim</span>
+                <span class="ws-lang-item">Obj-C</span>
+                <span class="ws-lang-item">OCaml</span>
+                <span class="ws-lang-item">Perl</span>
+                <span class="ws-lang-item">PHP</span>
+                <span class="ws-lang-item">PowerShell</span>
+                <span class="ws-lang-item">Python</span>
+                <span class="ws-lang-item">R</span>
+                <span class="ws-lang-item">Ruby</span>
+                <span class="ws-lang-item">Rust</span>
+                <span class="ws-lang-item">Scala</span>
+                <span class="ws-lang-item">SCSS</span>
+                <span class="ws-lang-item">Shell</span>
+                <span class="ws-lang-item">SQL</span>
+                <span class="ws-lang-item">Svelte</span>
+                <span class="ws-lang-item">Swift</span>
+                <span class="ws-lang-item">TypeScript</span>
+                <span class="ws-lang-item">Vue</span>
+                <span class="ws-lang-item">XML</span>
+                <span class="ws-lang-item">Zig</span>
+              </div>
+            </div>
           </div>
           <div class="ws-divider"></div>
-          <div class="ws-stat"><span class="ws-label">Mode</span><span class="ws-value">Localhost</span></div>
+          <div class="ws-stat" data-wb-tip="Localhost mode — all scans run on this machine against local file system paths."><span class="ws-label">Mode</span><span class="ws-value">Localhost</span></div>
           <div class="ws-divider"></div>
-          <div class="ws-stat ws-stat-clamp"><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
+          <div class="ws-stat ws-stat-clamp" data-wb-tip="Directory path of the project currently selected or most recently analyzed."><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
           <div class="ws-divider"></div>
-          <div class="ws-stat ws-stat-output">
+          <div class="ws-stat ws-stat-output" data-wb-tip="Folder where scan artifacts — JSON, HTML, and PDF reports — are written after each completed scan.">
             <span class="ws-label">Output</span>
             <span class="ws-value">
               <button type="button" class="ws-path-link open-folder-button" id="ws-output-link" data-folder="" title="Click to open in file explorer">
@@ -8824,18 +9086,18 @@ struct SubmoduleRow {
           </div>
         </div>
       </div>
-      <div class="workbench-box ws-history-group">
+      <div class="workbench-box ws-history-group" data-wb-tip="Scan statistics aggregated across all runs completed for this project in the current server session.">
         <div class="ws-history-label">Scan history</div>
         <div class="ws-history-inner">
-          <div class="ws-mini-box ws-mini-box-sm">
+          <div class="ws-mini-box ws-mini-box-sm" data-wb-tip="Total completed scan runs recorded for this project since the server started.">
             <div class="ws-mini-label">Scans</div>
             <div class="ws-mini-value" id="ws-scan-count">—</div>
           </div>
-          <div class="ws-mini-box ws-mini-box-lg">
+          <div class="ws-mini-box ws-mini-box-lg" data-wb-tip="Timestamp of the most recently completed scan for this project.">
             <div class="ws-mini-label">Last Scan</div>
             <div class="ws-mini-value" id="ws-last-scan">—</div>
           </div>
-          <div class="ws-mini-box ws-mini-box-br">
+          <div class="ws-mini-box ws-mini-box-br" data-wb-tip="Git branch name recorded during the most recent scan of this project.">
             <div class="ws-mini-label">Branch</div>
             <div class="ws-mini-value" id="ws-branch">—</div>
           </div>
@@ -8915,9 +9177,8 @@ struct SubmoduleRow {
                   </div>
                   {% endif %}
                   <div class="path-scope-grid">
-                    <div class="input-group">
                       {% if !git_repo.is_empty() %}
-                      <input id="path" name="path" type="text" value="{{ git_repo }} @ {{ git_ref }}" readonly class="git-locked-input" required />
+                      <input id="path" name="path" type="text" value="{{ git_repo }} @ {{ git_ref }}" readonly class="git-locked-input" required style="grid-column:1/4;" />
                       <input type="hidden" name="git_repo" value="{{ git_repo }}" />
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
@@ -8925,7 +9186,6 @@ struct SubmoduleRow {
                       <button type="button" class="mini-button oxide" id="browse-path">Browse</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
                       {% endif %}
-                    </div>
                     <div class="path-scope-sep"></div>
                     <div class="scope-legend-row">
                       <span class="scope-legend-label">Scope legend:</span>
@@ -8940,6 +9200,7 @@ struct SubmoduleRow {
                   <div class="hint">The source code will be checked out from the remote repository at the specified ref when you run the scan.</div>
                   {% endif %}
                   <div id="path-history-badge" class="path-history-badge" style="display:none"></div>
+                  <div id="zero-files-warning" class="path-history-badge warning" style="display:none" role="alert"></div>
                 </div>
 
                 <div style="height:1px;background:var(--line);margin:28px 0;"></div>
@@ -9289,8 +9550,9 @@ lcov --capture --directory . --output-file coverage/lcov.info
                     </div>
                     <input type="checkbox" name="generate_pdf" checked class="hidden artifact-checkbox" />
                   </div>
-                  <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)" style="opacity:0.55;pointer-events:none;">
-                    <div class="marker" style="background:var(--muted);border-color:var(--muted);color:#fff;">✓</div>
+                  <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)" style="opacity:0.85;pointer-events:none;">
+                    <div style="position:absolute;inset:0;border-radius:inherit;background:radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,0.13) 100%);pointer-events:none;z-index:2;"></div>
+                    <div class="marker">✓</div>
                     <div class="artifact-icon" style="color:var(--muted);">J</div>
                     <h4>JSON result <span style="font-size:11px;font-weight:700;color:var(--muted);">always on</span></h4>
                     <p>Machine-readable output always saved — required for run comparison, diff, and history features.</p>
@@ -9552,7 +9814,7 @@ lcov --capture --directory . --output-file coverage/lcov.info
               if (data.state === "complete") {
                 clearInterval(elapsedTimer);
                 lcSetPhase("Done");
-                window.location.href = "/runs/" + encodeURIComponent(data.run_id) + "/result";
+                window.location.href = "/runs/result/" + encodeURIComponent(data.run_id);
               } else if (data.state === "failed") {
                 lcShowError(data.message);
               } else if (data.state === "cancelled") {
@@ -10244,8 +10506,10 @@ lcov --capture --directory . --output-file coverage/lcov.info
           return;
         }
         var path = pathInput.value.trim();
+        var zeroWarn = document.getElementById('zero-files-warning');
         if (!path) {
           previewPanel.innerHTML = '<div class="preview-hint">Enter a project path above to preview the files that will be in scope.</div>';
+          if (zeroWarn) zeroWarn.style.display = 'none';
           return;
         }
         var includeValue = includeGlobsInput ? includeGlobsInput.value : "";
@@ -10262,6 +10526,18 @@ lcov --capture --directory . --output-file coverage/lcov.info
             syncPythonVisibility();
             updateReview();
             setTimeout(collapseLanguagePills, 50);
+            if (zeroWarn) {
+              var supportedBtn = previewPanel.querySelector('.scope-stat-button.supported .scope-stat-value');
+              var filesBtn = previewPanel.querySelector('.scope-stat-button[data-filter="file"] .scope-stat-value');
+              var supportedCount = supportedBtn ? parseInt(supportedBtn.textContent, 10) : -1;
+              var fileCount = filesBtn ? parseInt(filesBtn.textContent, 10) : -1;
+              if (supportedCount === 0 && fileCount > 0) {
+                zeroWarn.textContent = '⚠ Warning: No supported source files detected—this scan will analyze 0 files. The directory may contain only binaries, archives, or unsupported file types (e.g. JSON, Markdown).';
+                zeroWarn.style.display = '';
+              } else {
+                zeroWarn.style.display = 'none';
+              }
+            }
           })
           .catch(function (err) {
             previewPanel.innerHTML = '<div class="preview-error">Preview request failed: ' + String(err) + '</div>';
@@ -10743,6 +11019,32 @@ lcov --capture --directory . --output-file coverage/lcov.info
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <div class="wb-ftip" id="wb-ftip" role="tooltip" aria-hidden="true">
+    <div class="wb-ftip-arrow"></div>
+    <span id="wb-ftip-text"></span>
+  </div>
+  <script nonce="{{ csp_nonce }}">(function(){
+    var tip=document.getElementById('wb-ftip');
+    var txt=document.getElementById('wb-ftip-text');
+    var arr=tip?tip.querySelector('.wb-ftip-arrow'):null;
+    if(!tip||!txt)return;
+    function pos(el){
+      var r=el.getBoundingClientRect();
+      tip.style.display='block';
+      var tw=tip.offsetWidth;
+      var lx=r.left+r.width/2-tw/2;
+      if(lx<8)lx=8;
+      if(lx+tw>window.innerWidth-8)lx=window.innerWidth-tw-8;
+      tip.style.left=lx+'px';
+      tip.style.top=(r.bottom+8)+'px';
+      if(arr){var al=r.left+r.width/2-lx-6;al=Math.max(10,Math.min(tw-22,al));arr.style.left=al+'px';}
+    }
+    document.querySelectorAll('[data-wb-tip]').forEach(function(el){
+      el.addEventListener('mouseenter',function(){txt.textContent=el.getAttribute('data-wb-tip');pos(el);});
+      el.addEventListener('mouseleave',function(){tip.style.display='none';});
+    });
+  })();
+  </script>
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
@@ -10797,13 +11099,13 @@ struct IndexTemplate {
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1400px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
-    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
-    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
-    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
+    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;}
     a.nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
@@ -10843,13 +11145,13 @@ struct IndexTemplate {
     .hero-subtitle{font-size:15px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:2.5em;opacity:0;}
     .hero-cursor{display:inline-block;width:2px;height:0.9em;background:var(--oxide);vertical-align:text-bottom;margin-left:1px;border-radius:1px;animation:cursorBlink 0.72s step-end infinite;}
     @keyframes cursorBlink{0%,100%{opacity:1;}50%{opacity:0;}}
-    .card-sections{display:flex;flex-direction:column;gap:12px;margin:0 0 12px;}
+    .card-sections{display:flex;flex-direction:column;gap:25px;margin:0 0 16px;}
     .card-section-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px;padding-left:2px;}
-    .card-section-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
-    .card-section-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}
+    .card-section-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;}
+    .card-section-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;}
     @media(max-width:900px){.card-section-grid-2,.card-section-grid-3{grid-template-columns:1fr 1fr;}}
     @media(max-width:480px){.card-section-grid-2,.card-section-grid-3{grid-template-columns:1fr;}}
-    .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:14px 18px 12px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
+    .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:12px 15px 10px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
     .action-card:nth-child(1){animation-delay:0.1s;} .action-card:nth-child(2){animation-delay:0.2s;} .action-card:nth-child(3){animation-delay:0.3s;} .action-card:nth-child(4){animation-delay:0.4s;} .action-card:nth-child(5){animation-delay:0.5s;} .action-card:nth-child(6){animation-delay:0.6s;} .action-card:nth-child(7){animation-delay:0.7s;}
     @keyframes cardRise{from{opacity:0;}to{opacity:1;}}
     .action-card:hover{transform:translateY(-5px) scale(1.04);box-shadow:var(--shadow-strong);border-color:var(--oxide-2);}
@@ -10860,7 +11162,7 @@ struct IndexTemplate {
     .action-card.view .action-card-icon{background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;box-shadow:0 8px 22px rgba(59,130,246,0.28);}
     .action-card.compare .action-card-icon{background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;box-shadow:0 8px 22px rgba(139,92,246,0.28);}
     .action-card-title{font-size:15px;font-weight:850;letter-spacing:-0.02em;margin:0 0 4px;}
-    .action-card-desc{font-size:12px;color:var(--muted);line-height:1.55;margin:0 0 10px;flex:1;text-wrap:balance;}
+    .action-card-desc{font-size:12px;color:var(--muted);line-height:1.55;margin:0 0 10px;flex:1;}
     .action-card-cta{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:800;color:var(--oxide-2);transition:gap 0.15s ease;}
     body.dark-theme .action-card-cta{color:var(--oxide);}
     .action-card.view .action-card-cta{color:var(--accent-2);}
@@ -10880,8 +11182,25 @@ struct IndexTemplate {
     .action-card.test-metrics .action-card-cta{color:#be185d;}
     body.dark-theme .action-card.test-metrics .action-card-cta{color:#f472b6;}
     .action-card:hover .action-card-cta{gap:12px;}
-    .divider{height:1px;background:var(--line);margin:12px 0;}
-    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .action-card.card-split{flex-direction:row;align-items:stretch;}
+    .action-card-left{flex:1;display:flex;flex-direction:column;align-items:flex-start;}
+    .action-card-sep{width:1px;background:var(--line);margin:0 12px;opacity:0.22;align-self:stretch;flex-shrink:0;}
+    .action-card-right{width:170px;display:flex;flex-direction:column;justify-content:center;gap:10px;flex-shrink:0;}
+    .ac-right-row{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted);}
+    .ac-right-row svg{width:14px;height:14px;stroke:var(--oxide);stroke-width:2;fill:none;flex-shrink:0;}
+    .ac-right-stat{font-size:11px;color:var(--oxide);font-weight:700;margin-top:4px;min-height:14px;}
+    .ac-badge{display:inline-block;padding:3px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.04em;border:1px solid transparent;transition:opacity .3s;opacity:0.45;}
+    .ac-badge.active{opacity:1;}
+    .ac-badge.github{border-color:#555;color:#555;}
+    .ac-badge.gitlab{border-color:#e24329;color:#e24329;}
+    .ac-badge.bitbucket{border-color:#2684ff;color:#2684ff;}
+    .ac-badge.confluence{border-color:#0052cc;color:#0052cc;}
+    .ac-badges-grid{display:flex;flex-wrap:wrap;gap:5px;}
+    body.dark-theme .ac-right-row{color:var(--muted);}
+    body.dark-theme .ac-badge.github{border-color:#aaa;color:#aaa;}
+    @media(max-width:600px){.action-card-sep,.action-card-right{display:none;}}
+    .divider{height:1px;background:var(--line);margin:32px 0;}
+    .info-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-bottom:23px;}
     @media(max-width:960px){.info-strip{grid-template-columns:repeat(3,1fr);}}
     @media(max-width:600px){.info-strip{grid-template-columns:repeat(2,1fr);}}
     .info-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:9px 12px;text-align:center;position:relative;cursor:default;
@@ -10896,7 +11215,7 @@ struct IndexTemplate {
     .info-chip-tip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);
       border:6px solid transparent;border-top-color:var(--text);}
     .info-chip:hover .info-chip-tip{display:block;}
-    .chip-slide{transition:filter 0.35s ease,opacity 0.35s ease;}
+    .chip-slide{transition:filter 0.70s ease,opacity 0.70s ease;}
     .chip-slide.fading{filter:blur(5px);opacity:0;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
@@ -10919,7 +11238,7 @@ struct IndexTemplate {
     body.dark-theme .lan-local-hint{border-color:rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);}
     body.dark-theme .lan-local-hint code{background:rgba(255,255,255,0.06);}
     .lan-local-hint strong{color:var(--muted);font-weight:600;margin-right:2px;}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -10953,8 +11272,7 @@ struct IndexTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -10995,21 +11313,39 @@ struct IndexTemplate {
       <div>
         <div class="card-section-label">Analysis</div>
         <div class="card-section-grid-2">
-          <a class="action-card scan" href="/scan-setup">
-            <div class="action-card-icon">
-              <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+          <a class="action-card scan card-split" href="/scan-setup">
+            <div class="action-card-left">
+              <div class="action-card-icon">
+                <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              </div>
+              <div class="action-card-title">Scan Project</div>
+              <p class="action-card-desc">Start a new scan, reload saved settings from a config file, or quickly re-run a recent project with one click. All scan history stays accessible for instant revisiting.</p>
+              <span class="action-card-cta">Start scanning <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
             </div>
-            <div class="action-card-title">Scan Project</div>
-            <p class="action-card-desc">Start a new scan, reload saved settings from a config file, or quickly re-run a recent project with one click. All scan history stays accessible for instant revisiting.</p>
-            <span class="action-card-cta">Start scanning <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+            <div class="action-card-sep"></div>
+            <div class="action-card-right">
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 .49-3.51"></path></svg><span>Re-run last scan</span></div>
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg><span>Load from config</span></div>
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg><span>Browse history</span></div>
+              <div class="ac-right-stat" id="acp-scan-stat"></div>
+            </div>
           </a>
-          <a class="action-card test-metrics" href="/test-metrics">
-            <div class="action-card-icon">
-              <svg viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+          <a class="action-card test-metrics card-split" href="/test-metrics">
+            <div class="action-card-left">
+              <div class="action-card-icon">
+                <svg viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+              </div>
+              <div class="action-card-title">Test Metrics</div>
+              <p class="action-card-desc">Detect test files and functions across your codebase, measure test-to-code ratios, and view unit test coverage data alongside your SLOC metrics.</p>
+              <span class="action-card-cta">View test metrics <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
             </div>
-            <div class="action-card-title">Test Metrics</div>
-            <p class="action-card-desc">Detect test files and functions across your codebase, measure test-to-code ratios, and view unit test coverage data alongside your SLOC metrics.</p>
-            <span class="action-card-cta">View test metrics <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+            <div class="action-card-sep"></div>
+            <div class="action-card-right">
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg><span>Unit test detection</span></div>
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg><span>Assertion counting</span></div>
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg><span>LCOV coverage</span></div>
+              <div class="ac-right-stat" id="acp-test-stat"></div>
+            </div>
           </a>
         </div>
       </div>
@@ -11047,21 +11383,41 @@ struct IndexTemplate {
       <div>
         <div class="card-section-label">Developer Tools</div>
         <div class="card-section-grid-2">
-          <a class="action-card git-tools" href="/git-browser">
-            <div class="action-card-icon">
-              <svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+          <a class="action-card git-tools card-split" href="/git-browser">
+            <div class="action-card-left">
+              <div class="action-card-icon">
+                <svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+              </div>
+              <div class="action-card-title">Git Browser</div>
+              <p class="action-card-desc">Browse branches and commits, scan any ref on demand, and diff two refs side-by-side — all from within the browser, without any local setup.</p>
+              <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
             </div>
-            <div class="action-card-title">Git Browser</div>
-            <p class="action-card-desc">Browse branches and commits, scan any ref on demand, and diff two refs side-by-side — all from within the browser, without any local setup.</p>
-            <span class="action-card-cta">Open Git Browser <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+            <div class="action-card-sep"></div>
+            <div class="action-card-right">
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span>Branches &amp; tags</span></div>
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg><span>On-demand scanning</span></div>
+              <div class="ac-right-row"><svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg><span>Side-by-side diff</span></div>
+            </div>
           </a>
-          <a class="action-card automation" href="/integrations">
-            <div class="action-card-icon">
-              <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <a class="action-card automation card-split" href="/integrations">
+            <div class="action-card-left">
+              <div class="action-card-icon">
+                <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              </div>
+              <div class="action-card-title">Integrations</div>
+              <p class="action-card-desc">Connect GitHub, GitLab, or Bitbucket webhooks to trigger scans on every push, or publish results directly to Atlassian Confluence.</p>
+              <span class="action-card-cta">Set up integrations <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
             </div>
-            <div class="action-card-title">Integrations</div>
-            <p class="action-card-desc">Connect GitHub, GitLab, or Bitbucket webhooks to trigger scans on every push, or publish results directly to Atlassian Confluence.</p>
-            <span class="action-card-cta">Set up integrations <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="9 18 15 12 9 6"></polyline></svg></span>
+            <div class="action-card-sep"></div>
+            <div class="action-card-right">
+              <div class="ac-badges-grid">
+                <span class="ac-badge github"     id="acp-gh">GitHub</span>
+                <span class="ac-badge gitlab"     id="acp-gl">GitLab</span>
+                <span class="ac-badge bitbucket"  id="acp-bb">Bitbucket</span>
+                <span class="ac-badge confluence" id="acp-cf">Confluence</span>
+              </div>
+              <div class="ac-right-stat" id="acp-int-stat"></div>
+            </div>
           </a>
         </div>
       </div>
@@ -11354,11 +11710,33 @@ struct IndexTemplate {
             chip.querySelector('.info-chip-val').textContent = s.v;
             chip.querySelector('.info-chip-label').textContent = s.l;
             inner.classList.remove('fading');
-          }, 360);
+          }, 720);
         }
-        chips.forEach(function(chip, i) {
-          setTimeout(function() { setInterval(function() { advance(i); }, 3000); }, i * 600);
-        });
+        setInterval(function() {
+          chips.forEach(function(chip, i) { advance(i); });
+        }, 6000);
+      })();
+      (function cardLiveData() {
+        fetch('/api/project-history').then(function(r){return r.json();}).then(function(d){
+          var el = document.getElementById('acp-scan-stat');
+          if(el && d.scan_count) el.textContent = d.scan_count + ' scan' + (d.scan_count === 1 ? '' : 's') + ' in history';
+        }).catch(function(){});
+        fetch('/api/metrics/latest').then(function(r){return r.ok ? r.json() : null;}).then(function(d){
+          var el = document.getElementById('acp-test-stat');
+          if(el && d && d.summary && d.summary.test_count) el.textContent = fmt(d.summary.test_count) + ' tests in last scan';
+        }).catch(function(){});
+        fetch('/api/schedules').then(function(r){return r.json();}).then(function(d){
+          var sc = (d.schedules || []).filter(function(s){return s.enabled !== false;});
+          var providers = sc.map(function(s){return (s.provider || '').toLowerCase();});
+          if(providers.indexOf('github') >= 0) { var e = document.getElementById('acp-gh'); if(e) e.classList.add('active'); }
+          if(providers.indexOf('gitlab') >= 0) { var e = document.getElementById('acp-gl'); if(e) e.classList.add('active'); }
+          if(providers.indexOf('bitbucket') >= 0) { var e = document.getElementById('acp-bb'); if(e) e.classList.add('active'); }
+          var stat = document.getElementById('acp-int-stat');
+          if(stat && sc.length) stat.textContent = sc.length + ' webhook' + (sc.length === 1 ? '' : 's') + ' configured';
+        }).catch(function(){});
+        fetch('/api/confluence/config').then(function(r){return r.json();}).then(function(d){
+          if(d.configured) { var e = document.getElementById('acp-cf'); if(e) e.classList.add('active'); }
+        }).catch(function(){});
       })();
     })();
   </script>
@@ -11421,16 +11799,16 @@ struct SplashTemplate {
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:960px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
-    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
-    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
-    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
+    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;}
     a.nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
@@ -11457,8 +11835,12 @@ struct SplashTemplate {
     /* Cards */
     .option-grid{display:flex;flex-direction:column;gap:16px;padding-top:16px;}
     .option-card-wrap{position:relative;}
-    .option-card{background:var(--surface);border:1.5px solid var(--line-strong);border-radius:var(--radius);padding:20px 24px;box-shadow:var(--shadow);transition:border-color 0.18s ease,box-shadow 0.18s ease;position:relative;z-index:1;display:flex;align-items:center;gap:20px;}
-    .option-card:hover{border-color:var(--oxide-2);box-shadow:var(--shadow-strong);}
+    .option-card{background:var(--surface);border:1.5px solid var(--line-strong);border-radius:var(--radius);padding:20px 24px;box-shadow:var(--shadow);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;position:relative;z-index:1;display:flex;align-items:center;gap:20px;animation:cardRise 0.7s ease both;}
+    .option-card:hover{transform:translateY(-5px) scale(1.03);border-color:var(--oxide-2);box-shadow:var(--shadow-strong);}
+    @keyframes cardRise{from{opacity:0;}to{opacity:1;}}
+    .option-card-wrap:nth-child(1) .option-card{animation-delay:0.1s;} .option-card-wrap:nth-child(2) .option-card{animation-delay:0.2s;} .option-card-wrap:nth-child(3) .option-card{animation-delay:0.3s;}
+    .option-icon{transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
+    .option-card:hover .option-icon{transform:rotate(-8deg) scale(1.12);}
     #recent-card{flex-direction:column;align-items:stretch;gap:0;}
     .card-top-row{display:flex;align-items:center;gap:20px;}
     /* Two-column layout inside each card */
@@ -11515,7 +11897,7 @@ struct SplashTemplate {
       .card-right{flex-direction:row;flex-wrap:wrap;}
       .btn{flex:1;}
     }
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-online-pill{cursor:default;}
   </style>
@@ -11551,8 +11933,7 @@ struct SplashTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
@@ -11714,7 +12095,6 @@ struct SplashTemplate {
         var count = 38;
         for (var i = 0; i < count; i++) { (function(idx) { var el = document.createElement('span'); el.className = 'code-particle'; el.textContent = snippets[idx % snippets.length]; var left = Math.random() * 94 + 2; var top = Math.random() * 88 + 6; var dur = (Math.random() * 10 + 9).toFixed(1); var delay = (Math.random() * 18).toFixed(1); var rot = (Math.random() * 26 - 13).toFixed(1); var op = (Math.random() * 0.09 + 0.06).toFixed(3); el.style.left=left.toFixed(1)+'%';el.style.top=top.toFixed(1)+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s'; container.appendChild(el); })(i); }
       })();
-
       // Recent scans data injected from server
       var recentScans = {{ recent_scans_json|safe }};
 
@@ -11907,7 +12287,7 @@ struct ScanSetupTemplate {
     .background-watermarks img { position: absolute; opacity: 0.16; filter: blur(0.3px); user-select: none; max-width: none; }
     .top-nav, .page { position: relative; z-index: 2; }
     .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 18px; }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; }
     .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .brand-mark { width: 42px; height: 42px; border-radius: 14px; background: radial-gradient(circle at 35% 35%, #f2a578, var(--oxide) 58%, var(--oxide-2)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), 0 8px 18px rgba(0,0,0,0.22); flex: 0 0 auto; }
@@ -11921,7 +12301,7 @@ struct ScanSetupTemplate {
     .nav-status { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: nowrap; min-width: 0; }
     @media (max-width: 1400px) { .nav-status { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-status { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
-    .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); text-decoration: none; }
+    .nav-pill, .theme-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); white-space: nowrap; text-decoration: none; }
     .theme-toggle { width: 38px; justify-content: center; padding: 0; cursor: pointer; transition: transform 0.15s ease, background 0.15s ease; }
     .theme-toggle:hover { transform: translateY(-1px); background: rgba(255,255,255,0.16); }
     .theme-toggle svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; }
@@ -11958,12 +12338,16 @@ struct ScanSetupTemplate {
     .delta-chip.pos { background:var(--pos-bg); color:var(--pos); }
     .delta-chip.neg { background:var(--neg-bg); color:var(--neg); }
     .delta-cards-inline { display:flex; flex-wrap:wrap; gap:8px; flex:1 1 auto; align-items:center; justify-content:center; }
-    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:6px 12px; text-align:center; min-width:80px; }
+    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; min-width:92px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
+    .delta-card-inline:hover { transform:translateY(-3px); box-shadow:0 8px 20px rgba(77,44,20,0.18); z-index:10; }
     .delta-card-val { font-size:16px; font-weight:800; }
     .delta-card-val.pos { color:#1e7e34; }
     .delta-card-val.neg { color:var(--neg); }
     .delta-card-val.mod { color:#b35428; }
     .delta-card-lbl { font-size:10px; color:var(--muted); margin-top:2px; }
+    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; }
+    .delta-card-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .delta-card-inline:hover .delta-card-tip { opacity:1; }
     .compare-label { font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--info-text, #4467d8); }
     .compare-ts { font-size:13px; color:var(--muted); }
     .compare-banner-stats { display:flex; align-items:center; gap:10px; font-size:14px; flex-wrap:wrap; }
@@ -12012,10 +12396,14 @@ struct ScanSetupTemplate {
     .summary-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-top:18px; }
     @media(max-width:1100px){.summary-strip{grid-template-columns:repeat(3,1fr);}}
     @media(max-width:640px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
-    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
-    .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); }
+    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; overflow:visible; }
+    .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
+    .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
-    .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
+    .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; }
+    .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .stat-chip:hover .stat-chip-tip { opacity:1; }
     /* Submodule panel */
     .submodule-panel { margin-top: 18px; margin-bottom: 18px; padding: 18px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
     /* Metrics tables stack */
@@ -12050,7 +12438,7 @@ struct ScanSetupTemplate {
     }
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     /* ── Result-page chart controls ─────────────────────────────────────────── */
     .r-chart-section{margin-bottom:24px;}
     .r-chart-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
@@ -12097,7 +12485,8 @@ struct ScanSetupTemplate {
   <div class="top-nav">
     <div class="top-nav-inner">
       <a class="brand" href="/">
-        <img class="brand-logo" src="/images/logo/logo-text.png" alt="OxideSLOC logo" style="height:46px;width:auto;" />
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">local code analysis - metrics, history and reports</div></div>
       </a>
       <div class="nav-project-slot">
         <div class="nav-project-pill"><span class="nav-project-label">REPORT</span><span class="nav-project-value">{{ report_title }}</span></div>
@@ -12116,8 +12505,7 @@ struct ScanSetupTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -12151,29 +12539,41 @@ struct ScanSetupTemplate {
       </div>
 
       <div class="summary-strip">
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ physical_lines }}</div>
+        <div class="stat-chip" data-raw="{{ physical_lines }}">
           <div class="stat-chip-label">Physical Lines</div>
+          <div class="stat-chip-val">{{ physical_lines }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Total physical lines including code, comments, and blank lines</div>
         </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ code_lines }}</div>
+        <div class="stat-chip" data-raw="{{ code_lines }}">
           <div class="stat-chip-label">Code</div>
+          <div class="stat-chip-val">{{ code_lines }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Executable source lines (IEEE 1045 SLOC)</div>
         </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ comment_lines }}</div>
+        <div class="stat-chip" data-raw="{{ comment_lines }}">
           <div class="stat-chip-label">Comments</div>
+          <div class="stat-chip-val">{{ comment_lines }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Lines classified as comments or documentation</div>
         </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ blank_lines }}</div>
+        <div class="stat-chip" data-raw="{{ blank_lines }}">
           <div class="stat-chip-label">Blank</div>
+          <div class="stat-chip-val">{{ blank_lines }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Empty or whitespace-only lines</div>
         </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ files_analyzed }}</div>
+        <div class="stat-chip" data-raw="{{ files_analyzed }}">
           <div class="stat-chip-label">Files Analyzed</div>
+          <div class="stat-chip-val">{{ files_analyzed }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Source files successfully parsed and counted</div>
         </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ functions }}</div>
+        <div class="stat-chip" data-raw="{{ functions }}">
           <div class="stat-chip-label">Functions</div>
+          <div class="stat-chip-val">{{ functions }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Best-effort count of function and method definitions</div>
         </div>
       </div>
 
@@ -12199,30 +12599,37 @@ struct ScanSetupTemplate {
             <div class="delta-card-inline">
               <div class="delta-card-val pos">{% if let Some(v) = delta_lines_added %}+{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">lines added</div>
+              <div class="delta-card-tip">Code lines added since the previous scan</div>
             </div>
             <div class="delta-card-inline">
               <div class="delta-card-val neg">{% if let Some(v) = delta_lines_removed %}&minus;{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">lines removed</div>
+              <div class="delta-card-tip">Code lines removed since the previous scan</div>
             </div>
             <div class="delta-card-inline">
               <div class="delta-card-val">{% if let Some(v) = delta_unmodified_lines %}{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">unmodified lines</div>
+              <div class="delta-card-tip">Code lines unchanged since the previous scan</div>
             </div>
             <div class="delta-card-inline">
               <div class="delta-card-val mod">{% if let Some(v) = delta_files_modified %}{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files modified</div>
+              <div class="delta-card-tip">Files with at least one line changed</div>
             </div>
             <div class="delta-card-inline">
               <div class="delta-card-val pos">{% if let Some(v) = delta_files_added %}{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files added</div>
+              <div class="delta-card-tip">New files added since the previous scan</div>
             </div>
             <div class="delta-card-inline">
               <div class="delta-card-val neg">{% if let Some(v) = delta_files_removed %}{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files removed</div>
+              <div class="delta-card-tip">Files deleted since the previous scan</div>
             </div>
             <div class="delta-card-inline">
               <div class="delta-card-val">{% if let Some(v) = delta_files_unchanged %}{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files unchanged</div>
+              <div class="delta-card-tip">Files with no changes since the previous scan</div>
             </div>
           </div>
           {% else %}
@@ -12249,8 +12656,8 @@ struct ScanSetupTemplate {
               {% when None %}{% endmatch %}
             {% match html_path %}
               {% when Some with (_path) %}{% when None %}{% endmatch %}
+            <p class="action-empty-note" style="margin-top:6px;">Interactive report with charts, language breakdown, and per-file detail. Opens in your browser.</p>
           </div>
-          <p class="action-empty-note" style="margin-top:16px;">Interactive report with charts, language breakdown, and per-file detail. Opens in your browser.</p>
         </div>
         <div class="action-card">
           <h3>PDF report</h3>
@@ -12272,8 +12679,8 @@ struct ScanSetupTemplate {
               {% when None %}{% endmatch %}
             {% match pdf_path %}
               {% when Some with (_path) %}{% when None %}{% endmatch %}
+            <p class="action-empty-note" style="margin-top:6px;">Print-ready PDF generated from the HTML report. Suitable for sharing or archiving.</p>
           </div>
-          <p class="action-empty-note" style="margin-top:16px;">Print-ready PDF generated from the HTML report. Suitable for sharing or archiving.</p>
         </div>
         <div class="action-card">
           <h3>JSON result</h3>
@@ -12299,8 +12706,8 @@ struct ScanSetupTemplate {
           <div class="action-buttons">
             <a class="button secondary" href="{{ scan_config_url }}">Download config</a>
             <a class="button" href="/scan-setup" style="background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;border:none;">Run another scan</a>
+            <p class="action-empty-note" style="margin-top:6px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
           </div>
-          <p class="action-empty-note" style="margin-top:16px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
         </div>
         {% if confluence_configured %}
         <div class="action-card" id="confluenceCard">
@@ -12320,7 +12727,7 @@ struct ScanSetupTemplate {
           <label style="font-size:12px;font-weight:700;color:var(--muted);">Page Title</label>
           <input id="confPageTitle" type="text" value="OxideSLOC — {{ report_title }}" style="width:100%;margin:5px 0 14px;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;box-sizing:border-box;">
           <label style="font-size:12px;font-weight:700;color:var(--muted);">Report URL <span style="font-weight:400;">(optional — linked in page body)</span></label>
-          <input id="confReportUrl" type="url" placeholder="http://127.0.0.1:4317/runs/{{ run_id }}/result" style="width:100%;margin:5px 0 14px;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;box-sizing:border-box;">
+          <input id="confReportUrl" type="url" placeholder="http://127.0.0.1:4317/runs/result/{{ run_id }}" style="width:100%;margin:5px 0 14px;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;box-sizing:border-box;">
           <div id="confStatus" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>
           <div style="display:flex;gap:10px;justify-content:flex-end;">
             <button class="button secondary" id="confCancelBtn" type="button">Cancel</button>
@@ -12339,35 +12746,40 @@ struct ScanSetupTemplate {
           <div class="pill-row"><span class="soft-chip">{{ submodule_rows.len() }} submodule{% if submodule_rows.len() != 1 %}s{% endif %}</span></div>
         </div>
         <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:760px;">
           <colgroup>
-            <col><col>
-            <col style="width:1px"><col style="width:1px"><col style="width:1px">
-            <col style="width:1px"><col style="width:1px"><col style="width:80px">
+            <col style="width:17%">
+            <col style="width:44%">
+            <col style="width:6%">
+            <col style="width:7%">
+            <col style="width:6%">
+            <col style="width:8%">
+            <col style="width:6%">
+            <col style="width:6%">
           </colgroup>
           <thead>
             <tr>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Submodule</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Submodule</th>
               <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Path</th>
-              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
-              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
-              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
-              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Comments</th>
-              <th style="padding:9px 10px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Blank</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
+              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
+              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
+              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
+              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Comments</th>
+              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Blank</th>
+              <th style="padding:9px 8px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
             </tr>
           </thead>
           <tbody>
             {% for row in submodule_rows %}
             <tr>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;white-space:nowrap;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);" title="{{ row.relative_path }}"><code style="font-size:12px;white-space:nowrap;word-break:normal;overflow-wrap:normal;">{{ row.relative_path }}</code></td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.files_analyzed }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.total_physical_lines }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.code_lines }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.comment_lines }}</td>
-              <td style="padding:10px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.blank_lines }}</td>
-              <td style="padding:10px 14px;border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 12px;min-height:0;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
+              <td style="padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;" title="{{ row.relative_path }}"><code style="font-size:12px;white-space:nowrap;word-break:keep-all;overflow-wrap:normal;">{{ row.relative_path }}</code></td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.files_analyzed }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.total_physical_lines }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.code_lines }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.comment_lines }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.blank_lines }}</td>
+              <td style="padding:10px 8px;border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 10px;min-height:0;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -12558,7 +12970,8 @@ struct ScanSetupTemplate {
 
     <div id="r-tt" aria-hidden="true"></div>
 
-    <section class="panel" style="margin-bottom: 80px; padding-bottom: 24px;">
+    <div style="display:flex;flex-direction:column;gap:40px;width:100%;">
+    <section class="panel" style="padding-bottom: 24px;">
         <div class="toolbar-row">
           <div>
             <h2>Language breakdown</h2>
@@ -12568,9 +12981,7 @@ struct ScanSetupTemplate {
         <div id="result-lang-charts" style="margin:0 0 8px;"></div>
     </section>
 
-    <div style="height:60px;"></div>
-
-    <section class="panel r-chart-section" style="margin-top:80px;">
+    <section class="panel r-chart-section">
       <div class="toolbar-row" style="margin-bottom:16px;">
         <div>
           <h2>Visualizations</h2>
@@ -12628,6 +13039,7 @@ struct ScanSetupTemplate {
       </div>
 
     </section>
+    </div>
 
   </div>
 
@@ -12677,6 +13089,19 @@ struct ScanSetupTemplate {
       });
 
       loadSavedTheme();
+
+      // ── Compact number formatting for stat chips ──────────────────────────
+      (function(){
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        Array.prototype.slice.call(document.querySelectorAll('.stat-chip[data-raw]')).forEach(function(chip){
+          var raw=parseInt(chip.getAttribute('data-raw'),10);
+          if(isNaN(raw))return;
+          var valEl=chip.querySelector('.stat-chip-val');
+          if(valEl)valEl.textContent=fmt(raw);
+          var exactEl=chip.querySelector('.stat-chip-exact');
+          if(exactEl)exactEl.textContent=raw>=10000?raw.toLocaleString():'';
+        });
+      })();
 
       // ── Shared tooltip for all result-page charts ─────────────────────────
       var rTT=(function(){
@@ -13017,7 +13442,7 @@ struct ScanSetupTemplate {
                   var a = document.createElement('a');
                   a.className = 'button';
                   a.id = 'pdf-open-btn';
-                  a.href = '/runs/{{ run_id }}/pdf';
+                  a.href = '/runs/pdf/{{ run_id }}';
                   a.target = '_blank';
                   a.rel = 'noopener';
                   a.textContent = 'Open PDF';
@@ -13241,9 +13666,9 @@ struct ResultTemplate {
     .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
-    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
@@ -13322,8 +13747,7 @@ struct ResultTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -13405,7 +13829,7 @@ struct ResultTemplate {
             if (data.state === 'complete') {
               clearInterval(elapsedTimer);
               setPhase('Done');
-              window.location.href = '/runs/' + encodeURIComponent(data.run_id) + '/result';
+              window.location.href = '/runs/result/' + encodeURIComponent(data.run_id);
             } else if (data.state === 'failed') {
               clearInterval(elapsedTimer);
               setPhase('Failed');
@@ -13539,9 +13963,9 @@ struct ScanWaitTemplate {
     @keyframes wmFade{from{opacity:var(--wm-op,0.08);}to{opacity:calc(var(--wm-op,0.08)*0.3);}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
-    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
-    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
@@ -13577,7 +14001,7 @@ struct ScanWaitTemplate {
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -13613,8 +14037,7 @@ struct ScanWaitTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -13744,9 +14167,9 @@ struct ErrorTemplate {
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
-    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
-    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
@@ -13777,6 +14200,7 @@ struct ErrorTemplate {
     .panel-meta{font-size:13px;color:var(--muted);}
     .controls-bar{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;}
     .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+    .filter-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
     .per-page-label{font-size:13px;color:var(--muted);}
     select.per-page,.filter-input,.filter-select{border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:5px 10px;font-size:13px;cursor:pointer;}
     .filter-input{min-width:180px;cursor:text;}
@@ -13819,7 +14243,7 @@ struct ErrorTemplate {
     .summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
     @media(max-width:800px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
     .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}
-    .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}
+    .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}
     .stat-chip-val{font-size:20px;font-weight:900;color:var(--oxide);}
     .stat-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
     .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
@@ -13839,7 +14263,7 @@ struct ErrorTemplate {
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .watched-bar{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;flex-wrap:wrap;margin-bottom:14px;position:relative;z-index:1;}
     .toolbar-divider{width:1px;background:var(--line);align-self:stretch;flex-shrink:0;margin:0 6px;}
     .toolbar-right{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;}
@@ -13906,8 +14330,7 @@ struct ErrorTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -13968,14 +14391,6 @@ struct ErrorTemplate {
           <button type="submit" class="btn">&#8635; Refresh</button>
         </form>
       </div>
-      {% if !entries.is_empty() %}
-      <div class="toolbar-divider"></div>
-      <div class="toolbar-right">
-        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
-        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
-        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
-      </div>
-      {% endif %}
     </div>
     {% if total_scans > 0 %}
     <div class="summary-strip">
@@ -14010,6 +14425,11 @@ struct ErrorTemplate {
         Run a new analysis from the <a href="/scan">scan page</a>, or click <strong>Choose</strong> above to watch a folder containing saved reports.
       </div>
       {% else %}
+      <div class="filter-row">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
+        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
+        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
+      </div>
       <div class="table-wrap">
         <table id="history-table">
           <colgroup>
@@ -14040,7 +14460,7 @@ struct ErrorTemplate {
                 data-blank="{{ entry.blank_lines }}"
                 data-branch="{{ entry.git_branch }}"
                 data-commit="{{ entry.git_commit }}"
-                data-html-url="/runs/{{ entry.run_id }}/html">
+                data-html-url="/runs/html/{{ entry.run_id }}">
               <td>{{ entry.timestamp }}</td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
               <td><span class="run-id-chip">{{ entry.run_id_short }}</span></td>
@@ -14052,8 +14472,8 @@ struct ErrorTemplate {
               <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip" title="{{ entry.git_commit }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
               <td class="report-cell">
                 <div class="actions-cell">
-                  <a class="btn primary rpt-btn" href="/runs/{{ entry.run_id }}/html" target="_blank" rel="noopener" title="View HTML report">View</a>
-                  {% if entry.has_pdf %}<a class="btn primary rpt-btn" href="/runs/{{ entry.run_id }}/pdf" target="_blank" rel="noopener" title="View PDF report">PDF</a>{% endif %}
+                  <a class="btn primary rpt-btn" href="/runs/html/{{ entry.run_id }}" target="_blank" rel="noopener" title="View HTML report">View</a>
+                  {% if entry.has_pdf %}<a class="btn primary rpt-btn" href="/runs/pdf/{{ entry.run_id }}" target="_blank" rel="noopener" title="View PDF report">PDF</a>{% endif %}
                 </div>
                 {% if !entry.submodule_links.is_empty() %}
                 <details class="submod-details">
@@ -14436,9 +14856,9 @@ struct HistoryTemplate {
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
-    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
-    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
@@ -14470,14 +14890,25 @@ struct HistoryTemplate {
     .compare-bar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}
     .controls-bar{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;}
     .filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+    .filter-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
     .per-page-label{font-size:13px;color:var(--muted);}
     select.per-page,.filter-input,.filter-select{border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:5px 10px;font-size:13px;cursor:pointer;}
     .filter-input{min-width:180px;cursor:text;}
     .table-wrap{width:100%;overflow-x:auto;}
-    table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}
+    table{width:100%;border-collapse:collapse;font-size:13px;table-layout:auto;}
     th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;position:relative;user-select:none;}
     th.sortable{cursor:pointer;} th.sortable:hover{color:var(--oxide);}
     .sort-icon{margin-left:4px;font-size:10px;opacity:0.45;display:inline-block;vertical-align:middle;}
+    #compare-table th:nth-child(1),#compare-table td:nth-child(1){min-width:28px;width:28px;max-width:28px;padding-left:2px;padding-right:2px;box-sizing:border-box;}
+    #compare-table th:nth-child(2),#compare-table td:nth-child(2){min-width:185px;}
+    #compare-table th:nth-child(3),#compare-table td:nth-child(3){min-width:300px;}
+    #compare-table th:nth-child(4),#compare-table td:nth-child(4){min-width:78px;}
+    #compare-table th:nth-child(5),#compare-table td:nth-child(5){min-width:55px;}
+    #compare-table th:nth-child(6),#compare-table td:nth-child(6){min-width:75px;}
+    #compare-table th:nth-child(7),#compare-table td:nth-child(7){min-width:65px;}
+    #compare-table th:nth-child(8),#compare-table td:nth-child(8){min-width:50px;}
+    #compare-table th:nth-child(9),#compare-table td:nth-child(9){min-width:75px;}
+    #compare-table th:nth-child(10),#compare-table td:nth-child(10){min-width:75px;}
     th.sort-asc .sort-icon,th.sort-desc .sort-icon{opacity:1;color:var(--oxide);}
     .col-resize-handle{position:absolute;top:0;right:0;bottom:0;width:6px;cursor:col-resize;z-index:2;}
     .col-resize-handle:hover,.col-resize-handle.dragging{background:rgba(211,122,76,0.3);}
@@ -14494,7 +14925,6 @@ struct HistoryTemplate {
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
     .sel-badge{display:block;width:22px;height:22px;margin:0 auto;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--surface-2);line-height:20px;text-align:center;font-size:11px;font-weight:900;color:var(--muted-2);transition:background .12s,border-color .12s;}
     tr.selected .sel-badge{background:var(--sel-border);border-color:var(--sel-border);color:#fff;}
-    #compare-table td:nth-child(3){white-space:normal;word-break:break-word;overflow:visible;}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn:hover{background:var(--line);}
     .btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:#fff;}
@@ -14537,7 +14967,7 @@ struct HistoryTemplate {
     .summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
     @media(max-width:800px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
     .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}
-    .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}
+    .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}
     .stat-chip-val{font-size:20px;font-weight:900;color:var(--oxide);}
     .stat-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
     .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
@@ -14565,7 +14995,7 @@ struct HistoryTemplate {
     .scope-option.selected .scope-option-radio{border-color:var(--accent-2);}
     .scope-option.selected .scope-option-radio::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--accent-2);}
     .scope-option-sep{width:1px;height:16px;background:rgba(111,155,255,0.28);margin:0 2px;flex-shrink:0;}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
   </style>
 </head>
 <body>
@@ -14598,8 +15028,7 @@ struct HistoryTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -14648,14 +15077,6 @@ struct HistoryTemplate {
           <button type="submit" class="btn">&#8635; Refresh</button>
         </form>
       </div>
-      {% if !entries.is_empty() %}
-      <div class="toolbar-divider"></div>
-      <div class="toolbar-right">
-        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
-        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
-        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
-      </div>
-      {% endif %}
     </div>
     {% if total_scans > 0 %}
     <div class="summary-strip">
@@ -14687,6 +15108,11 @@ struct HistoryTemplate {
         Run your first analysis from the <a href="/scan">scan page</a>, or click <strong>Choose</strong> above to watch a folder containing saved reports.
       </div>
       {% else %}
+      <div class="filter-row">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project…">
+        <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
+        <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
+      </div>
       <div class="scope-panel hidden" id="scope-panel">
         <div class="scope-panel-label">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
@@ -14704,24 +15130,11 @@ struct HistoryTemplate {
       {% endif %}
       <div class="table-wrap">
         <table id="compare-table">
-          <colgroup>
-            <col style="width:36px">
-            <col style="width:230px">
-            <col style="width:250px">
-            <col style="width:88px">
-            <col style="width:62px">
-            <col style="width:80px">
-            <col style="width:72px">
-            <col style="width:58px">
-            <col style="width:80px">
-            <col style="width:100px">
-            <col>
-          </colgroup>
           <thead>
             <tr id="compare-thead">
-              <th style="text-align:center;padding-left:4px;padding-right:4px;width:36px;max-width:36px;"><div class="col-resize-handle"></div></th>
-              <th class="sortable" data-sort-col="timestamp" data-sort-type="str" style="min-width:230px;width:230px;">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
-              <th class="sortable" data-sort-col="project" data-sort-type="str" style="min-width:250px;width:250px;">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th style="text-align:center;padding-left:4px;padding-right:4px;"><div class="col-resize-handle"></div></th>
+              <th class="sortable" data-sort-col="timestamp" data-sort-type="str">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
+              <th class="sortable" data-sort-col="project" data-sort-type="str">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th title="Internal scan ID generated by OxideSLOC">Run ID<div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="files" data-sort-type="num">Files<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="code" data-sort-type="num">Code Lines<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
@@ -14800,7 +15213,7 @@ struct HistoryTemplate {
       });
 
       // ── State ─────────────────────────────────────────────────────────────
-      var perPage = 25, currentPage = 1, sortCol = null, sortOrder = 'asc';
+      var perPage = 25, currentPage = 1, sortCol = 'timestamp', sortOrder = 'desc';
       var allRows = Array.prototype.slice.call(document.querySelectorAll('.compare-row'));
       allRows.forEach(function(r, i) { r.dataset.origIdx = i; });
 
@@ -14905,6 +15318,12 @@ struct HistoryTemplate {
         });
       });
 
+      // Apply default sort (timestamp desc) on initial load
+      (function() {
+        var tsTh = document.querySelector('#compare-thead [data-sort-col="timestamp"]');
+        if (tsTh) { tsTh.classList.add('sort-desc'); var si = tsTh.querySelector('.sort-icon'); if (si) si.textContent = '↓'; doSort('timestamp', 'str', 'desc'); }
+      })();
+
       // ── Column resize ─────────────────────────────────────────────────────
       (function() {
         var table = document.getElementById('compare-table');
@@ -14941,7 +15360,7 @@ struct HistoryTemplate {
         }
         var pps = document.getElementById('per-page-sel'); if (pps) { pps.value = '25'; perPage = 25; }
         var table = document.getElementById('compare-table');
-        if (table) { var dw=['36px','230px','250px','88px','62px','80px','72px','58px','80px','100px',''];Array.prototype.slice.call(table.querySelectorAll('col')).forEach(function(c,i){c.style.width=dw[i]||'';});}
+        currentPage = 1; renderPage();
         currentPage = 1; renderPage();
       };
 
@@ -15188,13 +15607,13 @@ struct CompareSelectTemplate {
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
-    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
-    .brand-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;}
-    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
-    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
+    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
@@ -15377,7 +15796,7 @@ struct CompareSelectTemplate {
     body.dark-theme .tab-btn.tab-modified{background:#3d2f0a;color:#f0c060;border-color:#6b5020;}
     body.dark-theme .tab-btn.tab-added{background:#163927;color:#8fe2a8;border-color:#2a6b4a;}
     body.dark-theme .tab-btn.tab-removed{background:#3d1c1c;color:#f5a3a3;border-color:#7a3a3a;}
-    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .submod-scope-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 16px;background:var(--surface-2);border:1.5px solid var(--line-strong);border-radius:12px;margin:12px 0 18px;}
     .submod-scope-divider{width:1px;height:18px;background:var(--line-strong);margin:0 4px;flex-shrink:0;}
     .submod-scope-label{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);flex-shrink:0;white-space:nowrap;}
@@ -15418,8 +15837,7 @@ struct CompareSelectTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">
@@ -15498,9 +15916,9 @@ struct CompareSelectTemplate {
             </div>
           </div>
           {% if !baseline_git_commit.is_empty() %}
-          <a class="meta-card-commit" href="/runs/{{ baseline_run_id }}/html" target="_blank">{{ baseline_git_commit }}</a>
+          <a class="meta-card-commit" href="/runs/html/{{ baseline_run_id }}" target="_blank">{{ baseline_git_commit }}</a>
           {% else %}
-          <a class="meta-card-commit" href="/runs/{{ baseline_run_id }}/html" target="_blank">{{ baseline_run_id_short }}</a>
+          <a class="meta-card-commit" href="/runs/html/{{ baseline_run_id }}" target="_blank">{{ baseline_run_id_short }}</a>
           {% endif %}
           <div class="meta-card-rows">
             <div class="meta-card-row"><span class="meta-label">Branch:</span>{% if !baseline_git_branch.is_empty() %}<span class="git-chip">{{ baseline_git_branch }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
@@ -15529,9 +15947,9 @@ struct CompareSelectTemplate {
             </div>
           </div>
           {% if !current_git_commit.is_empty() %}
-          <a class="meta-card-commit" href="/runs/{{ current_run_id }}/html" target="_blank">{{ current_git_commit }}</a>
+          <a class="meta-card-commit" href="/runs/html/{{ current_run_id }}" target="_blank">{{ current_git_commit }}</a>
           {% else %}
-          <a class="meta-card-commit" href="/runs/{{ current_run_id }}/html" target="_blank">{{ current_run_id_short }}</a>
+          <a class="meta-card-commit" href="/runs/html/{{ current_run_id }}" target="_blank">{{ current_run_id_short }}</a>
           {% endif %}
           <div class="meta-card-rows">
             <div class="meta-card-row"><span class="meta-label">Branch:</span>{% if !current_git_branch.is_empty() %}<span class="git-chip">{{ current_git_branch }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
@@ -16483,15 +16901,15 @@ struct LoginTemplate {
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}
-    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;}
+    .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;white-space:nowrap;}
     .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;}
     @media (max-width: 1400px) { .nav-right { gap: 6px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-right { gap: 4px; } .nav-pill, .nav-dropdown-btn, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } .server-online-pill { width: 34px; padding: 0; justify-content: center; font-size: 0; gap: 0; min-height: 34px; } }
-    .nav-pill{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
+    .nav-pill{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;}
     a.nav-pill:hover{background:rgba(255,255,255,0.18);}
     .nav-pill.active{background:rgba(255,255,255,0.22);}
     .nav-dropdown{position:relative;display:inline-flex;}
-    .nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}
+    .nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}
     .nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}
     .nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}
     .nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}
@@ -16624,8 +17042,7 @@ struct LoginTemplate {
           <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           <div class="nav-dropdown-menu">
             <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">

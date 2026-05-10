@@ -684,7 +684,7 @@ pub async fn maybe_auto_post_confluence(
     // Build a server URL for the report link using bind_address from config
     let bind = &state.base_config.web.bind_address;
     let proto = if state.tls_enabled { "https" } else { "http" };
-    let report_url = format!("{proto}://{bind}/runs/{run_id}/result");
+    let report_url = format!("{proto}://{bind}/runs/result/{run_id}");
 
     if let Err(e) = post_to_confluence(&client, run, &title, Some(&report_url)).await {
         eprintln!("[sloc-confluence] auto-post failed for schedule {sched_id}: {e:#}");

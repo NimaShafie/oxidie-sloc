@@ -976,7 +976,7 @@ fn run_ref_scan(
             }
         }
     }
-    let html_url = format!("/runs/{run_id}/html");
+    let html_url = format!("/runs/html/{run_id}");
     Ok((run_id, html_url, artifacts, run))
 }
 
