@@ -309,7 +309,7 @@ use super::{AppState, CspNonce};
         <p style="font-size:13px;color:var(--muted);margin:0 0 16px">Post any saved scan result to Confluence right now. Enter the Run ID from the scan result page.</p>
         <div class="form-row">
           <div class="form-group">
-            <div class="label-row"><label>Run ID</label><button type="button" class="info-btn" aria-label="About run ID">i<span class="info-tip">The UUID of a completed scan. Copy it from the scan result page URL (/runs/uuid/result) or from the View Reports list.</span></button></div>
+            <div class="label-row"><label>Run ID</label><button type="button" class="info-btn" aria-label="About run ID">i<span class="info-tip">The UUID of a completed scan. Copy it from the scan result page URL (/runs/result/uuid) or from the View Reports list.</span></button></div>
             <input id="mRunId" type="text" placeholder="Paste run UUID from scan result page"/>
           </div>
           <div class="form-group">
@@ -320,7 +320,7 @@ use super::{AppState, CspNonce};
         <div class="form-row">
           <div class="form-group">
             <div class="label-row"><label>Report URL <span style="font-weight:400;font-size:11px;">(optional)</span></label><button type="button" class="info-btn" aria-label="About report URL">i<span class="info-tip">A link back to the full interactive oxide-sloc HTML report. Embedded as a hyperlink in the Confluence page. Leave blank to omit.</span></button></div>
-            <input id="mReportUrl" type="url" placeholder="http://127.0.0.1:4317/runs/.../result"/>
+            <input id="mReportUrl" type="url" placeholder="http://127.0.0.1:4317/runs/result/..."/>
           </div>
         </div>
         <div id="manualStatus" class="status-msg"></div>

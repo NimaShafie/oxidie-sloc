@@ -1005,7 +1005,8 @@ struct WarningOpportunityRow {
     @media (max-width: 1150px) { .nav-status { gap: 4px; } .header-button, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } }
     .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; }
     .theme-toggle { width: 38px; justify-content:center; padding:0; }
-    .nav-dropdown-wrap { position: relative; padding-bottom: 6px; }
+    .nav-dropdown-wrap { position: relative; }
+    .nav-dropdown-wrap::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 6px; }
     .nav-dropdown-trigger { }
     .nav-dropdown-menu { display: none; position: absolute; top: 100%; right: 0; background: var(--nav-2); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; min-width: 140px; padding: 6px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.28); }
     .nav-dropdown-wrap:hover .nav-dropdown-menu, .nav-dropdown-wrap:focus-within .nav-dropdown-menu { display: flex; flex-direction: column; gap: 2px; }
@@ -1034,12 +1035,21 @@ struct WarningOpportunityRow {
     .run-id-row { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:10px; margin-top:16px; }
     @media(max-width:960px) { .run-id-row { grid-template-columns: 1fr 1fr; } }
     @media(max-width:560px) { .run-id-row { grid-template-columns: 1fr; } }
-    .run-id-chip { display:flex; flex-direction:column; gap:5px; padding:12px 14px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent); color:var(--text); }
+    .run-id-chip { display:flex; flex-direction:column; gap:5px; padding:12px 14px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent); color:var(--text); position:relative; cursor:default; transition:transform 0.18s ease, box-shadow 0.18s ease; }
+    .run-id-chip[data-copy] { cursor:pointer; }
+    .run-id-chip:hover { transform:translateY(-3px); box-shadow:0 8px 24px rgba(0,0,0,0.15); z-index:10; }
     .run-id-chip.muted-chip { border-left-color:var(--line-strong); }
     .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:var(--accent); }
     .run-id-chip.muted-chip .run-id-chip-label { color:var(--muted-2); }
     .run-id-chip-value { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
+    .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity 0.18s ease; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
+    .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .run-id-chip:hover .chip-tooltip { opacity:1; }
+    .chip-copy-icon { display:inline-block; margin-left:5px; font-size:10px; opacity:0.55; vertical-align:middle; }
+    .author-handle { font-size:11px; font-weight:600; color:var(--muted-2); margin-left:1.5em; font-family:ui-monospace,monospace; }
+    @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
+    .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
     .subtitle { margin: 10px 0 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
     .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 20px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
     .meta-chip { display:inline-flex; align-items:center; gap:5px; padding:0 14px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
@@ -1057,7 +1067,11 @@ struct WarningOpportunityRow {
     .export-group { display:flex; gap:6px; align-items:center; }
     .export-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
     .export-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; contain: layout; scrollbar-gutter: stable; }
+    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; scrollbar-gutter: stable; }
+    /* Always reserve scrollbar space on the two large scrollable tables to prevent the
+       vertical scrollbar from overlapping column data regardless of browser support for
+       scrollbar-gutter. overflow-y:scroll keeps the gutter permanently allocated. */
+    #per-file-shell, #skipped-shell { overflow-y: scroll; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
@@ -1091,11 +1105,17 @@ struct WarningOpportunityRow {
     #lang-breakdown-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
     /* Skipped table: extend truncation to all cells, not just the first column */
     #skipped-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
-    /* Support opportunities table: fixed layout so Recommendation column can't expand */
+    /* Support opportunities table: fixed layout so Category/Count columns don't grow */
     .support-table { table-layout: fixed; width: 100%; }
-    .support-table th:first-child { width: 26%; }
-    .support-table th:nth-child(2) { width: 8%; }
-    .support-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
+    .support-table th:first-child { width: 20%; }
+    .support-table th:nth-child(2) { width: 6%; }
+    .support-table th:nth-child(3) { width: 24%; }
+    .support-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; vertical-align: top; padding-top: 10px; padding-bottom: 10px; }
+    /* Description and example columns must wrap — content can be long */
+    .support-table td:nth-child(3) { white-space: normal; overflow: visible; text-overflow: unset; max-width: none; line-height: 1.45; }
+    .support-table td:last-child { white-space: normal; overflow: visible; text-overflow: unset; max-width: none; }
+    .support-example-file { display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; padding: 1px 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; margin-bottom: 2px; word-break: break-all; }
+    .support-recommendation { color: var(--muted); font-size: 11px; margin: 6px 0 0; line-height: 1.5; }
     .num-col { text-align: right !important; }
     tbody tr:hover { background: rgba(255, 247, 238, 0.6); }
     body.dark-theme tbody tr:hover { background: rgba(255,255,255,0.03); }
@@ -1107,6 +1127,30 @@ struct WarningOpportunityRow {
     .status-analyzedbesteffort, .status-skippedbypolicy { background: var(--warn-bg); color: var(--warn-text); border-color: rgba(146,96,0,0.18); }
     .status-skippedunsupported, .status-skippedbinary { background: var(--danger-bg); color: var(--danger-text); border-color: rgba(179,59,59,0.18); }
     .stack { display:grid; gap:22px; }
+    .summary-strip { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:18px; }
+    @media(max-width:800px) { .summary-strip { grid-template-columns:repeat(2,1fr) !important; } }
+    .test-density-row { display:flex; align-items:center; gap:12px; margin-bottom:16px; padding:10px 16px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); }
+    .test-density-num { font-size:22px; font-weight:900; color:var(--oxide); line-height:1; }
+    .test-density-meta { display:flex; flex-direction:column; gap:2px; }
+    .test-density-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
+    .test-density-sub { font-size:11px; color:var(--muted-2); }
+    .test-density-badge { margin-left:auto; padding:4px 12px; border-radius:999px; font-size:12px; font-weight:700; }
+    .test-density-badge.good { background:var(--good-bg); color:var(--good-text); }
+    .test-density-badge.warn { background:var(--warn-bg); color:var(--warn-text); }
+    .test-density-badge.danger { background:var(--danger-bg); color:var(--danger-text); }
+    .info-callout { display:flex; align-items:flex-start; gap:10px; margin-top:14px; padding:11px 14px; border-radius:10px; background:var(--info-bg); border:1px solid rgba(68,103,216,0.18); color:var(--info-text); font-size:13px; line-height:1.5; }
+    .info-callout-icon { flex:0 0 auto; font-size:15px; margin-top:1px; }
+    .info-callout code { background:rgba(68,103,216,0.12); border-radius:4px; padding:1px 5px; font-size:12px; }
+    body.dark-theme .info-callout { background:rgba(100,130,255,0.09); border-color:rgba(100,130,255,0.22); }
+    .empty-state-row td { text-align:center; padding:20px; color:var(--muted-2); font-size:13px; font-style:italic; }
+    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
+    .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
+    .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
+    .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.4; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 14px rgba(0,0,0,0.2); }
+    .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .stat-chip:hover .stat-chip-tip { opacity:1; }
+    .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
     .report-stack { display:grid; gap: 18px; align-items:start; }
     pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 16px; padding: 16px; overflow: auto; font-size: 12px; color: var(--text); }
     .warn-list { margin: 0; padding-left: 18px; line-height: 1.6; }
@@ -1137,13 +1181,16 @@ struct WarningOpportunityRow {
       .search { min-width: 100%; width: 100%; }
     }
     /* ── Report header / footer identification banner ─────────────────── */
-    .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; position: relative; z-index: 31; width: 100%; }
-    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; width: 100%; margin-top: 24px; }
+    .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; position: fixed; top: 0; left: 0; right: 0; z-index: 32; width: 100%; }
+    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; padding: 5px 16px; position: fixed; bottom: 0; left: 0; right: 0; z-index: 32; width: 100%; }
+    body.has-report-banner .top-nav { top: 27px; }
+    body.has-report-banner { padding-bottom: 27px; }
     /* ── Print & PDF export ──────────────────────────────────────────── */
-    @page {
-      size: A4 landscape;
-      margin: 0.4in 0.45in;
-    }
+    {% if report_header_footer.is_some() %}
+    @page { size: A4 landscape; margin: 0.72in 0.45in; }
+    {% else %}
+    @page { size: A4 landscape; margin: 0.4in 0.45in; }
+    {% endif %}
 
     @media print {
       *, *::before, *::after {
@@ -1157,9 +1204,11 @@ struct WarningOpportunityRow {
         width: 100% !important;
       }
 
-      /* Report id banner — appears once at the top/bottom of the document in print */
-      .report-id-banner { position: static !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; }
-      .report-id-footer-banner { display: block !important; position: static !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 12px !important; background: #3d3d3d !important; color: #fff !important; }
+      /* Report id banner — fixed position repeats the banner on every printed page */
+      .report-id-banner { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; z-index: 9999 !important; }
+      .report-id-footer-banner { display: block !important; position: fixed !important; bottom: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 0 !important; background: #3d3d3d !important; color: #fff !important; z-index: 9999 !important; }
+      body.has-report-banner .top-nav { top: 0 !important; }
+      body.has-report-banner { padding-bottom: 0 !important; }
       /* Hide interactive UI-chrome; keep section heading text visible */
       .top-nav, .hero-actions,
       .background-watermarks,
@@ -1228,6 +1277,9 @@ struct WarningOpportunityRow {
       .metric, .warning-card, .run-id-chip { break-inside: avoid !important; }
       .hero, .panel, .stack { break-inside: auto !important; }
       section { break-inside: auto !important; }
+      /* Keep each chart panel whole — browser moves it to the next page rather than
+         slicing through the middle of a canvas. */
+      .chart-section { break-inside: avoid !important; }
       /* Keep the summary grid on the same page as the hero header when possible */
       .summary-grid { break-before: avoid !important; }
       /* Section headings never orphan at the bottom of a page */
@@ -1331,6 +1383,18 @@ struct WarningOpportunityRow {
 
       /* Support opportunities table */
       .support-table td:first-child { font-weight: 600; font-size: 10px !important; }
+
+      /* Hide canvas-based interactive chart sections; replaced by pre-rendered variants */
+      .chart-section { display: none !important; }
+      .charts-grid   { display: none !important; }
+      /* Pre-rendered chart variants — start on a fresh page */
+      .pdf-variants-root { display: block !important; break-before: page; }
+      .pdf-variant-group { break-inside: auto !important; margin-bottom: 12px !important; }
+      .pdf-variant-group-title { break-after: avoid !important; font-size: 13px !important; font-weight: 800 !important; color: #3d2d26 !important; margin: 0 0 6px !important; padding-bottom: 4px !important; border-bottom: 2px solid #d37a4c !important; }
+      .pdf-variant-grid { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+      .pdf-variant-panel { break-inside: avoid !important; }
+      .pdf-variant-label { font-size: 10px !important; font-weight: 700 !important; text-transform: uppercase !important; letter-spacing: .06em !important; color: #7b675b !important; margin: 0 0 3px !important; }
+      .pdf-variant-img { width: 100% !important; height: auto !important; display: block !important; border-radius: 6px !important; border: 1px solid #ddd !important; }
     }
 
 
@@ -1387,6 +1451,13 @@ struct WarningOpportunityRow {
     .charts-grid .chart-section > div { display:flex; flex-direction:column; flex:1; }
     .charts-grid .chart-container { flex:1; min-height:180px; }
     @media (max-width:820px) { .charts-grid { grid-template-columns:1fr; } }
+    .r-lang-overview { display:flex; gap:40px; align-items:flex-start; justify-content:center; flex-wrap:wrap; padding:8px 0 16px; }
+    .r-lang-overview-cell { display:flex; flex-direction:column; align-items:center; gap:8px; flex:1 1 280px; max-width:480px; }
+    .r-lang-overview-cell p { margin:0; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:var(--muted-2); text-align:center; }
+    .r-lang-overview svg { display:block; max-width:100%; height:auto; }
+    .rchit { cursor:pointer; transition:opacity .17s,filter .17s; }
+    .rchit:hover { opacity:.75; filter:brightness(1.14); }
+    #r-tt { display:none; position:fixed; background:rgba(15,10,6,.95); color:#fff; border-radius:10px; padding:8px 13px; font-size:12px; line-height:1.5; pointer-events:none; z-index:9999; box-shadow:0 4px 20px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.1); max-width:240px; white-space:nowrap; }
     .chart-tab-bar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
     .chart-tab { padding:5px 16px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer; transition:background 0.12s,color 0.12s,border-color 0.12s; }
     .chart-tab:hover { background:var(--surface-3); color:var(--text); }
@@ -1398,12 +1469,28 @@ struct WarningOpportunityRow {
     /* Print: hide interactive controls; keep SVGs; show locked card for history mode */
     @media print {
       .chart-controls, .chart-tab-bar { display:none !important; }
-      canvas { max-width: 100% !important; }
+      /* Single-column grid: each chart gets full page width, renders shorter, fits on one page */
+      .charts-grid { grid-template-columns: 1fr !important; gap: 10px !important; }
+      /* Cap canvas height so a single chart never overflows a landscape page */
+      canvas { max-width: 100% !important; max-height: 280px !important; }
       .chart-container { width: 100% !important; overflow: visible !important; }
-      .charts-grid { grid-template-columns: 1fr 1fr !important; gap: 14px !important; }
-      .chart-container svg { max-height:340px !important; }
-      .chart-locked-card { display:block !important; background:#eef3ff !important; border:1px solid #ccc !important; color:#2f5fe3 !important; font-size:11px !important; padding:10px 14px !important; border-radius:8px !important; }
+      .chart-container svg { max-height:300px !important; }
+      /* chart-locked-card: do NOT force display:block — let JS-set visibility carry
+         into print (hidden in normal mode; visible only when history mode is active).
+         When it does show, use readable dark text instead of accent blue. */
+      .chart-locked-card { background:#f0f0f0 !important; border:1px solid #bbb !important; color:#333 !important; font-size:11px !important; padding:10px 14px !important; border-radius:8px !important; }
+      .chart-locked-card h3 { color:#222 !important; font-size:13px !important; }
+      .chart-locked-card a, .chart-locked-card strong { color:#1a4fa0 !important; }
+      .chart-locked-card code { background:rgba(0,0,0,0.08) !important; padding:1px 4px !important; border-radius:3px !important; }
     }
+
+    /* PDF-only chart variants container — hidden on screen, rendered in print */
+    .pdf-variants-root{display:none;}
+    .pdf-variant-group{margin-bottom:16px;}
+    .pdf-variant-group-title{font-size:15px;font-weight:800;color:#3d2d26;margin:0 0 8px;padding-bottom:5px;border-bottom:2px solid #d37a4c;}
+    .pdf-variant-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+    .pdf-variant-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#7b675b;margin:0 0 3px;}
+    .pdf-variant-img{width:100%;height:auto;display:block;border-radius:6px;border:1px solid #ddd;}
 
 </style>
 <script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
@@ -1438,7 +1525,7 @@ struct WarningOpportunityRow {
           {% if let Some(name) = company_name %}
           <div class="brand-title">{{ name }}</div>
           {% else %}
-          <div class="brand-title">OxideSLOC — local code analysis - metrics, history and reports</div>
+          <div class="brand-title">OxideSLOC</div>
           {% endif %}
           <div class="brand-subtitle">Saved HTML report</div>
         </div>
@@ -1474,41 +1561,48 @@ struct WarningOpportunityRow {
           <div class="section-kicker">Saved report artifact</div>
           <h1>{{ title }}</h1>
           <div class="run-id-row">
-            <span class="run-id-chip" title="{{ run.tool.run_id }}">
-              <span class="run-id-chip-label">Run ID</span>
+            <span class="run-id-chip" data-copy="{{ run.tool.run_id }}">
+              <span class="run-id-chip-label">Run ID <span class="chip-copy-icon">⎘</span></span>
               <span class="run-id-chip-value">{{ run.tool.run_id }}</span>
+              <span class="chip-tooltip">Unique identifier for this analysis run — click to copy</span>
             </span>
             {% if let Some(long_commit) = run.git_commit_long %}
-            <span class="run-id-chip" title="{{ long_commit }}">
-              <span class="run-id-chip-label">Git Commit</span>
+            <span class="run-id-chip" data-copy="{{ long_commit }}">
+              <span class="run-id-chip-label">Git Commit <span class="chip-copy-icon">⎘</span></span>
               <span class="run-id-chip-value">{{ long_commit }}</span>
+              <span class="chip-tooltip">Full commit SHA for the scanned state — click to copy</span>
             </span>
             {% else %}
             <span class="run-id-chip muted-chip">
               <span class="run-id-chip-label">Git Commit</span>
               <span class="run-id-chip-value">Not detected</span>
+              <span class="chip-tooltip">No Git commit SHA was found for this scan</span>
             </span>
             {% endif %}
             {% if let Some(branch) = run.git_branch %}
-            <span class="run-id-chip" title="{{ branch }}">
+            <span class="run-id-chip">
               <span class="run-id-chip-label">Branch</span>
               <span class="run-id-chip-value">{{ branch }}</span>
+              <span class="chip-tooltip">Git branch scanned for this report</span>
             </span>
             {% else %}
             <span class="run-id-chip muted-chip">
               <span class="run-id-chip-label">Branch</span>
               <span class="run-id-chip-value">Not detected</span>
+              <span class="chip-tooltip">No Git branch was found for this scan</span>
             </span>
             {% endif %}
             {% if let Some(author) = run.git_commit_author %}
-            <span class="run-id-chip" title="{{ author }}">
+            <span class="run-id-chip" data-author="{{ author }}">
               <span class="run-id-chip-label">Last Commit By</span>
-              <span class="run-id-chip-value">{{ author }}</span>
+              <span class="run-id-chip-value">{{ author }}<span class="author-handle"></span></span>
+              <span class="chip-tooltip">Author of the most recent commit in this repository</span>
             </span>
             {% else %}
             <span class="run-id-chip muted-chip">
               <span class="run-id-chip-label">Last Commit By</span>
               <span class="run-id-chip-value">Not detected</span>
+              <span class="chip-tooltip">No commit author was found for this scan</span>
             </span>
             {% endif %}
           </div>
@@ -1637,7 +1731,7 @@ struct WarningOpportunityRow {
             <div class="toolbar-left"><h2>Tests &amp; Coverage</h2></div>
             {% if has_coverage_data %}<div class="pill-row"><span class="pill good">LCOV coverage data present</span></div>{% endif %}
           </div>
-          <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px;">
+          <div class="summary-strip">
             <div class="stat-chip">
               <div class="stat-chip-val" data-fmt="{{ run.summary_totals.test_count }}">{{ run.summary_totals.test_count }}</div>
               <div class="stat-chip-label">Test Functions</div>
@@ -1662,8 +1756,15 @@ struct WarningOpportunityRow {
               <div class="stat-chip-tip">Files containing at least one detected test definition out of total analyzed files</div>
             </div>
           </div>
-          <div style="margin-bottom:14px;">
-            <span class="pill" style="background:var(--{{ test_density_class }}-bg);color:var(--{{ test_density_class }}-text);font-size:13px;padding:5px 14px;">{{ test_density }} tests per 1 K SLOC</span>
+          <div class="test-density-row">
+            <div class="test-density-num">{{ test_density }}</div>
+            <div class="test-density-meta">
+              <span class="test-density-label">Test Density</span>
+              <span class="test-density-sub">tests detected per 1,000 lines of code</span>
+            </div>
+            <span class="test-density-badge {{ test_density_class }}">
+              {% if test_density_class == "good" %}Well tested{% elif test_density_class == "warn" %}Partially tested{% else %}No tests detected{% endif %}
+            </span>
           </div>
           {% if has_coverage_data %}
           <h3 style="margin:0 0 10px;font-size:14px;font-weight:700;">Coverage Summary (LCOV)</h3>
@@ -1688,8 +1789,6 @@ struct WarningOpportunityRow {
             </div>
             {% endif %}
           </div>
-          {% else %}
-          <p style="margin:0;font-size:13px;color:var(--muted);">No LCOV coverage data provided. Re-run with <code>--lcov-path coverage.info</code> to see line, function, and branch coverage here.</p>
           {% endif %}
           <div class="table-shell" style="margin-top:16px;">
             <table data-sort-table style="min-width:560px;">
@@ -1714,56 +1813,70 @@ struct WarningOpportunityRow {
                 </tr>
                 {% endif %}
                 {% endfor %}
+                {% if run.summary_totals.test_count == 0 && test_assertion_count == 0 %}
+                <tr class="empty-state-row"><td colspan="5">No test functions or assertions detected in this scan</td></tr>
+                {% endif %}
               </tbody>
             </table>
           </div>
+          {% if !has_coverage_data %}
+          <div class="info-callout">
+            <span class="info-callout-icon">&#x2139;&#xFE0F;</span>
+            <span>No LCOV coverage data provided. Re-run with <code>--lcov-path coverage.info</code> to see line, function, and branch coverage here.</span>
+          </div>
+          {% endif %}
         </div>
       </section>
 
-      <!-- ── Submodule Breakdown (full-width, conditional) ─────────────── -->
+      <!-- ── Submodule Breakdown (2-column, conditional) ─────────────── -->
       {% if has_submodule_data %}
-      <section class="panel stack chart-section">
-        <div>
-          <div class="toolbar">
-            <div class="toolbar-left"><h2>Submodule Breakdown</h2></div>
-            <div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">Change Y axis or sort order below</span></div>
+      <div class="charts-grid">
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>Submodule Breakdown</h2></div>
+              <div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">Change Y axis or sort order below</span></div>
+            </div>
+            <div class="chart-controls">
+              <label>Y Axis:
+                <select class="chart-select" id="sub-y-axis">
+                  <option value="code">Code Lines</option>
+                  <option value="comment">Comment Lines</option>
+                  <option value="blank">Blank Lines</option>
+                  <option value="physical">Total Physical Lines</option>
+                  <option value="files">File Count</option>
+                </select>
+              </label>
+              <label>Sort:
+                <select class="chart-select" id="sub-sort">
+                  <option value="desc">Value ↓</option>
+                  <option value="asc">Value ↑</option>
+                  <option value="name">Name A→Z</option>
+                </select>
+              </label>
+            </div>
+            <div id="submodule-chart" class="chart-container"><div id="canvas-sub-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-sub"></canvas></div></div>
           </div>
-          <div class="chart-controls">
-            <label>Y Axis:
-              <select class="chart-select" id="sub-y-axis">
-                <option value="code">Code Lines</option>
-                <option value="comment">Comment Lines</option>
-                <option value="blank">Blank Lines</option>
-                <option value="physical">Total Physical Lines</option>
-                <option value="files">File Count</option>
-              </select>
-            </label>
-            <label>Sort:
-              <select class="chart-select" id="sub-sort">
-                <option value="desc">Value ↓</option>
-                <option value="asc">Value ↑</option>
-                <option value="name">Name A→Z</option>
-              </select>
-            </label>
+        </section>
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>Submodule Composition</h2></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Code vs comments vs blank lines per submodule — bar width reflects relative size.</p>
+            <div id="submodule-donut" style="display:flex;justify-content:center;align-items:center;min-height:200px;flex:1;overflow:hidden;"></div>
           </div>
-          <div id="submodule-chart" class="chart-container"><div id="canvas-sub-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-sub"></canvas></div></div>
-        </div>
-      </section>
+        </section>
+      </div>
       {% endif %}
+
+      <!-- ── PDF-only pre-rendered chart variants ─────────────────────── -->
+      <div id="pdf-variants" class="pdf-variants-root"></div>
 
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;margin:0 0 16px;">
-            <div>
-              <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;">Code Lines by Language</p>
-              <div style="position:relative;height:270px;"><canvas id="canvas-donut"></canvas></div>
-            </div>
-            <div>
-              <p style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;text-align:center;">Line Mix per Language</p>
-              <div id="canvas-linemix-container" style="position:relative;min-height:100px;"><canvas id="canvas-linemix"></canvas></div>
-            </div>
-          </div>
+          <div id="report-lang-overview" style="margin:0 0 16px;"></div>
           <div class="table-shell">
             <table id="lang-breakdown-table" data-sort-table>
               <thead>
@@ -1811,7 +1924,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" onclick="resetPerFileTable()" title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" onclick="exportReportCsv()">&#8595; CSV</button><button class="export-btn" onclick="exportReportXls()">&#8595; Excel</button></div></div></div>
-        <div class="table-shell">
+        <div class="table-shell" id="per-file-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <colgroup>
               <col><col><col><col><col><col><col><col><col><col><col><col><col><col>
@@ -1862,7 +1975,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." data-table-filter="skipped-table" /></div></div>
-        <div class="table-shell" style="margin-top:6px;max-height:309px;">
+        <div class="table-shell" id="skipped-shell" style="margin-top:6px;max-height:250px;">
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
@@ -1920,7 +2033,7 @@ struct WarningOpportunityRow {
           <div class="table-shell">
             <table class="support-table">
               <thead>
-                <tr><th style="width:22%;">Category</th><th style="width:7%;">Count</th><th style="width:28%;">What these files are</th><th>Example files &amp; how to fix</th></tr>
+                <tr><th style="width:20%;">Category</th><th style="width:6%;">Count</th><th style="width:24%;">What these files are</th><th>Example files &amp; how to fix</th></tr>
               </thead>
               <tbody>
                 {% for row in warning_opportunity_rows %}
@@ -1929,15 +2042,13 @@ struct WarningOpportunityRow {
                   <td style="font-weight:800;color:var(--oxide);">{{ row.count }}</td>
                   <td class="small" style="color:var(--muted);">{{ row.bucket_description }}</td>
                   <td>
-                    <div style="display:flex;flex-direction:column;gap:4px;">
-                      {% if !row.example_files.is_empty() %}
-                      <div style="display:flex;flex-wrap:wrap;gap:4px;">
-                        {% for f in row.example_files %}<code style="font-size:11px;padding:1px 5px;">{{ f }}</code>{% endfor %}
-                        {% if row.count > row.example_files.len() %}<span style="font-size:11px;color:var(--muted);align-self:center;">+{{ row.count - row.example_files.len() }} more</span>{% endif %}
-                      </div>
-                      {% endif %}
-                      <span class="small" style="color:var(--muted-2);font-size:11px;">{{ row.recommendation }}</span>
+                    {% if !row.example_files.is_empty() %}
+                    <div style="margin-bottom:6px;">
+                      {% for f in row.example_files %}<span class="support-example-file">{{ f }}</span> {% endfor %}
+                      {% if row.count > row.example_files.len() %}<span style="font-size:11px;color:var(--muted);font-style:italic;">+{{ row.count - row.example_files.len() }} more</span>{% endif %}
                     </div>
+                    {% endif %}
+                    <p class="support-recommendation">{{ row.recommendation }}</p>
                   </td>
                 </tr>
                 {% endfor %}
@@ -2216,6 +2327,30 @@ struct WarningOpportunityRow {
         if (exact) exact.textContent = '';
       }
     })();
+    // ── Info chip interactivity ───────────────────────────────────────────────
+    (function() {
+      document.querySelectorAll('.run-id-chip[data-copy]').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+          var val = chip.getAttribute('data-copy');
+          var tt = chip.querySelector('.chip-tooltip');
+          var orig = tt ? tt.textContent : '';
+          if (!navigator.clipboard) return;
+          navigator.clipboard.writeText(val).then(function() {
+            chip.classList.add('chip-copied-flash');
+            if (tt) tt.textContent = 'Copied!';
+            setTimeout(function() {
+              chip.classList.remove('chip-copied-flash');
+              if (tt) tt.textContent = orig;
+            }, 1100);
+          });
+        });
+      });
+      document.querySelectorAll('.run-id-chip[data-author]').forEach(function(chip) {
+        var author = chip.getAttribute('data-author');
+        var el = chip.querySelector('.author-handle');
+        if (el) el.textContent = '/' + author.replace(/\s+/g, '');
+      });
+    })();
     // ── Export helpers ────────────────────────────────────────────────────────
     function slocEscXml(v){return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
     function slocEscCsv(v){var s=String(v);return(s.indexOf(',')>=0||s.indexOf('"')>=0||s.indexOf('\n')>=0)?'"'+s.replace(/"/g,'""')+'"':s;}
@@ -2261,84 +2396,66 @@ struct WarningOpportunityRow {
           : { text: '#43342d', grid: '#e6d0bf' };
       }
 
-      // ── Donut chart ────────────────────────────────────────────────────────────
+      // ── Language overview: SVG donut + horizontal stacked bars ───────────────
       (function() {
-        var canvas = document.getElementById('canvas-donut');
-        if (!canvas) return;
-        var c = clr();
-        var chart = new Chart(canvas, {
-          type: 'doughnut',
-          data: {
-            labels: D.map(function(d) { return d.lang; }),
-            datasets: [{
-              data: D.map(function(d) { return d.code; }),
-              backgroundColor: D.map(function(_, i) { return PALETTE[i % PALETTE.length]; }),
-              hoverOffset: 8, borderWidth: 2, borderColor: '#ffffff'
-            }]
-          },
-          options: {
-            responsive: true, maintainAspectRatio: false, cutout: '54%',
-            animation: { duration: 500, easing: 'easeOutQuart' },
-            plugins: {
-              legend: { position: 'right', labels: { color: c.text, font: { size: 12 }, padding: 10 } },
-              tooltip: {
-                callbacks: {
-                  title: function(items) { return items[0].label; },
-                  label: function(ctx) {
-                    var tot = ctx.dataset.data.reduce(function(a,b){return a+b;},0) || 1;
-                    var pct = (ctx.parsed/tot*100).toFixed(1);
-                    return '  Code lines: ' + Number(ctx.parsed).toLocaleString() + '  (' + pct + '% of total)';
-                  }
-                }
-              }
-            }
-          }
+        var el = document.getElementById('report-lang-overview');
+        if (!el || !D || !D.length) return;
+        var FONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+        function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        function px(n){return Math.round(n);}
+        function tt(label,val){return ' class="rchit" data-ttl="'+String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" data-ttv="'+String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"';}
+        var tot = D.reduce(function(a,d){return a+d.code;},0)||1;
+        // Donut
+        var cx=100,cy=110,Ro=88,Ri=48,legX=204,DW=360,DH=220;
+        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+        if(D.length===1){
+          var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
+          ds+='<circle'+tt(D[0].lang,fmt(D[0].code)+' code lines')+' cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+PALETTE[0]+'" stroke-width="'+rsw+'"/>';
+        } else {
+          var ang=-Math.PI/2;
+          D.forEach(function(d,i){
+            var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
+            var x1=cx+Ro*Math.cos(ang),y1=cy+Ro*Math.sin(ang);
+            var x2=cx+Ro*Math.cos(a2),y2=cy+Ro*Math.sin(a2);
+            var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
+            var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
+            var pct=Math.round(d.code/tot*100);
+            ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(PALETTE[i%PALETTE.length])+'" stroke="white" stroke-width="2"/>';
+            ang+=sw;
+          });
+        }
+        ds+='<text x="'+cx+'" y="'+(cy-7)+'" text-anchor="middle" font-family="'+FONT+'" font-size="21" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
+        ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
+        var legRows=Math.min(D.length,8),legYStart=Math.round((DH-legRows*22)/2);
+        D.forEach(function(d,i){
+          if(i>=8)return;
+          var ly=legYStart+i*22;
+          ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(PALETTE[i%PALETTE.length])+'"/>';
+          ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
         });
-        ALL_CHARTS.push(chart);
-      })();
-
-      // ── Line Mix stacked bar ─────────────────────────────────────────────────
-      (function() {
-        var canvas = document.getElementById('canvas-linemix');
-        var wrap = document.getElementById('canvas-linemix-container');
-        if (!canvas) return;
-        var h = Math.max(90, Math.min(432, D.length * 32 + 36));
-        if (wrap) wrap.style.height = h + 'px';
-        var c = clr();
-        var chart = new Chart(canvas, {
-          type: 'bar',
-          data: {
-            labels: D.map(function(d) { return d.lang; }),
-            datasets: [
-              { label: 'Code',     data: D.map(function(d){return d.code;}),     backgroundColor: OX, borderRadius: 3 },
-              { label: 'Comments', data: D.map(function(d){return d.comments;}), backgroundColor: GN, borderRadius: 3 },
-              { label: 'Blanks',   data: D.map(function(d){return d.blanks;}),   backgroundColor: GY, borderRadius: 3 }
-            ]
-          },
-          options: {
-            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-            animation: { duration: 500, easing: 'easeOutQuart' },
-            scales: {
-              x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} } },
-              y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
-            },
-            plugins: {
-              legend: { position: 'bottom', labels: { color: c.text } },
-              tooltip: {
-                mode: 'index', intersect: false,
-                callbacks: {
-                  title: function(items) { return items.length ? items[0].label : ''; },
-                  label: function(ctx) { return '  ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.x); },
-                  footer: function(items) {
-                    var tot = items.reduce(function(s, i){ return s + (i.parsed.x||0); }, 0);
-                    return 'Total: ' + Number(tot).toLocaleString() + ' lines';
-                  }
-                }
-              }
-            }
-          }
+        ds+='</svg>';
+        // Horizontal stacked-bar chart
+        var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
+        var LW=108,BW=260,rHb=28,bH=20,SH=D.length*rHb+32,svgW=LW+BW+68;
+        var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+        D.forEach(function(d,i){
+          var y=6+i*rHb,x=LW;
+          var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+          bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
+          if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
+          if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
         });
-        ALL_CHARTS.push(chart);
+        var ly=SH-14;
+        bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
+        bs+='<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+67)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
+        bs+='<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>';
+        bs+='</svg>';
+        el.innerHTML='<div class="r-lang-overview">'+
+          '<div class="r-lang-overview-cell"><p>Code Lines by Language</p>'+ds+'</div>'+
+          '<div class="r-lang-overview-cell" style="flex:2 1 340px;"><p>Line Mix per Language</p>'+bs+'</div>'+
+        '</div>';
       })();
 
       // ── Project Overview bar ─────────────────────────────────────────────────
@@ -2611,6 +2728,39 @@ struct WarningOpportunityRow {
         renderSubmodule();
       })();
 
+      // ── Submodule composition: stacked-bar (code / comments / blank) ─────────
+      (function() {
+        var el = document.getElementById('submodule-donut');
+        if (!el || !SUB_D || !SUB_D.length) return;
+        var FONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+        function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        function px(n){return Math.round(n);}
+        var data = SUB_D.slice().sort(function(a,b){return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));}).slice(0,15);
+        var maxT = Math.max.apply(null, data.map(function(d){return (d.code||0)+(d.comment||0)+(d.blank||0);})) || 1;
+        var LW=120, BW=260, rHb=30, bH=20, legH=28, topPad=8;
+        var SH = data.length * rHb + legH + topPad;
+        var svgW = LW + BW + 70;
+        var s = '<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+        data.forEach(function(d,i){
+          var tot2 = (d.code||0)+(d.comment||0)+(d.blank||0);
+          var cW = (d.code||0)/maxT*BW, cmW = (d.comment||0)/maxT*BW, blW = (d.blank||0)/maxT*BW;
+          var y = topPad + i*rHb, x = LW;
+          var pct = Math.round(tot2/maxT*100);
+          var name = d.name.length > 16 ? d.name.slice(0,15)+'…' : d.name;
+          s += '<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(name)+'</text>';
+          if(cW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Code" data-ttv="'+fmt(d.code||0)+' lines ('+pct+'% of largest)" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>'; x+=cW;
+          if(cmW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Comments" data-ttv="'+fmt(d.comment||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>'; x+=cmW;
+          if(blW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Blank" data-ttv="'+fmt(d.blank||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+          s += '<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(tot2)+'</text>';
+        });
+        var ly = SH - legH + 6;
+        s += '<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
+        s += '<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+67)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
+        s += '<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blank</text>';
+        s += '</svg>';
+        el.innerHTML = s;
+      })();
+
       // ── Semantic Metrics ─────────────────────────────────────────────────────
       (function() {
         if (!SEM_D || !SEM_D.length) return;
@@ -2694,8 +2844,237 @@ struct WarningOpportunityRow {
           }, 60);
         });
       });
+
+      // ── Pre-render all chart variants for PDF export ──────────────────────────
+      (function() {
+        var root = document.getElementById('pdf-variants');
+        if (!root) return;
+
+        // Plugin: fill a light background behind every off-screen chart so the PNG
+        // is opaque — without this Chart.js canvases are transparent and render as
+        // blank white boxes in print.
+        var PDF_BG = {
+          id: 'pdfBg',
+          beforeDraw: function(ch) {
+            var ctx = ch.canvas.getContext('2d');
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.fillStyle = '#faf6f0';
+            ctx.fillRect(0, 0, ch.canvas.width, ch.canvas.height);
+            ctx.restore();
+          }
+        };
+
+        // Off-screen Chart.js render → PNG data-URL → destroy chart
+        function snap(type, data, opts, w, h) {
+          var c = document.createElement('canvas');
+          c.width = w || 900; c.height = h || 280;
+          var ch = new Chart(c, {
+            type: type, data: data,
+            options: Object.assign({}, opts, { animation: false, responsive: false, devicePixelRatio: 1 }),
+            plugins: [PDF_BG]
+          });
+          var png = c.toDataURL('image/png');
+          ch.destroy();
+          return png;
+        }
+
+        function mkPanel(label, imgSrc) {
+          var d = document.createElement('div'); d.className = 'pdf-variant-panel';
+          if (label) {
+            var lbl = document.createElement('div');
+            lbl.className = 'pdf-variant-label'; lbl.textContent = label;
+            d.appendChild(lbl);
+          }
+          if (imgSrc) {
+            var img = document.createElement('img');
+            img.className = 'pdf-variant-img'; img.src = imgSrc;
+            d.appendChild(img);
+          }
+          return d;
+        }
+
+        function mkGroup(title) {
+          var g = document.createElement('div'); g.className = 'pdf-variant-group';
+          var h = document.createElement('h2'); h.className = 'pdf-variant-group-title'; h.textContent = title;
+          g.appendChild(h);
+          var grid = document.createElement('div'); grid.className = 'pdf-variant-grid';
+          g.appendChild(grid);
+          return { group: g, grid: grid };
+        }
+
+        var tc = '#43342d', gc = 'rgba(0,0,0,0.07)';
+
+        // ── Project Overview — 4 Y-axis variants ─────────────────────────────────
+        var pgProj = mkGroup('Project Overview');
+        [
+          { key:'code',     label:'Code Lines' },
+          { key:'comments', label:'Comment Lines' },
+          { key:'physical', label:'Physical Lines' },
+          { key:'files',    label:'File Count' }
+        ].forEach(function(y) {
+          var sorted = D.slice().sort(function(a,b){return (b[y.key]||0)-(a[y.key]||0);});
+          var h = Math.max(120, Math.min(400, sorted.length*22+50));
+          var png = snap('bar', {
+            labels: sorted.map(function(d){return d.lang;}),
+            datasets:[{ label:y.label, data:sorted.map(function(d){return d[y.key]||0;}),
+                        backgroundColor:sorted.map(function(_,i){return PALETTE[i%PALETTE.length];}), borderRadius:3 }]
+          }, {
+            indexAxis:'y',
+            scales:{
+              x:{grid:{color:gc},ticks:{color:tc,callback:function(v){return fmt(v);}},title:{display:true,text:y.label,color:tc}},
+              y:{grid:{display:false},ticks:{color:tc}}
+            },
+            plugins:{legend:{display:false}}
+          }, 900, h);
+          pgProj.grid.appendChild(mkPanel(y.label, png));
+        });
+        root.appendChild(pgProj.group);
+
+        // ── Language Composition — Absolute Lines + Composition % ────────────────
+        var pgComp = mkGroup('Language Composition');
+        var cData = D.slice(0,15);
+        var totFn = function(d){return (d.code||0)+(d.comments||0)+(d.blanks||0)||1;};
+        var compH = Math.max(120, Math.min(380, cData.length*22+60));
+        [{id:'absolute',label:'Absolute Lines',isPct:false},{id:'pct',label:'Composition %',isPct:true}]
+          .forEach(function(m) {
+            var pct = m.isPct;
+            var png = snap('bar', {
+              labels: cData.map(function(d){return d.lang;}),
+              datasets:[
+                {label:'Code',     data:cData.map(function(d){return pct?(d.code||0)/totFn(d)*100:d.code||0;}),    backgroundColor:OX,borderRadius:3},
+                {label:'Comments', data:cData.map(function(d){return pct?(d.comments||0)/totFn(d)*100:d.comments||0;}),backgroundColor:GN,borderRadius:3},
+                {label:'Blanks',   data:cData.map(function(d){return pct?(d.blanks||0)/totFn(d)*100:d.blanks||0;}),  backgroundColor:GY,borderRadius:3}
+              ]
+            }, {
+              indexAxis:'y',
+              scales:{
+                x:{stacked:true,grid:{color:gc},ticks:{color:tc,callback:pct?function(v){return v.toFixed(0)+'%';}:function(v){return fmt(v);}}},
+                y:{stacked:true,grid:{display:false},ticks:{color:tc}}
+              },
+              plugins:{legend:{position:'bottom',labels:{color:tc}}}
+            }, 900, compH);
+            pgComp.grid.appendChild(mkPanel(m.label, png));
+          });
+        root.appendChild(pgComp.group);
+
+        // ── File Count vs SLOC — render off-screen (bubble chart, full-width) ──────
+        if (SCAT_D && SCAT_D.length) {
+          var pgScat = mkGroup('File Count vs SLOC');
+          pgScat.grid.style.gridTemplateColumns = '1fr'; // single column — scatter needs width
+          var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical||0;})) || 1;
+          var scatPng = snap('bubble', {
+            datasets: SCAT_D.map(function(d, i) {
+              return {
+                label: d.lang,
+                data: [{ x: d.files, y: d.code, r: Math.max(5, Math.round(Math.sqrt((d.physical||0)/maxP)*20)) }],
+                backgroundColor: PALETTE[i % PALETTE.length] + 'b8',
+                borderColor: PALETTE[i % PALETTE.length], borderWidth: 1
+              };
+            })
+          }, {
+            scales: {
+              x: { grid:{color:gc}, ticks:{color:tc}, title:{display:true, text:'Files Analyzed', color:tc} },
+              y: { grid:{color:gc}, ticks:{color:tc, callback:function(v){return fmt(v);}}, title:{display:true, text:'Code Lines', color:tc} }
+            },
+            plugins: { legend:{position:'right', labels:{color:tc, boxWidth:12}} }
+          }, 900, 320);
+          pgScat.grid.appendChild(mkPanel('Files × Code Lines (bubble size ∝ physical lines)', scatPng));
+          root.appendChild(pgScat.group);
+        }
+
+        // ── Semantic Metrics — up to 5 metrics, skip empty ones ─────────────────
+        if (SEM_D && SEM_D.length) {
+          var pgSem = mkGroup('Semantic Metrics');
+          var SL={functions:'Functions',classes:'Classes / Types',variables:'Variables',imports:'Imports',tests:'Tests'};
+          var SC={functions:OX,classes:'#4472C4',variables:GN,imports:'#805099',tests:'#B23030'};
+          Object.keys(SL).forEach(function(mKey) {
+            var data = SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);}).slice(0,15);
+            if (!data.some(function(d){return (d[mKey]||0)>0;})) return;
+            var semH = 260; // vertical bar — fixed height; width drives layout, not row count
+            var png = snap('bar', {
+              labels: data.map(function(d){return d.lang;}),
+              datasets:[{label:SL[mKey],data:data.map(function(d){return d[mKey]||0;}),backgroundColor:SC[mKey],borderRadius:4}]
+            }, {
+              scales:{
+                x:{grid:{display:false},ticks:{color:tc}},
+                y:{grid:{color:gc},ticks:{color:tc,callback:function(v){return fmt(v);}}}
+              },
+              plugins:{legend:{display:false}}
+            }, 900, semH);
+            pgSem.grid.appendChild(mkPanel(SL[mKey], png));
+          });
+          root.appendChild(pgSem.group);
+        }
+
+        // ── Submodule Breakdown — 3 Y-axis variants + donut SVG clone ────────────
+        if (SUB_D && SUB_D.length) {
+          var pgSub = mkGroup('Submodule Breakdown');
+          [{key:'code',label:'Code Lines',col:OX},{key:'comment',label:'Comment Lines',col:GN},{key:'files',label:'File Count',col:'#805099'}]
+            .forEach(function(y) {
+              var data = SUB_D.slice().sort(function(a,b){return (b[y.key]||0)-(a[y.key]||0);}).slice(0,30);
+              if (!data.length) return;
+              var subH = Math.max(120, Math.min(500, data.length*20+36));
+              var png = snap('bar', {
+                labels: data.map(function(d){return d.name;}),
+                datasets:[{label:y.label,data:data.map(function(d){return d[y.key]||0;}),backgroundColor:y.col,borderRadius:3}]
+              }, {
+                indexAxis:'y',
+                scales:{
+                  x:{grid:{color:gc},ticks:{color:tc,callback:function(v){return fmt(v);}},title:{display:true,text:y.label,color:tc}},
+                  y:{grid:{display:false},ticks:{color:tc}}
+                },
+                plugins:{legend:{display:false}}
+              }, 900, subH);
+              pgSub.grid.appendChild(mkPanel(y.label, png));
+            });
+          var donutEl = document.getElementById('submodule-donut');
+          if (donutEl && donutEl.innerHTML.trim()) {
+            var dp = document.createElement('div'); dp.className = 'pdf-variant-panel';
+            var dl = document.createElement('div'); dl.className = 'pdf-variant-label'; dl.textContent = 'Distribution';
+            dp.appendChild(dl);
+            var dw = document.createElement('div'); dw.style.cssText = 'display:flex;justify-content:center;';
+            dw.innerHTML = donutEl.innerHTML; dp.appendChild(dw);
+            pgSub.grid.appendChild(dp);
+          }
+          root.appendChild(pgSub.group);
+        }
+      })();
     })();
     window.oxSlocChartsReady = true;
+    // ── SVG tooltip delegation ───────────────────────────────────────────────
+    (function(){
+      var tt = document.getElementById('r-tt');
+      if (!tt) return;
+      function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+      function show(e, html) { tt.innerHTML=html; tt.style.display='block'; move(e); }
+      function hide() { tt.style.display='none'; }
+      function move(e) {
+        var x=e.clientX+16, y=e.clientY-12;
+        var r=tt.getBoundingClientRect();
+        if (x+r.width>window.innerWidth-8) x=e.clientX-r.width-8;
+        if (y+r.height>window.innerHeight-8) y=e.clientY-r.height-8;
+        tt.style.left=x+'px'; tt.style.top=y+'px';
+      }
+      document.addEventListener('mouseover', function(e) {
+        var t=e.target;
+        while(t&&t.getAttribute){
+          var l=t.getAttribute('data-ttl');
+          if(l!==null){ show(e,'<strong>'+escH(l)+'</strong><br>'+escH(t.getAttribute('data-ttv')||'')); return; }
+          t=t.parentNode;
+        }
+      });
+      document.addEventListener('mouseout', function(e) {
+        var t=e.target;
+        while(t&&t.getAttribute){
+          if(t.getAttribute('data-ttl')!==null){ hide(); return; }
+          t=t.parentNode;
+        }
+      });
+      document.addEventListener('mousemove', function(e) {
+        if(tt.style.display!=='none') move(e);
+      });
+    })();
     // Auto-populate title on any td that is visually truncated but has no explicit title
     requestAnimationFrame(function() {
       document.querySelectorAll('td').forEach(function(td) {
@@ -2705,6 +3084,7 @@ struct WarningOpportunityRow {
       });
     });
   </script>
+  <div id="r-tt" aria-hidden="true"></div>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
