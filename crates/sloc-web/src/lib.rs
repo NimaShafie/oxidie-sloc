@@ -1554,7 +1554,10 @@ async fn pick_directory_handler(
         }
         let result = if is_coverage {
             dialog
-                .add_filter("LCOV coverage", &["info", "lcov"])
+                .add_filter(
+                    "Coverage files (LCOV, Cobertura XML, JaCoCo XML, Istanbul JSON)",
+                    &["info", "lcov", "xml", "json"],
+                )
                 .pick_file()
         } else {
             dialog.pick_folder()
@@ -2366,13 +2369,28 @@ struct SuggestCoverageQuery {
 
 async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl IntoResponse {
     const CANDIDATES: &[&str] = &[
+        // LCOV — cargo-llvm-cov, gcov, lcov
         "coverage/lcov.info",
         "lcov.info",
         "target/llvm-cov/lcov.info",
         "target/coverage/lcov.info",
+        "target/debug/coverage/lcov.info",
         "coverage/coverage.lcov",
         "build/coverage/lcov.info",
         "reports/lcov.info",
+        // Cobertura XML — pytest-cov, Maven Cobertura plugin, PHP
+        "coverage.xml",
+        "coverage/coverage.xml",
+        "target/site/cobertura/coverage.xml",
+        "build/reports/coverage/coverage.xml",
+        // JaCoCo XML — Gradle, Maven JaCoCo plugin
+        "target/site/jacoco/jacoco.xml",
+        "build/reports/jacoco/test/jacocoTestReport.xml",
+        "build/reports/jacoco/jacocoTestReport.xml",
+        "build/jacoco/jacoco.xml",
+        // Istanbul / NYC JSON — Jest, nyc
+        "coverage/coverage-summary.json",
+        ".nyc_output/coverage-summary.json",
     ];
     let root = resolve_input_path(query.path.as_deref().unwrap_or(""));
     let found = CANDIDATES
@@ -2380,7 +2398,36 @@ async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl
         .map(|rel| root.join(rel))
         .find(|p| p.is_file())
         .map(|p| display_path(&p));
-    Json(serde_json::json!({ "found": found }))
+
+    let (tool, hint) = detect_coverage_tool(&root);
+    Json(serde_json::json!({ "found": found, "tool": tool, "hint": hint }))
+}
+
+/// Inspect the project root for known build/package files and return the most likely coverage
+/// tool name and the shell command needed to generate a coverage file.
+fn detect_coverage_tool(root: &Path) -> (Option<&'static str>, Option<&'static str>) {
+    if root.join("Cargo.toml").is_file() {
+        return (
+            Some("cargo-llvm-cov"),
+            Some("cargo llvm-cov --lcov --output-path coverage/lcov.info"),
+        );
+    }
+    if root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file() {
+        return (Some("jacoco"), Some("./gradlew jacocoTestReport"));
+    }
+    if root.join("pom.xml").is_file() {
+        return (Some("jacoco"), Some("mvn test jacoco:report"));
+    }
+    if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
+        return (Some("pytest-cov"), Some("pytest --cov --cov-report=xml"));
+    }
+    if root.join("package.json").is_file() {
+        return (
+            Some("istanbul/nyc"),
+            Some("nyc --reporter=json-summary npm test"),
+        );
+    }
+    (None, None)
 }
 
 /// Validate a scan path in server mode. Returns `Err(response)` if rejected.
@@ -6286,11 +6333,195 @@ async fn trend_report_handler(
     Html(html).into_response()
 }
 
+fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
+    use std::collections::HashMap;
+    let mut langs: Vec<&sloc_core::LanguageSummary> = run
+        .totals_by_language
+        .iter()
+        .filter(|l| l.test_count > 0)
+        .collect();
+    langs.sort_by_key(|l| std::cmp::Reverse(l.test_count));
+    let lang_tests: Vec<serde_json::Value> = langs
+        .iter()
+        .map(|l| {
+            let d = if l.code_lines > 0 {
+                l.test_count as f64 / l.code_lines as f64 * 1000.0
+            } else {
+                0.0
+            };
+            serde_json::json!({"lang": l.language.display_name(), "tests": l.test_count,
+                "assertions": l.test_assertion_count, "suites": l.test_suite_count,
+                "code": l.code_lines, "density": (d * 100.0).round() / 100.0, "files": l.files})
+        })
+        .collect();
+    let has_file_cov = run.per_file_records.iter().any(|f| f.coverage.is_some());
+    let cov_arr: Vec<serde_json::Value> = if has_file_cov {
+        let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+        for rec in &run.per_file_records {
+            if let (Some(lang), Some(cov)) = (rec.language, &rec.coverage) {
+                let e = totals.entry(lang.display_name().to_string()).or_default();
+                e.0 += u64::from(cov.lines_found);
+                e.1 += u64::from(cov.lines_hit);
+            }
+        }
+        let mut pairs: Vec<(String, f64)> = totals
+            .into_iter()
+            .filter(|(_, (found, _))| *found > 0)
+            .map(|(lang, (found, hit))| (lang, hit as f64 / found as f64 * 100.0))
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs
+            .iter()
+            .map(
+                |(lang, pct)| serde_json::json!({"lang": lang, "pct": (pct * 10.0).round() / 10.0}),
+            )
+            .collect()
+    } else {
+        vec![]
+    };
+    let (mut high, mut mid, mut low) = (0u64, 0u64, 0u64);
+    for rec in &run.per_file_records {
+        if let Some(cov) = &rec.coverage {
+            if cov.lines_found == 0 {
+                continue;
+            }
+            let pct = cov.lines_hit as f64 / cov.lines_found as f64 * 100.0;
+            if pct >= 80.0 {
+                high += 1;
+            } else if pct >= 50.0 {
+                mid += 1;
+            } else {
+                low += 1;
+            }
+        }
+    }
+    let t = &run.summary_totals;
+    let total_tests = t.test_count;
+    let density = if t.code_lines > 0 {
+        total_tests as f64 / t.code_lines as f64 * 1000.0
+    } else {
+        0.0
+    };
+    let most_tested = langs
+        .first()
+        .map(|l| l.language.display_name().to_string())
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    let test_files: u64 = run
+        .per_file_records
+        .iter()
+        .filter(|f| f.raw_line_categories.test_count > 0)
+        .count() as u64;
+    let cov_line = if t.coverage_lines_found > 0 {
+        format!(
+            "{:.1}",
+            t.coverage_lines_hit as f64 / t.coverage_lines_found as f64 * 100.0
+        )
+    } else {
+        "0".to_string()
+    };
+    let cov_fn = if t.coverage_functions_found > 0 {
+        format!(
+            "{:.1}",
+            t.coverage_functions_hit as f64 / t.coverage_functions_found as f64 * 100.0
+        )
+    } else {
+        "0".to_string()
+    };
+    let cov_branch = if t.coverage_branches_found > 0 {
+        format!(
+            "{:.1}",
+            t.coverage_branches_hit as f64 / t.coverage_branches_found as f64 * 100.0
+        )
+    } else {
+        "0".to_string()
+    };
+    let has_cov = !cov_arr.is_empty();
+    serde_json::json!({
+        "totals": {
+            "test_count": total_tests,
+            "assertions": t.test_assertion_count,
+            "suites": t.test_suite_count,
+            "test_files": test_files,
+            "total_files": t.files_analyzed,
+            "density_str": format!("{density:.1}"),
+            "most_tested": most_tested,
+            "langs_with_tests": langs.len(),
+            "cov_line": cov_line,
+            "cov_fn": cov_fn,
+            "cov_branch": cov_branch,
+        },
+        "lang_tests": lang_tests,
+        "cov": cov_arr,
+        "cov_tiers": {"high": high, "mid": mid, "low": low},
+        "has_coverage": has_cov,
+        "submodules": {},
+    })
+}
+
+fn build_test_scope_sub_entry(sub: &sloc_core::SubmoduleSummary) -> serde_json::Value {
+    let mut langs: Vec<&sloc_core::LanguageSummary> = sub
+        .language_summaries
+        .iter()
+        .filter(|l| l.test_count > 0)
+        .collect();
+    langs.sort_by_key(|l| std::cmp::Reverse(l.test_count));
+    let lang_tests: Vec<serde_json::Value> = langs
+        .iter()
+        .map(|l| {
+            let d = if l.code_lines > 0 {
+                l.test_count as f64 / l.code_lines as f64 * 1000.0
+            } else {
+                0.0
+            };
+            serde_json::json!({"lang": l.language.display_name(), "tests": l.test_count,
+                "assertions": l.test_assertion_count, "suites": l.test_suite_count,
+                "code": l.code_lines, "density": (d * 100.0).round() / 100.0, "files": l.files})
+        })
+        .collect();
+    let total_tests: u64 = langs.iter().map(|l| l.test_count).sum();
+    let total_assertions: u64 = langs.iter().map(|l| l.test_assertion_count).sum();
+    let total_suites: u64 = langs.iter().map(|l| l.test_suite_count).sum();
+    let test_files_approx: u64 = langs.iter().map(|l| l.files).sum();
+    let density = if sub.code_lines > 0 {
+        total_tests as f64 / sub.code_lines as f64 * 1000.0
+    } else {
+        0.0
+    };
+    let most_tested = langs
+        .first()
+        .map(|l| l.language.display_name().to_string())
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    serde_json::json!({
+        "totals": {
+            "test_count": total_tests,
+            "assertions": total_assertions,
+            "suites": total_suites,
+            "test_files": test_files_approx,
+            "total_files": sub.files_analyzed,
+            "density_str": format!("{density:.1}"),
+            "most_tested": most_tested,
+            "langs_with_tests": langs.len(),
+            "cov_line": "0",
+            "cov_fn": "0",
+            "cov_branch": "0",
+        },
+        "lang_tests": lang_tests,
+        "cov": [],
+        "cov_tiers": {"high": 0, "mid": 0, "low": 0},
+        "has_coverage": false,
+    })
+}
+
 // GET /test-metrics
 async fn test_metrics_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
 ) -> Response {
+    auto_scan_watched_dirs(&state).await;
+    let watched_dirs_list: Vec<String> = {
+        let wd = state.watched_dirs.lock().await;
+        wd.dirs.iter().map(|p| p.display().to_string()).collect()
+    };
     let latest_run: Option<AnalysisRun> = {
         let reg = state.registry.lock().await;
         let json_str: Option<String> = reg
@@ -6304,8 +6535,8 @@ async fn test_metrics_handler(
             .and_then(|s| serde_json::from_str(s).ok())
     };
 
-    // Build per-language chart JSON, sorted by test_count desc.
-    let lang_tests_json: String = match &latest_run {
+    // Build per-language chart JSON (kept for has_coverage derivation via cov_json).
+    let _lang_tests_json: String = match &latest_run {
         Some(r) => {
             let mut langs: Vec<&sloc_core::LanguageSummary> = r
                 .totals_by_language
@@ -6369,8 +6600,8 @@ async fn test_metrics_handler(
         _ => "[]".to_string(),
     };
 
-    // Coverage tier distribution: count files by line coverage tier.
-    let cov_tier_json: String = match &latest_run {
+    // Coverage tier distribution (pre-computed into SCOPE_DATA; unused as format arg).
+    let _cov_tier_json: String = match &latest_run {
         Some(r) if r.per_file_records.iter().any(|f| f.coverage.is_some()) => {
             let mut high = 0u64; // >= 80%
             let mut mid = 0u64; // 50-79%
@@ -6493,13 +6724,86 @@ async fn test_metrics_handler(
         String::new()
     } else {
         String::from(
-            r#"<div class="empty-state" style="margin-bottom:18px;">No LCOV coverage data found for the latest scan. Re-run with <code>--lcov-path coverage.info</code> to enable line, function, and branch coverage metrics.</div>"#,
+            r#"<div class="empty-state" style="margin-bottom:18px;">No code coverage data found for the latest scan. Re-run with a coverage file to enable line, function, and branch coverage metrics. Supported formats: <strong>LCOV</strong> <code>.info</code> (cargo-llvm-cov, gcov) &middot; <strong>Cobertura XML</strong> (pytest-cov, Maven) &middot; <strong>JaCoCo XML</strong> (Gradle, Maven/Java) &middot; <strong>Istanbul JSON</strong> (nyc, Jest). Provide the file via the web scan form or <code>--coverage-file</code> CLI flag.</div>"#,
         )
     };
 
     let workspace_density_str = format!("{workspace_density:.1}");
     let nonce = &csp_nonce;
     let version = env!("CARGO_PKG_VERSION");
+
+    let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
+        r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
+            .to_string()
+    } else {
+        watched_dirs_list
+            .iter()
+            .map(|d| {
+                let escaped =
+                    d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+                format!(
+                    r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
+                )
+            })
+            .collect()
+    };
+    let watched_dirs_html = format!(
+        r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
+    );
+
+    // Build per-root SCOPE_DATA for instant JS scope switching (no API fetch on selection change).
+    let scope_data_json: String = {
+        let mut scope_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        scope_map.insert(
+            "__all__".to_string(),
+            if let Some(ref run) = latest_run {
+                build_test_scope_entry(run)
+            } else {
+                serde_json::json!({"totals":{"test_count":0,"assertions":0,"suites":0,
+                    "test_files":0,"total_files":0,"density_str":"0.0","most_tested":"—",
+                    "langs_with_tests":0,"cov_line":"0","cov_fn":"0","cov_branch":"0"},
+                    "lang_tests":[],"cov":[],"cov_tiers":{"high":0,"mid":0,"low":0},
+                    "has_coverage":false,"submodules":{}})
+            },
+        );
+        let all_roots: Vec<String> = {
+            let reg = state.registry.lock().await;
+            let mut seen = std::collections::BTreeSet::new();
+            reg.entries
+                .iter()
+                .flat_map(|e| e.input_roots.iter().cloned())
+                .filter(|r| seen.insert(r.clone()))
+                .collect()
+        };
+        for root in &all_roots {
+            let run_for_root: Option<AnalysisRun> = {
+                let reg = state.registry.lock().await;
+                let json_str = reg
+                    .entries
+                    .iter()
+                    .find(|e| e.input_roots.iter().any(|r| r == root))
+                    .and_then(|e| e.json_path.as_ref())
+                    .and_then(|p| std::fs::read_to_string(p).ok());
+                drop(reg);
+                json_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+            };
+            if let Some(ref run) = run_for_root {
+                let mut root_entry = build_test_scope_entry(run);
+                if !run.submodule_summaries.is_empty() {
+                    let subs: serde_json::Map<String, serde_json::Value> = run
+                        .submodule_summaries
+                        .iter()
+                        .map(|sub| (sub.name.clone(), build_test_scope_sub_entry(sub)))
+                        .collect();
+                    root_entry["submodules"] = serde_json::Value::Object(subs);
+                }
+                scope_map.insert(root.clone(), root_entry);
+            }
+        }
+        serde_json::to_string(&scope_map).unwrap_or_else(|_| "{}".to_string())
+    };
 
     let html = format!(
         r##"<!doctype html>
@@ -6595,6 +6899,25 @@ async fn test_metrics_handler(
     .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
     .site-footer a{{color:var(--muted);}}
     body.dark-theme .chart-box{{border-color:var(--line-strong);}}
+    .btn{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .13s;}}
+    .btn:hover{{background:var(--surface-2);}}
+    .scope-bar{{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin-bottom:16px;position:relative;z-index:1;flex-wrap:wrap;}}
+    .scope-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
+    .scope-sel-wrap{{display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap;}}
+    .scope-sel{{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;padding:5px 10px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;max-width:500px;}}
+    .scope-sel:focus{{border-color:var(--accent);}}
+    body.dark-theme .scope-sel{{background:var(--surface);color:var(--text);}}
+    .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;flex-wrap:wrap;margin-bottom:16px;position:relative;z-index:1;}}
+    .watched-bar-left{{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;}}
+    .watched-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
+    .watched-chips{{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;align-items:center;}}
+    .watched-chip{{display:inline-flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 8px;font-size:11px;max-width:300px;}}
+    .watched-chip-path{{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
+    .watched-chip-rm{{background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;padding:0 2px;flex-shrink:0;}}
+    .watched-chip-rm:hover{{color:var(--oxide);}}
+    .watched-none{{font-size:11px;color:var(--muted);font-style:italic;}}
+    .watched-bar-right{{display:flex;gap:6px;align-items:center;flex-shrink:0;}}
+    body.dark-theme .watched-chip{{background:rgba(255,255,255,0.05);}}
   </style>
 </head>
 <body>
@@ -6646,17 +6969,29 @@ async fn test_metrics_handler(
   </div>
 
   <div class="page">
+    {watched_dirs_html}
+    <div class="scope-bar">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <span class="scope-label">Scope</span>
+      <div class="scope-sel-wrap">
+        <select id="scope-root-sel" class="scope-sel"><option value="__all__">All projects</option></select>
+        <div id="scope-sub-wrap" style="display:none;align-items:center;gap:8px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+          <select id="scope-sub-sel" class="scope-sel"><option value="">Entire project</option></select>
+        </div>
+      </div>
+    </div>
     <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
       <div class="stat-chip"><div class="stat-chip-val" id="chip-total">{total_tests}</div><div class="stat-chip-label">Test Functions</div><div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div></div>
-      <div class="stat-chip"><div class="stat-chip-val">{total_assertions}</div><div class="stat-chip-label">Assertions</div><div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div></div>
-      <div class="stat-chip"><div class="stat-chip-val">{total_suites}</div><div class="stat-chip-label">Test Suites</div><div class="stat-chip-tip">Test suite / fixture / group declarations (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], etc.)</div></div>
-      <div class="stat-chip"><div class="stat-chip-val">{test_files_count} / {total_files_analyzed}</div><div class="stat-chip-label">Test Files</div><div class="stat-chip-tip">Files containing at least one test definition out of total analyzed files</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-assertions">{total_assertions}</div><div class="stat-chip-label">Assertions</div><div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-suites">{total_suites}</div><div class="stat-chip-label">Test Suites</div><div class="stat-chip-tip">Test suite / fixture / group declarations (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], etc.)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-test-files">{test_files_count} / {total_files_analyzed}</div><div class="stat-chip-label">Test Files</div><div class="stat-chip-tip">Files containing at least one test definition out of total analyzed files</div></div>
     </div>
     <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
       <div class="stat-chip"><div class="stat-chip-val" id="chip-density">{workspace_density_str}</div><div class="stat-chip-label">Tests per 1K SLOC</div><div class="stat-chip-tip">Workspace-wide test density: test functions ÷ code lines × 1000</div></div>
       <div class="stat-chip"><div class="stat-chip-val" id="chip-most">{most_tested}</div><div class="stat-chip-label">Most Tested Language</div><div class="stat-chip-tip">Language with the highest absolute test function count</div></div>
       <div class="stat-chip"><div class="stat-chip-val" id="chip-langs">{langs_with_tests}</div><div class="stat-chip-label">Languages with Tests</div><div class="stat-chip-tip">Number of distinct languages where test definitions were detected</div></div>
-      <div class="stat-chip"><div class="stat-chip-val">{cov_line_pct_str}%</div><div class="stat-chip-label">Line Coverage</div><div class="stat-chip-tip">Overall line coverage across all LCOV-instrumented files (empty if no LCOV data)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-cov-pct">{cov_line_pct_str}%</div><div class="stat-chip-label">Line Coverage</div><div class="stat-chip-tip">Overall line coverage across all LCOV-instrumented files (empty if no LCOV data)</div></div>
     </div>
 
     <div class="panel">
@@ -6704,14 +7039,14 @@ async fn test_metrics_handler(
         </div>
         <div class="cov-gauge-card">
           <div class="cov-gauge-label">Function Coverage</div>
-          <div class="cov-gauge-val" style="color:#1a6b96;">{cov_fn_pct_str}%</div>
-          <div class="cov-gauge-track"><div class="cov-gauge-fill" style="width:{cov_fn_pct_str}%;background:#1a6b96;"></div></div>
+          <div class="cov-gauge-val" id="cov-fn-val" style="color:#1a6b96;">{cov_fn_pct_str}%</div>
+          <div class="cov-gauge-track"><div id="cov-fn-bar" class="cov-gauge-fill" style="width:{cov_fn_pct_str}%;background:#1a6b96;"></div></div>
           <div class="cov-gauge-sub">Functions hit / found</div>
         </div>
         <div class="cov-gauge-card">
           <div class="cov-gauge-label">Branch Coverage</div>
-          <div class="cov-gauge-val" style="color:#7a4fa0;">{cov_branch_pct_str}%</div>
-          <div class="cov-gauge-track"><div class="cov-gauge-fill" style="width:{cov_branch_pct_str}%;background:#7a4fa0;"></div></div>
+          <div class="cov-gauge-val" id="cov-branch-val" style="color:#7a4fa0;">{cov_branch_pct_str}%</div>
+          <div class="cov-gauge-track"><div id="cov-branch-bar" class="cov-gauge-fill" style="width:{cov_branch_pct_str}%;background:#7a4fa0;"></div></div>
           <div class="cov-gauge-sub">Branches hit / found</div>
         </div>
       </div>
@@ -6729,12 +7064,7 @@ async fn test_metrics_handler(
 
     <div class="panel">
       <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">Test Count Trend</div>
-      <p class="muted" style="margin-bottom:14px;">Test definition count across all saved scans — select a project root to filter.</p>
-      <div class="controls-row">
-        <label style="font-size:13px;font-weight:700;color:var(--muted);">Project Root:
-          <select class="chart-select" id="trend-root-sel"><option value="">All projects</option></select>
-        </label>
-      </div>
+      <p class="muted" style="margin-bottom:14px;">Test definition count across all saved scans for the selected scope.</p>
       <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
       <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
     </div>
@@ -6805,16 +7135,42 @@ async fn test_metrics_handler(
       if(cl)cl.addEventListener('click',function(){{m.classList.remove('open');}});
       document.addEventListener('click',function(e){{if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');}});
     }})();
+
+    // Watched folder picker
+    (function() {{
+      var btn = document.getElementById('add-watched-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {{
+        fetch('/pick-directory?kind=reports')
+          .then(function(r) {{ return r.json(); }})
+          .then(function(data) {{
+            if (!data.cancelled && data.selected_path) {{
+              var form = document.createElement('form');
+              form.method = 'POST';
+              form.action = '/watched-dirs/add';
+              var ri = document.createElement('input');
+              ri.type = 'hidden'; ri.name = 'redirect_to'; ri.value = window.location.pathname;
+              var fi = document.createElement('input');
+              fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
+              form.appendChild(ri); form.appendChild(fi);
+              document.body.appendChild(form);
+              form.submit();
+            }}
+          }})
+          .catch(function(e) {{ alert('Could not open folder picker: ' + e); }});
+      }});
+    }})();
   }})();
   </script>
 
   <script src="/static/chart.js" nonce="{nonce}"></script>
   <script nonce="{nonce}">
   (function() {{
-    var D = {lang_tests_json};
-    var COV_D = {cov_json};
-    var COV_TIERS = {cov_tier_json};
-    var HAS_COV = {has_coverage};
+    var SCOPE_DATA = {scope_data_json};
+    var currentRoot = '__all__';
+    var currentSub  = '';
+    var testsChart = null, densityChart = null, covChart = null, tierChart = null, trendChart = null;
+    var ALL_CHARTS = [];
 
     function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
     function fmtFull(n){{return Number(n).toLocaleString();}}
@@ -6822,84 +7178,73 @@ async fn test_metrics_handler(
     function clr(){{return isDark()?'rgba(245,236,230,0.12)':'rgba(67,52,45,0.10)';}}
     function txtClr(){{return isDark()?'#c7b7aa':'#7b675b';}}
     var PALETTE=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082','#D0743C','#5BA8A0'];
-    var ALL_CHARTS = [];
 
-    var chartDefaults = {{
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {{
-        legend: {{ display: false }},
-        tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x !== undefined ? ctx.parsed.x : ctx.parsed.y); }} }} }}
-      }},
-      scales: {{
-        x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font: {{ size:11 }} }} }},
-        y: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font: {{ size:11 }}, callback: function(v){{ return fmt(v); }} }} }}
-      }}
-    }};
+    function getDataset() {{
+      var r = SCOPE_DATA[currentRoot] || SCOPE_DATA['__all__'];
+      if (currentSub && r.submodules && r.submodules[currentSub]) return r.submodules[currentSub];
+      return r;
+    }}
+    function destroyChart(c) {{ if (c) {{ var idx = ALL_CHARTS.indexOf(c); if (idx >= 0) ALL_CHARTS.splice(idx, 1); c.destroy(); }} return null; }}
 
-    // Chart 1: Test definitions by language (horizontal bar)
-    (function() {{
+    function renderTestCharts(D) {{
+      testsChart = destroyChart(testsChart);
+      densityChart = destroyChart(densityChart);
       if (!D || !D.length) return;
-      var top = D.slice(0, 15);
-      var canvas = document.getElementById('canvas-tests');
-      if (!canvas) return;
-      var chart = new Chart(canvas, {{
-        type: 'bar',
-        data: {{
-          labels: top.map(function(d){{ return d.lang; }}),
-          datasets: [{{ label: 'Test Definitions', data: top.map(function(d){{ return d.tests; }}), backgroundColor: top.map(function(_,i){{ return PALETTE[i % PALETTE.length]; }}), borderRadius: 4 }}]
-        }},
-        options: Object.assign({{}}, chartDefaults, {{
-          indexAxis: 'y',
-          scales: {{
-            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
-            y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
-          }}
-        }})
-      }});
-      ALL_CHARTS.push(chart);
-    }})();
-
-    // Chart 2: Test density by language (horizontal bar)
-    (function() {{
-      if (!D || !D.length) return;
-      var top = D.slice(0, 15).slice().sort(function(a,b){{ return b.density - a.density; }});
-      var canvas = document.getElementById('canvas-density');
-      if (!canvas) return;
-      var chart = new Chart(canvas, {{
-        type: 'bar',
-        data: {{
-          labels: top.map(function(d){{ return d.lang; }}),
-          datasets: [{{ label: 'Tests / 1K Code Lines', data: top.map(function(d){{ return d.density; }}), backgroundColor: top.map(function(_,i){{ return PALETTE[(i+4) % PALETTE.length]; }}), borderRadius: 4 }}]
-        }},
-        options: Object.assign({{}}, chartDefaults, {{
-          indexAxis: 'y',
-          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
-          scales: {{
-            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v.toFixed(1); }} }} }},
-            y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
-          }}
-        }})
-      }});
-      ALL_CHARTS.push(chart);
-    }})();
-
-    // Chart 3: LCOV coverage (if present)
-    if (HAS_COV && COV_D && COV_D.length) {{
-      var covPanel = document.getElementById('cov-panel');
-      if (covPanel) covPanel.style.display = '';
-      var covCanvas = document.getElementById('canvas-cov');
-      if (covCanvas) {{
-        var covChart = new Chart(covCanvas, {{
+      var top15 = D.slice(0, 15);
+      var canvas1 = document.getElementById('canvas-tests');
+      if (canvas1) {{
+        testsChart = new Chart(canvas1, {{
           type: 'bar',
           data: {{
-            labels: COV_D.map(function(d){{ return d.lang; }}),
-            datasets: [{{ label: 'Line Coverage %', data: COV_D.map(function(d){{ return d.pct; }}), backgroundColor: COV_D.map(function(d,i){{ return d.pct >= 80 ? '#2A6846' : d.pct >= 50 ? '#D4A017' : '#B23030'; }}), borderRadius: 4 }}]
+            labels: top15.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Test Definitions', data: top15.map(function(d){{ return d.tests; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[i % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true,
-            maintainAspectRatio: false,
-            indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+            }}
+          }}
+        }});
+        ALL_CHARTS.push(testsChart);
+      }}
+      var topD = top15.slice().sort(function(a,b){{ return b.density - a.density; }});
+      var canvas2 = document.getElementById('canvas-density');
+      if (canvas2) {{
+        densityChart = new Chart(canvas2, {{
+          type: 'bar',
+          data: {{
+            labels: topD.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Tests / 1K Code Lines', data: topD.map(function(d){{ return d.density; }}), backgroundColor: topD.map(function(_,i){{ return PALETTE[(i+4) % PALETTE.length]; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v.toFixed(1); }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+            }}
+          }}
+        }});
+        ALL_CHARTS.push(densityChart);
+      }}
+    }}
+
+    function renderCovCharts(covD, tiers) {{
+      covChart = destroyChart(covChart);
+      tierChart = destroyChart(tierChart);
+      var covCanvas = document.getElementById('canvas-cov');
+      if (covCanvas && covD && covD.length) {{
+        covChart = new Chart(covCanvas, {{
+          type: 'bar',
+          data: {{
+            labels: covD.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Line Coverage %', data: covD.map(function(d){{ return d.pct; }}), backgroundColor: covD.map(function(d){{ return d.pct >= 80 ? '#2A6846' : d.pct >= 50 ? '#D4A017' : '#B23030'; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + ctx.parsed.x.toFixed(1) + '%'; }} }} }} }},
             scales: {{
               x: {{ min: 0, max: 100, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v + '%'; }} }} }},
@@ -6909,26 +7254,17 @@ async fn test_metrics_handler(
         }});
         ALL_CHARTS.push(covChart);
       }}
-
-      // Chart 3b: Coverage tier doughnut
       var tierCanvas = document.getElementById('canvas-cov-tiers');
-      if (tierCanvas && COV_TIERS) {{
-        var total = (COV_TIERS.high || 0) + (COV_TIERS.mid || 0) + (COV_TIERS.low || 0);
-        var tierChart = new Chart(tierCanvas, {{
+      if (tierCanvas && tiers) {{
+        var total = (tiers.high || 0) + (tiers.mid || 0) + (tiers.low || 0);
+        tierChart = new Chart(tierCanvas, {{
           type: 'doughnut',
           data: {{
             labels: ['High (≥80%)', 'Moderate (50–79%)', 'Low (<50%)'],
-            datasets: [{{
-              data: [COV_TIERS.high || 0, COV_TIERS.mid || 0, COV_TIERS.low || 0],
-              backgroundColor: ['#2A6846', '#D4A017', '#B23030'],
-              borderWidth: 2,
-              borderColor: isDark() ? '#1e1e1e' : '#f5efe8'
-            }}]
+            datasets: [{{ data: [tiers.high || 0, tiers.mid || 0, tiers.low || 0], backgroundColor: ['#2A6846', '#D4A017', '#B23030'], borderWidth: 2, borderColor: isDark() ? '#1e1e1e' : '#f5efe8' }}]
           }},
           options: {{
-            responsive: true,
-            maintainAspectRatio: false,
-            cutout: '62%',
+            responsive: true, maintainAspectRatio: false, cutout: '62%',
             plugins: {{
               legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }} }},
               tooltip: {{ callbacks: {{ label: function(ctx) {{
@@ -6942,11 +7278,11 @@ async fn test_metrics_handler(
       }}
     }}
 
-    // Language breakdown table
-    (function() {{
+    function buildLangTable(D) {{
       var tbody = document.getElementById('lang-tbody');
-      if (!tbody || !D || !D.length) {{
-        if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No test definitions detected. Run a scan on a project with test files.</td></tr>';
+      if (!tbody) return;
+      if (!D || !D.length) {{
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No test definitions detected. Run a scan on a project with test files.</td></tr>';
         return;
       }}
       var maxDensity = Math.max.apply(null, D.map(function(d){{ return d.density; }})) || 1;
@@ -6963,71 +7299,120 @@ async fn test_metrics_handler(
           '<td><div class="density-bar-wrap"><div class="density-bar" style="width:' + barW + 'px;"></div></div></td>' +
           '</tr>';
       }}).join('');
-    }})();
+    }}
 
-    // Trend chart — fetch history API
-    (function() {{
-      var trendCanvas = document.getElementById('canvas-trend');
-      var trendEmpty = document.getElementById('trend-empty');
-      var rootSel = document.getElementById('trend-root-sel');
-      var trendChart = null;
+    function updateCovGauges(t) {{
+      var lp = t.cov_line || '0', fp = t.cov_fn || '0', bp = t.cov_branch || '0';
+      var el;
+      if ((el = document.getElementById('cov-line-val'))) el.textContent = lp + '%';
+      if ((el = document.getElementById('cov-line-bar'))) el.style.width = lp + '%';
+      if ((el = document.getElementById('cov-fn-val'))) el.textContent = fp + '%';
+      if ((el = document.getElementById('cov-fn-bar'))) el.style.width = fp + '%';
+      if ((el = document.getElementById('cov-branch-val'))) el.textContent = bp + '%';
+      if ((el = document.getElementById('cov-branch-bar'))) el.style.width = bp + '%';
+    }}
 
-      function buildTrend(data) {{
-        var pts = data.filter(function(d){{ return d.test_count > 0 || data.some(function(x){{ return x.test_count > 0; }}); }});
-        pts = pts.slice().reverse();
-        if (!pts.length) {{
-          if (trendCanvas) trendCanvas.style.display = 'none';
-          if (trendEmpty) trendEmpty.style.display = '';
-          return;
-        }}
-        if (trendCanvas) trendCanvas.style.display = '';
-        if (trendEmpty) trendEmpty.style.display = 'none';
-        if (trendChart) {{ trendChart.destroy(); trendChart = null; }}
-        trendChart = new Chart(trendCanvas, {{
-          type: 'line',
-          data: {{
-            labels: pts.map(function(d){{ return d.timestamp ? d.timestamp.slice(0,10) : d.run_id_short; }}),
-            datasets: [{{
-              label: 'Test Definitions',
-              data: pts.map(function(d){{ return d.test_count; }}),
-              borderColor: '#C45C10',
-              backgroundColor: 'rgba(196,92,16,0.10)',
-              pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : '#C45C10'; }}),
-              pointRadius: 5,
-              fill: true,
-              tension: 0.3
-            }}]
-          }},
-          options: {{
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
-            scales: {{
-              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
-              y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
-            }}
-          }}
-        }});
-        ALL_CHARTS.push(trendChart);
-      }}
-
-      function loadTrend() {{
-        var url = '/api/metrics/history?limit=100';
-        if (rootSel && rootSel.value) url += '&root=' + encodeURIComponent(rootSel.value);
-        fetch(url).then(function(r){{ return r.json(); }}).then(function(data){{
-          // Populate root selector on first load
-          if (rootSel && rootSel.options.length <= 1) {{
-            var roots = {{}};
-            data.forEach(function(d){{ if (d.project_label) roots[d.project_label] = true; }});
-            Object.keys(roots).forEach(function(r){{ var o=document.createElement('option');o.value=r;o.textContent=r;rootSel.appendChild(o); }});
-          }}
-          buildTrend(data);
-        }}).catch(function(){{ if (trendEmpty) {{ trendEmpty.style.display=''; trendEmpty.textContent='Failed to load trend data.'; }} }});
-      }}
-
+    function applyScope() {{
+      var d = getDataset();
+      var t = d.totals;
+      var el;
+      if ((el = document.getElementById('chip-total'))) el.textContent = fmt(t.test_count);
+      if ((el = document.getElementById('chip-assertions'))) el.textContent = fmt(t.assertions);
+      if ((el = document.getElementById('chip-suites'))) el.textContent = fmt(t.suites);
+      if ((el = document.getElementById('chip-test-files'))) el.textContent = fmt(t.test_files) + ' / ' + fmt(t.total_files);
+      if ((el = document.getElementById('chip-density'))) el.textContent = t.density_str;
+      if ((el = document.getElementById('chip-most'))) el.textContent = t.most_tested;
+      if ((el = document.getElementById('chip-langs'))) el.textContent = fmt(t.langs_with_tests);
+      if ((el = document.getElementById('chip-cov-pct'))) el.textContent = t.cov_line + '%';
+      renderTestCharts(d.lang_tests);
+      buildLangTable(d.lang_tests);
+      var covPanel = document.getElementById('cov-panel');
+      if (covPanel) covPanel.style.display = d.has_coverage ? '' : 'none';
+      if (d.has_coverage) {{ renderCovCharts(d.cov, d.cov_tiers); updateCovGauges(t); }}
       loadTrend();
-      if (rootSel) rootSel.addEventListener('change', loadTrend);
+    }}
+
+    // Populate scope-root-sel from SCOPE_DATA keys
+    (function() {{
+      var sel = document.getElementById('scope-root-sel');
+      if (!sel) return;
+      Object.keys(SCOPE_DATA).forEach(function(k) {{
+        if (k === '__all__') return;
+        var o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o);
+      }});
     }})();
+
+    document.getElementById('scope-root-sel').addEventListener('change', function() {{
+      currentRoot = this.value;
+      currentSub = '';
+      var rootData = SCOPE_DATA[currentRoot] || SCOPE_DATA['__all__'];
+      var subNames = rootData && rootData.submodules ? Object.keys(rootData.submodules) : [];
+      var subWrap = document.getElementById('scope-sub-wrap');
+      var subSel  = document.getElementById('scope-sub-sel');
+      subSel.innerHTML = '<option value="">Entire project</option>';
+      if (subNames.length) {{
+        subNames.forEach(function(s) {{ var o = document.createElement('option'); o.value = s; o.textContent = s; subSel.appendChild(o); }});
+        subWrap.style.display = 'flex';
+      }} else {{
+        subWrap.style.display = 'none';
+      }}
+      applyScope();
+    }});
+
+    document.getElementById('scope-sub-sel').addEventListener('change', function() {{
+      currentSub = this.value;
+      applyScope();
+    }});
+
+    function buildTrend(data) {{
+      var trendCanvas = document.getElementById('canvas-trend');
+      var trendEmpty  = document.getElementById('trend-empty');
+      var pts = data.filter(function(d){{ return d.test_count > 0 || data.some(function(x){{ return x.test_count > 0; }}); }});
+      pts = pts.slice().reverse();
+      if (!pts.length) {{
+        if (trendCanvas) trendCanvas.style.display = 'none';
+        if (trendEmpty) trendEmpty.style.display = '';
+        return;
+      }}
+      if (trendCanvas) trendCanvas.style.display = '';
+      if (trendEmpty) trendEmpty.style.display = 'none';
+      trendChart = destroyChart(trendChart);
+      if (!trendCanvas) return;
+      trendChart = new Chart(trendCanvas, {{
+        type: 'line',
+        data: {{
+          labels: pts.map(function(d){{ return d.timestamp ? d.timestamp.slice(0,10) : d.run_id_short; }}),
+          datasets: [{{
+            label: 'Test Definitions',
+            data: pts.map(function(d){{ return d.test_count; }}),
+            borderColor: '#C45C10',
+            backgroundColor: 'rgba(196,92,16,0.10)',
+            pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : '#C45C10'; }}),
+            pointRadius: 5, fill: true, tension: 0.3
+          }}]
+        }},
+        options: {{
+          responsive: true, maintainAspectRatio: false,
+          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
+          scales: {{
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
+            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+          }}
+        }}
+      }});
+      ALL_CHARTS.push(trendChart);
+    }}
+
+    function loadTrend() {{
+      var url = '/api/metrics/history?limit=100';
+      if (currentRoot !== '__all__') url += '&root=' + encodeURIComponent(currentRoot);
+      fetch(url).then(function(r){{ return r.json(); }}).then(function(data){{
+        buildTrend(data);
+      }}).catch(function(){{
+        var trendEmpty = document.getElementById('trend-empty');
+        if (trendEmpty) {{ trendEmpty.style.display = ''; trendEmpty.textContent = 'Failed to load trend data.'; }}
+      }});
+    }}
 
     // Re-render charts on theme toggle
     document.getElementById('theme-toggle') && document.getElementById('theme-toggle').addEventListener('click', function() {{
@@ -7043,20 +7428,18 @@ async fn test_metrics_handler(
         }});
       }}, 80);
     }});
+
+    applyScope();
   }})();
   </script>
 </body>
 </html>"##,
         nonce = nonce,
         version = version,
-        lang_tests_json = lang_tests_json,
-        cov_json = cov_json,
-        cov_tier_json = cov_tier_json,
         total_tests = total_tests,
         workspace_density_str = workspace_density_str,
         most_tested = most_tested,
         langs_with_tests = langs_with_tests,
-        has_coverage = has_coverage,
     );
     Html(html).into_response()
 }
@@ -8521,7 +8904,7 @@ struct SubmoduleRow {
     .workbench-box { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); transition: transform .2s ease, box-shadow .2s ease; }
     .workbench-box:hover { transform: translateY(-3px); box-shadow: 0 14px 36px rgba(77,44,20,0.18); }
     body.dark-theme .workbench-box { background: var(--surface); box-shadow: var(--shadow); }
-    .wb-stats { flex: 4 1 0; display:flex; flex-direction:column; overflow: visible; min-width: 0; position: relative; z-index: 1; }
+    .wb-stats { flex: 4 1 0; display:flex; flex-direction:column; overflow: visible; min-width: 0; position: relative; z-index: 25; }
     .wb-stats-header { padding: 10px 24px 0; }
     .wb-stats-title { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted-2); }
     .ws-left { display:flex; align-items:stretch; gap:12px; flex:1 1 auto; flex-wrap:wrap; padding: 14px 20px 18px; overflow: visible; }
@@ -8850,7 +9233,7 @@ struct SubmoduleRow {
     .tree-name-cell { display:flex; align-items:center; gap: 10px; padding-left: calc(var(--depth) * 18px + 8px); position: relative; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; min-width:0; }
     .tree-toggle { width: 28px; height: 28px; display:inline-flex; align-items:center; justify-content:center; border:none; background: var(--surface-2); color: var(--muted-2); cursor:pointer; font-size: 18px; line-height: 1; flex:0 0 28px; border-radius: 8px; border: 1px solid var(--line); font-weight: 900; }
     .tree-toggle:hover { color: var(--text); background: var(--surface-3); }
-    .tree-bullet { color: var(--muted-2); width: 28px; text-align:center; flex: 0 0 28px; font-size: 14px; }
+    .tree-bullet { color: var(--muted-2); width: 28px; text-align:center; flex: 0 0 28px; font-size: 7px; opacity: 0.5; }
     .tree-node { display:inline-flex; align-items:center; min-width:0; }
     .tree-node-dir { color: var(--text); font-weight: 800; }
     .tree-node-supported { color: var(--success-text); }
@@ -8867,7 +9250,10 @@ struct SubmoduleRow {
     .coverage-suggest-badge .csb-use { appearance:none; padding:4px 12px; border-radius:999px; border:1px solid var(--accent-2); background:transparent; color:var(--accent-2); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
     .coverage-suggest-badge .csb-use:hover { background:rgba(37,99,235,0.1); }
     .coverage-suggest-badge .csb-dismiss { appearance:none; padding:2px 8px; border-radius:999px; border:none; background:transparent; color:var(--muted); font-size:14px; cursor:pointer; line-height:1; }
+    .coverage-suggest-badge .csb-tool { display:inline-block; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; background:rgba(37,99,235,0.12); color:var(--accent-2); margin:0 2px; vertical-align:middle; }
+    .coverage-suggest-badge .csb-hint { font-size:11px; background:rgba(0,0,0,0.06); padding:1px 6px; border-radius:4px; }
     body.dark-theme .coverage-suggest-badge { background:rgba(37,99,235,0.12); border-color:rgba(111,155,255,0.25); }
+    body.dark-theme .coverage-suggest-badge .csb-hint { background:rgba(255,255,255,0.08); }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
     .loading-card { width: min(730px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 36px 42px; }
@@ -9277,20 +9663,27 @@ struct SubmoduleRow {
 
               <div class="section" style="margin-top:14px;">
                 <div class="field">
-                  <label for="coverage_file">Coverage file <span style="font-weight:400;color:var(--muted);font-size:12px;">(optional)</span></label>
+                  <label for="coverage_file">Code Coverage file <span style="font-weight:400;color:var(--muted);font-size:12px;">(optional)</span></label>
                   <div class="input-group compact">
-                    <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. /path/to/lcov.info or coverage/lcov.info" />
+                    <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. coverage/lcov.info, coverage.xml, coverage-summary.json" />
                     <button type="button" class="mini-button oxide" id="browse-coverage">Browse</button>
                   </div>
                   <div id="coverage-suggest-badge" class="coverage-suggest-badge" style="display:none"></div>
-                  <div class="hint">Path to an LCOV <code>.info</code> file produced by <code>lcov</code>&ensp;&middot;&ensp;<code>gcov</code>&ensp;&middot;&ensp;<code>cargo&nbsp;llvm-cov&nbsp;--lcov</code>&ensp;&middot;&ensp;or any compatible LCOV-format tool.<br>When provided, line and function coverage percentages are overlaid on each file in the report alongside the SLOC totals.</div>
-                  <div class="code-sample" style="margin-top:8px;font-size:12px;"># Rust — cargo-llvm-cov
+                  <div class="hint">Supports <strong>LCOV</strong> <code>.info</code> (cargo-llvm-cov, gcov, lcov)&ensp;&middot;&ensp;<strong>Cobertura XML</strong> <code>coverage.xml</code> (pytest-cov, Maven)&ensp;&middot;&ensp;<strong>JaCoCo XML</strong> <code>jacoco.xml</code> (Gradle, Maven/Java)&ensp;&middot;&ensp;<strong>Istanbul JSON</strong> <code>coverage-summary.json</code> (nyc, Jest).<br>When provided, line, function, and branch coverage percentages are overlaid on each file in the report and shown on the Test Metrics page.</div>
+                  <div class="code-sample" style="margin-top:8px;font-size:12px;"># Rust — cargo-llvm-cov (LCOV)
 cargo llvm-cov --lcov --output-path coverage/lcov.info
 
-# C / C++ — gcov + lcov
+# C / C++ — gcov + lcov (LCOV)
 lcov --capture --directory . --output-file coverage/lcov.info
 
-# Pass the file path here:  coverage/lcov.info  or  /tmp/cov/myproject.info</div>
+# Python — pytest-cov (Cobertura XML)
+pytest --cov --cov-report=xml
+
+# Java / Kotlin — Gradle + JaCoCo (JaCoCo XML)
+./gradlew jacocoTestReport
+
+# JavaScript / TypeScript — nyc / Jest (Istanbul JSON)
+nyc --reporter=json-summary npm test</div>
                 </div>
               </div>
 
@@ -10668,10 +11061,12 @@ lcov --capture --directory . --output-file coverage/lcov.info
           fetch("/api/suggest-coverage?path=" + encodeURIComponent(projectPath))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-              if (d && d.found && !coverageInput.value.trim()) {
+              if (!d || coverageInput.value.trim()) { coverageSuggestBadge.style.display = "none"; return; }
+              var toolBadge = d.tool ? ' <span class="csb-tool">' + escapeHtml(d.tool) + '</span>' : '';
+              if (d.found) {
                 coverageSuggestBadge.innerHTML =
                   '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:var(--accent-2);fill:none;stroke-width:2;flex:0 0 auto;" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
-                  + '<span class="csb-label">Coverage file found: <strong>' + escapeHtml(d.found) + '</strong></span>'
+                  + '<span class="csb-label">Coverage file found' + toolBadge + ': <strong>' + escapeHtml(d.found) + '</strong></span>'
                   + '<button type="button" class="csb-use" data-path="' + escapeHtml(d.found) + '">Use this</button>'
                   + '<button type="button" class="csb-dismiss" title="Dismiss">&times;</button>';
                 coverageSuggestBadge.style.display = "flex";
@@ -10679,6 +11074,15 @@ lcov --capture --directory . --output-file coverage/lcov.info
                   coverageInput.value = this.dataset.path;
                   coverageSuggestBadge.style.display = "none";
                 });
+                coverageSuggestBadge.querySelector(".csb-dismiss").addEventListener("click", function () {
+                  coverageSuggestBadge.style.display = "none";
+                });
+              } else if (d.tool && d.hint) {
+                coverageSuggestBadge.innerHTML =
+                  '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:var(--muted);fill:none;stroke-width:2;flex:0 0 auto;" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+                  + '<span class="csb-label">No coverage file found.' + toolBadge + ' Generate one: <code class="csb-hint">' + escapeHtml(d.hint) + '</code></span>'
+                  + '<button type="button" class="csb-dismiss" title="Dismiss">&times;</button>';
+                coverageSuggestBadge.style.display = "flex";
                 coverageSuggestBadge.querySelector(".csb-dismiss").addEventListener("click", function () {
                   coverageSuggestBadge.style.display = "none";
                 });
@@ -12441,6 +12845,8 @@ struct ScanSetupTemplate {
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     /* ── Result-page chart controls ─────────────────────────────────────────── */
     .r-chart-section{margin-bottom:24px;}
+    .section-pair{display:flex;flex-direction:column;gap:64px;width:100%;margin-top:24px;}
+    .section-pair > .panel{flex-shrink:0;}
     .r-chart-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
     .r-chart-select{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:4px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}
     .r-chart-select:focus{border-color:var(--accent);}
@@ -12746,27 +13152,17 @@ struct ScanSetupTemplate {
           <div class="pill-row"><span class="soft-chip">{{ submodule_rows.len() }} submodule{% if submodule_rows.len() != 1 %}s{% endif %}</span></div>
         </div>
         <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:760px;">
-          <colgroup>
-            <col style="width:17%">
-            <col style="width:44%">
-            <col style="width:6%">
-            <col style="width:7%">
-            <col style="width:6%">
-            <col style="width:8%">
-            <col style="width:6%">
-            <col style="width:6%">
-          </colgroup>
+        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:800px;">
           <thead>
             <tr>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Submodule</th>
-              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Path</th>
-              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
-              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
-              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
-              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Comments</th>
-              <th style="padding:9px 6px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Blank</th>
-              <th style="padding:9px 8px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
+              <th style="width:17%;padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
+              <th style="width:44%;padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Path</th>
+              <th style="width:6%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
+              <th style="width:7%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
+              <th style="width:6%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
+              <th style="width:8%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Comments</th>
+              <th style="width:6%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Blank</th>
+              <th style="width:6%;padding:9px 8px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
             </tr>
           </thead>
           <tbody>
@@ -12970,8 +13366,8 @@ struct ScanSetupTemplate {
 
     <div id="r-tt" aria-hidden="true"></div>
 
-    <div style="display:flex;flex-direction:column;gap:40px;width:100%;">
-    <section class="panel" style="padding-bottom: 24px;">
+    <div class="section-pair">
+    <section class="panel">
         <div class="toolbar-row">
           <div>
             <h2>Language breakdown</h2>

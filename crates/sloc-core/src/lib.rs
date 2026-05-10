@@ -547,7 +547,7 @@ pub fn analyze(
     {
         match fs::read_to_string(&cov_path) {
             Ok(content) => {
-                let cov_map = coverage::parse_lcov(&content);
+                let cov_map = coverage::parse_coverage_auto(&cov_path, &content);
                 for record in &mut analyzed {
                     record.coverage =
                         coverage::lookup_coverage(&cov_map, &record.relative_path).cloned();
