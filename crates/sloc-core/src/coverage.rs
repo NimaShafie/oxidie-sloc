@@ -107,6 +107,7 @@ pub fn parse_lcov(content: &str) -> HashMap<PathBuf, FileCoverage> {
 /// 2. Suffix match: find a coverage path whose components end with the relative path
 /// 3. Filename-only fallback when the relative path is a bare filename
 #[must_use]
+#[allow(clippy::implicit_hasher)] // public API; callers always use the default hasher
 pub fn lookup_coverage<'a>(
     map: &'a HashMap<PathBuf, FileCoverage>,
     relative_path: &str,
@@ -149,6 +150,8 @@ pub fn aggregate_line_coverage(records: &[&FileCoverage]) -> Option<f64> {
         return None;
     }
     let total_hit: u64 = records.iter().map(|c| u64::from(c.lines_hit)).sum();
+    // ratio/percentage display, precision loss acceptable
+    #[allow(clippy::cast_precision_loss)]
     Some((total_hit as f64 / total_found as f64) * 100.0)
 }
 
@@ -191,9 +194,8 @@ pub fn parse_cobertura(content: &str) -> HashMap<PathBuf, FileCoverage> {
         remaining = &remaining[class_start + 7..];
 
         // Extract filename="..."
-        let filename = match extract_attr(remaining, "filename") {
-            Some(f) => f,
-            None => continue,
+        let Some(filename) = extract_attr(remaining, "filename") else {
+            continue;
         };
 
         // Find the end of this class element (either </class> or next <class)
@@ -291,9 +293,8 @@ pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
         let mut sf_scan = pkg_block;
         while let Some(sf_start) = sf_scan.find("<sourcefile ") {
             sf_scan = &sf_scan[sf_start + 12..];
-            let sf_name = match extract_attr(sf_scan, "name") {
-                Some(n) => n,
-                None => continue,
+            let Some(sf_name) = extract_attr(sf_scan, "name") else {
+                continue;
             };
             let sf_end = sf_scan.find("</sourcefile>").unwrap_or(sf_scan.len());
             let sf_block = &sf_scan[..sf_end];
@@ -381,11 +382,18 @@ pub fn parse_istanbul(content: &str) -> HashMap<PathBuf, FileCoverage> {
         if path_str == "total" {
             continue;
         }
+        // Line/function/branch counts are always small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let lines_total: u32 = file_val["lines"]["total"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let lines_covered: u32 = file_val["lines"]["covered"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let fn_total: u32 = file_val["functions"]["total"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let fn_covered: u32 = file_val["functions"]["covered"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let br_total: u32 = file_val["branches"]["total"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let br_covered: u32 = file_val["branches"]["covered"].as_u64().unwrap_or(0) as u32;
 
         result.insert(

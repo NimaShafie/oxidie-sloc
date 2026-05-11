@@ -164,6 +164,8 @@ fn build_semantic_chart_json(run: &AnalysisRun) -> String {
 
 // ── Coverage / density helpers ────────────────────────────────────────────────
 
+// ratio/percentage display, precision loss acceptable
+#[allow(clippy::cast_precision_loss)]
 fn coverage_pct_str(hit: u64, found: u64) -> String {
     if found > 0 {
         format!("{:.1}", hit as f64 / found as f64 * 100.0)
@@ -172,6 +174,8 @@ fn coverage_pct_str(hit: u64, found: u64) -> String {
     }
 }
 
+// ratio/percentage display, precision loss acceptable
+#[allow(clippy::cast_precision_loss)]
 fn coverage_class(hit: u64, found: u64) -> String {
     if found > 0 {
         let pct = hit as f64 / found as f64 * 100.0;
@@ -188,6 +192,8 @@ fn coverage_class(hit: u64, found: u64) -> String {
     .to_string()
 }
 
+// ratio display, precision loss acceptable
+#[allow(clippy::cast_precision_loss)]
 fn format_test_density(code_lines: u64, test_count: u64) -> String {
     if code_lines > 0 && test_count > 0 {
         format!("{:.1}", test_count as f64 / code_lines as f64 * 1000.0)
@@ -198,6 +204,7 @@ fn format_test_density(code_lines: u64, test_count: u64) -> String {
 
 // ── Main renderer ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // large HTML renderer; splitting would obscure the template structure
 fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
     let config_json = serde_json::to_string_pretty(&run.effective_configuration)
         .context("failed to serialize effective configuration")?;
@@ -250,10 +257,10 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
                 test_assertion_count: row.test_assertion_count,
                 test_suite_count: row.test_suite_count,
                 test_density_str: if row.code_lines > 0 {
-                    format!(
-                        "{:.1}",
-                        row.test_count as f64 / row.code_lines as f64 * 1000.0
-                    )
+                    // ratio display, precision loss acceptable
+                    #[allow(clippy::cast_precision_loss)]
+                    let density = row.test_count as f64 / row.code_lines as f64 * 1000.0;
+                    format!("{density:.1}")
                 } else {
                     "—".to_string()
                 },
@@ -3403,6 +3410,8 @@ struct WarningOpportunityRow {
 </html>"##,
     ext = "html"
 )]
+// Template structs need many bool fields to pass Askama rendering flags.
+#[allow(clippy::struct_excessive_bools)]
 struct ReportTemplate<'a> {
     nonce: String,
     title: String,
