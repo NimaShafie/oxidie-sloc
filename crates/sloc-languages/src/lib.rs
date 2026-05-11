@@ -226,15 +226,15 @@ pub struct RawLineCounts {
     #[serde(default)]
     pub compiler_directive_lines: u64,
     /// Best-effort count of test case / test function definition lines detected lexically
-    /// (GTest, Catch2, PyTest, JUnit, etc.). Always a subset of `code_only_lines`.
+    /// (`GTest`, Catch2, `PyTest`, `JUnit`, etc.). Always a subset of `code_only_lines`.
     #[serde(default)]
     pub test_count: u64,
     /// Best-effort count of test assertion call lines detected lexically
-    /// (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.).
+    /// (`ASSERT_EQ`, `EXPECT_TRUE`, assertEquals, Assert.AreEqual, `assert_eq`!, etc.).
     #[serde(default)]
     pub test_assertion_count: u64,
     /// Best-effort count of test suite / fixture / group declaration lines detected lexically
-    /// (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], [TestFixture], etc.).
+    /// (`TEST_GROUP`, `BOOST_AUTO_TEST_SUITE`, [`TestClass`], [`TestFixture`], etc.).
     #[serde(default)]
     pub test_suite_count: u64,
 }
@@ -1022,11 +1022,11 @@ struct SymbolPatterns {
     /// Line prefixes (after stripping leading whitespace) that indicate a test case or test
     /// function definition. Matched against code lines only, same as other symbol categories.
     tests: &'static [&'static str],
-    /// Line prefixes that indicate a test assertion call (ASSERT_EQ, assertEquals, assert_eq!,
+    /// Line prefixes that indicate a test assertion call (`ASSERT_EQ`, assertEquals, `assert_eq`!,
     /// Assert.AreEqual, etc.). Matched against code lines only.
     assertions: &'static [&'static str],
     /// Line prefixes that indicate a test suite / fixture / group declaration
-    /// (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], [TestFixture], etc.).
+    /// (`TEST_GROUP`, `BOOST_AUTO_TEST_SUITE`, [`TestClass`], [`TestFixture`], etc.).
     test_suites: &'static [&'static str],
 }
 
