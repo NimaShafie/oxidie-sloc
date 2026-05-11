@@ -206,7 +206,7 @@ struct AnalyzeArgs {
     #[arg(long, value_name = "NAME")]
     set_baseline: Option<String>,
 
-    /// Exit with code 5 if code lines grew more than MAX_DELTA_PCT % vs. the named
+    /// Exit with code 5 if code lines grew more than `MAX_DELTA_PCT` % vs. the named
     /// baseline. Omit --max-delta-pct to fail on any growth.
     #[arg(long, value_name = "NAME")]
     fail_above_baseline: Option<String>,
@@ -217,7 +217,7 @@ struct AnalyzeArgs {
 
     /// Path to an LCOV .info file (from lcov, gcov, cargo-llvm-cov, etc.) to attach
     /// per-file line and function coverage data to the analysis output.
-    /// Can also be set via the SLOC_COVERAGE_FILE environment variable.
+    /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[arg(long, value_name = "FILE")]
     coverage_file: Option<PathBuf>,
 }
@@ -367,19 +367,19 @@ struct SendArgs {
     report_url: Option<String>,
 
     // --- Atlassian Confluence ---
-    /// Confluence base URL (e.g. https://myco.atlassian.net or https://confluence.corp.com).
-    /// Defaults to SLOC_CONFLUENCE_URL env var.
+    /// Confluence base URL (e.g. <https://myco.atlassian.net> or <https://confluence.corp.com>).
+    /// Defaults to `SLOC_CONFLUENCE_URL` env var.
     #[arg(long, value_name = "URL", env = "SLOC_CONFLUENCE_URL")]
     confluence_url: Option<String>,
     /// Atlassian account email (Cloud) or username (Server).
-    /// Defaults to SLOC_CONFLUENCE_USER env var.
+    /// Defaults to `SLOC_CONFLUENCE_USER` env var.
     #[arg(long, value_name = "USER", env = "SLOC_CONFLUENCE_USER")]
     confluence_username: Option<String>,
     /// API token (Cloud) or password/PAT (Server).
-    /// Prefer the SLOC_CONFLUENCE_TOKEN env var to avoid credential exposure in process listings.
+    /// Prefer the `SLOC_CONFLUENCE_TOKEN` env var to avoid credential exposure in process listings.
     #[arg(long, value_name = "TOKEN", env = "SLOC_CONFLUENCE_TOKEN")]
     confluence_token: Option<String>,
-    /// Target Confluence space key (e.g. ENG). Defaults to SLOC_CONFLUENCE_SPACE env var.
+    /// Target Confluence space key (e.g. ENG). Defaults to `SLOC_CONFLUENCE_SPACE` env var.
     #[arg(long, value_name = "KEY", env = "SLOC_CONFLUENCE_SPACE")]
     confluence_space: Option<String>,
     /// Optional numeric parent page ID to nest the created page under.
@@ -1173,7 +1173,7 @@ const BLOCKED_WEBHOOK_HOSTS: &[&str] = &[
 
 /// Returns `true` when `ip` falls into a range that must not receive outbound requests
 /// (loopback, private RFC-1918/FC00, link-local, broadcast, unspecified, multicast).
-fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
+const fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback()
@@ -1746,50 +1746,47 @@ async fn confluence_upsert_cloud(
         .as_u64()
         .map(|v| v as u32);
 
-    match (existing_id, existing_ver) {
-        (Some(page_id), Some(ver)) => {
-            let payload = serde_json::json!({
-                "version": { "number": ver + 1 },
-                "title": page_title,
-                "body": { "representation": "storage", "value": body_html }
-            });
-            let resp = client
-                .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
-            }
-            println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    if let (Some(page_id), Some(ver)) = (existing_id, existing_ver) {
+        let payload = serde_json::json!({
+            "version": { "number": ver + 1 },
+            "title": page_title,
+            "body": { "representation": "storage", "value": body_html }
+        });
+        let resp = client
+            .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
         }
-        _ => {
-            let mut payload = serde_json::json!({
-                "spaceId": space_id,
-                "title": page_title,
-                "body": { "representation": "storage", "value": body_html }
-            });
-            if let Some(pid) = parent_id {
-                payload["parentId"] = serde_json::Value::String(pid.to_owned());
-            }
-            let resp = client
-                .post(format!("{base_url}/wiki/api/v2/pages"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
-            }
-            let created: serde_json::Value = resp.json().await?;
-            let new_id = created["id"].as_str().unwrap_or("?");
-            println!("send: created Confluence page '{page_title}' (id: {new_id})");
+        println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    } else {
+        let mut payload = serde_json::json!({
+            "spaceId": space_id,
+            "title": page_title,
+            "body": { "representation": "storage", "value": body_html }
+        });
+        if let Some(pid) = parent_id {
+            payload["parentId"] = serde_json::Value::String(pid.to_owned());
         }
+        let resp = client
+            .post(format!("{base_url}/wiki/api/v2/pages"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+        }
+        let created: serde_json::Value = resp.json().await?;
+        let new_id = created["id"].as_str().unwrap_or("?");
+        println!("send: created Confluence page '{page_title}' (id: {new_id})");
     }
     Ok(())
 }
@@ -1820,53 +1817,50 @@ async fn confluence_upsert_server(
         .as_u64()
         .map(|v| v as u32);
 
-    match (existing_id, existing_ver) {
-        (Some(page_id), Some(ver)) => {
-            let payload = serde_json::json!({
-                "version": { "number": ver + 1 },
-                "type": "page",
-                "title": page_title,
-                "space": { "key": space },
-                "body": { "storage": { "value": body_html, "representation": "storage" } }
-            });
-            let resp = client
-                .put(format!("{base_url}/rest/api/content/{page_id}"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
-            }
-            println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    if let (Some(page_id), Some(ver)) = (existing_id, existing_ver) {
+        let payload = serde_json::json!({
+            "version": { "number": ver + 1 },
+            "type": "page",
+            "title": page_title,
+            "space": { "key": space },
+            "body": { "storage": { "value": body_html, "representation": "storage" } }
+        });
+        let resp = client
+            .put(format!("{base_url}/rest/api/content/{page_id}"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
         }
-        _ => {
-            let mut payload = serde_json::json!({
-                "type": "page",
-                "space": { "key": space },
-                "title": page_title,
-                "body": { "storage": { "value": body_html, "representation": "storage" } }
-            });
-            if let Some(pid) = parent_id {
-                payload["ancestors"] = serde_json::json!([{ "id": pid }]);
-            }
-            let resp = client
-                .post(format!("{base_url}/rest/api/content"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
-            }
-            let created: serde_json::Value = resp.json().await?;
-            let new_id = created["id"].as_str().unwrap_or("?");
-            println!("send: created Confluence page '{page_title}' (id: {new_id})");
+        println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    } else {
+        let mut payload = serde_json::json!({
+            "type": "page",
+            "space": { "key": space },
+            "title": page_title,
+            "body": { "storage": { "value": body_html, "representation": "storage" } }
+        });
+        if let Some(pid) = parent_id {
+            payload["ancestors"] = serde_json::json!([{ "id": pid }]);
         }
+        let resp = client
+            .post(format!("{base_url}/rest/api/content"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+        }
+        let created: serde_json::Value = resp.json().await?;
+        let new_id = created["id"].as_str().unwrap_or("?");
+        println!("send: created Confluence page '{page_title}' (id: {new_id})");
     }
     Ok(())
 }
