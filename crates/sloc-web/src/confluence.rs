@@ -34,7 +34,7 @@ pub enum ConfluenceTier {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfluenceConfig {
     pub tier: ConfluenceTier,
-    /// Base URL, e.g. "https://mycompany.atlassian.net" or "https://confluence.corp.com"
+    /// Base URL, e.g. "<https://mycompany.atlassian.net>" or "<https://confluence.corp.com>"
     pub base_url: String,
     /// Cloud: Atlassian account email. Server: username (blank if using a PAT).
     pub username: String,
@@ -172,7 +172,7 @@ impl ConfluenceClient {
             .json()
             .await?;
         let results = resp["results"].as_array();
-        if results.map(|a| a.is_empty()).unwrap_or(true) {
+        if results.map_or(true, std::vec::Vec::is_empty) {
             return Ok(None);
         }
         let page = &resp["results"][0];
@@ -200,7 +200,7 @@ impl ConfluenceClient {
             .json()
             .await?;
         let results = resp["results"].as_array();
-        if results.map(|a| a.is_empty()).unwrap_or(true) {
+        if results.map_or(true, std::vec::Vec::is_empty) {
             return Ok(None);
         }
         let page = &resp["results"][0];
@@ -404,7 +404,7 @@ pub async fn post_to_confluence(
 // ── request / response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub(super) struct SaveConfluenceConfig {
+pub struct SaveConfluenceConfig {
     pub tier: Option<String>,
     pub base_url: String,
     pub username: String,
@@ -417,20 +417,20 @@ pub(super) struct SaveConfluenceConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct PostToConfluenceRequest {
+pub struct PostToConfluenceRequest {
     pub run_id: String,
     pub page_title: String,
     pub report_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct RunIdQuery {
+pub struct RunIdQuery {
     pub run_id: String,
 }
 
 // ── route handlers ────────────────────────────────────────────────────────────
 
-pub(super) async fn api_get_confluence_config(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn api_get_confluence_config(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.confluence.lock().await;
     match &store.config {
         None => Json(serde_json::json!({
@@ -456,7 +456,7 @@ pub(super) async fn api_get_confluence_config(State(state): State<AppState>) -> 
     }
 }
 
-pub(super) async fn api_save_confluence_config(
+pub async fn api_save_confluence_config(
     State(state): State<AppState>,
     Json(body): Json<SaveConfluenceConfig>,
 ) -> impl IntoResponse {
@@ -491,7 +491,7 @@ pub(super) async fn api_save_confluence_config(
     Json(serde_json::json!({ "ok": true }))
 }
 
-pub(super) async fn api_test_confluence(State(state): State<AppState>) -> Response {
+pub async fn api_test_confluence(State(state): State<AppState>) -> Response {
     let config = {
         let store = state.confluence.lock().await;
         store.config.clone()
@@ -514,7 +514,7 @@ pub(super) async fn api_test_confluence(State(state): State<AppState>) -> Respon
     }
 }
 
-pub(super) async fn api_post_to_confluence(
+pub async fn api_post_to_confluence(
     State(state): State<AppState>,
     Json(body): Json<PostToConfluenceRequest>,
 ) -> Response {
@@ -617,7 +617,7 @@ pub(super) async fn api_post_to_confluence(
     }
 }
 
-pub(super) async fn api_wiki_markup(
+pub async fn api_wiki_markup(
     State(state): State<AppState>,
     Query(q): Query<RunIdQuery>,
 ) -> Response {

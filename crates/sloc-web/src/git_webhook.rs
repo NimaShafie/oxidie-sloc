@@ -31,7 +31,7 @@ use super::{
 // ── request types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct CreateScheduleRequest {
+pub struct CreateScheduleRequest {
     pub label: String,
     pub repo_url: String,
     pub branch: String,
@@ -41,18 +41,18 @@ pub(super) struct CreateScheduleRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct ScheduleIdQuery {
+pub struct ScheduleIdQuery {
     pub id: uuid::Uuid,
 }
 
 // ── schedule CRUD ─────────────────────────────────────────────────────────────
 
-pub(super) async fn api_list_schedules(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn api_list_schedules(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.schedules.lock().await;
     Json(serde_json::json!({ "schedules": store.schedules }))
 }
 
-pub(super) async fn api_create_schedule(
+pub async fn api_create_schedule(
     State(state): State<AppState>,
     Json(body): Json<CreateScheduleRequest>,
 ) -> impl IntoResponse {
@@ -76,7 +76,7 @@ pub(super) async fn api_create_schedule(
         .into_response()
 }
 
-pub(super) async fn api_delete_schedule(
+pub async fn api_delete_schedule(
     State(state): State<AppState>,
     Query(q): Query<ScheduleIdQuery>,
 ) -> impl IntoResponse {
@@ -88,7 +88,7 @@ pub(super) async fn api_delete_schedule(
 
 // ── webhook receivers ─────────────────────────────────────────────────────────
 
-pub(super) async fn handle_github_webhook(
+pub async fn handle_github_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
@@ -104,7 +104,7 @@ pub(super) async fn handle_github_webhook(
     StatusCode::ACCEPTED
 }
 
-pub(super) async fn handle_gitlab_webhook(
+pub async fn handle_gitlab_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
@@ -121,7 +121,7 @@ pub(super) async fn handle_gitlab_webhook(
     StatusCode::ACCEPTED
 }
 
-pub(super) async fn handle_bitbucket_webhook(
+pub async fn handle_bitbucket_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
@@ -260,7 +260,7 @@ fn scan_commit(
 
 // ── polling ───────────────────────────────────────────────────────────────────
 
-pub(crate) async fn poll_loop(state: AppState, mut schedule: ScanSchedule, interval_secs: u64) {
+pub async fn poll_loop(state: AppState, mut schedule: ScanSchedule, interval_secs: u64) {
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     ticker.tick().await;
     loop {
