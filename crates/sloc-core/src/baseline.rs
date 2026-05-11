@@ -38,6 +38,7 @@ pub struct BaselineStore {
 }
 
 impl BaselineStore {
+    #[must_use]
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
@@ -61,6 +62,7 @@ impl BaselineStore {
         self.baselines.insert(entry.name.clone(), entry);
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&BaselineEntry> {
         self.baselines.get(name)
     }
@@ -72,9 +74,7 @@ impl BaselineStore {
 
 /// Returns the path to the baselines file, honouring `SLOC_BASELINES_PATH`.
 pub fn resolve_baselines_path() -> PathBuf {
-    std::env::var("SLOC_BASELINES_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_baselines_path())
+    std::env::var("SLOC_BASELINES_PATH").map_or_else(|_| default_baselines_path(), PathBuf::from)
 }
 
 /// Result of a baseline comparison check.

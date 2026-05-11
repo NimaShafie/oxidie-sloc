@@ -345,9 +345,9 @@ fn walk_root(
 
     // Phase 2: analyze files in parallel using scoped threads.
     // Each thread gets a contiguous slice; results are merged afterwards.
-    let thread_count = std::thread::available_parallelism()
-        .map(|n| n.get().min(MAX_ANALYSIS_THREADS))
-        .unwrap_or(DEFAULT_ANALYSIS_THREADS);
+    let thread_count = std::thread::available_parallelism().map_or(DEFAULT_ANALYSIS_THREADS, |n| {
+        n.get().min(MAX_ANALYSIS_THREADS)
+    });
     let chunk_size = paths.len().div_ceil(thread_count);
 
     let chunk_results: Vec<Vec<Result<Option<FileRecord>>>> =
@@ -1020,7 +1020,7 @@ fn build_summary(analyzed: &[FileRecord], skipped: &[FileRecord]) -> SummaryTota
 }
 
 /// Construct a zero-filled `LanguageSummary` for the given language.
-fn zeroed_summary(language: Language) -> LanguageSummary {
+const fn zeroed_summary(language: Language) -> LanguageSummary {
     LanguageSummary {
         language,
         files: 0,
