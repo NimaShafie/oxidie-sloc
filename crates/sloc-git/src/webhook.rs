@@ -27,6 +27,7 @@ pub struct WebhookEvent {
 
 /// Verify a GitHub-style `sha256=<hex>` HMAC-SHA256 signature.
 /// Returns `false` for any malformed input rather than erroring.
+#[must_use]
 pub fn verify_github_sig(body: &[u8], sig_header: &str, secret: &str) -> bool {
     use ring::hmac;
 
@@ -40,6 +41,7 @@ pub fn verify_github_sig(body: &[u8], sig_header: &str, secret: &str) -> bool {
 }
 
 /// Bitbucket uses the same HMAC-SHA256 scheme as GitHub.
+#[must_use]
 pub fn verify_bitbucket_sig(body: &[u8], sig_header: &str, secret: &str) -> bool {
     verify_github_sig(body, sig_header, secret)
 }
