@@ -278,7 +278,7 @@ impl IpRateLimiter {
 
     fn spawn_pruning_task(limiter: Arc<Self>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
             interval.tick().await; // consume the immediate first tick
             loop {
                 interval.tick().await;
@@ -308,7 +308,7 @@ impl IpRateLimiter {
     }
 }
 
-/// Carries context from scan time to result render time (stored inside RunArtifacts).
+/// Carries context from scan time to result render time (stored inside `RunArtifacts`).
 #[derive(Clone, Debug, Default)]
 struct RunResultContext {
     prev_entry: Option<RegistryEntry>,
@@ -316,14 +316,14 @@ struct RunResultContext {
     project_path: String,
 }
 
-/// State of a background async scan, keyed by wait_id in AppState::async_runs.
+/// State of a background async scan, keyed by `wait_id` in `AppState::async_runs`.
 #[derive(Clone)]
 enum AsyncRunState {
     Running {
         started_at: std::time::Instant,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
     },
-    /// run_id so the status endpoint can redirect to /runs/result/{run_id}.
+    /// `run_id` so the status endpoint can redirect to /`runs/result/{run_id`}.
     Complete {
         run_id: String,
     },
@@ -545,10 +545,10 @@ pub fn make_test_router() -> Router {
         tls_enabled: false,
         api_keys: vec![],
         rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             600,
             10,
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
         )),
         trust_proxy: false,
         git_clones_dir: tmp.join("git-clones"),
@@ -1160,8 +1160,7 @@ async fn auth_login_post(
             .insert(session_id.clone(), expiry);
         let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
         let cookie_value = format!(
-            "sloc_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
-            session_id, SESSION_SECS, secure_flag,
+            "sloc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}{secure_flag}",
         );
         let location =
             HeaderValue::from_str(safe_next).unwrap_or_else(|_| HeaderValue::from_static("/"));
@@ -2374,15 +2373,14 @@ async fn add_watched_dir_handler(
     if state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let folder = match fs::canonicalize(PathBuf::from(&form.folder_path)) {
-        Ok(p) => strip_unc_prefix(p),
-        Err(_) => {
-            let dest = format!(
-                "{}?error=Folder+not+found+or+path+is+invalid.",
-                safe_redirect(&form.redirect_to)
-            );
-            return axum::response::Redirect::to(&dest).into_response();
-        }
+    let folder = if let Ok(p) = fs::canonicalize(PathBuf::from(&form.folder_path)) {
+        strip_unc_prefix(p)
+    } else {
+        let dest = format!(
+            "{}?error=Folder+not+found+or+path+is+invalid.",
+            safe_redirect(&form.redirect_to)
+        );
+        return axum::response::Redirect::to(&dest).into_response();
     };
     if !folder.is_dir() {
         let dest = format!(
@@ -3070,7 +3068,7 @@ async fn analyze_handler(
             // Only overwrite if still Running (don't clobber a Complete that snuck in).
             if matches!(
                 runs.get(&wait_id_bg),
-                Some(AsyncRunState::Running { .. }) | Some(AsyncRunState::Cancelled)
+                Some(AsyncRunState::Running { .. } | AsyncRunState::Cancelled)
             ) {
                 runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
             }
@@ -3309,7 +3307,7 @@ async fn async_run_status_handler(
         None => StatusCode::NOT_FOUND.into_response(),
         Some(AsyncRunState::Running { started_at, .. }) => {
             // Treat runs older than 2 h as timed out (analysis should finish well under that).
-            if started_at.elapsed() > std::time::Duration::from_secs(7200) {
+            if started_at.elapsed() > std::time::Duration::from_hours(2) {
                 let mut runs = state.async_runs.lock().await;
                 runs.insert(
                     wait_id,
@@ -3391,42 +3389,40 @@ async fn async_run_result_handler(
         }
     };
 
-    let json_path = match &artifacts.json_path {
-        Some(p) => p.clone(),
-        None => {
-            let html = ErrorTemplate {
-                message: "JSON result was not saved for this run.".to_string(),
-                last_report_url: Some("/view-reports".to_string()),
-                last_report_label: Some("View Reports".to_string()),
-                csp_nonce: csp_nonce.clone(),
-            }
-            .render()
-            .unwrap_or_else(|_| "<pre>No JSON.</pre>".to_string());
-            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+    let json_path = if let Some(p) = &artifacts.json_path {
+        p.clone()
+    } else {
+        let html = ErrorTemplate {
+            message: "JSON result was not saved for this run.".to_string(),
+            last_report_url: Some("/view-reports".to_string()),
+            last_report_label: Some("View Reports".to_string()),
+            csp_nonce: csp_nonce.clone(),
         }
+        .render()
+        .unwrap_or_else(|_| "<pre>No JSON.</pre>".to_string());
+        return (StatusCode::NOT_FOUND, Html(html)).into_response();
     };
 
-    let run = match read_json(&json_path) {
-        Ok(r) => r,
-        Err(_) => {
-            let folder_hint = json_path
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let redirect_url = format!("/runs/result/{run_id}");
-            return missing_scan_relocate_response(
-                &format!(
-                    "Scan file could not be read:\n  {}\n\nThe file may have been moved or \
-                     deleted. Browse to the folder containing your scan output to reconnect it.",
-                    json_path.display()
-                ),
-                &run_id,
-                &folder_hint,
-                &redirect_url,
-                state.server_mode,
-                &csp_nonce,
-            );
-        }
+    let run = if let Ok(r) = read_json(&json_path) {
+        r
+    } else {
+        let folder_hint = json_path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let redirect_url = format!("/runs/result/{run_id}");
+        return missing_scan_relocate_response(
+            &format!(
+                "Scan file could not be read:\n  {}\n\nThe file may have been moved or \
+                 deleted. Browse to the folder containing your scan output to reconnect it.",
+                json_path.display()
+            ),
+            &run_id,
+            &folder_hint,
+            &redirect_url,
+            state.server_mode,
+            &csp_nonce,
+        );
     };
 
     let confluence_configured = {
@@ -3632,9 +3628,9 @@ fn render_result_page(
                 })
                 .sum()
         }),
-        git_branch: git_branch.clone(),
-        git_commit: git_commit.clone(),
-        git_author: git_author.clone(),
+        git_branch: git_branch,
+        git_commit: git_commit,
+        git_author: git_author,
         current_scan_number: prev_scan_count + 1,
         prev_scan_count,
         submodule_rows: run
@@ -3642,11 +3638,7 @@ fn render_result_page(
             .iter()
             .map(|s| build_submodule_row(s, run, run_id, &run_dir, artifacts.html_path.is_some()))
             .collect(),
-        pdf_generating: artifacts
-            .pdf_path
-            .as_ref()
-            .map(|p| !p.exists())
-            .unwrap_or(false),
+        pdf_generating: artifacts.pdf_path.as_ref().is_some_and(|p| !p.exists()),
         scan_config_url: format!("/runs/scan-config/{run_id}"),
         lang_chart_json: {
             let entries: Vec<String> = run
@@ -3796,7 +3788,7 @@ async fn pdf_status_handler(
             .map(recover_artifacts_from_registry)
             .and_then(|a| a.pdf_path)
     };
-    let ready = pdf_path.map(|p| p.exists()).unwrap_or(false);
+    let ready = pdf_path.is_some_and(|p| p.exists());
     Json(serde_json::json!({"ready": ready})).into_response()
 }
 
@@ -4200,7 +4192,7 @@ async fn artifact_handler(
             let path = artifact_set
                 .scan_config_path
                 .as_deref()
-                .map(|p| p.to_path_buf())
+                .map(std::path::Path::to_path_buf)
                 .or_else(|| find_scan_config_in_dir(&artifact_set.output_dir))
                 .unwrap_or_else(|| artifact_set.output_dir.join("scan-config.json"));
             fs::read(&path).map_or_else(
@@ -4513,7 +4505,7 @@ struct CompareFileDeltaRow {
 }
 
 /// Recompute `summary_totals` from the current `per_file_records` slice.
-/// Used when per_file_records has been narrowed to a submodule subset.
+/// Used when `per_file_records` has been narrowed to a submodule subset.
 fn recompute_summary_from_records(run: &mut AnalysisRun) {
     let files_analyzed = run
         .per_file_records
@@ -4752,8 +4744,8 @@ async fn compare_handler(
 
     // Narrow per_file_records when a scope is active, then recompute totals.
     let (effective_baseline, effective_current) = if let Some(ref sub_name) = active_submodule {
-        let mut b = baseline_run.clone();
-        let mut c = current_run.clone();
+        let mut b = baseline_run;
+        let mut c = current_run;
         b.per_file_records
             .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
         c.per_file_records
@@ -4762,8 +4754,8 @@ async fn compare_handler(
         recompute_summary_from_records(&mut c);
         (b, c)
     } else if super_scope_active {
-        let mut b = baseline_run.clone();
-        let mut c = current_run.clone();
+        let mut b = baseline_run;
+        let mut c = current_run;
         b.per_file_records.retain(|f| f.submodule.is_none());
         c.per_file_records.retain(|f| f.submodule.is_none());
         recompute_summary_from_records(&mut b);
@@ -5231,8 +5223,8 @@ async fn project_history_handler(
 struct MetricsHistoryQuery {
     root: Option<String>,
     limit: Option<usize>,
-    /// When set, metrics are sourced from the matching SubmoduleSummary within each scan's
-    /// JSON artifact rather than from the project-level ScanSummarySnapshot.
+    /// When set, metrics are sourced from the matching `SubmoduleSummary` within each scan's
+    /// JSON artifact rather than from the project-level `ScanSummarySnapshot`.
     submodule: Option<String>,
 }
 
@@ -5484,8 +5476,7 @@ async fn api_ingest_handler(
     let label = q.label.unwrap_or_else(|| {
         run.input_roots
             .first()
-            .map(|r| sanitize_project_label(r))
-            .unwrap_or_else(|| "ingested".to_owned())
+            .map_or_else(|| "ingested".to_owned(), |r| sanitize_project_label(r))
     });
 
     let label_for_task = label.clone();
@@ -5506,7 +5497,7 @@ async fn api_ingest_handler(
         let output_dir = resolve_output_root(None).join(format!("{project_label}_{run_id}"));
         let file_stem = match run.git_commit_short.as_deref().map(str::trim) {
             Some(c) if !c.is_empty() => format!("{project_label}_{c}"),
-            _ => project_label.clone(),
+            _ => project_label,
         };
         let (artifacts, _pending_pdf) = persist_run_artifacts(
             &run,
@@ -6701,10 +6692,6 @@ async fn trend_report_handler(
   </footer>
 </body>
 </html>"##,
-        nonce = nonce,
-        roots_json = roots_json,
-        version = version,
-        watched_dirs_html = watched_dirs_html,
     );
 
     Html(html).into_response()
@@ -6762,7 +6749,7 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
             if cov.lines_found == 0 {
                 continue;
             }
-            let pct = cov.lines_hit as f64 / cov.lines_found as f64 * 100.0;
+            let pct = f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0;
             if pct >= 80.0 {
                 high += 1;
             } else if pct >= 50.0 {
@@ -6779,10 +6766,10 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
     } else {
         0.0
     };
-    let most_tested = langs
-        .first()
-        .map(|l| l.language.display_name().to_string())
-        .unwrap_or_else(|| "\u{2014}".to_string());
+    let most_tested = langs.first().map_or_else(
+        || "\u{2014}".to_string(),
+        |l| l.language.display_name().to_string(),
+    );
     let test_files: u64 = run
         .per_file_records
         .iter()
@@ -6819,19 +6806,21 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
         .filter_map(|rec| {
             rec.coverage.as_ref().map(|cov| {
                 let line_pct = if cov.lines_found > 0 {
-                    (cov.lines_hit as f64 / cov.lines_found as f64 * 100.0 * 10.0).round() / 10.0
+                    (f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0 * 10.0).round()
+                        / 10.0
                 } else {
                     0.0
                 };
                 let fn_pct = if cov.functions_found > 0 {
-                    (cov.functions_hit as f64 / cov.functions_found as f64 * 100.0 * 10.0).round()
+                    (f64::from(cov.functions_hit) / f64::from(cov.functions_found) * 100.0 * 10.0)
+                        .round()
                         / 10.0
                 } else {
                     -1.0
                 };
                 serde_json::json!({
                     "rel": rec.relative_path,
-                    "lang": rec.language.map(|l| l.display_name()).unwrap_or("?"),
+                    "lang": rec.language.map_or("?", |l| l.display_name()),
                     "line_pct": line_pct,
                     "fn_pct": fn_pct,
                     "lhit": cov.lines_hit,
@@ -6899,10 +6888,10 @@ fn build_test_scope_sub_entry(sub: &sloc_core::SubmoduleSummary) -> serde_json::
     } else {
         0.0
     };
-    let most_tested = langs
-        .first()
-        .map(|l| l.language.display_name().to_string())
-        .unwrap_or_else(|| "\u{2014}".to_string());
+    let most_tested = langs.first().map_or_else(
+        || "\u{2014}".to_string(),
+        |l| l.language.display_name().to_string(),
+    );
     serde_json::json!({
         "totals": {
             "test_count": total_tests,
@@ -7023,7 +7012,7 @@ async fn test_metrics_handler(
                     if cov.lines_found == 0 {
                         continue;
                     }
-                    let pct = cov.lines_hit as f64 / cov.lines_found as f64 * 100.0;
+                    let pct = f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0;
                     if pct >= 80.0 {
                         high += 1;
                     } else if pct >= 50.0 {
@@ -7040,34 +7029,27 @@ async fn test_metrics_handler(
 
     let total_tests: u64 = latest_run
         .as_ref()
-        .map(|r| r.summary_totals.test_count)
-        .unwrap_or(0);
+        .map_or(0, |r| r.summary_totals.test_count);
     let total_assertions: u64 = latest_run
         .as_ref()
-        .map(|r| r.summary_totals.test_assertion_count)
-        .unwrap_or(0);
+        .map_or(0, |r| r.summary_totals.test_assertion_count);
     let total_suites: u64 = latest_run
         .as_ref()
-        .map(|r| r.summary_totals.test_suite_count)
-        .unwrap_or(0);
+        .map_or(0, |r| r.summary_totals.test_suite_count);
     let total_code: u64 = latest_run
         .as_ref()
-        .map(|r| r.summary_totals.code_lines)
-        .unwrap_or(0);
+        .map_or(0, |r| r.summary_totals.code_lines);
     let workspace_density: f64 = if total_code > 0 {
         total_tests as f64 / total_code as f64 * 1000.0
     } else {
         0.0
     };
-    let langs_with_tests: usize = latest_run
-        .as_ref()
-        .map(|r| {
-            r.totals_by_language
-                .iter()
-                .filter(|l| l.test_count > 0)
-                .count()
-        })
-        .unwrap_or(0);
+    let langs_with_tests: usize = latest_run.as_ref().map_or(0, |r| {
+        r.totals_by_language
+            .iter()
+            .filter(|l| l.test_count > 0)
+            .count()
+    });
     let most_tested: String = latest_run
         .as_ref()
         .and_then(|r| {
@@ -7076,21 +7058,19 @@ async fn test_metrics_handler(
                 .filter(|l| l.test_count > 0)
                 .max_by_key(|l| l.test_count)
         })
-        .map(|l| l.language.display_name().to_string())
-        .unwrap_or_else(|| "\u{2014}".to_string());
-    let test_files_count: u64 = latest_run
-        .as_ref()
-        .map(|r| {
-            r.per_file_records
-                .iter()
-                .filter(|f| f.raw_line_categories.test_count > 0)
-                .count() as u64
-        })
-        .unwrap_or(0);
+        .map_or_else(
+            || "\u{2014}".to_string(),
+            |l| l.language.display_name().to_string(),
+        );
+    let test_files_count: u64 = latest_run.as_ref().map_or(0, |r| {
+        r.per_file_records
+            .iter()
+            .filter(|f| f.raw_line_categories.test_count > 0)
+            .count() as u64
+    });
     let total_files_analyzed: u64 = latest_run
         .as_ref()
-        .map(|r| r.summary_totals.files_analyzed)
-        .unwrap_or(0);
+        .map_or(0, |r| r.summary_totals.files_analyzed);
     let _has_data = total_tests > 0;
     let has_coverage = !cov_json.starts_with("[]") && cov_json.len() > 2;
 
@@ -7098,39 +7078,45 @@ async fn test_metrics_handler(
     let cov_line_pct_str: String = latest_run
         .as_ref()
         .filter(|r| r.summary_totals.coverage_lines_found > 0)
-        .map(|r| {
-            format!(
-                "{:.1}",
-                r.summary_totals.coverage_lines_hit as f64
-                    / r.summary_totals.coverage_lines_found as f64
-                    * 100.0
-            )
-        })
-        .unwrap_or_else(|| "0".to_string());
+        .map_or_else(
+            || "0".to_string(),
+            |r| {
+                format!(
+                    "{:.1}",
+                    r.summary_totals.coverage_lines_hit as f64
+                        / r.summary_totals.coverage_lines_found as f64
+                        * 100.0
+                )
+            },
+        );
     let cov_fn_pct_str: String = latest_run
         .as_ref()
         .filter(|r| r.summary_totals.coverage_functions_found > 0)
-        .map(|r| {
-            format!(
-                "{:.1}",
-                r.summary_totals.coverage_functions_hit as f64
-                    / r.summary_totals.coverage_functions_found as f64
-                    * 100.0
-            )
-        })
-        .unwrap_or_else(|| "0".to_string());
+        .map_or_else(
+            || "0".to_string(),
+            |r| {
+                format!(
+                    "{:.1}",
+                    r.summary_totals.coverage_functions_hit as f64
+                        / r.summary_totals.coverage_functions_found as f64
+                        * 100.0
+                )
+            },
+        );
     let cov_branch_pct_str: String = latest_run
         .as_ref()
         .filter(|r| r.summary_totals.coverage_branches_found > 0)
-        .map(|r| {
-            format!(
-                "{:.1}",
-                r.summary_totals.coverage_branches_hit as f64
-                    / r.summary_totals.coverage_branches_found as f64
-                    * 100.0
-            )
-        })
-        .unwrap_or_else(|| "0".to_string());
+        .map_or_else(
+            || "0".to_string(),
+            |r| {
+                format!(
+                    "{:.1}",
+                    r.summary_totals.coverage_branches_hit as f64
+                        / r.summary_totals.coverage_branches_found as f64
+                        * 100.0
+                )
+            },
+        );
 
     let cov_no_data_notice = if has_coverage {
         String::new()
@@ -7229,7 +7215,7 @@ async fn test_metrics_handler(
     };
 
     let html = format!(
-        r##"<!doctype html>
+        r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -7976,13 +7962,7 @@ async fn test_metrics_handler(
   }})();
   </script>
 </body>
-</html>"##,
-        nonce = nonce,
-        version = version,
-        total_tests = total_tests,
-        workspace_density_str = workspace_density_str,
-        most_tested = most_tested,
-        langs_with_tests = langs_with_tests,
+</html>"#,
     );
     Html(html).into_response()
 }
@@ -8226,7 +8206,7 @@ fn find_scan_config_in_dir(dir: &Path) -> Option<PathBuf> {
     }
     fs::read_dir(dir).ok().and_then(|entries| {
         entries
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .find(|e| {
                 let name = e.file_name();
                 let name = name.to_string_lossy();
@@ -8371,8 +8351,7 @@ fn resolve_output_root(raw: Option<&str>) -> PathBuf {
 /// Derive the directory that holds remote-repo clones from the output root.
 fn resolve_git_clones_dir(output_root: &Path) -> PathBuf {
     std::env::var("SLOC_GIT_CLONES_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| output_root.join("git-clones"))
+        .map_or_else(|_| output_root.join("git-clones"), PathBuf::from)
 }
 
 /// Build a deterministic filesystem path for a cloned remote repository.
@@ -8410,7 +8389,7 @@ pub(crate) fn scan_path_to_artifacts(
     let file_stem = {
         let commit = run.git_commit_short.as_deref().unwrap_or("").trim();
         if commit.is_empty() {
-            project_label.clone()
+            project_label
         } else {
             format!("{project_label}_{commit}")
         }
@@ -8680,7 +8659,7 @@ fn format_dir_size(bytes: u64) -> String {
     } else if bytes >= 1_024 {
         format!("{:.0} KB", bytes as f64 / 1_024.0)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
