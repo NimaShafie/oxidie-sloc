@@ -287,8 +287,10 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
             .iter()
             .filter(|l| l.test_count > 0)
             .max_by_key(|l| l.test_count)
-            .map(|l| l.language.display_name().to_string())
-            .unwrap_or_else(|| "\u{2014}".to_string()),
+            .map_or_else(
+                || "\u{2014}".to_string(),
+                |l| l.language.display_name().to_string(),
+            ),
         langs_with_tests: run
             .totals_by_language
             .iter()
@@ -340,7 +342,7 @@ pub fn write_html(run: &AnalysisRun, output_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
 
-/// Use Chrome DevTools Protocol to render `html_path` as a PDF at `output_path`.
+/// Use Chrome `DevTools` Protocol to render `html_path` as a PDF at `output_path`.
 ///
 /// Launches a headless Chromium-based browser at A4-landscape viewport (1122 × 794 px),
 /// waits up to 15 s for all Chart.js canvases to signal readiness via
@@ -3443,9 +3445,9 @@ struct ReportTemplate<'a> {
     warning_console_full: String,
     logo_text_uri: String,
     small_logo_uri: String,
-    /// Data-URI for a custom logo, or None to show the default OxideSLOC logo.
+    /// Data-URI for a custom logo, or None to show the default `OxideSLOC` logo.
     custom_logo_uri: Option<String>,
-    /// Optional company/team name shown instead of "OxideSLOC" in the nav header.
+    /// Optional company/team name shown instead of "`OxideSLOC`" in the nav header.
     company_name: Option<String>,
     /// CSS hex accent colour override (e.g. `#3b82f6`), or None for the default.
     accent_hex: Option<String>,
@@ -4134,11 +4136,7 @@ fn html_esc(s: &str) -> String {
 pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) -> String {
     let mut out = String::with_capacity(8192);
 
-    let project = run
-        .input_roots
-        .first()
-        .map(String::as_str)
-        .unwrap_or("(unknown)");
+    let project = run.input_roots.first().map_or("(unknown)", String::as_str);
     let branch = run.git_branch.as_deref().unwrap_or("—");
     let commit = run.git_commit_short.as_deref().unwrap_or("—");
     let scanned = run
@@ -4226,11 +4224,7 @@ pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) ->
 pub fn render_confluence_wiki_markup(run: &AnalysisRun) -> String {
     let mut out = String::with_capacity(4096);
 
-    let project = run
-        .input_roots
-        .first()
-        .map(String::as_str)
-        .unwrap_or("(unknown)");
+    let project = run.input_roots.first().map_or("(unknown)", String::as_str);
     let branch = run.git_branch.as_deref().unwrap_or("—");
     let commit = run.git_commit_short.as_deref().unwrap_or("—");
     let scanned = run
