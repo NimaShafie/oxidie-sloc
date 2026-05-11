@@ -18,7 +18,7 @@ impl FileCoverage {
         if self.lines_found == 0 {
             0.0
         } else {
-            (self.lines_hit as f64 / self.lines_found as f64) * 100.0
+            (f64::from(self.lines_hit) / f64::from(self.lines_found)) * 100.0
         }
     }
 
@@ -27,7 +27,7 @@ impl FileCoverage {
         if self.functions_found == 0 {
             0.0
         } else {
-            (self.functions_hit as f64 / self.functions_found as f64) * 100.0
+            (f64::from(self.functions_hit) / f64::from(self.functions_found)) * 100.0
         }
     }
 
@@ -36,7 +36,7 @@ impl FileCoverage {
         if self.branches_found == 0 {
             0.0
         } else {
-            (self.branches_hit as f64 / self.branches_found as f64) * 100.0
+            (f64::from(self.branches_hit) / f64::from(self.branches_found)) * 100.0
         }
     }
 }
@@ -273,9 +273,9 @@ pub fn parse_cobertura(content: &str) -> HashMap<PathBuf, FileCoverage> {
     result
 }
 
-/// Parse a JaCoCo XML report (`jacoco.xml`) into a per-file coverage map.
+/// Parse a `JaCoCo` XML report (`jacoco.xml`) into a per-file coverage map.
 ///
-/// JaCoCo is produced by the Gradle `jacocoTestReport` task and the Maven JaCoCo plugin.
+/// `JaCoCo` is produced by the Gradle `jacocoTestReport` task and the Maven `JaCoCo` plugin.
 /// Paths are reconstructed as `package/sourcefile` (e.g. `com/example/Main.java`).
 #[must_use]
 pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
@@ -335,7 +335,7 @@ pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
             let path = if pkg_name.is_empty() {
                 PathBuf::from(&sf_name)
             } else {
-                PathBuf::from(format!("{}/{}", pkg_name, sf_name))
+                PathBuf::from(format!("{pkg_name}/{sf_name}"))
             };
 
             result.insert(
