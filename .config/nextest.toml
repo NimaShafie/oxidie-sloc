@@ -1,0 +1,31 @@
+# cargo-nextest configuration for oxide-sloc
+# https://nexte.st/docs/configuration/
+
+# ── Default profile ───────────────────────────────────────────────────────────
+[profile.default]
+# Show all test output on failure (not just the last N lines).
+failure-output = "immediate-final"
+# Report flaky tests (pass on retry) as distinct from clean passes.
+final-status-level = "flaky"
+
+# ── CI profile ────────────────────────────────────────────────────────────────
+# Used by the Jenkinsfile:  cargo nextest run --profile ci
+# Writes a JUnit XML file at the workspace root; the Jenkinsfile moves it to
+# <OUTPUT_SUBDIR>/test-results/junit.xml for archiving and the junit() step.
+[profile.ci]
+# Parallelism: match available CPU count (fast on multi-core agents).
+test-threads = "num-cpus"
+# Show output of failing tests immediately and in the final summary.
+failure-output = "immediate-final"
+# Track flaky tests separately from hard failures.
+final-status-level = "flaky"
+# Retry transient failures once before marking as failed.
+retries = 1
+
+# JUnit XML output — consumed by the Jenkins junit() step.
+# Path is relative to the workspace root.  The Jenkinsfile moves this file into
+# <OUTPUT_SUBDIR>/test-results/ after the test run completes.
+[profile.ci.junit]
+path = "junit.xml"
+# Embed test stdout/stderr in the XML so Jenkins shows it in the test detail view.
+store-success-output = false

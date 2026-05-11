@@ -16,6 +16,8 @@ bash scripts/install.sh   # detects bundled binary or builds from vendor sources
 bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
 
+When compiling from source, both scripts display a live animated build indicator with three phases (dependency resolution → compile → install/launch) and a frozen summary on completion.
+
 | Platform | Install | Launch | LAN server |
 |---|---|---|---|
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
@@ -81,7 +83,7 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 - **CLI + web UI** — `analyze / report / diff / serve / send / init / git-scan / git-compare` commands; guided 4-step web flow with light/dark theme and one-click Quick Scan
 - **IEEE 1045-1992 physical SLOC** — configurable mixed-line policy, continuation lines, compiler directives, and blank-in-comment classification; symbol counting (functions, classes, variables, imports)
-- **Test Metrics** — lexical test function and test-case detection across all 41 supported languages; test-to-code density per language; LCOV line-coverage import with per-language coverage charts at `/test-metrics`
+- **Test Metrics** — lexical test function and test-case detection across all 41 supported languages; test-to-code density per language; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, Istanbul/NYC JSON) with animated per-language coverage gauges at `/test-metrics`
 - **Flexible output** — HTML reports with per-file breakdown and language charts; PDF, CSV, and 4-sheet Excel export; re-render any saved JSON result
 - **Git integration** — browser UI for branches/tags/commits, GitHub/GitLab/Bitbucket webhook and polling automation, point-in-time comparison via git worktree, submodule breakdown
 - **CI/CD and integrations** — Jenkinsfile, GitHub Actions, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable `<iframe>` widget, SMTP/webhook report delivery, Confluence push
@@ -230,7 +232,7 @@ oxide-sloc serve   # → http://127.0.0.1:4317
 A guided 4-step flow: select project → counting rules → outputs → review & run. The **Quick Scan** sidebar button submits from step 1 with all defaults.
 
 Additional pages:
-- **Test Metrics** (`/test-metrics`) — per-language test detection counts, test-to-code density, and optional LCOV coverage charts
+- **Test Metrics** (`/test-metrics`) — four-chip summary (density, most-tested language, languages with tests, line coverage %); per-language test detection counts, test-to-code density, and animated coverage gauges loaded from LCOV, Cobertura XML, JaCoCo XML, or Istanbul/NYC JSON
 - **Trend Reports** (`/trend-reports`) — historical SLOC and test-count trajectory with commit annotation
 - **Compare Scans** (`/compare-scans`) — side-by-side diff of any two saved results with four chart types
 
@@ -289,11 +291,20 @@ oxide-sloc lexically detects test definitions as part of every scan — no separ
 | **Test suites** | Count of test suite / fixture / group declarations (`TEST_GROUP`, `[TestClass]`, `[TestFixture]`, `BOOST_AUTO_TEST_SUITE`, etc.) |
 | **Workspace density** | Tests per 1,000 code lines — a normalized measure of test thoroughness |
 | **Languages with tests** | Number of languages for which at least one test definition was found |
-| **Coverage (optional)** | Average line-hit percentage per language, loaded from an LCOV report |
+| **Coverage (optional)** | Average line-hit percentage per language, loaded from LCOV (`.info`), Cobertura XML, JaCoCo XML, or Istanbul/NYC JSON — format is auto-detected |
 
 Test detection is lexical — it recognizes patterns such as `#[test]` (Rust), `def test_*` / `@pytest.mark` (Python), `@Test` (Java/Kotlin), `it(` / `describe(` (JavaScript/TypeScript), `func Test*` (Go), and equivalent patterns across all supported languages. No execution or instrumentation is required.
 
-To include line coverage data, generate an LCOV report with your test runner (`cargo llvm-cov --lcov`, `pytest --cov`, `jest --coverage`, etc.) and load it via the web UI or CLI. Coverage is aggregated by language and shown as an average line-hit percentage alongside the test-count charts.
+To include coverage data, generate a report with your test runner and load it via the web UI or the `SLOC_COVERAGE_FILE` env var. oxide-sloc auto-detects the format from the file extension and content:
+
+| Format | Typical source | Extension |
+|---|---|---|
+| LCOV | `cargo llvm-cov --lcov`, `pytest --cov --cov-report lcov`, `jest --coverage` | `.info` |
+| Cobertura XML | `pytest --cov --cov-report xml`, Maven Cobertura plugin, PHP PHPUnit | `.xml` (`<coverage` header) |
+| JaCoCo XML | Gradle `jacocoTestReport`, Maven JaCoCo plugin | `.xml` (`<report` header) |
+| Istanbul/NYC JSON | `nyc --reporter=json-summary`, Jest with `json-summary` reporter | `.json` |
+
+The `/api/suggest-coverage` endpoint inspects your project root for build files (`Cargo.toml`, `pom.xml`, `build.gradle`, `package.json`, etc.) and returns the recommended generation command — the web UI shows this as a hint in the coverage file picker. Coverage is aggregated by language and displayed as animated gauge cards with line-hit percentage.
 
 ---
 
@@ -447,6 +458,7 @@ CLI flags: `-c result.csv -x result.xlsx` on `analyze`, `report`, and `diff`.
 | `GET /badge/:metric` | SVG badge (`code-lines`, `files`, `comment-lines`, `blank-lines`) |
 | `GET /embed/summary` | Embeddable HTML widget |
 | `GET /test-metrics` | Test detection and coverage dashboard (web UI) |
+| `GET /api/suggest-coverage?path=<dir>` | Infer coverage file path and generation command for a project root |
 | `GET /healthz` | Health check |
 
 ```markdown
@@ -534,7 +546,7 @@ cargo clean -p oxide-sloc -p sloc-config -p sloc-core -p sloc-languages -p sloc-
   && cargo run -p oxide-sloc -- serve
 ```
 
-> **`scripts/run.sh` vs `cargo run`:** When Rust is available, `scripts/run.sh` prefers `cargo run` so changes are always picked up. During active development, either works.
+> **`scripts/run.sh` vs `cargo run`:** When Rust is available, `scripts/run.sh` uses `cargo build` (incremental) then launches the binary, so source changes are always picked up. During active development either path works; `cargo run -p oxide-sloc -- serve` is the shortest form.
 
 **Make targets (Linux/macOS):**
 

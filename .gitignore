@@ -12,6 +12,7 @@
 *.log
 *.tmp
 *.bak
+/logs/
 
 # OS artefacts
 .DS_Store

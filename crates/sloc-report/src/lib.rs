@@ -404,13 +404,13 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
         .print_to_pdf(Some(PrintToPdfOptions {
             landscape: Some(true),
             print_background: Some(true),
-            scale: Some(1.0),
+            scale: Some(0.82),
             paper_width: Some(11.69), // A4 landscape width (inches)
             paper_height: Some(8.27), // A4 landscape height (inches)
-            margin_top: Some(0.4),
-            margin_bottom: Some(0.4),
-            margin_left: Some(0.45),
-            margin_right: Some(0.45),
+            margin_top: Some(0.35),
+            margin_bottom: Some(0.35),
+            margin_left: Some(0.5),
+            margin_right: Some(0.5),
             prefer_css_page_size: Some(false),
             ..Default::default()
         }))
@@ -1011,6 +1011,20 @@ struct WarningOpportunityRow {
     .theme-toggle .icon-sun { display:none; }
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; }
     .summary-grid { display:grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:10px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -1042,6 +1056,7 @@ struct WarningOpportunityRow {
     .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .run-id-chip:hover .chip-tooltip { opacity:1; }
     .chip-copy-icon { display:inline-block; margin-left:5px; font-size:10px; opacity:0.55; vertical-align:middle; }
+    .chip-label-icon { display:inline-block; vertical-align:middle; margin-right:3px; margin-top:-1px; opacity:0.8; }
     .author-handle { font-size:11px; font-weight:600; color:var(--muted-2); margin-left:1.5em; font-family:ui-monospace,monospace; }
     @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
     .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
@@ -1062,15 +1077,13 @@ struct WarningOpportunityRow {
     .export-group { display:flex; gap:6px; align-items:center; }
     .export-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
     .export-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; scrollbar-gutter: stable; }
-    /* Force a non-overlay, layout-reserving scrollbar on the two large tables.
-       Styling ::-webkit-scrollbar disables OS overlay-scrollbar behavior on
-       Chromium-based browsers (Chrome, Edge, Brave, Opera) — the scrollbar then
-       occupies actual layout space so it can never overlap column content.
-       scrollbar-width:thin + scrollbar-color achieve the same on Firefox. */
-    #per-file-shell, #skipped-shell { overflow-y: scroll; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--surface-2); }
+    .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; }
+    /* Clip wrapper: hides the scrollbar track that hangs 8px past the right edge */
+    .table-shell-clip { overflow: hidden !important; max-height: none !important; }
+    /* Inner scroll pane is 8px wider than parent; scrollbar lives in the clipped zone */
+    #per-file-shell, #skipped-shell { overflow-y: scroll; width: calc(100% + 8px); scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--surface-2); }
     #per-file-shell::-webkit-scrollbar, #skipped-shell::-webkit-scrollbar { width: 8px; }
-    #per-file-shell::-webkit-scrollbar-track, #skipped-shell::-webkit-scrollbar-track { background: var(--surface-2); border-radius: 0 16px 16px 0; }
+    #per-file-shell::-webkit-scrollbar-track, #skipped-shell::-webkit-scrollbar-track { background: var(--surface-2); }
     #per-file-shell::-webkit-scrollbar-thumb, #skipped-shell::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -1086,9 +1099,6 @@ struct WarningOpportunityRow {
     /* Column resize handle */
     .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
     .col-resize-handle:hover, .col-resize-handle.dragging { background: rgba(211,122,76,0.3); }
-    /* Per-file table: fixed layout so all columns fit without horizontal scroll.
-       Column widths must sum to ≤ 98% so the last column never slides under the
-       vertical scrollbar. (30%+7%+12×6.3% = 112.6% was the old over-100% bug.) */
     #per-file-table { table-layout: fixed; width: 100%; min-width: 0; }
     #per-file-table th, #per-file-table td { padding: 8px 6px; }
     /* File column: pinned, truncates long paths */
@@ -1173,6 +1183,9 @@ struct WarningOpportunityRow {
     .tone-neutral .count { color: var(--text); }
     .tone-warn .count { color: var(--warn-text); }
     .tone-danger .count { color: var(--danger-text); }
+    .tone-neutral .warning-count { color: var(--oxide); }
+    .tone-warn .warning-count { color: var(--warn-text); }
+    .tone-danger .warning-count { color: var(--danger-text); }
     .support-note { color: var(--muted); font-size: 11px; line-height: 1.45; }
     .support-table th { cursor: default; }
     details { border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); }
@@ -1197,21 +1210,13 @@ struct WarningOpportunityRow {
     body.has-report-banner .top-nav { top: 27px; }
     body.has-report-banner { padding-bottom: 27px; }
     /* ── Print & PDF export ──────────────────────────────────────────── */
-    {% if report_header_footer.is_some() %}
-    @page { size: A4 landscape; margin: 0.72in 0.45in; }
-    {% else %}
-    @page { size: A4 landscape; margin: 0.4in 0.45in; }
-    {% endif %}
+    @page { size: A4 landscape; margin: 0.35in 0.5in; }
 
     @media print {
       *, *::before, *::after {
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
-      }
-
-      html {
-        /* Scale all content ~18 % smaller so more fits per page; Chrome print honours zoom */
-        zoom: 0.82 !important;
+        box-sizing: border-box !important;
       }
 
       html, body {
@@ -1253,6 +1258,7 @@ struct WarningOpportunityRow {
         border: 1px solid #ddd !important;
         border-radius: 10px !important;
         margin-bottom: 10px !important;
+        overflow: visible !important;
       }
 
       /* Force grids to their full-width column counts regardless of viewport */
@@ -1403,11 +1409,11 @@ struct WarningOpportunityRow {
       /* Hide canvas-based interactive chart sections; replaced by pre-rendered variants */
       .chart-section { display: none !important; }
       .charts-grid   { display: none !important; }
-      /* Pre-rendered chart variants — start on a fresh page */
-      .pdf-variants-root { display: block !important; break-before: page; padding: 0 6px !important; }
-      .pdf-variant-group { break-inside: auto !important; margin-bottom: 10px !important; }
-      .pdf-variant-group-title { break-after: avoid !important; font-size: 12px !important; font-weight: 800 !important; color: #3d2d26 !important; margin: 0 0 5px !important; padding-bottom: 3px !important; border-bottom: 2px solid #d37a4c !important; }
-      .pdf-variant-grid { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 8px !important; }
+      /* Pre-rendered chart variants — no forced page break; flow naturally after hero section */
+      .pdf-variants-root { display: block !important; padding: 0 !important; }
+      .pdf-variant-group { break-inside: auto !important; margin-bottom: 8px !important; background: #faf6f0 !important; border: 1px solid #e0d0c0 !important; border-radius: 10px !important; padding: 10px 12px !important; }
+      .pdf-variant-group-title { break-after: avoid !important; font-size: 12px !important; font-weight: 800 !important; color: #3d2d26 !important; margin: 0 0 6px !important; padding-bottom: 4px !important; border-bottom: 2px solid #d37a4c !important; }
+      .pdf-variant-grid { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 6px !important; }
       /* Single-column chart (scatter, etc.) — centre and constrain width in print */
       .pdf-variant-grid.single-col { grid-template-columns: 1fr !important; }
       .pdf-variant-grid.single-col .pdf-variant-panel { max-width: 62% !important; margin: 0 auto !important; }
@@ -1438,7 +1444,7 @@ struct WarningOpportunityRow {
     }
 
     .effective-config-note {
-      margin: 8px 0 14px;
+      margin: 8px 0 0;
       color: var(--muted);
       font-size: 14px;
       line-height: 1.6;
@@ -1446,10 +1452,13 @@ struct WarningOpportunityRow {
     .config-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 10px; }
     .config-actions { display: flex; gap: 8px; flex-shrink: 0; margin-top: 4px; }
     .config-pre-wrap { position: relative; }
-    .config-pre { background: #16120f; color: #d4f0d0; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; overflow: auto; resize: vertical; max-height: 320px; min-height: 100px; white-space: pre; }
+    .config-pre { margin: 0; background: #16120f; color: #d4f0d0; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; overflow: auto; resize: vertical; max-height: 320px; min-height: 100px; white-space: pre; }
     body.dark-theme .config-pre { background: #0e0c0a; color: #b8f0b8; }
-    .config-pre-copy { position: absolute; top: 8px; right: 10px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.22); color: #d4f0d0; border-radius: 7px; padding: 3px 10px; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s ease; }
-    .config-pre-copy:hover { background: rgba(255,255,255,0.22); }
+    .code-block-toolbar { display:flex; justify-content:flex-end; margin-bottom:6px; }
+    .code-copy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 4px 12px; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s ease; }
+    .code-copy-btn:hover { background: var(--line); }
+    body.dark-theme .code-copy-btn { background: #1e1a16; border-color: rgba(255,255,255,0.18); color: #d4f0d0; }
+    body.dark-theme .code-copy-btn:hover { background: rgba(255,255,255,0.12); }
 
 
     .page {
@@ -1505,7 +1514,7 @@ struct WarningOpportunityRow {
 
     /* PDF-only chart variants container — hidden on screen, rendered in print */
     .pdf-variants-root{display:none;}
-    .pdf-variant-group{margin-bottom:16px;}
+    .pdf-variant-group{margin-bottom:12px;background:#faf6f0;border:1px solid #e0d0c0;border-radius:10px;padding:12px 14px;}
     .pdf-variant-group-title{font-size:15px;font-weight:800;color:#3d2d26;margin:0 0 8px;padding-bottom:5px;border-bottom:2px solid #d37a4c;}
     .pdf-variant-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
     /* Solo charts (one per row) — constrained width, centred */
@@ -1553,21 +1562,23 @@ struct WarningOpportunityRow {
         </div>
       </a>
       <div class="nav-project-slot">
-        <div class="nav-project-pill"><span class="nav-project-label">Report&nbsp;</span><span class="nav-project-value">{{ title }}</span></div>
+        <div class="nav-project-pill"><span class="nav-project-label">REPORT</span><span class="nav-project-value">{{ title }}</span></div>
       </div>
       <div class="nav-status">
-        <span class="nav-pill">Saved artifact</span>
         <button type="button" class="header-button" data-copy-link>Copy link</button>
         <button type="button" class="header-button" data-share-report>Share</button>
         <div class="nav-dropdown-wrap">
           <button type="button" class="header-button nav-dropdown-trigger" aria-haspopup="true">Export ▾</button>
           <div class="nav-dropdown-menu">
-            <button type="button" class="nav-dropdown-item" onclick="exportReportCsv()">Export CSV</button>
-            <button type="button" class="nav-dropdown-item" onclick="exportReportXls()">Export Excel</button>
+            <button type="button" class="nav-dropdown-item" data-export-csv>Export CSV</button>
+            <button type="button" class="nav-dropdown-item" data-export-xls>Export Excel</button>
           </div>
         </div>
-        <a id="nav-view-pdf-btn" href="/runs/{{ run.tool.run_id }}/pdf" target="_blank" rel="noopener" class="header-button" style="text-decoration:none;">View PDF</a>
+        <a id="nav-view-pdf-btn" href="/runs/pdf/{{ run.tool.run_id }}" target="_blank" rel="noopener" class="header-button" style="text-decoration:none;">View PDF</a>
         <button type="button" class="header-button" data-print-report>Save / Print</button>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
         <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle theme" title="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
           <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
@@ -1584,45 +1595,45 @@ struct WarningOpportunityRow {
           <h1>{{ title }}</h1>
           <div class="run-id-row">
             <span class="run-id-chip" data-copy="{{ run.tool.run_id }}">
-              <span class="run-id-chip-label">Run ID <span class="chip-copy-icon">⎘</span></span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>Run ID</span>
               <span class="run-id-chip-value">{{ run.tool.run_id }}</span>
               <span class="chip-tooltip">Unique identifier for this analysis run — click to copy</span>
             </span>
             {% if let Some(long_commit) = run.git_commit_long %}
             <span class="run-id-chip" data-copy="{{ long_commit }}">
-              <span class="run-id-chip-label">Git Commit <span class="chip-copy-icon">⎘</span></span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
               <span class="run-id-chip-value">{{ long_commit }}</span>
               <span class="chip-tooltip">Full commit SHA for the scanned state — click to copy</span>
             </span>
             {% else %}
             <span class="run-id-chip muted-chip">
-              <span class="run-id-chip-label">Git Commit</span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
               <span class="run-id-chip-value">Not detected</span>
               <span class="chip-tooltip">No Git commit SHA was found for this scan</span>
             </span>
             {% endif %}
             {% if let Some(branch) = run.git_branch %}
             <span class="run-id-chip">
-              <span class="run-id-chip-label">Branch</span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
               <span class="run-id-chip-value">{{ branch }}</span>
               <span class="chip-tooltip">Git branch scanned for this report</span>
             </span>
             {% else %}
             <span class="run-id-chip muted-chip">
-              <span class="run-id-chip-label">Branch</span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
               <span class="run-id-chip-value">Not detected</span>
               <span class="chip-tooltip">No Git branch was found for this scan</span>
             </span>
             {% endif %}
             {% if let Some(author) = run.git_commit_author %}
             <span class="run-id-chip" data-author="{{ author }}">
-              <span class="run-id-chip-label">Last Commit By</span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Last Commit By</span>
               <span class="run-id-chip-value">{{ author }}<span class="author-handle"></span></span>
               <span class="chip-tooltip">Author of the most recent commit in this repository</span>
             </span>
             {% else %}
             <span class="run-id-chip muted-chip">
-              <span class="run-id-chip-label">Last Commit By</span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Last Commit By</span>
               <span class="run-id-chip-value">Not detected</span>
               <span class="chip-tooltip">No commit author was found for this scan</span>
             </span>
@@ -1655,6 +1666,9 @@ struct WarningOpportunityRow {
         <div class="metric" data-metric-value="{{ run.summary_totals.files_analyzed }}"><div class="metric-tooltip">Total number of source files included in this analysis.</div><div class="metric-label">Files analyzed</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
       </div>
     </section>
+
+    <!-- ── PDF-only pre-rendered chart variants (hidden on screen) ─────── -->
+    <div id="pdf-variants" class="pdf-variants-root"></div>
 
     <div class="report-stack">
       <!-- ── Chart row 1: Overview + Composition ───────────────────────── -->
@@ -1906,9 +1920,6 @@ struct WarningOpportunityRow {
       </div>
       {% endif %}
 
-      <!-- ── PDF-only pre-rendered chart variants ─────────────────────── -->
-      <div id="pdf-variants" class="pdf-variants-root"></div>
-
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
@@ -1959,8 +1970,9 @@ struct WarningOpportunityRow {
       </section>
 
       <section class="panel stack">
-        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" onclick="resetPerFileTable()" title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" onclick="exportReportCsv()">&#8595; CSV</button><button class="export-btn" onclick="exportReportXls()">&#8595; Excel</button></div></div></div>
-        <div class="table-shell" id="per-file-shell">
+        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" data-reset-table title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" data-export-csv>&#8595; CSV</button><button class="export-btn" data-export-xls>&#8595; Excel</button></div></div></div>
+        <div class="table-shell table-shell-clip">
+        <div id="per-file-shell" style="overflow-y:scroll;max-height:900px;">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <colgroup>
               <col><col><col><col><col><col><col><col><col><col><col><col><col><col>
@@ -2007,11 +2019,13 @@ struct WarningOpportunityRow {
             </tbody>
           </table>
         </div>
+        </div>
       </section>
 
       <section class="panel stack">
         <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." data-table-filter="skipped-table" /></div></div>
-        <div class="table-shell" id="skipped-shell" style="margin-top:6px;max-height:250px;overflow-y:scroll;">
+        <div class="table-shell table-shell-clip" style="margin-top:6px;">
+        <div id="skipped-shell" style="overflow-y:scroll;max-height:375px;">
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
@@ -2031,6 +2045,7 @@ struct WarningOpportunityRow {
             </tbody>
           </table>
         </div>
+        </div>
       </section>
 
       <section class="panel stack">
@@ -2043,19 +2058,27 @@ struct WarningOpportunityRow {
         </div>
 
         {% if !is_sub_report %}
-        <div>
-          <h3 style="margin:0 0 10px;">Warnings overview</h3>
+        <div style="margin-top:-14px;">
+          <h3 style="margin:0 0 4px;">Warnings overview</h3>
+          <p class="support-note">Warning categories produced during the scan. Each row shows the warning type, how many files were affected, and what it means for your results.</p>
           {% if !has_run_warnings %}
             <div class="pill good">No top-level warnings.</div>
           {% else %}
-            <div class="warning-grid">
-              {% for row in warning_summary_rows %}
-              <div class="warning-card {{ row.tone_class }}">
-                <h3>{{ row.label }}</h3>
-                <div class="count">{{ row.count }}</div>
-                <div class="support-note">{{ row.detail }}</div>
-              </div>
-              {% endfor %}
+            <div class="table-shell">
+              <table class="support-table">
+                <thead>
+                  <tr><th style="width:30%;">Category</th><th style="width:8%;">Count</th><th>What this means</th></tr>
+                </thead>
+                <tbody>
+                  {% for row in warning_summary_rows %}
+                  <tr class="{{ row.tone_class }}">
+                    <td style="font-weight:700;" title="{{ row.label }}">{{ row.label }}</td>
+                    <td class="warning-count" style="font-weight:800;">{{ row.count }}</td>
+                    <td class="small" style="color:var(--muted);">{{ row.detail }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
             </div>
           {% endif %}
         </div>
@@ -2102,6 +2125,9 @@ struct WarningOpportunityRow {
               {% if !has_run_warnings %}
                 <div class="pill good">No top-level warnings.</div>
               {% else %}
+                <div class="code-block-toolbar">
+                  <button type="button" class="code-copy-btn" id="warning-console-copy-btn" aria-label="Copy warnings">Copy</button>
+                </div>
                 <pre class="warning-console" id="warning-console-full" style="max-height:210px;">{{ warning_console_full }}</pre>
               {% endif %}
             </div>
@@ -2121,14 +2147,17 @@ struct WarningOpportunityRow {
             </div>
           </div>
           <div class="config-pre-wrap">
+            <div class="code-block-toolbar">
+              <button type="button" class="code-copy-btn" id="config-inline-copy-btn" aria-label="Copy configuration">Copy</button>
+            </div>
             <pre class="config-pre" id="config-json-block">{{ config_json }}</pre>
-            <button type="button" class="config-pre-copy" id="config-inline-copy-btn" aria-label="Copy configuration">Copy</button>
           </div>
         </div>
       </section>
     </div>
   </div>
 
+  <div id="r-tt" aria-hidden="true"></div>
   <script nonce="{{ nonce }}">
     // Hide "View PDF" button when the report is opened as a local file (not from web server)
     (function () {
@@ -2213,6 +2242,18 @@ struct WarningOpportunityRow {
       }
       handleConfigCopy(copyConfigBtn);
       handleConfigCopy(inlineCopyBtn);
+
+      var warnCopyBtn = document.getElementById('warning-console-copy-btn');
+      var warnBlock = document.getElementById('warning-console-full');
+      if (warnCopyBtn && warnBlock) {
+        warnCopyBtn.addEventListener('click', function () {
+          copyText(warnBlock.textContent);
+          var orig = warnCopyBtn.textContent;
+          warnCopyBtn.textContent = 'Copied!';
+          setTimeout(function () { warnCopyBtn.textContent = orig; }, 1600);
+        });
+      }
+
       if (downloadConfigBtn && configBlock) {
         downloadConfigBtn.addEventListener('click', function () {
           var blob = new Blob([configBlock.textContent], { type: 'application/json' });
@@ -2405,6 +2446,9 @@ struct WarningOpportunityRow {
     function getReportExportRows(){var r=[];document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<11)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim(),tds[3].textContent.trim(),tds[4].textContent.trim(),tds[5].textContent.trim(),tds[6].textContent.trim(),tds[7].textContent.trim(),tds[8].textContent.trim(),tds[9].textContent.trim(),tds[10].textContent.trim()]);});return r;}
     window.exportReportCsv=function(){slocCsv('report-per-file.csv',_rh,getReportExportRows());};
     window.exportReportXls=function(){slocXls('report-per-file.xlsx','Per-File Detail',_rh,getReportExportRows());};
+    Array.prototype.slice.call(document.querySelectorAll('[data-export-csv]')).forEach(function(btn){btn.addEventListener('click',function(){slocCsv('report-per-file.csv',_rh,getReportExportRows());});});
+    Array.prototype.slice.call(document.querySelectorAll('[data-export-xls]')).forEach(function(btn){btn.addEventListener('click',function(){slocXls('report-per-file.xlsx','Per-File Detail',_rh,getReportExportRows());});});
+    Array.prototype.slice.call(document.querySelectorAll('[data-reset-table]')).forEach(function(btn){btn.addEventListener('click',window.resetPerFileTable);});
     // ── Chart.js initialization ───────────────────────────────────────────────
     (function() {
       var D = {{ lang_chart_json|safe }};
@@ -2773,16 +2817,16 @@ struct WarningOpportunityRow {
         function px(n){return Math.round(n);}
         var data = SUB_D.slice().sort(function(a,b){return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));}).slice(0,15);
         var maxT = Math.max.apply(null, data.map(function(d){return (d.code||0)+(d.comment||0)+(d.blank||0);})) || 1;
-        var LW=120, BW=260, rHb=30, bH=20, legH=28, topPad=8;
+        var LW=90, BW=750, rHb=30, bH=20, legH=28, topPad=8;
         var SH = data.length * rHb + legH + topPad;
-        var svgW = LW + BW + 70;
+        var svgW = LW + BW + 55;
         var s = '<svg viewBox="0 0 '+svgW+' '+SH+'" width="100%" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
         data.forEach(function(d,i){
           var tot2 = (d.code||0)+(d.comment||0)+(d.blank||0);
           var cW = (d.code||0)/maxT*BW, cmW = (d.comment||0)/maxT*BW, blW = (d.blank||0)/maxT*BW;
           var y = topPad + i*rHb, x = LW;
           var pct = Math.round(tot2/maxT*100);
-          var name = d.name.length > 16 ? d.name.slice(0,15)+'…' : d.name;
+          var name = d.name.length > 12 ? d.name.slice(0,11)+'…' : d.name;
           s += '<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(name)+'</text>';
           if(cW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Code" data-ttv="'+fmt(d.code||0)+' lines ('+pct+'% of largest)" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>'; x+=cW;
           if(cmW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Comments" data-ttv="'+fmt(d.comment||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>'; x+=cmW;
@@ -2947,17 +2991,18 @@ struct WarningOpportunityRow {
 
         // ── Project Overview — 4 Y-axis variants ─────────────────────────────────
         var pgProj = mkGroup('Project Overview');
-        [
-          { key:'code',     label:'Code Lines' },
-          { key:'comments', label:'Comment Lines' },
-          { key:'physical', label:'Physical Lines' },
-          { key:'files',    label:'File Count' }
-        ].forEach(function(y) {
-          var sorted = D.slice().sort(function(a,b){return (b[y.key]||0)-(a[y.key]||0);});
-          var h = Math.max(120, Math.min(400, sorted.length*22+50));
+        var projVariants = [
+          { label:'Code Lines',     fn:function(d){return d.code||0;} },
+          { label:'Comment Lines',  fn:function(d){return d.comments||0;} },
+          { label:'Physical Lines', fn:function(d){return (d.code||0)+(d.comments||0)+(d.blanks||0);} },
+          { label:'File Count',     fn:function(d){return d.files||0;} }
+        ];
+        projVariants.forEach(function(y) {
+          var sorted = D.slice().sort(function(a,b){return y.fn(b)-y.fn(a);});
+          var h = Math.max(110, Math.min(360, sorted.length*18+40));
           var png = snap('bar', {
             labels: sorted.map(function(d){return d.lang;}),
-            datasets:[{ label:y.label, data:sorted.map(function(d){return d[y.key]||0;}),
+            datasets:[{ label:y.label, data:sorted.map(y.fn),
                         backgroundColor:sorted.map(function(_,i){return PALETTE[i%PALETTE.length];}), borderRadius:3 }]
           }, {
             indexAxis:'y',
@@ -2975,7 +3020,7 @@ struct WarningOpportunityRow {
         var pgComp = mkGroup('Language Composition');
         var cData = D.slice(0,15);
         var totFn = function(d){return (d.code||0)+(d.comments||0)+(d.blanks||0)||1;};
-        var compH = Math.max(120, Math.min(380, cData.length*22+60));
+        var compH = Math.max(110, Math.min(340, cData.length*18+50));
         [{id:'absolute',label:'Absolute Lines',isPct:false},{id:'pct',label:'Composition %',isPct:true}]
           .forEach(function(m) {
             var pct = m.isPct;
@@ -3018,7 +3063,7 @@ struct WarningOpportunityRow {
               y: { grid:{color:gc}, ticks:{color:tc, callback:function(v){return fmt(v);}}, title:{display:true, text:'Code Lines', color:tc} }
             },
             plugins: { legend:{position:'right', labels:{color:tc, boxWidth:12}} }
-          }, 900, 320);
+          }, 900, 260);
           pgScat.grid.appendChild(mkPanel('Files × Code Lines (bubble size ∝ physical lines)', scatPng));
           root.appendChild(pgScat.group);
         }
@@ -3031,7 +3076,7 @@ struct WarningOpportunityRow {
           Object.keys(SL).forEach(function(mKey) {
             var data = SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);}).slice(0,15);
             if (!data.some(function(d){return (d[mKey]||0)>0;})) return;
-            var semH = 260; // vertical bar — fixed height; width drives layout, not row count
+            var semH = 210; // vertical bar — fixed height; width drives layout, not row count
             var png = snap('bar', {
               labels: data.map(function(d){return d.lang;}),
               datasets:[{label:SL[mKey],data:data.map(function(d){return d[mKey]||0;}),backgroundColor:SC[mKey],borderRadius:4}]
@@ -3054,7 +3099,7 @@ struct WarningOpportunityRow {
             .forEach(function(y) {
               var data = SUB_D.slice().sort(function(a,b){return (b[y.key]||0)-(a[y.key]||0);}).slice(0,30);
               if (!data.length) return;
-              var subH = Math.max(120, Math.min(500, data.length*20+36));
+              var subH = Math.max(100, Math.min(420, data.length*16+30));
               var png = snap('bar', {
                 labels: data.map(function(d){return d.name;}),
                 datasets:[{label:y.label,data:data.map(function(d){return d[y.key]||0;}),backgroundColor:y.col,borderRadius:3}]
@@ -3124,31 +3169,19 @@ struct WarningOpportunityRow {
       });
     });
 
-    // Scrollbar-gap fix + skipped-table 6-row cap.
-    // CSS scrollbar-gutter is unreliable across browsers/OS scrollbar styles.
-    // Measure the actual scrollbar track width (offsetWidth - clientWidth) and
-    // add it as padding-right so no column is ever hidden under the scrollbar.
+    // Skipped-table row cap.
     (function() {
-      function padShell(id) {
-        var el = document.getElementById(id);
-        if (!el) return;
-        el.style.paddingRight = '0px';
-        var sw = el.offsetWidth - el.clientWidth;
-        if (sw > 0) el.style.paddingRight = sw + 'px';
-      }
       function capSkipped() {
         var shell = document.getElementById('skipped-shell');
         if (!shell) return;
         var rows = shell.querySelectorAll('tbody tr');
-        if (rows.length <= 6) return;
+        if (rows.length <= 9) return;
         var thead = shell.querySelector('thead');
         var headH = thead ? thead.offsetHeight : 38;
         var rowH  = rows[0] ? rows[0].offsetHeight : 37;
-        shell.style.maxHeight = (headH + rowH * 6 + 2) + 'px';
+        shell.style.maxHeight = (headH + rowH * 9 + 2) + 'px';
       }
       function apply() {
-        padShell('per-file-shell');
-        padShell('skipped-shell');
         capSkipped();
       }
       if (document.readyState === 'loading') {
@@ -3159,7 +3192,26 @@ struct WarningOpportunityRow {
       window.addEventListener('resize', apply);
     })();
   </script>
-  <div id="r-tt" aria-hidden="true"></div>
+  <script nonce="{{ nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>

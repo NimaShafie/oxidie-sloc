@@ -51,7 +51,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxdo-dev \
     curl \
     xz-utils \
+    lcov \
     && rm -rf /var/lib/apt/lists/*
+# lcov — provides genhtml, used by the Coverage stage as an HTML report fallback
+# when cargo-llvm-cov is not available (e.g. cargo-tarpaulin path).
 
 # Install the pinned Rust toolchain at image build time so all pipeline runs are
 # fully offline — no sh.rustup.rs request during cargo build, fmt, or clippy.

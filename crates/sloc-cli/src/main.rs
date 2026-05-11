@@ -1163,6 +1163,35 @@ async fn send_smtp(args: &SendArgs, run: &AnalysisRun) -> Result<()> {
     Ok(())
 }
 
+/// Hostnames that must never receive webhook payloads (cloud metadata endpoints, link-local names).
+const BLOCKED_WEBHOOK_HOSTS: &[&str] = &[
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata.internal",
+    "instance-data",
+];
+
+/// Returns `true` when `ip` falls into a range that must not receive outbound requests
+/// (loopback, private RFC-1918/FC00, link-local, broadcast, unspecified, multicast).
+fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // Unique-local (FC00::/7)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // Link-local (FE80::/10)
+        }
+    }
+}
+
 fn validate_webhook_url(raw: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(raw).with_context(|| format!("invalid webhook URL: {raw}"))?;
     if parsed.scheme() != "https" {
@@ -1174,31 +1203,11 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("webhook URL has no host"))?;
-    if matches!(
-        host,
-        "169.254.169.254" | "metadata.google.internal" | "metadata.internal" | "instance-data"
-    ) || host.to_ascii_lowercase().ends_with(".local")
-    {
+    if BLOCKED_WEBHOOK_HOSTS.contains(&host) || host.to_ascii_lowercase().ends_with(".local") {
         anyhow::bail!("webhook URL host is blocked: {host}");
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let blocked = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
-        if blocked {
+        if is_ip_blocked(ip) {
             anyhow::bail!("webhook URL resolves to a blocked IP address: {ip}");
         }
     }
@@ -1429,24 +1438,20 @@ fn ensure_html_for_pdf(
 
 // ── terminal output ───────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
-fn print_summary(run: &AnalysisRun, per_file: bool, plain: bool) {
-    if plain {
-        println!("files_analyzed={}", run.summary_totals.files_analyzed);
-        println!("files_skipped={}", run.summary_totals.files_skipped);
-        println!("physical_lines={}", run.summary_totals.total_physical_lines);
-        println!("code_lines={}", run.summary_totals.code_lines);
-        println!("comment_lines={}", run.summary_totals.comment_lines);
-        println!("blank_lines={}", run.summary_totals.blank_lines);
-        println!(
-            "mixed_lines_separate={}",
-            run.summary_totals.mixed_lines_separate
-        );
-        return;
-    }
+fn print_plain_summary(run: &AnalysisRun) {
+    println!("files_analyzed={}", run.summary_totals.files_analyzed);
+    println!("files_skipped={}", run.summary_totals.files_skipped);
+    println!("physical_lines={}", run.summary_totals.total_physical_lines);
+    println!("code_lines={}", run.summary_totals.code_lines);
+    println!("comment_lines={}", run.summary_totals.comment_lines);
+    println!("blank_lines={}", run.summary_totals.blank_lines);
+    println!(
+        "mixed_lines_separate={}",
+        run.summary_totals.mixed_lines_separate
+    );
+}
 
-    let col = color_enabled();
-
+fn print_totals_header(run: &AnalysisRun, col: bool) {
     println!("{}", paint!(col, "1", "SLOC Analysis Complete"));
     println!(
         "  {}  {}",
@@ -1485,67 +1490,91 @@ fn print_summary(run: &AnalysisRun, per_file: bool, plain: bool) {
             run.summary_totals.mixed_lines_separate
         );
     }
+}
 
-    if !run.totals_by_language.is_empty() {
-        println!();
-        println!("{}", paint!(col, "1", "By Language"));
+fn print_language_table(run: &AnalysisRun, col: bool) {
+    if run.totals_by_language.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", paint!(col, "1", "By Language"));
+    println!(
+        "  {:<14} {:>6} {:>8} {:>9} {:>7} {:>8}",
+        paint!(col, "2", "Language"),
+        paint!(col, "2", "Files"),
+        paint!(col, "2", "Code"),
+        paint!(col, "2", "Comments"),
+        paint!(col, "2", "Blank"),
+        paint!(col, "2", "Total"),
+    );
+    for lang in &run.totals_by_language {
         println!(
             "  {:<14} {:>6} {:>8} {:>9} {:>7} {:>8}",
-            paint!(col, "2", "Language"),
-            paint!(col, "2", "Files"),
-            paint!(col, "2", "Code"),
-            paint!(col, "2", "Comments"),
-            paint!(col, "2", "Blank"),
-            paint!(col, "2", "Total"),
+            lang.language.display_name(),
+            lang.files,
+            lang.code_lines,
+            lang.comment_lines,
+            lang.blank_lines,
+            lang.total_physical_lines,
         );
-        for lang in &run.totals_by_language {
-            println!(
-                "  {:<14} {:>6} {:>8} {:>9} {:>7} {:>8}",
-                lang.language.display_name(),
-                lang.files,
-                lang.code_lines,
-                lang.comment_lines,
-                lang.blank_lines,
-                lang.total_physical_lines,
-            );
-        }
+    }
+}
+
+fn print_per_file_table(run: &AnalysisRun, col: bool) {
+    if run.per_file_records.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", paint!(col, "1", "Per-File Detail"));
+    for file in &run.per_file_records {
+        let sub_tag = file
+            .submodule
+            .as_deref()
+            .map(|s| format!("[{s}] "))
+            .unwrap_or_default();
+        println!(
+            "  {:<50} {:<14} code={:<6} comment={:<6} blank={:<6}",
+            truncate(&format!("{sub_tag}{}", file.relative_path), 50),
+            file.language
+                .map_or_else(|| "-".into(), |l| l.display_name().to_string()),
+            file.effective_counts.code_lines,
+            file.effective_counts.comment_lines,
+            file.effective_counts.blank_lines,
+        );
+    }
+}
+
+fn print_submodule_table(run: &AnalysisRun, col: bool) {
+    if run.submodule_summaries.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", paint!(col, "1", "By Submodule"));
+    for sub in &run.submodule_summaries {
+        println!(
+            "  {:<30} files={:<4} code={:<6} comment={:<6} blank={:<6}",
+            truncate(&sub.name, 30),
+            sub.files_analyzed,
+            sub.code_lines,
+            sub.comment_lines,
+            sub.blank_lines,
+        );
+    }
+}
+
+fn print_summary(run: &AnalysisRun, per_file: bool, plain: bool) {
+    if plain {
+        print_plain_summary(run);
+        return;
     }
 
-    if per_file && !run.per_file_records.is_empty() {
-        println!();
-        println!("{}", paint!(col, "1", "Per-File Detail"));
-        for file in &run.per_file_records {
-            let sub_tag = file
-                .submodule
-                .as_deref()
-                .map(|s| format!("[{s}] "))
-                .unwrap_or_default();
-            println!(
-                "  {:<50} {:<14} code={:<6} comment={:<6} blank={:<6}",
-                truncate(&format!("{sub_tag}{}", file.relative_path), 50),
-                file.language
-                    .map_or_else(|| "-".into(), |l| l.display_name().to_string()),
-                file.effective_counts.code_lines,
-                file.effective_counts.comment_lines,
-                file.effective_counts.blank_lines,
-            );
-        }
+    let col = color_enabled();
+    print_totals_header(run, col);
+    print_language_table(run, col);
+    if per_file {
+        print_per_file_table(run, col);
     }
-
-    if !run.submodule_summaries.is_empty() {
-        println!();
-        println!("{}", paint!(col, "1", "By Submodule"));
-        for sub in &run.submodule_summaries {
-            println!(
-                "  {:<30} files={:<4} code={:<6} comment={:<6} blank={:<6}",
-                truncate(&sub.name, 30),
-                sub.files_analyzed,
-                sub.code_lines,
-                sub.comment_lines,
-                sub.blank_lines,
-            );
-        }
-    }
+    print_submodule_table(run, col);
 
     if !run.warnings.is_empty() {
         println!();
@@ -1662,9 +1691,187 @@ fn write_diff_xlsx(cmp: &ScanComparison, path: &Path) -> Result<()> {
 
 // ── Confluence delivery ───────────────────────────────────────────────────────
 
-async fn send_confluence(args: &SendArgs, run: &AnalysisRun) -> Result<()> {
+fn build_confluence_auth(username: Option<&str>, token: &str) -> String {
     use base64::Engine as _;
+    match username {
+        Some(u) if !u.is_empty() => {
+            let enc = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{token}"));
+            format!("Basic {enc}")
+        }
+        _ => format!("Bearer {token}"),
+    }
+}
 
+async fn confluence_upsert_cloud(
+    client: &reqwest::Client,
+    base_url: &str,
+    auth: &str,
+    space: &str,
+    page_title: &str,
+    body_html: &str,
+    parent_id: Option<&str>,
+) -> Result<()> {
+    let space_resp: serde_json::Value = client
+        .get(format!(
+            "{base_url}/wiki/api/v2/spaces?keys={space}&limit=1"
+        ))
+        .header("Authorization", auth)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .context("Confluence space lookup")?
+        .json()
+        .await
+        .context("Confluence space response")?;
+
+    let space_id = space_resp["results"][0]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Confluence space '{space}' not found"))?
+        .to_owned();
+
+    let enc_title = percent_encode(page_title);
+    let find_resp: serde_json::Value = client
+        .get(format!(
+            "{base_url}/wiki/api/v2/pages?spaceId={space_id}&title={enc_title}&limit=1&expand=version"
+        ))
+        .header("Authorization", auth)
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
+    let existing_ver = find_resp["results"][0]["version"]["number"]
+        .as_u64()
+        .map(|v| v as u32);
+
+    match (existing_id, existing_ver) {
+        (Some(page_id), Some(ver)) => {
+            let payload = serde_json::json!({
+                "version": { "number": ver + 1 },
+                "title": page_title,
+                "body": { "representation": "storage", "value": body_html }
+            });
+            let resp = client
+                .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
+                .header("Authorization", auth)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
+            }
+            println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+        }
+        _ => {
+            let mut payload = serde_json::json!({
+                "spaceId": space_id,
+                "title": page_title,
+                "body": { "representation": "storage", "value": body_html }
+            });
+            if let Some(pid) = parent_id {
+                payload["parentId"] = serde_json::Value::String(pid.to_owned());
+            }
+            let resp = client
+                .post(format!("{base_url}/wiki/api/v2/pages"))
+                .header("Authorization", auth)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+            }
+            let created: serde_json::Value = resp.json().await?;
+            let new_id = created["id"].as_str().unwrap_or("?");
+            println!("send: created Confluence page '{page_title}' (id: {new_id})");
+        }
+    }
+    Ok(())
+}
+
+async fn confluence_upsert_server(
+    client: &reqwest::Client,
+    base_url: &str,
+    auth: &str,
+    space: &str,
+    page_title: &str,
+    body_html: &str,
+    parent_id: Option<&str>,
+) -> Result<()> {
+    let enc_title = percent_encode(page_title);
+    let find_resp: serde_json::Value = client
+        .get(format!(
+            "{base_url}/rest/api/content?spaceKey={space}&title={enc_title}&type=page&expand=version&limit=1"
+        ))
+        .header("Authorization", auth)
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
+    let existing_ver = find_resp["results"][0]["version"]["number"]
+        .as_u64()
+        .map(|v| v as u32);
+
+    match (existing_id, existing_ver) {
+        (Some(page_id), Some(ver)) => {
+            let payload = serde_json::json!({
+                "version": { "number": ver + 1 },
+                "type": "page",
+                "title": page_title,
+                "space": { "key": space },
+                "body": { "storage": { "value": body_html, "representation": "storage" } }
+            });
+            let resp = client
+                .put(format!("{base_url}/rest/api/content/{page_id}"))
+                .header("Authorization", auth)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
+            }
+            println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+        }
+        _ => {
+            let mut payload = serde_json::json!({
+                "type": "page",
+                "space": { "key": space },
+                "title": page_title,
+                "body": { "storage": { "value": body_html, "representation": "storage" } }
+            });
+            if let Some(pid) = parent_id {
+                payload["ancestors"] = serde_json::json!([{ "id": pid }]);
+            }
+            let resp = client
+                .post(format!("{base_url}/rest/api/content"))
+                .header("Authorization", auth)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+            }
+            let created: serde_json::Value = resp.json().await?;
+            let new_id = created["id"].as_str().unwrap_or("?");
+            println!("send: created Confluence page '{page_title}' (id: {new_id})");
+        }
+    }
+    Ok(())
+}
+
+async fn send_confluence(args: &SendArgs, run: &AnalysisRun) -> Result<()> {
     let base_url = args
         .confluence_url
         .as_deref()
@@ -1688,177 +1895,21 @@ async fn send_confluence(args: &SendArgs, run: &AnalysisRun) -> Result<()> {
         .or(args.report_url.as_deref());
 
     let body_html = sloc_report::render_confluence_storage(run, report_url);
-
-    // Determine Cloud vs Server by URL
-    let is_cloud = base_url.to_lowercase().contains(".atlassian.net");
-
-    // Build auth header
-    let auth = if let Some(username) = args.confluence_username.as_deref() {
-        if !username.is_empty() {
-            let raw = format!("{username}:{token}");
-            let enc = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
-            format!("Basic {enc}")
-        } else {
-            format!("Bearer {token}")
-        }
-    } else {
-        format!("Bearer {token}")
-    };
-
+    let auth = build_confluence_auth(args.confluence_username.as_deref(), token);
     let client = reqwest::Client::new();
+    let parent_id = args.confluence_parent_id.as_deref();
 
-    if is_cloud {
-        // Cloud v2 API: look up space ID, then find/create/update page
-        let space_resp: serde_json::Value = client
-            .get(format!(
-                "{base_url}/wiki/api/v2/spaces?keys={space}&limit=1"
-            ))
-            .header("Authorization", &auth)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .context("Confluence space lookup")?
-            .json()
-            .await
-            .context("Confluence space response")?;
-
-        let space_id = space_resp["results"][0]["id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Confluence space '{space}' not found"))?
-            .to_owned();
-
-        let enc_title = percent_encode(page_title);
-        let find_resp: serde_json::Value = client
-            .get(format!(
-                "{base_url}/wiki/api/v2/pages?spaceId={space_id}&title={enc_title}&limit=1&expand=version"
-            ))
-            .header("Authorization", &auth)
-            .header("Accept", "application/json")
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
-        let existing_ver = find_resp["results"][0]["version"]["number"]
-            .as_u64()
-            .map(|v| v as u32);
-
-        match (existing_id, existing_ver) {
-            (Some(page_id), Some(ver)) => {
-                let payload = serde_json::json!({
-                    "version": { "number": ver + 1 },
-                    "title": page_title,
-                    "body": { "representation": "storage", "value": body_html }
-                });
-                let resp = client
-                    .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
-                    .header("Authorization", &auth)
-                    .header("Content-Type", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
-                }
-                println!("send: updated Confluence page '{page_title}' (id: {page_id})");
-            }
-            _ => {
-                let mut payload = serde_json::json!({
-                    "spaceId": space_id,
-                    "title": page_title,
-                    "body": { "representation": "storage", "value": body_html }
-                });
-                if let Some(parent_id) = &args.confluence_parent_id {
-                    payload["parentId"] = serde_json::Value::String(parent_id.clone());
-                }
-                let resp = client
-                    .post(format!("{base_url}/wiki/api/v2/pages"))
-                    .header("Authorization", &auth)
-                    .header("Content-Type", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
-                }
-                let created: serde_json::Value = resp.json().await?;
-                let new_id = created["id"].as_str().unwrap_or("?");
-                println!("send: created Confluence page '{page_title}' (id: {new_id})");
-            }
-        }
+    if base_url.to_lowercase().contains(".atlassian.net") {
+        confluence_upsert_cloud(
+            &client, base_url, &auth, space, page_title, &body_html, parent_id,
+        )
+        .await
     } else {
-        // Server/DC v1 API
-        let enc_title = percent_encode(page_title);
-        let find_resp: serde_json::Value = client
-            .get(format!(
-                "{base_url}/rest/api/content?spaceKey={space}&title={enc_title}&type=page&expand=version&limit=1"
-            ))
-            .header("Authorization", &auth)
-            .header("Accept", "application/json")
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
-        let existing_ver = find_resp["results"][0]["version"]["number"]
-            .as_u64()
-            .map(|v| v as u32);
-
-        match (existing_id, existing_ver) {
-            (Some(page_id), Some(ver)) => {
-                let payload = serde_json::json!({
-                    "version": { "number": ver + 1 },
-                    "type": "page",
-                    "title": page_title,
-                    "space": { "key": space },
-                    "body": { "storage": { "value": body_html, "representation": "storage" } }
-                });
-                let resp = client
-                    .put(format!("{base_url}/rest/api/content/{page_id}"))
-                    .header("Authorization", &auth)
-                    .header("Content-Type", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
-                }
-                println!("send: updated Confluence page '{page_title}' (id: {page_id})");
-            }
-            _ => {
-                let mut payload = serde_json::json!({
-                    "type": "page",
-                    "space": { "key": space },
-                    "title": page_title,
-                    "body": { "storage": { "value": body_html, "representation": "storage" } }
-                });
-                if let Some(parent_id) = &args.confluence_parent_id {
-                    payload["ancestors"] = serde_json::json!([{ "id": parent_id }]);
-                }
-                let resp = client
-                    .post(format!("{base_url}/rest/api/content"))
-                    .header("Authorization", &auth)
-                    .header("Content-Type", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
-                }
-                let created: serde_json::Value = resp.json().await?;
-                let new_id = created["id"].as_str().unwrap_or("?");
-                println!("send: created Confluence page '{page_title}' (id: {new_id})");
-            }
-        }
+        confluence_upsert_server(
+            &client, base_url, &auth, space, page_title, &body_html, parent_id,
+        )
+        .await
     }
-
-    Ok(())
 }
 
 fn percent_encode(s: &str) -> String {

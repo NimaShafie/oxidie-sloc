@@ -42,6 +42,25 @@ git                         # GitSCM checkout step
 # ── Credentials ───────────────────────────────────────────────────────────────
 credentials-binding         # credentials() binding in environment blocks
 
-# ── Optional — required for full pipeline feature set ─────────────────────────
-htmlpublisher               # publishHTML() — "SLOC Report" link in the build sidebar
-plot                        # plot() — code-lines trend charts across builds
+# ── Reporting — required for full pipeline feature set ────────────────────────
+htmlpublisher               # publishHTML() — "SLOC Report" browsable HTML report sidebar link
+plot                        # plot() — SLOC trend charts across builds
+junit                       # junit() — "Test Result" sidebar link (cargo-nextest runs)
+coverage                    # recordCoverage() — native LCOV/Cobertura integration; shows
+                            #   line %, branch %, function % on each build page, per-file
+                            #   drill-down, build-over-build trend chart, and quality-gate
+                            #   enforcement — all without manual CSV or shell parsing.
+                            #   Supersedes the manual lcov.info threshold check.
+
+# ── UX quality-of-life ─────────────────────────────────────────────────────────
+pipeline-stage-view         # Stage visualization in the job UI (Blue Ocean lite)
+timestamper                 # Timestamps on every console output line
+ansicolor                   # ANSI colour in Rust compiler / clippy output
+
+# ── Job automation ─────────────────────────────────────────────────────────────
+job-dsl                     # Executes ci/jenkins/seed-job.groovy to create the pipeline job
+copyartifact                # Copies artifacts to/from downstream jobs in Pipeline-of-Pipelines
+
+# ── SCM integrations (optional) ───────────────────────────────────────────────
+bitbucket                   # Bitbucket Branch Source (optional — Bitbucket SCM only)
+bitbucket-build-status-notifier  # Posts commit statuses to Bitbucket (optional)

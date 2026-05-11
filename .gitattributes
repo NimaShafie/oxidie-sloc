@@ -11,6 +11,8 @@
 *.zip binary
 *.gz binary
 *.tar binary
+*.tar.xz binary
+*.tar.gz binary
 *.7z binary
 *.exe binary
 *.wasm binary
@@ -20,6 +22,23 @@
 *.fst binary
 *.dfa binary
 *.der binary
+# Jenkins plugin archives — committed as binary blobs
+*.hpi binary
+*.jpi binary
+
+# ── Large binary archives — git LFS candidates ────────────────────────────────
+# vendor.tar.xz (~27 MB) fits within GitHub's 100 MB limit — no LFS needed.
+# jenkins-plugins.tar.xz can exceed 100 MB depending on transitive deps.
+# rust-toolchain-bundle.tar.xz is typically 200-350 MB and requires LFS.
+#
+# To enable LFS for these files (run once per machine):
+#   git lfs install
+#   git lfs track 'jenkins-plugins.tar.xz'
+#   git lfs track 'rust-toolchain-bundle.tar.xz'
+#   git add .gitattributes
+#
+# If bundle-jenkins-plugins.sh warns that the archive exceeds 100 MB, run the
+# above commands before committing jenkins-plugins.tar.xz.
 
 # Vendor sources must never be normalized by git — cargo checksum verification
 # compares the exact bytes on disk to the SHA-256 in .cargo-checksum.json.
