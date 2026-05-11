@@ -2175,6 +2175,7 @@ fn finalize_line_facts(
 /// lines and returned early without further analysis.
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::many_single_char_names)] // destructuring return from count_symbols; names match field roles
 fn process_physical_line(
     line: &str,
     line_idx: usize,

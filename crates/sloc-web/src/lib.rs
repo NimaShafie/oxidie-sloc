@@ -71,10 +71,10 @@ const MAX_CONCURRENT_ANALYSES: usize = 4;
 /// Windows-only helpers that force the native file-picker dialog into the
 /// foreground instead of appearing minimised behind other windows.
 ///
-/// Strategy: (a) attach the spawn_blocking thread's input queue to the current
+/// Strategy: (a) attach the `spawn_blocking` thread's input queue to the current
 /// foreground thread so that windows created on our thread inherit focus; and
 /// (b) spin a polling watcher that finds the dialog by title and calls
-/// SetForegroundWindow + FlashWindowEx once it appears.
+/// `SetForegroundWindow` + `FlashWindowEx` once it appears.
 #[cfg(all(target_os = "windows", feature = "native-dialog"))]
 #[allow(clippy::upper_case_acronyms)]
 mod win_dialog_focus {
@@ -162,6 +162,9 @@ mod win_dialog_focus {
                         BringWindowToTop(hwnd);
                         #[allow(non_snake_case)]
                         FlashWindowEx(&FLASHWINFO {
+                            // size_of returns usize; Win32 struct field is u32 (UINT).
+                            // struct size fits trivially within u32.
+                            #[allow(clippy::cast_possible_truncation)]
                             cbSize: size_of::<FLASHWINFO>() as UINT,
                             hwnd,
                             dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
@@ -412,6 +415,7 @@ pub(crate) struct RunArtifacts {
     result_context: RunResultContext,
 }
 
+#[allow(clippy::too_many_lines)] // route registration table; splitting would obscure router structure
 fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/", get(splash))
@@ -897,6 +901,7 @@ async fn serve_tls(
     }
 }
 
+#[allow(clippy::too_many_lines)] // middleware with multi-path auth logic; extraction is impractical
 async fn require_api_key(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -1594,7 +1599,7 @@ async fn pick_directory_handler(
         // Windows: attach to the foreground thread so the dialog inherits focus,
         // and kick off a watcher that flashes the dialog once it appears.
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
-        let _fg_tid = win_dialog_focus::attach_to_foreground();
+        let fg_tid = win_dialog_focus::attach_to_foreground();
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
         win_dialog_focus::flash_dialog_when_ready(title.clone());
 
@@ -1622,7 +1627,7 @@ async fn pick_directory_handler(
         };
 
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
-        win_dialog_focus::detach_from_foreground(_fg_tid);
+        win_dialog_focus::detach_from_foreground(fg_tid);
 
         result
     })
@@ -1651,7 +1656,7 @@ async fn pick_file_handler(State(state): State<AppState>) -> Response {
     }
     let picked = tokio::task::spawn_blocking(|| {
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
-        let _fg_tid = win_dialog_focus::attach_to_foreground();
+        let fg_tid = win_dialog_focus::attach_to_foreground();
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
         win_dialog_focus::flash_dialog_when_ready("Select HTML report".to_owned());
 
@@ -1661,7 +1666,7 @@ async fn pick_file_handler(State(state): State<AppState>) -> Response {
             .pick_file();
 
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
-        win_dialog_focus::detach_from_foreground(_fg_tid);
+        win_dialog_focus::detach_from_foreground(fg_tid);
 
         result
     })
@@ -1897,9 +1902,11 @@ fn find_result_json_in_dir(dir: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
         .find(|p| {
             p.is_file()
-                && p.file_name()
+                && p.file_stem()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".json"))
+                    .is_some_and(|n| n.starts_with("result"))
+                && p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
         })
 }
 
@@ -1908,6 +1915,7 @@ struct LocateReportsDirForm {
     folder_path: String,
 }
 
+#[allow(clippy::too_many_lines)] // report discovery handler with complex search and rendering logic
 async fn locate_reports_dir_handler(
     State(state): State<AppState>,
     Form(form): Form<LocateReportsDirForm>,
@@ -1987,9 +1995,8 @@ async fn locate_reports_dir_handler(
                 .map(|e| e.path())
                 .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
         });
-        let run = match read_json(&json_path) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(run) = read_json(&json_path) else {
+            continue;
         };
         let project_label = run.input_roots.first().map_or_else(
             || "Unknown Project".to_string(),
@@ -2045,6 +2052,7 @@ struct RelocateScanForm {
     redirect_url: String,
 }
 
+#[allow(clippy::too_many_lines)] // scan relocation handler with inline HTML rendering
 async fn relocate_scan_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2106,9 +2114,11 @@ async fn relocate_scan_handler(
         .map(|e| e.path())
         .filter(|p| {
             p.is_file()
-                && p.file_name()
+                && p.file_stem()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".json"))
+                    .is_some_and(|n| n.starts_with("result"))
+                && p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
         })
         .collect();
 
@@ -2136,23 +2146,20 @@ async fn relocate_scan_handler(
         }
     }
 
-    let json_path = match matched_json {
-        Some(p) => p,
-        None => {
-            return missing_scan_relocate_response(
-                &format!(
-                    "No matching scan found in the selected folder.\n\
-                     The JSON files present do not contain run ID: {run_id}\n\
-                     Searched: {}",
-                    folder.display()
-                ),
-                &run_id,
-                &folder.display().to_string(),
-                &redirect_url,
-                false,
-                &csp_nonce,
-            );
-        }
+    let Some(json_path) = matched_json else {
+        return missing_scan_relocate_response(
+            &format!(
+                "No matching scan found in the selected folder.\n\
+                 The JSON files present do not contain run ID: {run_id}\n\
+                 Searched: {}",
+                folder.display()
+            ),
+            &run_id,
+            &folder.display().to_string(),
+            &redirect_url,
+            false,
+            &csp_nonce,
+        );
     };
 
     let html_path = fs::read_dir(&folder)
@@ -2163,9 +2170,11 @@ async fn relocate_scan_handler(
         .map(|e| e.path())
         .find(|p| {
             p.is_file()
-                && p.file_name()
+                && p.file_stem()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".html"))
+                    .is_some_and(|n| n.starts_with("result"))
+                && p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("html"))
         });
     let pdf_path = fs::read_dir(&folder)
         .ok()
@@ -2175,9 +2184,10 @@ async fn relocate_scan_handler(
         .map(|e| e.path())
         .find(|p| {
             p.is_file()
-                && p.file_name()
+                && p.file_stem()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".pdf"))
+                    .is_some_and(|n| n.starts_with("result"))
+                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
         });
 
     {
@@ -2271,9 +2281,8 @@ fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -
                 .map(|e| e.path())
                 .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
         });
-        let run = match read_json(&json_path) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(run) = read_json(&json_path) else {
+            continue;
         };
         let project_label = run.input_roots.first().map_or_else(
             || "Unknown Project".to_string(),
@@ -2957,7 +2966,7 @@ async fn analyze_handler(
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Form(form): Form<AnalyzeForm>,
 ) -> impl IntoResponse {
-    let Ok(_permit) = Arc::clone(&state.analyze_semaphore).try_acquire_owned() else {
+    let Ok(sem_permit) = Arc::clone(&state.analyze_semaphore).try_acquire_owned() else {
         let template = ErrorTemplate {
             message: "Server is busy — too many concurrent analyses. Please try again in a moment."
                 .to_string(),
@@ -3031,7 +3040,7 @@ async fn analyze_handler(
 
     tokio::spawn(async move {
         // Hold the permit for the lifetime of the background task.
-        let _permit = _permit;
+        let _permit = sem_permit;
 
         // Clone before moving into spawn_blocking so we can use them again afterwards.
         let git_repo_sb = git_repo_bg.clone();
@@ -3072,6 +3081,7 @@ async fn analyze_handler(
             ) {
                 runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
             }
+            drop(runs);
             return;
         }
 
@@ -3082,6 +3092,7 @@ async fn analyze_handler(
                 let message = if err.to_string().contains("analysis cancelled") {
                     let mut runs = state_bg.async_runs.lock().await;
                     runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
+                    drop(runs);
                     return;
                 } else {
                     "Analysis failed. Check that the path exists and is readable.".to_string()
@@ -3089,6 +3100,7 @@ async fn analyze_handler(
                 eprintln!("[oxide-sloc][analyze] analysis failed: {err:#}");
                 let mut runs = state_bg.async_runs.lock().await;
                 runs.insert(wait_id_bg.clone(), AsyncRunState::Failed { message });
+                drop(runs);
                 return;
             }
         };
@@ -3176,6 +3188,7 @@ async fn analyze_handler(
                             .to_string(),
                     },
                 );
+                drop(runs);
                 return;
             }
         };
@@ -3315,6 +3328,7 @@ async fn async_run_status_handler(
                         message: "Analysis timed out after 2 hours.".to_string(),
                     },
                 );
+                drop(runs);
                 return Json(AsyncRunStatusResponse::Failed {
                     message: "Analysis timed out after 2 hours.".to_string(),
                 })
@@ -3343,7 +3357,7 @@ async fn cancel_run_handler(
         return StatusCode::BAD_REQUEST.into_response();
     }
     let mut runs = state.async_runs.lock().await;
-    match runs.get(&wait_id) {
+    let resp = match runs.get(&wait_id) {
         Some(AsyncRunState::Running { cancel_token, .. }) => {
             cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
             runs.insert(wait_id, AsyncRunState::Cancelled);
@@ -3351,7 +3365,9 @@ async fn cancel_run_handler(
         }
         Some(AsyncRunState::Cancelled) => StatusCode::OK.into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
-    }
+    };
+    drop(runs);
+    resp
 }
 
 async fn async_run_result_handler(
@@ -3403,9 +3419,7 @@ async fn async_run_result_handler(
         return (StatusCode::NOT_FOUND, Html(html)).into_response();
     };
 
-    let run = if let Ok(r) = read_json(&json_path) {
-        r
-    } else {
+    let Ok(run) = read_json(&json_path) else {
         let folder_hint = json_path
             .parent()
             .map(|p| p.display().to_string())
@@ -3434,6 +3448,7 @@ async fn async_run_result_handler(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::similar_names)] // abbreviated names (fa=files_analyzed, cl=code_lines, etc.) are intentional
 fn render_result_page(
     run: &AnalysisRun,
     artifacts: &RunArtifacts,
@@ -3628,9 +3643,9 @@ fn render_result_page(
                 })
                 .sum()
         }),
-        git_branch: git_branch,
-        git_commit: git_commit,
-        git_author: git_author,
+        git_branch,
+        git_commit,
+        git_author,
         current_scan_number: prev_scan_count + 1,
         prev_scan_count,
         submodule_rows: run
@@ -4552,10 +4567,13 @@ fn delta_class(n: i64) -> &'static str {
     }
 }
 
+// ratio/percentage display, precision loss acceptable
+#[allow(clippy::cast_precision_loss)]
 fn fmt_pct(delta: i64, baseline: u64) -> String {
     if baseline == 0 {
         return "—".to_string();
     }
+    #[allow(clippy::cast_precision_loss)]
     let pct = (delta as f64 / baseline as f64) * 100.0;
     if pct > 0.049 {
         format!("+{pct:.1}%")
@@ -4800,11 +4818,14 @@ async fn compare_handler(
     // True when the selected scope had no files in the baseline — e.g. comparing a submodule
     // that only exists in the current scan or using Super-repo only on an older scan.
     let new_scope = comparison.summary.baseline_code == 0 && comparison.summary.current_code > 0;
+    // ratio/percentage display, precision loss acceptable
+    #[allow(clippy::cast_precision_loss)]
     let churn_pct = if comparison.summary.baseline_code > 0 {
         (lines_added + lines_removed) as f64 / comparison.summary.baseline_code as f64 * 100.0
     } else {
         0.0
     };
+    #[allow(clippy::cast_precision_loss)]
     let scope_flag = new_scope
         || (comparison.summary.baseline_code > 0
             && lines_added as f64 / comparison.summary.baseline_code as f64 > 0.20);
@@ -5256,6 +5277,7 @@ struct MetricsHistoryEntry {
     submodule_links: Vec<MetricsSubmoduleLink>,
 }
 
+#[allow(clippy::too_many_lines)] // history aggregation with per-run metric computation and JSON building
 async fn api_metrics_history_handler(
     State(state): State<AppState>,
     Query(query): Query<MetricsHistoryQuery>,
@@ -5268,13 +5290,11 @@ async fn api_metrics_history_handler(
         reg.entries
             .iter()
             .filter(|e| {
-                if let Some(root) = &query.root {
+                query.root.as_ref().is_none_or(|root| {
                     let resolved = resolve_input_path(root);
                     let root_str = resolved.to_string_lossy().replace('\\', "/");
                     e.input_roots.iter().any(|r| r == &root_str)
-                } else {
-                    true
-                }
+                })
             })
             .take(limit)
             .cloned()
@@ -5419,13 +5439,11 @@ async fn api_metrics_submodules_handler(
         reg.entries
             .iter()
             .filter(|e| {
-                if let Some(root) = &query.root {
+                query.root.as_ref().is_none_or(|root| {
                     let resolved = resolve_input_path(root);
                     let root_str = resolved.to_string_lossy().replace('\\', "/");
                     e.input_roots.iter().any(|r| r == &root_str)
-                } else {
-                    true
-                }
+                })
             })
             .filter_map(|e| e.json_path.clone())
             .collect()
@@ -5545,6 +5563,7 @@ async fn api_ingest_handler(
 //
 // GET /trend-reports
 
+#[allow(clippy::too_many_lines)] // trend report page with inline HTML; splitting would fragment the template
 async fn trend_report_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -5578,13 +5597,15 @@ async fn trend_report_handler(
     } else {
         watched_dirs_list
             .iter()
-            .map(|d| {
+            .fold(String::new(), |mut s, d| {
+                use std::fmt::Write as _;
                 let escaped = d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
-                format!(
+                write!(
+                    s,
                     r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
-                )
+                ).expect("write to String is infallible");
+                s
             })
-            .collect()
     };
     let watched_dirs_html = format!(
         r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
@@ -6697,6 +6718,8 @@ async fn trend_report_handler(
     Html(html).into_response()
 }
 
+#[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
+#[allow(clippy::too_many_lines)] // JSON data builder for test-metrics scope; splitting would scatter related fields
 fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
     use std::collections::HashMap;
     let mut langs: Vec<&sloc_core::LanguageSummary> = run
@@ -6859,6 +6882,7 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
     })
 }
 
+#[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
 fn build_test_scope_sub_entry(sub: &sloc_core::SubmoduleSummary) -> serde_json::Value {
     let mut langs: Vec<&sloc_core::LanguageSummary> = sub
         .language_summaries
@@ -6914,6 +6938,8 @@ fn build_test_scope_sub_entry(sub: &sloc_core::SubmoduleSummary) -> serde_json::
 }
 
 // GET /test-metrics
+#[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
+#[allow(clippy::too_many_lines)] // test-metrics page with inline HTML; splitting would fragment the template
 async fn test_metrics_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -6937,8 +6963,9 @@ async fn test_metrics_handler(
     };
 
     // Build per-language chart JSON (kept for has_coverage derivation via cov_json).
-    let _lang_tests_json: String = match &latest_run {
-        Some(r) => {
+    let _lang_tests_json: String = latest_run.as_ref().map_or_else(
+        || "[]".to_string(),
+        |r| {
             let mut langs: Vec<&sloc_core::LanguageSummary> = r
                 .totals_by_language
                 .iter()
@@ -6950,7 +6977,9 @@ async fn test_metrics_handler(
                 .map(|l| {
                     let name = l.language.display_name().replace('"', "\\\"");
                     let density = if l.code_lines > 0 {
-                        l.test_count as f64 / l.code_lines as f64 * 1000.0
+                        // ratio for density display, precision loss acceptable
+                        #[allow(clippy::cast_precision_loss)]
+                        { l.test_count as f64 / l.code_lines as f64 * 1000.0 }
                     } else {
                         0.0
                     };
@@ -6967,9 +6996,8 @@ async fn test_metrics_handler(
                 })
                 .collect();
             format!("[{}]", parts.join(","))
-        }
-        None => "[]".to_string(),
-    };
+        },
+    );
 
     // Build coverage chart JSON (per-language avg line coverage %).
     let cov_json: String = match &latest_run {
@@ -7071,7 +7099,6 @@ async fn test_metrics_handler(
     let total_files_analyzed: u64 = latest_run
         .as_ref()
         .map_or(0, |r| r.summary_totals.files_analyzed);
-    let _has_data = total_tests > 0;
     let has_coverage = !cov_json.starts_with("[]") && cov_json.len() > 2;
 
     // Aggregated coverage percentages from summary_totals
@@ -7147,14 +7174,16 @@ async fn test_metrics_handler(
     } else {
         watched_dirs_list
             .iter()
-            .map(|d| {
+            .fold(String::new(), |mut s, d| {
+                use std::fmt::Write as _;
                 let escaped =
                     d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
-                format!(
+                write!(
+                    s,
                     r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
-                )
+                ).expect("write to String is infallible");
+                s
             })
-            .collect()
     };
     let watched_dirs_html = format!(
         r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
@@ -7165,15 +7194,16 @@ async fn test_metrics_handler(
         let mut scope_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         scope_map.insert(
             "__all__".to_string(),
-            if let Some(ref run) = latest_run {
-                build_test_scope_entry(run)
-            } else {
-                serde_json::json!({"totals":{"test_count":0,"assertions":0,"suites":0,
-                    "test_files":0,"total_files":0,"density_str":"0.0","most_tested":"—",
-                    "langs_with_tests":0,"cov_line":"0","cov_fn":"0","cov_branch":"0"},
-                    "lang_tests":[],"cov":[],"cov_tiers":{"high":0,"mid":0,"low":0},
-                    "has_coverage":false,"submodules":{}})
-            },
+            latest_run.as_ref().map_or_else(
+                || {
+                    serde_json::json!({"totals":{"test_count":0,"assertions":0,"suites":0,
+                        "test_files":0,"total_files":0,"density_str":"0.0","most_tested":"—",
+                        "langs_with_tests":0,"cov_line":"0","cov_fn":"0","cov_branch":"0"},
+                        "lang_tests":[],"cov":[],"cov_tiers":{"high":0,"mid":0,"low":0},
+                        "has_coverage":false,"submodules":{}})
+                },
+                build_test_scope_entry,
+            ),
         );
         let all_roots: Vec<String> = {
             let reg = state.registry.lock().await;
@@ -8305,6 +8335,7 @@ async fn api_save_scan_profile(
     if let Err(e) = store.save(&state.scan_profiles_path) {
         tracing::warn!("failed to persist scan profiles: {e}");
     }
+    drop(store);
 
     (
         StatusCode::CREATED,
@@ -8321,6 +8352,7 @@ async fn api_delete_scan_profile(
     let before = store.profiles.len();
     store.profiles.retain(|p| p.id != id);
     if store.profiles.len() == before {
+        drop(store);
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "profile not found" })),
@@ -8330,6 +8362,7 @@ async fn api_delete_scan_profile(
     if let Err(e) = store.save(&state.scan_profiles_path) {
         tracing::warn!("failed to persist scan profiles: {e}");
     }
+    drop(store);
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -8380,7 +8413,7 @@ pub(crate) fn scan_path_to_artifacts(
 ) -> Result<(String, RunArtifacts, sloc_core::AnalysisRun)> {
     let mut config = base_config.clone();
     config.discovery.root_paths = vec![scan_path.to_path_buf()];
-    config.reporting.report_title = label.to_owned();
+    label.clone_into(&mut config.reporting.report_title);
     let run = analyze(&config, "git", None)?;
     let html = render_html(&run)?;
     let run_id = run.tool.run_id.clone();
@@ -8651,6 +8684,7 @@ fn dir_size_bytes(path: &Path) -> u64 {
     total
 }
 
+#[allow(clippy::cast_precision_loss)] // byte-count display formatting, precision loss acceptable
 fn format_dir_size(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
@@ -14770,6 +14804,8 @@ struct ScanSetupTemplate {
 "##,
     ext = "html"
 )]
+// Template structs need many bool fields to pass Askama rendering flags.
+#[allow(clippy::struct_excessive_bools)]
 struct ResultTemplate {
     version: &'static str,
     report_title: String,
@@ -18223,6 +18259,8 @@ struct CompareSelectTemplate {
 "##,
     ext = "html"
 )]
+// Template structs need many bool fields to pass Askama rendering flags.
+#[allow(clippy::struct_excessive_bools)]
 struct CompareTemplate {
     version: &'static str,
     project_label: String,

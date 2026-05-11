@@ -352,7 +352,7 @@ fn walk_root(
 
     let chunk_results: Vec<Vec<Result<Option<FileRecord>>>> =
         std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
-            let handles: Vec<_> = paths
+            paths
                 .chunks(chunk_size)
                 .map(|chunk| {
                     s.spawn(move || -> Vec<Result<Option<FileRecord>>> {
@@ -374,10 +374,6 @@ fn walk_root(
                         results
                     })
                 })
-                .collect();
-
-            handles
-                .into_iter()
                 .map(|h| {
                     h.join()
                         .map_err(|_| anyhow::anyhow!("analysis thread panicked"))

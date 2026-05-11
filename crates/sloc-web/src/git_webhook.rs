@@ -174,17 +174,15 @@ fn matches_hmac<F: Fn(&[u8], &str, &str) -> bool>(
     sig: &str,
     verify: &F,
 ) -> bool {
-    match &s.webhook_secret {
-        None => true,
-        Some(secret) => verify(body, sig, secret),
-    }
+    s.webhook_secret
+        .as_ref()
+        .is_none_or(|secret| verify(body, sig, secret))
 }
 
 fn matches_token(s: &ScanSchedule, token: &str) -> bool {
-    match &s.webhook_secret {
-        None => true,
-        Some(secret) => ct_eq(secret, token),
-    }
+    s.webhook_secret
+        .as_ref()
+        .is_none_or(|secret| ct_eq(secret, token))
 }
 
 fn is_valid_github_sig(body: &[u8], sig: &str, secret: &str) -> bool {
@@ -195,6 +193,8 @@ fn is_valid_bitbucket_sig(body: &[u8], sig: &str, secret: &str) -> bool {
     verify_bitbucket_sig(body, sig, secret)
 }
 
+// Takes owned values so each iteration can move into the async task after cloning.
+#[allow(clippy::needless_pass_by_value)]
 fn spawn_scans(state: AppState, event: WebhookEvent, schedules: Vec<ScanSchedule>) {
     for schedule in schedules {
         let st = state.clone();

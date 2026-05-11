@@ -28,8 +28,7 @@ async fn get(uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
 fn has_csp(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("content-security-policy")
-        .map(|v| v.to_str().unwrap_or("").contains("script-src"))
-        .unwrap_or(false)
+        .is_some_and(|v| v.to_str().unwrap_or("").contains("script-src"))
 }
 
 // ── public routes (no auth required) ─────────────────────────────────────────

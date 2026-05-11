@@ -172,11 +172,13 @@ impl ConfluenceClient {
             .json()
             .await?;
         let results = resp["results"].as_array();
-        if results.map_or(true, std::vec::Vec::is_empty) {
+        if results.is_none_or(std::vec::Vec::is_empty) {
             return Ok(None);
         }
         let page = &resp["results"][0];
         let id = page["id"].as_str().unwrap_or("").to_owned();
+        // Confluence version numbers are small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let ver = page["version"]["number"].as_u64().unwrap_or(1) as u32;
         Ok(Some(PageSummary {
             id,
@@ -200,11 +202,13 @@ impl ConfluenceClient {
             .json()
             .await?;
         let results = resp["results"].as_array();
-        if results.map_or(true, std::vec::Vec::is_empty) {
+        if results.is_none_or(std::vec::Vec::is_empty) {
             return Ok(None);
         }
         let page = &resp["results"][0];
         let id = page["id"].as_str().unwrap_or("").to_owned();
+        // Confluence version numbers are small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let ver = page["version"]["number"].as_u64().unwrap_or(1) as u32;
         Ok(Some(PageSummary {
             id,
@@ -432,28 +436,32 @@ pub struct RunIdQuery {
 
 pub async fn api_get_confluence_config(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.confluence.lock().await;
-    match &store.config {
-        None => Json(serde_json::json!({
-            "configured": false,
-            "tier": "cloud",
-            "base_url": "",
-            "username": "",
-            "api_token_set": false,
-            "space_key": "",
-            "parent_page_id": null,
-            "schedule_auto_post": {}
-        })),
-        Some(c) => Json(serde_json::json!({
-            "configured": true,
-            "tier": if c.tier == ConfluenceTier::Cloud { "cloud" } else { "server" },
-            "base_url": c.base_url,
-            "username": c.username,
-            "api_token_set": !c.credential.is_empty(),
-            "space_key": c.space_key,
-            "parent_page_id": c.parent_page_id,
-            "schedule_auto_post": c.schedule_auto_post
-        })),
-    }
+    Json(store.config.as_ref().map_or_else(
+        || {
+            serde_json::json!({
+                "configured": false,
+                "tier": "cloud",
+                "base_url": "",
+                "username": "",
+                "api_token_set": false,
+                "space_key": "",
+                "parent_page_id": null,
+                "schedule_auto_post": {}
+            })
+        },
+        |c| {
+            serde_json::json!({
+                "configured": true,
+                "tier": if c.tier == ConfluenceTier::Cloud { "cloud" } else { "server" },
+                "base_url": c.base_url,
+                "username": c.username,
+                "api_token_set": !c.credential.is_empty(),
+                "space_key": c.space_key,
+                "parent_page_id": c.parent_page_id,
+                "schedule_auto_post": c.schedule_auto_post
+            })
+        },
+    ))
 }
 
 pub async fn api_save_confluence_config(
@@ -488,6 +496,7 @@ pub async fn api_save_confluence_config(
         schedule_auto_post: body.schedule_auto_post.clone(),
     });
     let _ = store.save(&state.confluence_path);
+    drop(store);
     Json(serde_json::json!({ "ok": true }))
 }
 
@@ -644,9 +653,8 @@ pub async fn api_wiki_markup(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let run = match read_json(&json_path) {
-        Ok(r) => r,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(run) = read_json(&json_path) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
     let markup = render_confluence_wiki_markup(&run);
@@ -701,6 +709,7 @@ pub async fn maybe_auto_post_confluence(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn urlencoding_encode(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -710,7 +719,7 @@ fn urlencoding_encode(s: &str) -> String {
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
-                out.push_str(&format!("{b:02X}"));
+                write!(out, "{b:02X}").expect("write to String is infallible");
             }
         }
     }

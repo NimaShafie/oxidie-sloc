@@ -143,6 +143,9 @@ const fn default_true() -> bool {
 }
 
 /// Validates that `s` is a CSS hex colour: `#RGB` or `#RRGGBB`.
+///
+/// # Errors
+/// Returns an error if `s` does not start with `#` or is not a 3- or 6-digit hex colour.
 pub fn validate_hex_color(s: &str) -> Result<()> {
     let hex = s
         .strip_prefix('#')
@@ -271,9 +274,11 @@ impl Default for WebConfig {
     }
 }
 
-/// A named configuration profile.  All sub-config sections are optional; any
-/// present section *replaces* the corresponding base config section in full.
-/// Commonly used to represent different scanning contexts in the same repo
+/// A named configuration profile.
+///
+/// All sub-config sections are optional; any present section *replaces* the
+/// corresponding base config section in full. Commonly used to represent
+/// different scanning contexts in the same repo
 /// (e.g. `[profile.frontend]`, `[profile.backend]`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileConfig {

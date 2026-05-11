@@ -124,6 +124,8 @@ impl ScheduleStore {
             .unwrap_or_default()
     }
 
+    /// # Errors
+    /// Returns an error if serialization or writing to disk fails.
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;

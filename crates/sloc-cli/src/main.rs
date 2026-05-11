@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 #![allow(clippy::multiple_crate_versions)]
 
+use std::fmt::Write as FmtWrite;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -572,7 +573,7 @@ async fn main() -> Result<()> {
         Commands::Validate(args) => run_validate(&args),
         Commands::Send(args) => run_send(*args).await,
         Commands::GitScan(args) => run_git_scan(args).await,
-        Commands::GitCompare(args) => run_git_compare(args).await,
+        Commands::GitCompare(args) => run_git_compare(args),
         Commands::Watch(args) => run_watch(args).await,
         Commands::PrComment(args) => run_pr_comment(args).await,
     }
@@ -652,6 +653,9 @@ fn check_exit_conditions(
     }
 }
 
+// Multiple conditions (total and per-language) each set `violated`; an if-let-seq refactor
+// would be less clear here since both conditions need to print their own error messages.
+#[allow(clippy::useless_let_if_seq)]
 fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
     let mut violated = false;
 
@@ -954,7 +958,7 @@ fn run_validate(args: &ValidateArgs) -> Result<()> {
     let config_path = args
         .config
         .as_deref()
-        .unwrap_or(std::path::Path::new(".oxide-sloc.toml"));
+        .unwrap_or_else(|| std::path::Path::new(".oxide-sloc.toml"));
 
     if !config_path.exists() {
         anyhow::bail!(
@@ -1744,7 +1748,8 @@ async fn confluence_upsert_cloud(
     let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
     let existing_ver = find_resp["results"][0]["version"]["number"]
         .as_u64()
-        .map(|v| v as u32);
+        // Confluence version numbers are tiny; truncation is not possible in practice.
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
     if let (Some(page_id), Some(ver)) = (existing_id, existing_ver) {
         let payload = serde_json::json!({
@@ -1815,7 +1820,8 @@ async fn confluence_upsert_server(
     let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
     let existing_ver = find_resp["results"][0]["version"]["number"]
         .as_u64()
-        .map(|v| v as u32);
+        // Confluence version numbers are tiny; truncation is not possible in practice.
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
     if let (Some(page_id), Some(ver)) = (existing_id, existing_ver) {
         let payload = serde_json::json!({
@@ -1916,7 +1922,7 @@ fn percent_encode(s: &str) -> String {
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
-                out.push_str(&format!("{b:02X}"));
+                write!(out, "{b:02X}").expect("write to String is infallible");
             }
         }
     }
@@ -1965,19 +1971,20 @@ fn build_pr_comment_body(
     // Summary table
     out.push_str("| Metric | Value |\n");
     out.push_str("|--------|-------|\n");
-    out.push_str(&format!("| Files analyzed | {} |\n", totals.files_analyzed));
-    out.push_str(&format!(
-        "| Code lines | {} |\n",
-        fmt_thousands(totals.code_lines)
-    ));
-    out.push_str(&format!(
-        "| Comment lines | {} |\n",
+    writeln!(out, "| Files analyzed | {} |", totals.files_analyzed).expect("infallible");
+    writeln!(out, "| Code lines | {} |", fmt_thousands(totals.code_lines)).expect("infallible");
+    writeln!(
+        out,
+        "| Comment lines | {} |",
         fmt_thousands(totals.comment_lines)
-    ));
-    out.push_str(&format!(
-        "| Blank lines | {} |\n",
+    )
+    .expect("infallible");
+    writeln!(
+        out,
+        "| Blank lines | {} |",
         fmt_thousands(totals.blank_lines)
-    ));
+    )
+    .expect("infallible");
 
     // Delta section
     if let Some(cmp) = comparison {
@@ -1992,16 +1999,15 @@ fn build_pr_comment_body(
         out.push_str("\n### Changes vs. Target Branch\n\n");
         out.push_str("| | Delta |\n");
         out.push_str("|--|-------|\n");
-        out.push_str(&format!("| Code Δ | {} |\n", sign(s.code_lines_delta)));
-        out.push_str(&format!(
-            "| Comment Δ | {} |\n",
-            sign(s.comment_lines_delta)
-        ));
-        out.push_str(&format!("| Blank Δ | {} |\n", sign(s.blank_lines_delta)));
-        out.push_str(&format!(
-            "| Files | +{} added / -{} removed / ~{} modified |\n",
+        writeln!(out, "| Code Δ | {} |", sign(s.code_lines_delta)).expect("infallible");
+        writeln!(out, "| Comment Δ | {} |", sign(s.comment_lines_delta)).expect("infallible");
+        writeln!(out, "| Blank Δ | {} |", sign(s.blank_lines_delta)).expect("infallible");
+        writeln!(
+            out,
+            "| Files | +{} added / -{} removed / ~{} modified |",
             cmp.files_added, cmp.files_removed, cmp.files_modified
-        ));
+        )
+        .expect("infallible");
     }
 
     // Top languages
@@ -2010,20 +2016,22 @@ fn build_pr_comment_body(
         out.push_str("| Language | Files | Code | Comments | Blank |\n");
         out.push_str("|----------|-------|------|----------|-------|\n");
         for l in run.totals_by_language.iter().take(10) {
-            out.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+            writeln!(
+                out,
+                "| {} | {} | {} | {} | {} |",
                 l.language.display_name(),
                 l.files,
                 l.code_lines,
                 l.comment_lines,
                 l.blank_lines,
-            ));
+            )
+            .expect("infallible");
         }
         out.push_str("\n</details>\n");
     }
 
     if let Some(url) = report_url {
-        out.push_str(&format!("\n[View full report]({url})\n"));
+        writeln!(out, "\n[View full report]({url})").expect("infallible");
     }
 
     out.push_str("\n*Generated by [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc)*\n");
@@ -2174,7 +2182,9 @@ fn write_git_scan_outputs(
 
 // ── git-compare handler ───────────────────────────────────────────────────────
 
-async fn run_git_compare(args: GitCompareArgs) -> Result<()> {
+// Args are matched by the dispatch pattern; taking ownership is idiomatic for handler functions.
+#[allow(clippy::needless_pass_by_value)]
+fn run_git_compare(args: GitCompareArgs) -> Result<()> {
     let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
     let quiet = args.quiet;
     let dest = git_clone_path(&args.repo, &clones_dir);
@@ -2259,7 +2269,7 @@ async fn run_watch(args: WatchArgs) -> Result<()> {
         if sha == last_sha {
             continue;
         }
-        last_sha = sha.clone();
+        last_sha.clone_from(&sha);
         if !quiet {
             eprintln!("[watch] new commit {sha} — scanning…");
         }
