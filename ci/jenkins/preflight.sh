@@ -6,6 +6,12 @@
 #   # fill in JENKINS_TOKEN in ci/jenkins/.env
 #   source ci/jenkins/.env && bash ci/jenkins/preflight.sh
 #
+# Flags:
+#   --install-csp   When the CSP check (f) finds the default value, automatically copy
+#                   ci/jenkins/init.groovy.d/relax-csp.groovy into the running Jenkins
+#                   container and restart it.  Requires Docker on this machine and a
+#                   running Jenkins container (detected via `docker ps`).
+#
 # Required environment variables (set in ci/jenkins/.env):
 #   JENKINS_URL   — e.g. http://10.0.0.8:8080  (no trailing slash)
 #   JENKINS_USER  — Jenkins username (usually "admin")
@@ -25,17 +31,24 @@ if [ -n "${OXIDE_SLOC_ENV_FILE:-}" ] && [ -f "${OXIDE_SLOC_ENV_FILE}" ]; then
     set -a; . "${OXIDE_SLOC_ENV_FILE}"; set +a
 fi
 
+INSTALL_CSP=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --install-csp) INSTALL_CSP=1 ;;
+    esac
+done
+
 ANY_FAIL=0
 
 ok()   { printf '[ok]   %s\n' "$*"; }
 fail() { printf '[fail] %s\n' "$*" >&2; ANY_FAIL=1; }
+info() { printf '[info] %s\n' "$*"; }
 
 # ── Validate required variables ──────────────────────────────────────────────
 
 for var in JENKINS_URL JENKINS_USER JENKINS_TOKEN JOB_NAME; do
     if [ -z "${!var:-}" ]; then
         fail "Required variable \$$var is not set. Source ci/jenkins/.env first."
-        ANY_FAIL=1
     fi
 done
 
@@ -88,7 +101,6 @@ else
     if [ -z "$INSTALLED_JSON" ]; then
         fail "Could not retrieve plugin list from ${JENKINS_URL}/pluginManager/api/json"
     else
-        PLUGIN_CHECK_FAIL=0
         while IFS= read -r line; do
             # Skip comments and blank lines.
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -114,10 +126,8 @@ print('missing')
                 ok "Plugin ${plugin_id} is installed and enabled"
             elif [ "$is_active" == "disabled" ]; then
                 fail "Plugin ${plugin_id} is installed but disabled — enable it in Manage Jenkins → Plugins."
-                PLUGIN_CHECK_FAIL=1
             else
                 fail "Plugin ${plugin_id} is NOT installed. Install it before running the bootstrap."
-                PLUGIN_CHECK_FAIL=1
             fi
         done < "$PLUGINS_FILE"
     fi
@@ -141,7 +151,7 @@ ALT_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
     -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     "${JENKINS_URL}/job/${ALT_NAME}/api/json" 2>&1) || true
 if [ "$ALT_STATUS" = "200" ]; then
-    printf '[info] Alternate job name "%s" also exists on this Jenkins. Decide whether to keep, delete, or rename it before proceeding.\n' "$ALT_NAME"
+    info "Alternate job name \"${ALT_NAME}\" also exists on this Jenkins. Decide whether to keep, delete, or rename it before proceeding."
 fi
 
 # ── Check e: CSRF crumb endpoint responds ────────────────────────────────────
@@ -163,10 +173,29 @@ fi
 CSP=$(curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     "${JENKINS_URL}/scriptText" --data-urlencode 'script=println(System.getProperty("hudson.model.DirectoryBrowserSupport.CSP"))' 2>/dev/null || true)
 if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
-    echo "[info] hudson.model.DirectoryBrowserSupport.CSP is at default — HTML reports may render unstyled."
-    echo "       Fix (Docker): docker cp ci/jenkins/init.groovy.d/relax-csp.groovy <container>:/var/jenkins_home/init.groovy.d/relax-csp.groovy && docker restart <container>"
-    echo "       Fix (native): cp ci/jenkins/init.groovy.d/relax-csp.groovy \$JENKINS_HOME/init.groovy.d/ && systemctl restart jenkins"
-    echo "       See docs/ci-integrations.md § Setting the artifact-viewer CSP."
+    info "hudson.model.DirectoryBrowserSupport.CSP is at default — HTML reports may render unstyled."
+    info "Fix (Docker): docker cp ci/jenkins/init.groovy.d/relax-csp.groovy <container>:/var/jenkins_home/init.groovy.d/relax-csp.groovy && docker restart <container>"
+    info "Fix (native): cp ci/jenkins/init.groovy.d/relax-csp.groovy \$JENKINS_HOME/init.groovy.d/ && systemctl restart jenkins"
+    info "See docs/ci-integrations.md § Setting the artifact-viewer CSP."
+
+    if [ "$INSTALL_CSP" -eq 1 ]; then
+        CSP_GROOVY="$(cd "$(dirname "$0")" && pwd)/init.groovy.d/relax-csp.groovy"
+        if [ ! -f "$CSP_GROOVY" ]; then
+            fail "--install-csp: cannot find ${CSP_GROOVY}"
+        elif ! command -v docker >/dev/null 2>&1; then
+            fail "--install-csp: Docker is not available on this machine."
+        else
+            JENKINS_CONTAINER=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i jenkins | head -1 || true)
+            if [ -z "$JENKINS_CONTAINER" ]; then
+                fail "--install-csp: no running Jenkins container found. Start your Jenkins container first."
+            else
+                docker exec "$JENKINS_CONTAINER" mkdir -p /var/jenkins_home/init.groovy.d
+                docker cp "$CSP_GROOVY" "${JENKINS_CONTAINER}:/var/jenkins_home/init.groovy.d/relax-csp.groovy"
+                docker restart "$JENKINS_CONTAINER"
+                ok "CSP override installed and Jenkins restarted (container: ${JENKINS_CONTAINER})"
+            fi
+        fi
+    fi
 fi
 
 # ── Check g: agent system libraries for cargo --all-features ───────────────
@@ -198,7 +227,7 @@ if [ -n "$crumb" ]; then
         fail "Agent is missing system libraries (${SYSLIB_OUT#MISSING:}). Rebuild the Jenkins agent image: see docs/ci-integrations.md \"Rebuilding the agent image\"."
     else
         # Script console may be locked down or unreachable. Demote to info.
-        printf '[info] Could not query agent system libraries via /scriptText. If clippy fails with "Package wayland-client was not found", rebuild the agent image.\n'
+        info "Could not query agent system libraries via /scriptText. If clippy fails with \"Package wayland-client was not found\", rebuild the agent image."
     fi
 fi
 rm -f "$cookies"

@@ -44,15 +44,19 @@ Each section maps to one Jenkins screen.
 ## 2. Install Jenkins
 
 > **Air-gapped / recommended path:** Use the pre-built controller Docker image
-> (Option A below) which has all plugins bundled from the repository — no internet
-> access needed and no manual plugin installation required.  Skip ahead to
+> (Option A below) which has all plugins bundled from `jenkins-plugins.tar.xz`.
+> Once that archive is generated and committed, no internet access is needed and
+> no manual plugin installation is required.  Skip ahead to
 > [Step 3](#3-complete-the-setup-wizard) after starting the container.
 
 ### Option A — Bundled controller image (air-gapped, recommended)
 
 This image is built from `ci/jenkins/Dockerfile.controller` and has every required
-plugin installed from `jenkins-plugins.tar.xz` committed to the repository.
-Requires Docker.  **No internet access needed after `git clone`.**
+plugin installed from `jenkins-plugins.tar.xz` bundled into the archive.
+Requires Docker.  Once `jenkins-plugins.tar.xz` is generated and committed (see below),
+no internet access is needed after `git clone`.
+
+**No internet access needed once `jenkins-plugins.tar.xz` is committed to the repo.**
 
 ```bash
 # From the repository root — ensure jenkins-plugins.tar.xz is present:
@@ -364,11 +368,12 @@ Jenkins discovers the `parameters {}` block in the Jenkinsfile only after runnin
 once.  The first build must run **without parameters** to register them.
 
 1. On the job page, click **"Build Now"** in the left sidebar.
-   The first build will run with default values and may fail at the Analyze stage
-   if `tests/fixtures/basic` doesn't exist in the repository — that is expected.
-   What matters is that Jenkins parses the Jenkinsfile successfully.
+   The first build runs with defaults (SKIP_SONAR and SKIP_WEB_CHECK both default to
+   true for a fresh install). It should complete successfully — Analyze runs against
+   `tests/fixtures/basic` which exists in the repository, and the SonarQube and Web UI
+   stages are skipped by default.
 
-2. Wait for the build to complete (green or red — either is fine for this seed run).
+2. Wait for the build to complete. It should be **green** on the first run with default settings.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 

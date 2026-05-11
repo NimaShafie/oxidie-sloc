@@ -1011,7 +1011,7 @@ struct WarningOpportunityRow {
     .theme-toggle .icon-sun { display:none; }
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -1025,6 +1025,8 @@ struct WarningOpportunityRow {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; }
     .summary-grid { display:grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:10px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -1077,14 +1079,24 @@ struct WarningOpportunityRow {
     .export-group { display:flex; gap:6px; align-items:center; }
     .export-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
     .export-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .page-size-row { display:flex; align-items:center; gap:6px; }
+    .page-size-label { font-size:13px; color:var(--muted); font-weight:600; }
+    .page-size-select { padding:5px 10px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; cursor:pointer; }
+    .page-count-label { font-size:12px; color:var(--muted); white-space:nowrap; }
+    .pagination-bar { display:flex; align-items:center; justify-content:center; gap:14px; padding:10px 0 2px; }
+    .pager-btn { padding:6px 16px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; cursor:pointer; transition:background .15s,color .15s; }
+    .pager-btn:hover:not(:disabled) { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .pager-btn:disabled { opacity:.4; cursor:default; }
+    .pager-info { font-size:13px; color:var(--muted); font-weight:600; min-width:180px; text-align:center; }
     .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; }
     /* Clip wrapper: hides the scrollbar track that hangs 8px past the right edge */
     .table-shell-clip { overflow: hidden !important; max-height: none !important; }
-    /* Inner scroll pane is 8px wider than parent; scrollbar lives in the clipped zone */
-    #per-file-shell, #skipped-shell { overflow-y: scroll; width: calc(100% + 8px); scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--surface-2); }
-    #per-file-shell::-webkit-scrollbar, #skipped-shell::-webkit-scrollbar { width: 8px; }
-    #per-file-shell::-webkit-scrollbar-track, #skipped-shell::-webkit-scrollbar-track { background: var(--surface-2); }
-    #per-file-shell::-webkit-scrollbar-thumb, #skipped-shell::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
+    /* Skipped-files scroll pane: auto so no phantom space when content is short */
+    #skipped-shell { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--surface-2); }
+    #per-file-table tbody tr:last-child td, #skipped-table tbody tr:last-child td { border-bottom: none; }
+    #skipped-shell::-webkit-scrollbar { width: 8px; }
+    #skipped-shell::-webkit-scrollbar-track { background: var(--surface-2); }
+    #skipped-shell::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 800; background: var(--surface-2); cursor: pointer; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
@@ -1335,6 +1347,10 @@ struct WarningOpportunityRow {
       /* Release sticky column positioning (not meaningful on paper) */
       #per-file-table th:first-child,
       #per-file-table td:first-child { position: static !important; }
+      /* Show ALL rows — JS pagination hides rows via inline style; !important overrides it */
+      #per-file-table tbody tr, #skipped-table tbody tr { display: table-row !important; }
+      /* Hide pagination controls — not interactive in PDF */
+      .page-size-row, .pagination-bar { display: none !important; }
 
       thead { display: table-header-group; }
       tr { break-inside: avoid !important; }
@@ -1449,8 +1465,7 @@ struct WarningOpportunityRow {
       font-size: 14px;
       line-height: 1.6;
     }
-    .config-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 10px; }
-    .config-actions { display: flex; gap: 8px; flex-shrink: 0; margin-top: 4px; }
+    .config-actions { display: flex; gap: 8px; flex-shrink: 0; }
     .config-pre-wrap { position: relative; }
     .config-pre { margin: 0; background: #16120f; color: #d4f0d0; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; overflow: auto; resize: vertical; max-height: 320px; min-height: 100px; white-space: pre; }
     body.dark-theme .config-pre { background: #0e0c0a; color: #b8f0b8; }
@@ -1970,9 +1985,9 @@ struct WarningOpportunityRow {
       </section>
 
       <section class="panel stack">
-        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input class="search" type="search" placeholder="Filter files, languages, status, warnings..." data-table-filter="per-file-table" /></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" data-reset-table title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" data-export-csv>&#8595; CSV</button><button class="export-btn" data-export-xls>&#8595; Excel</button></div></div></div>
+        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input id="per-file-search" class="search" type="search" placeholder="Filter files, languages, status, warnings..." /><div class="page-size-row"><label class="page-size-label">Show:</label><select id="per-file-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="per-file-count-label" class="page-count-label"></span></div></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" data-reset-table title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" data-export-csv>&#8595; CSV</button><button class="export-btn" data-export-xls>&#8595; Excel</button></div></div></div>
         <div class="table-shell table-shell-clip">
-        <div id="per-file-shell" style="overflow-y:scroll;max-height:900px;">
+        <div id="per-file-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
             <colgroup>
               <col><col><col><col><col><col><col><col><col><col><col><col><col><col>
@@ -2020,12 +2035,17 @@ struct WarningOpportunityRow {
           </table>
         </div>
         </div>
+        <div id="per-file-pagination" class="pagination-bar">
+          <button id="pf-prev" class="pager-btn" disabled>&#8592; Prev</button>
+          <span id="pf-page-info" class="pager-info"></span>
+          <button id="pf-next" class="pager-btn">Next &#8594;</button>
+        </div>
       </section>
 
       <section class="panel stack">
-        <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." data-table-filter="skipped-table" /></div></div>
+        <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input id="skipped-search" class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." /><div class="page-size-row"><label class="page-size-label">Show:</label><select id="skipped-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="skipped-count-label" class="page-count-label"></span></div></div><div class="export-group"><button class="export-btn" id="skipped-export-csv">&#8595; CSV</button><button class="export-btn" id="skipped-export-xls">&#8595; Excel</button></div></div>
         <div class="table-shell table-shell-clip" style="margin-top:6px;">
-        <div id="skipped-shell" style="overflow-y:scroll;max-height:375px;">
+        <div id="skipped-shell">
           <table id="skipped-table" data-sort-table class="table-resizable">
             <thead>
               <tr>
@@ -2045,6 +2065,11 @@ struct WarningOpportunityRow {
             </tbody>
           </table>
         </div>
+        </div>
+        <div id="skipped-pagination" class="pagination-bar">
+          <button id="sk-prev" class="pager-btn" disabled>&#8592; Prev</button>
+          <span id="sk-page-info" class="pager-info"></span>
+          <button id="sk-next" class="pager-btn">Next &#8594;</button>
         </div>
       </section>
 
@@ -2136,22 +2161,24 @@ struct WarningOpportunityRow {
         {% endif %}
 
         <div>
-          <div class="config-header">
+          <details open>
+            <summary style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+              <span>Effective configuration</span>
+              <span class="config-actions" style="display:flex;gap:8px;">
+                <button type="button" class="header-button" data-copy-config>Copy</button>
+                <button type="button" class="header-button" data-download-config>Download</button>
+              </span>
+            </summary>
             <div>
-              <h3 style="margin:0 0 4px;">Effective configuration</h3>
-              <p style="margin:0;font-size:13px;color:var(--muted);">The merged, fully-resolved configuration snapshot used for this scan — includes all CLI overrides applied on top of the base config file. Use this to replay the exact run or verify what settings were active.</p>
+              <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">The merged, fully-resolved configuration snapshot used for this scan — includes all CLI overrides applied on top of the base config file. Use this to replay the exact run or verify what settings were active.</p>
+              <div class="config-pre-wrap">
+                <div class="code-block-toolbar">
+                  <button type="button" class="code-copy-btn" id="config-inline-copy-btn" aria-label="Copy configuration">Copy</button>
+                </div>
+                <pre class="config-pre" id="config-json-block">{{ config_json }}</pre>
+              </div>
             </div>
-            <div class="config-actions">
-              <button type="button" class="header-button" data-copy-config>Copy</button>
-              <button type="button" class="header-button" data-download-config>Download</button>
-            </div>
-          </div>
-          <div class="config-pre-wrap">
-            <div class="code-block-toolbar">
-              <button type="button" class="code-copy-btn" id="config-inline-copy-btn" aria-label="Copy configuration">Copy</button>
-            </div>
-            <pre class="config-pre" id="config-json-block">{{ config_json }}</pre>
-          </div>
+          </details>
         </div>
       </section>
     </div>
@@ -2233,7 +2260,8 @@ struct WarningOpportunityRow {
       var inlineCopyBtn = document.getElementById('config-inline-copy-btn');
       function handleConfigCopy(btn) {
         if (!btn || !configBlock) return;
-        btn.addEventListener('click', function () {
+        btn.addEventListener('click', function (e) {
+          e.stopPropagation();
           copyText(configBlock.textContent);
           var orig = btn.textContent;
           btn.textContent = 'Copied!';
@@ -2255,7 +2283,8 @@ struct WarningOpportunityRow {
       }
 
       if (downloadConfigBtn && configBlock) {
-        downloadConfigBtn.addEventListener('click', function () {
+        downloadConfigBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
           var blob = new Blob([configBlock.textContent], { type: 'application/json' });
           var url = URL.createObjectURL(blob);
           var a = document.createElement('a');
@@ -2291,6 +2320,7 @@ struct WarningOpportunityRow {
             });
             rows.forEach(function (row) { tbody.appendChild(row); });
             direction = direction * -1;
+            table.dispatchEvent(new CustomEvent('sloc-sorted'));
           });
         });
       });
@@ -2337,6 +2367,167 @@ struct WarningOpportunityRow {
           }, 200);
         });
       });
+
+      // ── Per-file table pagination ─────────────────────────────────────────────
+      (function () {
+        var table = document.getElementById('per-file-table');
+        if (!table) return;
+        var tbody = table.tBodies[0];
+        var searchInput = document.getElementById('per-file-search');
+        var pageSizeSelect = document.getElementById('per-file-page-size');
+        var prevBtn = document.getElementById('pf-prev');
+        var nextBtn = document.getElementById('pf-next');
+        var pageInfo = document.getElementById('pf-page-info');
+        var countLabel = document.getElementById('per-file-count-label');
+        var filteredRows = [];
+        var currentPage = 1;
+        var totalAll = tbody.rows.length;
+
+        function getPageSize() {
+          var v = pageSizeSelect ? pageSizeSelect.value : '20';
+          return v === 'all' ? Infinity : parseInt(v, 10);
+        }
+
+        function applyFilter() {
+          var q = searchInput ? searchInput.value.toLowerCase() : '';
+          var rows = Array.prototype.slice.call(tbody.rows);
+          filteredRows = q === '' ? rows : rows.filter(function (row) {
+            return row.textContent.toLowerCase().indexOf(q) >= 0;
+          });
+          currentPage = 1;
+          render();
+        }
+
+        function render() {
+          var ps = getPageSize();
+          var total = filteredRows.length;
+          var totalPages = ps === Infinity ? 1 : Math.max(1, Math.ceil(total / ps));
+          if (currentPage > totalPages) currentPage = totalPages;
+          if (currentPage < 1) currentPage = 1;
+          var start = ps === Infinity ? 0 : (currentPage - 1) * ps;
+          var end = ps === Infinity ? total : Math.min(start + ps, total);
+          Array.prototype.forEach.call(tbody.rows, function (row) { row.style.display = 'none'; });
+          for (var i = start; i < end; i++) { filteredRows[i].style.display = ''; }
+          if (pageInfo) {
+            if (total === 0) {
+              pageInfo.textContent = 'No results';
+            } else if (ps === Infinity) {
+              pageInfo.textContent = 'All ' + total.toLocaleString() + ' files';
+            } else {
+              pageInfo.textContent = (start + 1) + '–' + end + ' of ' + total.toLocaleString() + ' files';
+            }
+          }
+          if (countLabel) {
+            countLabel.textContent = (total < totalAll && total > 0) ? '(' + total.toLocaleString() + ' matching)' : '';
+          }
+          if (prevBtn) prevBtn.disabled = currentPage <= 1 || ps === Infinity;
+          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || ps === Infinity;
+        }
+
+        if (searchInput) {
+          var filterTimer = null;
+          searchInput.addEventListener('input', function () {
+            clearTimeout(filterTimer);
+            filterTimer = setTimeout(applyFilter, 200);
+          });
+        }
+        if (pageSizeSelect) {
+          pageSizeSelect.addEventListener('change', function () { currentPage = 1; render(); });
+        }
+        if (prevBtn) {
+          prevBtn.addEventListener('click', function () { if (currentPage > 1) { currentPage--; render(); } });
+        }
+        if (nextBtn) {
+          nextBtn.addEventListener('click', function () {
+            var ps = getPageSize();
+            var totalPages = ps === Infinity ? 1 : Math.ceil(filteredRows.length / ps);
+            if (currentPage < totalPages) { currentPage++; render(); }
+          });
+        }
+        table.addEventListener('sloc-sorted', function () { applyFilter(); });
+        window._pfPaginationReset = function () { currentPage = 1; applyFilter(); };
+        applyFilter();
+      })();
+
+      // ── Skipped-files table pagination ───────────────────────────────────────
+      (function () {
+        var table = document.getElementById('skipped-table');
+        if (!table) return;
+        var tbody = table.tBodies[0];
+        var searchInput = document.getElementById('skipped-search');
+        var pageSizeSelect = document.getElementById('skipped-page-size');
+        var prevBtn = document.getElementById('sk-prev');
+        var nextBtn = document.getElementById('sk-next');
+        var pageInfo = document.getElementById('sk-page-info');
+        var countLabel = document.getElementById('skipped-count-label');
+        var filteredRows = [];
+        var currentPage = 1;
+        var totalAll = tbody.rows.length;
+
+        function getPageSize() {
+          var v = pageSizeSelect ? pageSizeSelect.value : '20';
+          return v === 'all' ? Infinity : parseInt(v, 10);
+        }
+
+        function applyFilter() {
+          var q = searchInput ? searchInput.value.toLowerCase() : '';
+          var rows = Array.prototype.slice.call(tbody.rows);
+          filteredRows = q === '' ? rows : rows.filter(function (row) {
+            return row.textContent.toLowerCase().indexOf(q) >= 0;
+          });
+          currentPage = 1;
+          render();
+        }
+
+        function render() {
+          var ps = getPageSize();
+          var total = filteredRows.length;
+          var totalPages = ps === Infinity ? 1 : Math.max(1, Math.ceil(total / ps));
+          if (currentPage > totalPages) currentPage = totalPages;
+          if (currentPage < 1) currentPage = 1;
+          var start = ps === Infinity ? 0 : (currentPage - 1) * ps;
+          var end = ps === Infinity ? total : Math.min(start + ps, total);
+          Array.prototype.forEach.call(tbody.rows, function (row) { row.style.display = 'none'; });
+          for (var i = start; i < end; i++) { filteredRows[i].style.display = ''; }
+          if (pageInfo) {
+            if (total === 0) {
+              pageInfo.textContent = 'No results';
+            } else if (ps === Infinity) {
+              pageInfo.textContent = 'All ' + total.toLocaleString() + ' files';
+            } else {
+              pageInfo.textContent = (start + 1) + '–' + end + ' of ' + total.toLocaleString() + ' files';
+            }
+          }
+          if (countLabel) {
+            countLabel.textContent = (total < totalAll && total > 0) ? '(' + total.toLocaleString() + ' matching)' : '';
+          }
+          if (prevBtn) prevBtn.disabled = currentPage <= 1 || ps === Infinity;
+          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || ps === Infinity;
+        }
+
+        if (searchInput) {
+          var filterTimer = null;
+          searchInput.addEventListener('input', function () {
+            clearTimeout(filterTimer);
+            filterTimer = setTimeout(applyFilter, 200);
+          });
+        }
+        if (pageSizeSelect) {
+          pageSizeSelect.addEventListener('change', function () { currentPage = 1; render(); });
+        }
+        if (prevBtn) {
+          prevBtn.addEventListener('click', function () { if (currentPage > 1) { currentPage--; render(); } });
+        }
+        if (nextBtn) {
+          nextBtn.addEventListener('click', function () {
+            var ps = getPageSize();
+            var totalPages = ps === Infinity ? 1 : Math.ceil(filteredRows.length / ps);
+            if (currentPage < totalPages) { currentPage++; render(); }
+          });
+        }
+        table.addEventListener('sloc-sorted', function () { applyFilter(); });
+        applyFilter();
+      })();
     })();
 
     (function randomizeWatermarks() {
@@ -2441,14 +2632,25 @@ struct WarningOpportunityRow {
       if (shell) shell.scrollLeft = 0;
       Array.prototype.slice.call(tbl.querySelectorAll('th')).forEach(function(th) { th.style.width = ''; });
       Array.prototype.slice.call(tbl.querySelectorAll('col')).forEach(function(c) { c.style.width = ''; });
+      if (window._pfPaginationReset) window._pfPaginationReset();
+      var si = document.getElementById('per-file-search');
+      if (si) si.value = '';
     };
     var _rh=['File','Language','Physical Lines','Code Lines','Comments','Blank','Mixed Separate','Functions','Classes','Variables','Imports'];
+    var _titleSlug="{{ title }}".replace(/[^a-zA-Z0-9\-]/g,'_').replace(/_+/g,'_').replace(/^_+|_+$/g,'');
+    var _commitSlug="{% if let Some(c) = run.git_commit_short %}{{ c }}{% endif %}";
+    var _exportSlug='per-file_'+_titleSlug+(_commitSlug?'_'+_commitSlug:'');
     function getReportExportRows(){var r=[];document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<11)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim(),tds[3].textContent.trim(),tds[4].textContent.trim(),tds[5].textContent.trim(),tds[6].textContent.trim(),tds[7].textContent.trim(),tds[8].textContent.trim(),tds[9].textContent.trim(),tds[10].textContent.trim()]);});return r;}
-    window.exportReportCsv=function(){slocCsv('report-per-file.csv',_rh,getReportExportRows());};
-    window.exportReportXls=function(){slocXls('report-per-file.xlsx','Per-File Detail',_rh,getReportExportRows());};
-    Array.prototype.slice.call(document.querySelectorAll('[data-export-csv]')).forEach(function(btn){btn.addEventListener('click',function(){slocCsv('report-per-file.csv',_rh,getReportExportRows());});});
-    Array.prototype.slice.call(document.querySelectorAll('[data-export-xls]')).forEach(function(btn){btn.addEventListener('click',function(){slocXls('report-per-file.xlsx','Per-File Detail',_rh,getReportExportRows());});});
+    window.exportReportCsv=function(){slocCsv(_exportSlug+'.csv',_rh,getReportExportRows());};
+    window.exportReportXls=function(){slocXls(_exportSlug+'.xlsx','Per-File Detail',_rh,getReportExportRows());};
+    Array.prototype.slice.call(document.querySelectorAll('[data-export-csv]')).forEach(function(btn){btn.addEventListener('click',function(){slocCsv(_exportSlug+'.csv',_rh,getReportExportRows());});});
+    Array.prototype.slice.call(document.querySelectorAll('[data-export-xls]')).forEach(function(btn){btn.addEventListener('click',function(){slocXls(_exportSlug+'.xlsx','Per-File Detail',_rh,getReportExportRows());});});
     Array.prototype.slice.call(document.querySelectorAll('[data-reset-table]')).forEach(function(btn){btn.addEventListener('click',window.resetPerFileTable);});
+    var _skippedRh=['File','Status','Warnings'];
+    var _skippedSlug='skipped_'+_titleSlug+(_commitSlug?'_'+_commitSlug:'');
+    function getSkippedExportRows(){var r=[];document.querySelectorAll('#skipped-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<3)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim()]);});return r;}
+    (function(){var b=document.getElementById('skipped-export-csv');if(b)b.addEventListener('click',function(){slocCsv(_skippedSlug+'.csv',_skippedRh,getSkippedExportRows());});})();
+    (function(){var b=document.getElementById('skipped-export-xls');if(b)b.addEventListener('click',function(){slocXls(_skippedSlug+'.xlsx','Skipped Files',_skippedRh,getSkippedExportRows());});})();
     // ── Chart.js initialization ───────────────────────────────────────────────
     (function() {
       var D = {{ lang_chart_json|safe }};
@@ -3169,28 +3371,6 @@ struct WarningOpportunityRow {
       });
     });
 
-    // Skipped-table row cap.
-    (function() {
-      function capSkipped() {
-        var shell = document.getElementById('skipped-shell');
-        if (!shell) return;
-        var rows = shell.querySelectorAll('tbody tr');
-        if (rows.length <= 9) return;
-        var thead = shell.querySelector('thead');
-        var headH = thead ? thead.offsetHeight : 38;
-        var rowH  = rows[0] ? rows[0].offsetHeight : 37;
-        shell.style.maxHeight = (headH + rowH * 9 + 2) + 'px';
-      }
-      function apply() {
-        capSkipped();
-      }
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', apply);
-      } else {
-        apply();
-      }
-      window.addEventListener('resize', apply);
-    })();
   </script>
   <script nonce="{{ nonce }}">
   (function(){
@@ -3200,11 +3380,12 @@ struct WarningOpportunityRow {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});

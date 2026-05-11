@@ -57,8 +57,8 @@ Then open `http://<your-ip>:4317` from any device on the same network (`hostname
 > `Authorization: Bearer <key>` header — browsers don't send this on their own.
 > Instead, navigate to `http://<your-ip>:4317/auth/login` and paste the key into the
 > sign-in form (the server sets an `HttpOnly` session cookie for subsequent requests).
-> Alternatively: leave `SLOC_API_KEY` unset for a quick trusted-LAN test (all endpoints
-> become unauthenticated), or use a header-injecting extension (ModHeader / Requestly).
+> Alternatively: pass `--no-auth` to `serve-server.sh` for a quick trusted-LAN test (all
+> endpoints become unauthenticated), or use a header-injecting extension (ModHeader / Requestly).
 
 When an API key is set, CLI/curl callers must include it:
 

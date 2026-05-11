@@ -9,6 +9,7 @@
 #   bash scripts/serve-server.sh
 #   bash scripts/serve-server.sh --port 8080
 #   bash scripts/serve-server.sh --open-firewall
+#   bash scripts/serve-server.sh --no-auth   # skip key generation; all endpoints unauthenticated
 #   SLOC_API_KEY=mysecret bash scripts/serve-server.sh
 #
 # What this does vs. run.sh --host:
@@ -37,9 +38,11 @@ fi
 
 # Parse flags
 OPEN_FIREWALL=false
+NO_AUTH=false
 for arg in "$@"; do
     case "$arg" in
         --open-firewall) OPEN_FIREWALL=true ;;
+        --no-auth) NO_AUTH=true ;;
         --port) ;;            # next arg consumed below
         --port=*) SLOC_PORT="${arg#--port=}" ;;
         *) ;;
@@ -52,7 +55,13 @@ for arg in "$@"; do
 done
 
 # ── API key setup ──────────────────────────────────────────────────────────────
-if [[ -z "${SLOC_API_KEY:-}" ]]; then
+_no_auth_mode=false
+if [[ "$NO_AUTH" == true ]]; then
+    # --no-auth: skip key generation entirely; child process gets no SLOC_API_KEY
+    unset SLOC_API_KEY
+    _key_generated=false
+    _no_auth_mode=true
+elif [[ -z "${SLOC_API_KEY:-}" ]]; then
     if command -v openssl &>/dev/null; then
         SLOC_API_KEY="$(openssl rand -hex 32)"
     else
@@ -62,9 +71,9 @@ if [[ -z "${SLOC_API_KEY:-}" ]]; then
     export SLOC_API_KEY
     _key_generated=true
 else
+    export SLOC_API_KEY
     _key_generated=false
 fi
-export SLOC_API_KEY
 
 # ── Detect LAN IPs ─────────────────────────────────────────────────────────────
 get_lan_ips() {
@@ -209,7 +218,10 @@ print_banner() {
     fi
     printf '\n'
 
-    if [[ "$_key_generated" == true ]]; then
+    if [[ "$_no_auth_mode" == true ]]; then
+        printf '  *** WARNING: --no-auth is set — all endpoints are UNAUTHENTICATED ***\n'
+        printf '  Do not use this mode on untrusted networks.\n'
+    elif [[ "$_key_generated" == true ]]; then
         printf '  API key (generated for this session):\n'
         printf '    %s\n' "$SLOC_API_KEY"
         printf '\n'
@@ -230,7 +242,7 @@ print_banner() {
             printf '    http://%s:%s/auth/login\n' "$first_ip" "$SLOC_PORT"
             printf '\n'
             printf '  For a quick LAN test without auth:\n'
-            printf '    unset SLOC_API_KEY && bash scripts/serve-server.sh\n'
+            printf '    bash scripts/serve-server.sh --no-auth\n'
             printf '  (warning: all endpoints become unauthenticated)\n'
             printf '\n'
             printf '  Auth lockout: %d failed attempts from the same IP triggers a\n' "${SLOC_AUTH_LOCKOUT_FAILS:-10}"

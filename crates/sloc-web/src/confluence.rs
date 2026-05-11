@@ -39,6 +39,7 @@ pub struct ConfluenceConfig {
     /// Cloud: Atlassian account email. Server: username (blank if using a PAT).
     pub username: String,
     /// Cloud: API token. Server: password or Personal Access Token.
+    #[serde(skip)]
     pub credential: String,
     pub space_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,10 +70,16 @@ pub struct ConfluenceConfigStore {
 
 impl ConfluenceConfigStore {
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
+        let mut store: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(ref mut cfg) = store.config {
+            if let Ok(token) = std::env::var("SLOC_CONFLUENCE_TOKEN") {
+                cfg.credential = token;
+            }
+        }
+        store
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {

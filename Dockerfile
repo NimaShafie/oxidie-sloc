@@ -47,10 +47,14 @@ FROM debian@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c
 # Install Chromium for PDF export (headless).
 # For a fully air-gapped Docker host, build this layer from a pre-populated
 # apt mirror or use a pre-built image that already contains chromium.
+# To find the version available on a target Debian image:
+#   docker run --rm debian:bookworm-slim apt-cache policy chromium
+# Override at build time: docker build --build-arg CHROMIUM_VERSION=<version> .
+ARG CHROMIUM_VERSION=120.0.6099.109-1~deb12u1
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
-    chromium \
+    "chromium=${CHROMIUM_VERSION}" \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
