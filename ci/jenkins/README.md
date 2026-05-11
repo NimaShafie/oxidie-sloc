@@ -154,9 +154,9 @@ All lines must print `[ok]`. Fix any `[fail]` before continuing.
 
 ## Installing plugins (air-gapped — recommended)
 
-All required plugins are bundled with the repository in `jenkins-plugins.tar.xz`,
+All required plugins can be bundled for air-gapped installs into `jenkins-plugins.tar.xz`
 following the same model as `vendor.tar.xz` for Rust crates.
-No internet access is needed after a plain `git clone`.
+Generate and commit it once (see below), then every `git clone` is fully offline.
 
 The full plugin list is in `ci/jenkins/plugins.txt`.
 
@@ -257,10 +257,15 @@ Only use this when the machine has internet access and a running Jenkins instanc
 **Docker:**
 ```bash
 docker exec -u root <container> jenkins-plugin-cli \
+  --plugin-download-directory /var/jenkins_home/plugins \
   --plugins $(grep -Ev '^[[:space:]]*#|^[[:space:]]*$' ci/jenkins/plugins.txt \
               | awk '{print $1}' | tr '\n' ' ')
 docker restart <container>
 ```
+
+Without `--plugin-download-directory`, plugins land in `/usr/share/jenkins/ref/plugins/`
+which only seeds a brand-new `JENKINS_HOME` on first start — a running instance never
+picks them up.  The flag redirects downloads directly into the active plugins directory.
 
 **Native (Jenkins CLI jar):**
 ```bash

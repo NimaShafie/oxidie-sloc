@@ -49,13 +49,8 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 fn constant_eq_str(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    use subtle::ConstantTimeEq;
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 // ── payload parsers ───────────────────────────────────────────────────────────

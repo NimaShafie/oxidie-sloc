@@ -1983,6 +1983,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "uuid",
 ]

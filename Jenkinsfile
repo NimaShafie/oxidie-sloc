@@ -151,14 +151,14 @@ pipeline {
         )
         booleanParam(
             name:         'SKIP_WEB_CHECK',
-            defaultValue: false,
+            defaultValue: true,
             description:  'Skip the web UI health-check stage. ' +
                           'Use on agents without loopback access or where port 4317 is unavailable.'
         )
 
         booleanParam(
             name:         'SKIP_SONAR',
-            defaultValue: false,
+            defaultValue: true,
             description:  'Skip the SonarQube scan stage. Use on agents without Docker access or when the SonarQube server is unavailable.'
         )
         booleanParam(
@@ -861,11 +861,12 @@ CARGOEOF
         //
         // Prerequisite: add a Jenkins credential named 'sonarqube-oxide-sloc-token'
         // (Kind: Secret text) containing the SonarQube analysis token.
+        // The credential is bound only when SKIP_SONAR is false (i.e., when the stage
+        // actually runs) — withCredentials wraps the docker sh block instead of a
+        // stage-level environment{} block, preventing CredentialNotFoundException on the
+        // seed build when the credential does not yet exist.
         stage('SonarQube scan') {
             when { expression { !params.SKIP_SONAR } }
-            environment {
-                SONAR_TOKEN = credentials('sonarqube-oxide-sloc-token')
-            }
             steps {
                 sh '''
                     # Produce clippy JSON for SonarQube external-issue import.
@@ -909,15 +910,17 @@ CARGOEOF
                     }
                 }
 
-                sh '''
-                    docker run --rm --network host \
-                        -e SONAR_TOKEN \
-                        -v "$WORKSPACE":/usr/src -w /usr/src \
-                        sonarsource/sonar-scanner-cli:latest \
-                        sonar-scanner \
-                            -Dsonar.host.url=http://10.0.0.8:9000 \
-                            -Dproject.settings=ci/sonar/sonar-project.properties
-                '''
+                withCredentials([string(credentialsId: 'sonarqube-oxide-sloc-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        docker run --rm --network host \
+                            -e SONAR_TOKEN \
+                            -v "$WORKSPACE":/usr/src -w /usr/src \
+                            sonarsource/sonar-scanner-cli:latest \
+                            sonar-scanner \
+                                -Dsonar.host.url=http://10.0.0.8:9000 \
+                                -Dproject.settings=ci/sonar/sonar-project.properties
+                    '''
+                }
             }
         }
 

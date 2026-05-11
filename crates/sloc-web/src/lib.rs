@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
-#![allow(clippy::multiple_crate_versions)]
 
 static IMG_LOGO_TEXT: &[u8] = include_bytes!("../assets/logo/logo-text.png");
 static IMG_LOGO_SMALL: &[u8] = include_bytes!("../assets/logo/small-logo.png");
@@ -276,6 +275,37 @@ impl IpRateLimiter {
                 .map_or(0, |r| r.as_secs())
         })
     }
+
+    fn spawn_pruning_task(limiter: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // consume the immediate first tick
+            loop {
+                interval.tick().await;
+                let now = Instant::now();
+                let cutoff = now.checked_sub(limiter.window).unwrap_or(now);
+                {
+                    let mut state = limiter
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.retain(|_, bucket| {
+                        while bucket.front().is_some_and(|t| *t <= cutoff) {
+                            bucket.pop_front();
+                        }
+                        !bucket.is_empty()
+                    });
+                }
+                {
+                    let mut auth = limiter
+                        .auth_failures
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    auth.retain(|_, e| e.1.elapsed() <= limiter.auth_lockout_window);
+                }
+            }
+        });
+    }
 }
 
 /// Carries context from scan time to result render time (stored inside RunArtifacts).
@@ -358,6 +388,7 @@ struct AppState {
     /// Named scan profiles saved by the user via the web UI.
     scan_profiles: Arc<Mutex<ScanProfileStore>>,
     scan_profiles_path: PathBuf,
+    sessions: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
     /// Persisted Confluence integration settings.
     confluence: Arc<Mutex<confluence::ConfluenceConfigStore>>,
     confluence_path: PathBuf,
@@ -394,6 +425,7 @@ fn build_router(state: AppState) -> Router {
         .route("/pick-file", get(pick_file_handler))
         .route("/locate-report", post(locate_report_handler))
         .route("/locate-reports-dir", post(locate_reports_dir_handler))
+        .route("/relocate-scan", post(relocate_scan_handler))
         .route("/watched-dirs/add", post(add_watched_dir_handler))
         .route("/watched-dirs/remove", post(remove_watched_dir_handler))
         .route("/watched-dirs/refresh", post(refresh_watched_dirs_handler))
@@ -524,6 +556,7 @@ pub fn make_test_router() -> Router {
         schedules_path: tmp.join("schedules.json"),
         scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
         scan_profiles_path: tmp.join("scan_profiles.json"),
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
         confluence_path: tmp.join("confluence_config.json"),
         watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
@@ -608,6 +641,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         auth_lockout_threshold,
         Duration::from_secs(auth_lockout_secs),
     ));
+    IpRateLimiter::spawn_pruning_task(Arc::clone(&rate_limiter));
 
     let git_clones_dir = resolve_git_clones_dir(&output_root);
     let schedules_path = std::env::var("SLOC_SCHEDULES_PATH")
@@ -642,6 +676,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         schedules_path,
         scan_profiles: Arc::new(Mutex::new(scan_profiles)),
         scan_profiles_path,
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         confluence: Arc::new(Mutex::new(confluence)),
         confluence_path,
         watched_dirs: Arc::new(Mutex::new(watched_dirs)),
@@ -896,18 +931,34 @@ async fn require_api_key(
         .and_then(extract_session_cookie)
         .map(str::to_owned);
 
+    let session_valid = session_cookie.as_deref().is_some_and(|tok| {
+        let now = Instant::now();
+        let mut sessions = state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&expiry) = sessions.get(tok) {
+            if now < expiry {
+                return true;
+            }
+            sessions.remove(tok);
+        }
+        false
+    });
+
     let any_credential_provided =
         auth_header.is_some() || x_api_key.is_some() || session_cookie.is_some();
 
-    let valid = [&auth_header, &x_api_key, &session_cookie]
-        .iter()
-        .filter_map(|o| o.as_deref())
-        .any(|k| {
-            keys.iter().any(|expected| {
-                use secrecy::ExposeSecret;
-                ct_eq(k, expected.expose_secret())
-            })
-        });
+    let valid = session_valid
+        || [&auth_header, &x_api_key]
+            .iter()
+            .filter_map(|o| o.as_deref())
+            .any(|k| {
+                keys.iter().any(|expected| {
+                    use secrecy::ExposeSecret;
+                    ct_eq(k, expected.expose_secret())
+                })
+            });
 
     if valid {
         return next.run(req).await;
@@ -1087,7 +1138,7 @@ async fn auth_login_post(
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("/");
-    let safe_next = if next_url.starts_with('/') {
+    let safe_next = if next_url.starts_with('/') && !next_url.starts_with("//") {
         next_url
     } else {
         "/"
@@ -1099,10 +1150,18 @@ async fn auth_login_post(
     });
 
     if valid {
+        const SESSION_SECS: u64 = 8 * 3600;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let expiry = Instant::now() + Duration::from_secs(SESSION_SECS);
+        state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), expiry);
         let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
         let cookie_value = format!(
-            "sloc_session={}; Path=/; HttpOnly; SameSite=Strict{}",
-            form.key, secure_flag,
+            "sloc_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+            session_id, SESSION_SECS, secure_flag,
         );
         let location =
             HeaderValue::from_str(safe_next).unwrap_or_else(|_| HeaderValue::from_static("/"));
@@ -1365,7 +1424,7 @@ async fn scan_setup_handler(
                         .and_then(|s| serde_json::from_str(&s).ok());
                     serde_json::json!({
                         "project_label": e.project_label,
-                        "timestamp": fmt_pst(e.timestamp_utc),
+                        "timestamp": fmt_la_time(e.timestamp_utc),
                         "path": e.input_roots.first().map(|s| sanitize_path_str(s)).unwrap_or_default(),
                         "config": config_val,
                     })
@@ -1904,16 +1963,21 @@ async fn locate_reports_dir_handler(
             Some(p) => p.to_path_buf(),
             None => continue,
         };
-        // Skip if this directory is already registered.
+        // Skip if this directory is already registered AND the artifact still exists on disk.
+        // A stale entry (file moved/deleted) must not block re-scanning the same directory.
         let already = reg.entries.iter().any(|e| {
-            e.json_path
+            let dir_match = e
+                .json_path
                 .as_ref()
                 .and_then(|p| p.parent())
                 .is_some_and(|p| p == parent)
                 || e.html_path
                     .as_ref()
                     .and_then(|p| p.parent())
-                    .is_some_and(|p| p == parent)
+                    .is_some_and(|p| p == parent);
+            dir_match
+                && (e.json_path.as_ref().is_some_and(|p| p.exists())
+                    || e.html_path.as_ref().is_some_and(|p| p.exists()))
         });
         if already {
             continue;
@@ -1975,6 +2039,191 @@ async fn locate_reports_dir_handler(
     axum::response::Redirect::to(&format!("/view-reports?linked={linked_count}")).into_response()
 }
 
+#[derive(Deserialize)]
+struct RelocateScanForm {
+    run_id: String,
+    folder_path: String,
+    redirect_url: String,
+}
+
+async fn relocate_scan_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+    Form(form): Form<RelocateScanForm>,
+) -> impl IntoResponse {
+    if state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let run_id = form.run_id.trim().to_string();
+    let redirect_url = form.redirect_url.trim().to_string();
+
+    let run_exists = {
+        let reg = state.registry.lock().await;
+        reg.find_by_run_id(&run_id).is_some()
+    };
+    if !run_exists {
+        let html = ErrorTemplate {
+            message: format!("Run ID '{run_id}' not found in registry."),
+            last_report_url: Some("/compare-scans".to_string()),
+            last_report_label: Some("Compare Scans".to_string()),
+            csp_nonce: csp_nonce.clone(),
+        }
+        .render()
+        .unwrap_or_else(|_| "<pre>Error.</pre>".to_string());
+        return Html(html).into_response();
+    }
+
+    let folder = match fs::canonicalize(PathBuf::from(form.folder_path.trim())) {
+        Ok(p) => strip_unc_prefix(p),
+        Err(_) => {
+            return missing_scan_relocate_response(
+                "Folder not found or path is invalid.",
+                &run_id,
+                form.folder_path.trim(),
+                &redirect_url,
+                false,
+                &csp_nonce,
+            );
+        }
+    };
+
+    if !folder.is_dir() {
+        return missing_scan_relocate_response(
+            "Selected path is not a directory.",
+            &run_id,
+            &folder.display().to_string(),
+            &redirect_url,
+            false,
+            &csp_nonce,
+        );
+    }
+
+    let json_candidates: Vec<PathBuf> = fs::read_dir(&folder)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".json"))
+        })
+        .collect();
+
+    if json_candidates.is_empty() {
+        return missing_scan_relocate_response(
+            &format!(
+                "No result JSON files found in the selected folder.\nSearched: {}",
+                folder.display()
+            ),
+            &run_id,
+            &folder.display().to_string(),
+            &redirect_url,
+            false,
+            &csp_nonce,
+        );
+    }
+
+    let mut matched_json: Option<PathBuf> = None;
+    for candidate in &json_candidates {
+        if let Ok(run) = read_json(candidate) {
+            if run.tool.run_id == run_id {
+                matched_json = Some(candidate.clone());
+                break;
+            }
+        }
+    }
+
+    let json_path = match matched_json {
+        Some(p) => p,
+        None => {
+            return missing_scan_relocate_response(
+                &format!(
+                    "No matching scan found in the selected folder.\n\
+                     The JSON files present do not contain run ID: {run_id}\n\
+                     Searched: {}",
+                    folder.display()
+                ),
+                &run_id,
+                &folder.display().to_string(),
+                &redirect_url,
+                false,
+                &csp_nonce,
+            );
+        }
+    };
+
+    let html_path = fs::read_dir(&folder)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".html"))
+        });
+    let pdf_path = fs::read_dir(&folder)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("result") && n.ends_with(".pdf"))
+        });
+
+    {
+        let mut reg = state.registry.lock().await;
+        if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
+            entry.json_path = Some(json_path);
+            if let Some(hp) = html_path {
+                entry.html_path = Some(hp);
+            }
+            if let Some(pp) = pdf_path {
+                entry.pdf_path = Some(pp);
+            }
+        }
+        let _ = reg.save(&state.registry_path);
+    }
+
+    let safe_redirect = if redirect_url.starts_with('/') && !redirect_url.starts_with("//") {
+        redirect_url
+    } else {
+        "/compare-scans".to_string()
+    };
+    axum::response::Redirect::to(&safe_redirect).into_response()
+}
+
+fn missing_scan_relocate_response(
+    message: &str,
+    run_id: &str,
+    folder_hint: &str,
+    redirect_url: &str,
+    server_mode: bool,
+    csp_nonce: &str,
+) -> axum::response::Response {
+    let html = RelocateScanTemplate {
+        message: message.to_string(),
+        run_id: run_id.to_string(),
+        folder_hint: folder_hint.to_string(),
+        redirect_url: redirect_url.to_string(),
+        server_mode,
+        csp_nonce: csp_nonce.to_owned(),
+    }
+    .render()
+    .unwrap_or_else(|_| "<pre>Error.</pre>".to_string());
+    (StatusCode::NOT_FOUND, Html(html)).into_response()
+}
+
 // ── Watched-directory helpers ─────────────────────────────────────────────────
 
 /// Scan `folder` (and one level of subdirs) for `result*.json` files and add any new ones to `reg`.
@@ -2002,14 +2251,18 @@ fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -
             None => continue,
         };
         let already = reg.entries.iter().any(|e| {
-            e.json_path
+            let dir_match = e
+                .json_path
                 .as_ref()
                 .and_then(|p| p.parent())
                 .is_some_and(|p| p == parent)
                 || e.html_path
                     .as_ref()
                     .and_then(|p| p.parent())
-                    .is_some_and(|p| p == parent)
+                    .is_some_and(|p| p == parent);
+            dir_match
+                && (e.json_path.as_ref().is_some_and(|p| p.exists())
+                    || e.html_path.as_ref().is_some_and(|p| p.exists()))
         });
         if already {
             continue;
@@ -2265,18 +2518,37 @@ async fn open_path_handler(
     };
 
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args([
-            "/c",
-            "start",
-            "",
-            "/max",
-            "explorer.exe",
-            &target.to_string_lossy(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    {
+        // Open the folder in Explorer, then use SetForegroundWindow + ShowWindow(SW_MAXIMIZE=3)
+        // to ensure the window surfaces on top of all other windows.  The path is passed via
+        // an environment variable to avoid any command-injection or escaping issues.
+        let ps_cmd = "Add-Type -TypeDefinition \
+            'using System;using System.Runtime.InteropServices;\
+            public class WF{\
+              [DllImport(\"user32.dll\")]public static extern bool SetForegroundWindow(IntPtr h);\
+              [DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int c);\
+            }'; \
+            $p=$env:SLOC_OPEN_PATH; \
+            $sh=New-Object -ComObject Shell.Application; \
+            $sh.Open($p); \
+            Start-Sleep -Milliseconds 600; \
+            foreach($w in $sh.Windows()){ \
+              try{ \
+                if([System.IO.Path]::GetFullPath($w.Document.Folder.Self.Path) -eq \
+                   [System.IO.Path]::GetFullPath($p)){ \
+                  [WF]::ShowWindow($w.HWND,3); \
+                  [WF]::SetForegroundWindow($w.HWND); \
+                  break \
+                } \
+              }catch{} \
+            }";
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd])
+            .env("SLOC_OPEN_PATH", target.to_string_lossy().as_ref())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open")
         .arg(&target)
@@ -3136,16 +3408,24 @@ async fn async_run_result_handler(
 
     let run = match read_json(&json_path) {
         Ok(r) => r,
-        Err(e) => {
-            let html = ErrorTemplate {
-                message: format!("Could not load scan result: {e}"),
-                last_report_url: Some("/view-reports".to_string()),
-                last_report_label: Some("View Reports".to_string()),
-                csp_nonce: csp_nonce.clone(),
-            }
-            .render()
-            .unwrap_or_else(|_| "<pre>Load error.</pre>".to_string());
-            return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
+        Err(_) => {
+            let folder_hint = json_path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let redirect_url = format!("/runs/result/{run_id}");
+            return missing_scan_relocate_response(
+                &format!(
+                    "Scan file could not be read:\n  {}\n\nThe file may have been moved or \
+                     deleted. Browse to the folder containing your scan output to reconnect it.",
+                    json_path.display()
+                ),
+                &run_id,
+                &folder_hint,
+                &redirect_url,
+                state.server_mode,
+                &csp_nonce,
+            );
         }
     };
 
@@ -3313,7 +3593,7 @@ fn render_result_page(
         pdf_path: artifacts.pdf_path.as_ref().map(|p| display_path(p)),
         json_path: artifacts.json_path.as_ref().map(|p| display_path(p)),
         prev_run_id: prev_entry.as_ref().map(|e| e.run_id.clone()),
-        prev_run_timestamp: prev_entry.as_ref().map(|e| fmt_pst(e.timestamp_utc)),
+        prev_run_timestamp: prev_entry.as_ref().map(|e| fmt_la_time(e.timestamp_utc)),
         prev_run_code_lines: prev_entry.as_ref().map(|e| e.summary.code_lines),
         prev_fa_str,
         prev_fs_str,
@@ -3985,6 +4265,7 @@ struct HistoryEntryRow {
     run_id: String,
     run_id_short: String,
     timestamp: String,
+    timestamp_utc_ms: i64,
     project_label: String,
     project_path: String,
     files_analyzed: u64,
@@ -4002,16 +4283,61 @@ struct HistoryEntryRow {
     submodule_names_csv: String,
 }
 
-fn fmt_pst(dt: chrono::DateTime<chrono::Utc>) -> String {
-    dt.with_timezone(&chrono::FixedOffset::west_opt(8 * 3600).expect("PST offset is always valid"))
-        .format("%Y-%m-%d %H:%M PST")
-        .to_string()
+/// Returns the nth occurrence of `weekday` in the given month/year (1-based).
+fn nth_weekday_of_month(
+    year: i32,
+    month: u32,
+    weekday: chrono::Weekday,
+    n: u32,
+) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let mut count = 0u32;
+    let mut day = 1u32;
+    loop {
+        let d = chrono::NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
+        if d.weekday() == weekday {
+            count += 1;
+            if count == n {
+                return d;
+            }
+        }
+        day += 1;
+    }
+}
+
+/// Returns true if `dt` falls within US Pacific Daylight Time.
+/// DST starts: second Sunday in March at 02:00 PST = 10:00 UTC.
+/// DST ends:   first Sunday in November at 02:00 PDT = 09:00 UTC.
+fn is_pacific_dst(dt: chrono::DateTime<chrono::Utc>) -> bool {
+    use chrono::{Datelike, TimeZone};
+    let year = dt.year();
+    let dst_start = chrono::Utc.from_utc_datetime(
+        &nth_weekday_of_month(year, 3, chrono::Weekday::Sun, 2)
+            .and_time(chrono::NaiveTime::from_hms_opt(10, 0, 0).expect("valid")),
+    );
+    let dst_end = chrono::Utc.from_utc_datetime(
+        &nth_weekday_of_month(year, 11, chrono::Weekday::Sun, 1)
+            .and_time(chrono::NaiveTime::from_hms_opt(9, 0, 0).expect("valid")),
+    );
+    dt >= dst_start && dt < dst_end
+}
+
+fn fmt_la_time(dt: chrono::DateTime<chrono::Utc>) -> String {
+    if is_pacific_dst(dt) {
+        dt.with_timezone(&chrono::FixedOffset::west_opt(7 * 3600).expect("PDT offset valid"))
+            .format("%Y-%m-%d %H:%M PDT")
+            .to_string()
+    } else {
+        dt.with_timezone(&chrono::FixedOffset::west_opt(8 * 3600).expect("PST offset valid"))
+            .format("%Y-%m-%d %H:%M PST")
+            .to_string()
+    }
 }
 
 fn fmt_git_date(iso: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(iso)
         .ok()
-        .map(|d| fmt_pst(d.with_timezone(&chrono::Utc)))
+        .map(|d| fmt_la_time(d.with_timezone(&chrono::Utc)))
 }
 
 fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
@@ -4059,7 +4385,8 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                     .chars()
                     .take(7)
                     .collect(),
-                timestamp: fmt_pst(e.timestamp_utc),
+                timestamp: fmt_la_time(e.timestamp_utc),
+                timestamp_utc_ms: e.timestamp_utc.timestamp_millis(),
                 project_label: e.project_label.clone(),
                 project_path: e
                     .input_roots
@@ -4330,56 +4657,79 @@ async fn compare_handler(
         return Html(html).into_response();
     };
 
+    let compare_url = format!(
+        "/compare?a={}&b={}",
+        baseline_entry.run_id, current_entry.run_id
+    );
+
     let baseline_run = match read_json(base_json) {
         Ok(r) => r,
         Err(e) => {
-            let message = if state.server_mode {
-                "Could not load baseline scan data. The scan output folder may have been moved, \
-                 renamed, or deleted. Re-running the analysis will create fresh comparison data."
-                    .to_string()
-            } else {
-                format!(
-                    "Could not load baseline scan data.\n\nPath: {}\n\nError: {e}\n\n\
-                     The scan output folder may have been moved, renamed, or deleted. \
-                     Re-running the analysis for this project will create fresh comparison data.",
-                    base_json.display()
-                )
-            };
-            let html = ErrorTemplate {
-                message,
-                last_report_url: Some("/compare-scans".to_string()),
-                last_report_label: Some("Compare Scans".to_string()),
-                csp_nonce: csp_nonce.clone(),
+            if state.server_mode {
+                let html = ErrorTemplate {
+                    message: "Could not load baseline scan data. The scan output folder may \
+                              have been moved, renamed, or deleted. Re-running the analysis \
+                              will create fresh comparison data."
+                        .to_string(),
+                    last_report_url: Some("/compare-scans".to_string()),
+                    last_report_label: Some("Compare Scans".to_string()),
+                    csp_nonce: csp_nonce.clone(),
+                }
+                .render()
+                .unwrap_or_else(|_| "<pre>Baseline load failed.</pre>".to_string());
+                return (StatusCode::NOT_FOUND, Html(html)).into_response();
             }
-            .render()
-            .unwrap_or_else(|_| "<pre>Baseline load failed.</pre>".to_string());
-            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            let msg = format!(
+                "Could not load baseline scan data.\n\nExpected path: {}\n\nError: {e}",
+                base_json.display()
+            );
+            let folder_hint = base_json
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            return missing_scan_relocate_response(
+                &msg,
+                &baseline_entry.run_id,
+                &folder_hint,
+                &compare_url,
+                false,
+                &csp_nonce,
+            );
         }
     };
     let current_run = match read_json(curr_json) {
         Ok(r) => r,
         Err(e) => {
-            let message = if state.server_mode {
-                "Could not load current scan data. The scan output folder may have been moved, \
-                 renamed, or deleted. Re-running the analysis will create fresh comparison data."
-                    .to_string()
-            } else {
-                format!(
-                    "Could not load current scan data.\n\nPath: {}\n\nError: {e}\n\n\
-                     The scan output folder may have been moved, renamed, or deleted. \
-                     Re-running the analysis for this project will create fresh comparison data.",
-                    curr_json.display()
-                )
-            };
-            let html = ErrorTemplate {
-                message,
-                last_report_url: Some("/compare-scans".to_string()),
-                last_report_label: Some("Compare Scans".to_string()),
-                csp_nonce: csp_nonce.clone(),
+            if state.server_mode {
+                let html = ErrorTemplate {
+                    message: "Could not load current scan data. The scan output folder may \
+                              have been moved, renamed, or deleted. Re-running the analysis \
+                              will create fresh comparison data."
+                        .to_string(),
+                    last_report_url: Some("/compare-scans".to_string()),
+                    last_report_label: Some("Compare Scans".to_string()),
+                    csp_nonce: csp_nonce.clone(),
+                }
+                .render()
+                .unwrap_or_else(|_| "<pre>Current load failed.</pre>".to_string());
+                return (StatusCode::NOT_FOUND, Html(html)).into_response();
             }
-            .render()
-            .unwrap_or_else(|_| "<pre>Current load failed.</pre>".to_string());
-            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            let msg = format!(
+                "Could not load current scan data.\n\nExpected path: {}\n\nError: {e}",
+                curr_json.display()
+            );
+            let folder_hint = curr_json
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            return missing_scan_relocate_response(
+                &msg,
+                &current_entry.run_id,
+                &folder_hint,
+                &compare_url,
+                false,
+                &csp_nonce,
+            );
         }
     };
 
@@ -4490,8 +4840,10 @@ async fn compare_handler(
             .chars()
             .take(7)
             .collect(),
-        baseline_timestamp: fmt_pst(baseline_entry.timestamp_utc),
-        current_timestamp: fmt_pst(current_entry.timestamp_utc),
+        baseline_timestamp: fmt_la_time(baseline_entry.timestamp_utc),
+        baseline_timestamp_utc_ms: baseline_entry.timestamp_utc.timestamp_millis(),
+        current_timestamp: fmt_la_time(current_entry.timestamp_utc),
+        current_timestamp_utc_ms: current_entry.timestamp_utc.timestamp_millis(),
         project_path: project_path.clone(),
         baseline_code: s.baseline_code,
         current_code: s.current_code,
@@ -4853,7 +5205,7 @@ async fn project_history_handler(
     let scan_count = entries.len();
     let last = entries.first();
     let last_scan_id = last.map(|e| e.run_id.clone());
-    let last_scan_timestamp = last.map(|e| fmt_pst(e.timestamp_utc));
+    let last_scan_timestamp = last.map(|e| fmt_la_time(e.timestamp_utc));
     let last_scan_code_lines = last.map(|e| e.summary.code_lines);
     let last_git_branch = last.and_then(|e| e.git_branch.clone());
     let last_git_commit = last.and_then(|e| e.git_commit.clone());
@@ -5140,6 +5492,16 @@ async fn api_ingest_handler(
     let result = tokio::task::spawn_blocking(move || {
         let html = render_html(&run)?;
         let run_id = run.tool.run_id.clone();
+        let run_id_safe = run_id.len() <= 128
+            && !run_id.is_empty()
+            && run_id
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !run_id_safe {
+            anyhow::bail!(
+                "invalid run_id: must be 1–128 alphanumeric/dash/underscore/dot characters"
+            );
+        }
         let project_label = sanitize_project_label(&label_for_task);
         let output_dir = resolve_output_root(None).join(format!("{project_label}_{run_id}"));
         let file_stem = match run.git_commit_short.as_deref().map(str::trim) {
@@ -5275,7 +5637,7 @@ async fn trend_report_handler(
     .status-dot{{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}}
     .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{{display:block;}}
     .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
-    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
+    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
     .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
     .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
     .settings-close{{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}}
@@ -5285,6 +5647,8 @@ async fn trend_report_handler(
     .scheme-swatch{{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}}
     .scheme-swatch:hover{{border-color:var(--line-strong);transform:translateY(-1px);}} .scheme-swatch.active{{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}}
     .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}} .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
+    .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
+    .tz-select:focus{{border-color:var(--oxide);}}
     .page{{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
     h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
@@ -5575,11 +5939,12 @@ async fn trend_report_handler(
         try{{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){{ap(sv);}}else{{ap(S[0]);}}}}catch(e){{ap(S[0]);}}
         var btn=document.getElementById('settings-btn');if(!btn)return;
         var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
         document.body.appendChild(m);
         var g=document.getElementById('scheme-grid');
         if(g)S.forEach(function(s){{var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}}catch(e){{}}el.addEventListener('click',function(){{ap(s);}});g.appendChild(el);}});
         var cl=document.getElementById('settings-close');
+        window.tzAbbr=function(z){{return{{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}}[z]||'PT';}};window.fmtTz=function(ms,tz){{var d=new Date(ms);if(isNaN(d.getTime()))return'';try{{var pts=new Intl.DateTimeFormat('en-US',{{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}}).formatToParts(d);var v={{}};pts.forEach(function(p){{v[p.type]=p.value;}});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}}catch(e){{return'';}}}};window.applyTz=function(tz){{try{{localStorage.setItem('sloc-tz',tz);}}catch(e){{}}document.querySelectorAll('[data-utc-ms]').forEach(function(el){{var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);}});}};var tzSel=document.getElementById('tz-select');var storedTz;try{{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}}catch(e){{storedTz='America/Los_Angeles';}}if(tzSel){{tzSel.value=storedTz;tzSel.addEventListener('change',function(){{window.applyTz(this.value);}});}}window.applyTz(storedTz);
         btn.addEventListener('click',function(e){{e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');}});
         if(cl)cl.addEventListener('click',function(){{m.classList.remove('open');}});
         document.addEventListener('click',function(e){{if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');}});
@@ -5796,9 +6161,17 @@ async fn trend_report_handler(
       if(!isoStr)return'';
       var d=new Date(isoStr);
       if(isNaN(d.getTime()))return isoStr.substring(0,16).replace('T',' ');
-      var pst=new Date(d.getTime()-8*3600*1000);
+      if(window.fmtTz){{var tz;try{{tz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}}catch(e){{tz='America/Los_Angeles';}}return window.fmtTz(d.getTime(),tz);}}
       function p(n){{return n<10?'0'+n:String(n);}}
-      return pst.getUTCFullYear()+'-'+p(pst.getUTCMonth()+1)+'-'+p(pst.getUTCDate())+' '+p(pst.getUTCHours())+':'+p(pst.getUTCMinutes())+' PST';
+      function nthWeekdaySun(year,month,n){{var count=0,day=1;while(true){{var t=new Date(Date.UTC(year,month,day));if(t.getUTCDay()===0&&++count===n)return t;day++;}}}}
+      var yr=d.getUTCFullYear();
+      var dstStart=new Date(nthWeekdaySun(yr,2,2).getTime()+10*3600*1000);
+      var dstEnd=new Date(nthWeekdaySun(yr,10,1).getTime()+9*3600*1000);
+      var isDST=d>=dstStart&&d<dstEnd;
+      var off=isDST?-7*3600*1000:-8*3600*1000;
+      var lbl=isDST?'PDT':'PST';
+      var loc=new Date(d.getTime()+off);
+      return loc.getUTCFullYear()+'-'+p(loc.getUTCMonth()+1)+'-'+p(loc.getUTCDate())+' '+p(loc.getUTCHours())+':'+p(loc.getUTCMinutes())+' '+lbl;
     }}
 
     function getShRows(){{
@@ -6440,6 +6813,40 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
         "0".to_string()
     };
     let has_cov = !cov_arr.is_empty();
+    let mut file_cov_arr: Vec<serde_json::Value> = run
+        .per_file_records
+        .iter()
+        .filter_map(|rec| {
+            rec.coverage.as_ref().map(|cov| {
+                let line_pct = if cov.lines_found > 0 {
+                    (cov.lines_hit as f64 / cov.lines_found as f64 * 100.0 * 10.0).round() / 10.0
+                } else {
+                    0.0
+                };
+                let fn_pct = if cov.functions_found > 0 {
+                    (cov.functions_hit as f64 / cov.functions_found as f64 * 100.0 * 10.0).round()
+                        / 10.0
+                } else {
+                    -1.0
+                };
+                serde_json::json!({
+                    "rel": rec.relative_path,
+                    "lang": rec.language.map(|l| l.display_name()).unwrap_or("?"),
+                    "line_pct": line_pct,
+                    "fn_pct": fn_pct,
+                    "lhit": cov.lines_hit,
+                    "lfound": cov.lines_found,
+                    "fhit": cov.functions_hit,
+                    "ffound": cov.functions_found,
+                })
+            })
+        })
+        .collect();
+    file_cov_arr.sort_by(|a, b| {
+        let pa = a["line_pct"].as_f64().unwrap_or(0.0);
+        let pb = b["line_pct"].as_f64().unwrap_or(0.0);
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
     serde_json::json!({
         "totals": {
             "test_count": total_tests,
@@ -6457,6 +6864,7 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
         "lang_tests": lang_tests,
         "cov": cov_arr,
         "cov_tiers": {"high": high, "mid": mid, "low": low},
+        "file_cov": file_cov_arr,
         "has_coverage": has_cov,
         "submodules": {},
     })
@@ -6858,7 +7266,7 @@ async fn test_metrics_handler(
     .status-dot{{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}}
     .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{{display:block;}}
     .nav-dropdown{{position:relative;display:inline-flex;}}.nav-dropdown-btn{{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);}}.nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}}.nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}.nav-dropdown-menu a:last-child{{border-bottom:none;}}.nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}.nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
-    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
+    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
     .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
     .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
     .settings-close{{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}}
@@ -6868,6 +7276,8 @@ async fn test_metrics_handler(
     .scheme-swatch{{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}}
     .scheme-swatch:hover{{border-color:var(--line-strong);transform:translateY(-1px);}} .scheme-swatch.active{{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}}
     .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}} .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
+    .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
+    .tz-select:focus{{border-color:var(--oxide);}}
     .page{{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
     h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
@@ -6933,6 +7343,18 @@ async fn test_metrics_handler(
     .watched-none{{font-size:11px;color:var(--muted);font-style:italic;}}
     .watched-bar-right{{display:flex;gap:6px;align-items:center;flex-shrink:0;}}
     body.dark-theme .watched-chip{{background:rgba(255,255,255,0.05);}}
+    .cov-file-toolbar{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;}}
+    .cov-filter-tabs{{display:flex;gap:6px;flex-wrap:wrap;}}
+    .cov-tab{{padding:4px 12px;border-radius:20px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--muted);font-size:11px;font-weight:700;cursor:pointer;transition:background .12s,color .12s;white-space:nowrap;}}
+    .cov-tab.active,.cov-tab:hover{{background:var(--oxide);border-color:var(--oxide-2);color:#fff;}}
+    .cov-tab[data-tier="high"].active{{background:#2a6846;border-color:#1f5035;}}
+    .cov-tab[data-tier="mid"].active{{background:#b58a00;border-color:#9a7400;}}
+    .cov-tab[data-tier="low"].active,.cov-tab[data-tier="zero"].active{{background:#b23030;border-color:#8f2626;}}
+    .cov-file-search{{flex:1;min-width:160px;max-width:340px;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;padding:5px 10px;color:var(--text);font-size:12px;outline:none;}}
+    .cov-file-search:focus{{border-color:var(--accent);}}
+    .cov-pct-badge{{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;}}
+    .cov-file-path{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--text);max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
+    body.dark-theme .cov-file-search{{background:var(--surface);}}
   </style>
 </head>
 <body>
@@ -6989,8 +7411,8 @@ async fn test_metrics_handler(
       <span class="scope-label">Scope</span>
       <div class="scope-sel-wrap">
         <select id="scope-root-sel" class="scope-sel"><option value="__all__">All projects</option></select>
-        <div id="scope-sub-wrap" style="display:none;align-items:center;gap:10px;padding-left:12px;margin-left:4px;border-left:1.5px solid var(--line-strong);">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);display:block;align-self:center;"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+        <div id="scope-sub-wrap" style="display:none;align-items:center;gap:16px;padding-left:16px;margin-left:4px;border-left:1.5px solid var(--line-strong);">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);display:flex;align-self:center;margin-top:3px;"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
           <select id="scope-sub-sel" class="scope-sel"><option value="">Entire project</option></select>
         </div>
       </div>
@@ -7074,6 +7496,34 @@ async fn test_metrics_handler(
           <div class="chart-canvas-wrap" style="height:280px;display:flex;align-items:center;justify-content:center;"><canvas id="canvas-cov-tiers"></canvas></div>
         </div>
       </div>
+
+      <div class="section-header" style="margin-top:24px;">Coverage File Detail</div>
+      <p class="muted" style="margin-bottom:14px;">Per-file line and function coverage from the LCOV report. Files are sorted from lowest to highest coverage. Use the filters to focus on gaps.</p>
+      <div class="cov-file-toolbar">
+        <div class="cov-filter-tabs" id="cov-filter-tabs">
+          <button class="cov-tab active" data-tier="all">All</button>
+          <button class="cov-tab" data-tier="zero">Uncovered (0%)</button>
+          <button class="cov-tab" data-tier="low">Low (&lt;50%)</button>
+          <button class="cov-tab" data-tier="mid">Moderate (50–79%)</button>
+          <button class="cov-tab" data-tier="high">High (≥80%)</button>
+        </div>
+        <input type="search" id="cov-file-search" class="cov-file-search" placeholder="Filter by filename…">
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table" id="cov-file-table">
+          <thead><tr>
+            <th>File</th>
+            <th>Lang</th>
+            <th class="num">Line %</th>
+            <th class="num">Lines Hit / Found</th>
+            <th class="num">Fn %</th>
+            <th class="num">Fns Hit / Found</th>
+          </tr></thead>
+          <tbody id="cov-file-tbody"></tbody>
+        </table>
+      </div>
+      <div id="cov-file-empty" style="display:none;text-align:center;color:var(--muted);padding:24px;font-size:13px;">No files match the current filter.</div>
+      <div id="cov-file-count" style="text-align:right;font-size:11px;color:var(--muted);margin-top:8px;"></div>
     </div>
 
     <div class="panel">
@@ -7140,7 +7590,7 @@ async fn test_metrics_handler(
       try{{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){{ap(sv);}}else{{ap(S[0]);}}}}catch(e){{ap(S[0]);}}
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){{var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}}catch(e){{}}el.addEventListener('click',function(){{ap(s);}});g.appendChild(el);}});
@@ -7315,6 +7765,74 @@ async fn test_metrics_handler(
       }}).join('');
     }}
 
+    var covFileData = [];
+    var covFileTier = 'all';
+    var covFileSearch = '';
+
+    function pctBadge(pct) {{
+      var color = pct >= 80 ? '#2a6846' : pct >= 50 ? '#b58a00' : '#b23030';
+      var bg = pct >= 80 ? 'rgba(42,104,70,0.12)' : pct >= 50 ? 'rgba(181,138,0,0.12)' : 'rgba(178,48,48,0.12)';
+      return '<span class="cov-pct-badge" style="background:' + bg + ';color:' + color + ';border:1px solid ' + color + '40;">' + pct.toFixed(1) + '%</span>';
+    }}
+
+    function buildCovFileTable() {{
+      var tbody = document.getElementById('cov-file-tbody');
+      var empty = document.getElementById('cov-file-empty');
+      var count = document.getElementById('cov-file-count');
+      if (!tbody) return;
+      var srch = covFileSearch.toLowerCase();
+      var filtered = covFileData.filter(function(f) {{
+        if (covFileTier === 'zero' && f.line_pct > 0) return false;
+        if (covFileTier === 'low' && (f.line_pct === 0 || f.line_pct >= 50)) return false;
+        if (covFileTier === 'mid' && (f.line_pct < 50 || f.line_pct >= 80)) return false;
+        if (covFileTier === 'high' && f.line_pct < 80) return false;
+        if (srch && f.rel.toLowerCase().indexOf(srch) < 0) return false;
+        return true;
+      }});
+      if (!filtered.length) {{
+        tbody.innerHTML = '';
+        if (empty) empty.style.display = '';
+        if (count) count.textContent = '';
+        return;
+      }}
+      if (empty) empty.style.display = 'none';
+      var shown = Math.min(filtered.length, 500);
+      if (count) count.textContent = shown + ' of ' + filtered.length + ' file' + (filtered.length !== 1 ? 's' : '') + (filtered.length > 500 ? ' (showing first 500)' : '');
+      tbody.innerHTML = filtered.slice(0, 500).map(function(f) {{
+        var fnCol = f.fn_pct < 0
+          ? '<td class="num" style="color:var(--muted);font-size:11px;">—</td><td class="num" style="color:var(--muted);font-size:11px;">—</td>'
+          : '<td class="num">' + pctBadge(f.fn_pct) + '</td><td class="num" style="color:var(--muted);font-size:11px;">' + f.fhit + ' / ' + f.ffound + '</td>';
+        return '<tr>' +
+          '<td class="cov-file-path" title="' + f.rel.replace(/"/g, '&quot;') + '">' + f.rel + '</td>' +
+          '<td style="color:var(--muted);font-size:11px;white-space:nowrap;">' + f.lang + '</td>' +
+          '<td class="num">' + pctBadge(f.line_pct) + '</td>' +
+          '<td class="num" style="color:var(--muted);font-size:11px;">' + f.lhit + ' / ' + f.lfound + '</td>' +
+          fnCol +
+          '</tr>';
+      }}).join('');
+    }}
+
+    (function() {{
+      var tabs = document.getElementById('cov-filter-tabs');
+      if (tabs) {{
+        tabs.addEventListener('click', function(e) {{
+          var btn = e.target.closest('.cov-tab');
+          if (!btn) return;
+          Array.prototype.forEach.call(tabs.querySelectorAll('.cov-tab'), function(t) {{ t.classList.remove('active'); }});
+          btn.classList.add('active');
+          covFileTier = btn.getAttribute('data-tier');
+          buildCovFileTable();
+        }});
+      }}
+      var srch = document.getElementById('cov-file-search');
+      if (srch) {{
+        srch.addEventListener('input', function() {{
+          covFileSearch = this.value;
+          buildCovFileTable();
+        }});
+      }}
+    }})();
+
     function updateCovGauges(t) {{
       var lp = t.cov_line || '0', fp = t.cov_fn || '0', bp = t.cov_branch || '0';
       var el;
@@ -7342,7 +7860,18 @@ async fn test_metrics_handler(
       buildLangTable(d.lang_tests);
       var covPanel = document.getElementById('cov-panel');
       if (covPanel) covPanel.style.display = d.has_coverage ? '' : 'none';
-      if (d.has_coverage) {{ renderCovCharts(d.cov, d.cov_tiers); updateCovGauges(t); }}
+      if (d.has_coverage) {{
+        renderCovCharts(d.cov, d.cov_tiers);
+        updateCovGauges(t);
+        covFileData = d.file_cov || [];
+        covFileTier = 'all';
+        covFileSearch = '';
+        var tabs = document.getElementById('cov-filter-tabs');
+        if (tabs) Array.prototype.forEach.call(tabs.querySelectorAll('.cov-tab'), function(tb) {{ tb.classList.toggle('active', tb.getAttribute('data-tier') === 'all'); }});
+        var srch = document.getElementById('cov-file-search');
+        if (srch) srch.value = '';
+        buildCovFileTable();
+      }}
       loadTrend();
     }}
 
@@ -8969,7 +9498,7 @@ struct SubmoduleRow {
     .theme-toggle .icon-sun { display:none; }
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -8983,6 +9512,8 @@ struct SubmoduleRow {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; flex: 1; width: 100%; }
@@ -9223,7 +9754,7 @@ struct SubmoduleRow {
     .review-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap: 10px; margin-bottom: 8px; }
     .review-link { border:none; background: transparent; color: var(--accent-2); font-size: 12px; font-weight: 800; cursor: pointer; padding: 0; }
     .review-link:hover { text-decoration: underline; }
-    .artifact-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+    .artifact-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; margin-bottom: 48px !important; }
     .artifact-card { position:relative; padding: 16px; cursor:pointer; }
     .artifact-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(37,99,235,0.18), var(--shadow-strong); }
     .artifact-card .marker { position:absolute; top: 12px; right: 12px; width: 22px; height: 22px; border-radius: 999px; border:2px solid var(--line-strong); display:flex; align-items:center; justify-content:center; font-size: 12px; color: transparent; }
@@ -9357,6 +9888,8 @@ struct SubmoduleRow {
     body.dark-theme .cov-scan-found .cov-scan-title,body.dark-theme .cov-scan-found .cov-scan-use { color:#5aba8a; }
     body.dark-theme .cov-scan-found .cov-scan-use { border-color:#5aba8a; }
     body.dark-theme .cov-scan-found .cov-scan-tool { background:rgba(90,186,138,0.12); color:#5aba8a; }
+    .cov-scan-found .cov-scan-remove { color:#8b2020!important; border-color:#8b2020!important; }
+    body.dark-theme .cov-scan-found .cov-scan-remove { color:#e07070!important; border-color:#e07070!important; }
     .cov-scan-hint { background:rgba(160,110,0,0.06); border:1px solid rgba(160,110,0,0.22); }
     .cov-scan-hint .cov-scan-title { color:#7a5e00; }
     .cov-scan-hint .cov-scan-tool { background:rgba(160,110,0,0.1); color:#7a5e00; }
@@ -10093,7 +10626,8 @@ pytest --cov --cov-report=xml
                     <input type="checkbox" name="generate_json" checked class="hidden artifact-checkbox" />
                   </div>
                 </div>
-                <div class="hint" style="padding-top:48px;">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
+                <div style="height:48px;flex-shrink:0;display:block;"></div>
+                <div class="hint">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
               </div>
 
               <div class="wizard-actions">
@@ -10195,6 +10729,7 @@ pytest --cov --cov-report=xml
       var coverageInput = document.getElementById("coverage_file");
       var covScanStatus = document.getElementById("cov-scan-status");
       var coverageSuggestTimer = null;
+      var covAutoFilled = false;
       var themeToggle = document.getElementById("theme-toggle");
       var mixedLinePolicy = document.getElementById("mixed_line_policy");
       var pythonDocstrings = document.getElementById("python_docstrings_as_comments");
@@ -11159,6 +11694,7 @@ pytest --cov --cov-report=xml
                 autoSetOutputDir(data.selected_path);
                 fetchProjectHistory(data.selected_path);
                 loadPreview();
+                suggestCoverageFile(data.selected_path);
               }
 
               updateReview();
@@ -11225,6 +11761,7 @@ pytest --cov --cov-report=xml
           updateReportTitleFromPath();
           autoSetOutputDir("tests/fixtures/basic");
           loadPreview();
+          suggestCoverageFile("tests/fixtures/basic");
         });
       }
 
@@ -11270,9 +11807,9 @@ pytest --cov --cov-report=xml
           html += '<div class="cov-scan-title">Scanning project for coverage files…</div>';
         } else if (state === "found") {
           var tb = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
-          html += '<div class="cov-scan-title">Coverage file detected' + tb + '</div>';
+          html += '<div class="cov-scan-title">Using this file' + tb + '</div>';
           html += '<div class="cov-scan-sub">' + escapeHtml(opts.found) + '</div>';
-          html += '<div class="cov-scan-actions"><button type="button" class="cov-scan-use" data-path="' + escapeHtml(opts.found) + '">Use this file</button></div>';
+          html += '<div class="cov-scan-actions"><button type="button" class="cov-scan-use cov-scan-remove">Remove this file</button></div>';
         } else if (state === "hint") {
           var tb2 = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
           html += '<div class="cov-scan-title">' + tb2 + ' detected &mdash; no coverage file found yet</div>';
@@ -11287,7 +11824,8 @@ pytest --cov --cov-report=xml
         if (state === "found") {
           var useBtn = covScanStatus.querySelector(".cov-scan-use");
           if (useBtn) useBtn.addEventListener("click", function () {
-            if (coverageInput) coverageInput.value = this.dataset.path;
+            if (coverageInput) coverageInput.value = "";
+            covAutoFilled = false;
             setCovStatus("idle");
           });
         }
@@ -11295,7 +11833,8 @@ pytest --cov --cov-report=xml
 
       function suggestCoverageFile(projectPath) {
         if (!coverageInput || !covScanStatus) return;
-        if (coverageInput.value.trim()) { setCovStatus("idle"); return; }
+        if (coverageInput.value.trim() && !covAutoFilled) { setCovStatus("idle"); return; }
+        if (covAutoFilled) { coverageInput.value = ""; covAutoFilled = false; }
         clearTimeout(coverageSuggestTimer);
         if (!projectPath || !projectPath.trim()) { setCovStatus("idle"); return; }
         setCovStatus("scanning");
@@ -11303,9 +11842,10 @@ pytest --cov --cov-report=xml
           fetch("/api/suggest-coverage?path=" + encodeURIComponent(projectPath))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-              if (coverageInput && coverageInput.value.trim()) { setCovStatus("idle"); return; }
+              if (coverageInput && coverageInput.value.trim() && !covAutoFilled) { setCovStatus("idle"); return; }
               if (!d) { setCovStatus("none"); return; }
               if (d.found) {
+                if (coverageInput) { coverageInput.value = d.found; covAutoFilled = true; }
                 setCovStatus("found", { found: d.found, tool: d.tool });
               } else if (d.tool && d.hint) {
                 setCovStatus("hint", { tool: d.tool, hint: d.hint });
@@ -11318,6 +11858,11 @@ pytest --cov --cov-report=xml
       }
 
       if (refreshPreviewInline) refreshPreviewInline.addEventListener("click", loadPreview);
+
+      if (coverageInput) coverageInput.addEventListener("input", function () {
+        covAutoFilled = false;
+        if (!this.value.trim()) setCovStatus("idle");
+      });
 
       // ── Language pill overflow: collapse to "+N more" chip ─────────────
       function collapseLanguagePills() {
@@ -11634,11 +12179,12 @@ pytest --cov --cov-report=xml
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -11671,6 +12217,13 @@ pytest --cov --cov-report=xml
       el.addEventListener('mouseleave',function(){tip.style.display='none';});
     });
   })();
+  (function(){
+    function fixArtifactHintSpacing(){
+      var grid=document.querySelector('.artifact-grid');
+      if(grid){grid.style.setProperty('margin-bottom','48px','important');}
+    }
+    if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fixArtifactHintSpacing);}else{fixArtifactHintSpacing();}
+  }());
   </script>
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
@@ -11738,7 +12291,7 @@ struct IndexTemplate {
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -11752,6 +12305,8 @@ struct IndexTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page{max-width:1400px;margin:0 auto;padding:18px 24px 12px;position:relative;z-index:1;}
@@ -12374,11 +12929,12 @@ struct IndexTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -12440,7 +12996,7 @@ struct SplashTemplate {
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -12454,6 +13010,8 @@ struct SplashTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page{max-width:960px;margin:0 auto;padding:40px 24px 64px;position:relative;z-index:1;}
     .page-header{text-align:center;margin-bottom:16px;}
     .page-header h1{font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;}
@@ -12822,11 +13380,12 @@ struct SplashTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -12933,7 +13492,7 @@ struct ScanSetupTemplate {
     .theme-toggle .icon-sun { display:none; }
     body.dark-theme .theme-toggle .icon-sun { display:block; }
     body.dark-theme .theme-toggle .icon-moon { display:none; }
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -12947,6 +13506,8 @@ struct ScanSetupTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; }
@@ -13001,13 +13562,13 @@ struct ScanSetupTemplate {
     .metrics-table th:first-child, .metrics-table td:first-child { width: 28%; }
     th { color: var(--muted); font-weight: 700; }
     tr:last-child td { border-bottom: none; }
-    #subm-tbl col:nth-child(1){width:21%;}
-    #subm-tbl col:nth-child(2){width:39%;}
-    #subm-tbl col:nth-child(3){width:6%;}
-    #subm-tbl col:nth-child(4){width:6%;}
-    #subm-tbl col:nth-child(5){width:6%;}
-    #subm-tbl col:nth-child(6){width:7%;}
-    #subm-tbl col:nth-child(7){width:6%;}
+    #subm-tbl col:nth-child(1){width:15%;}
+    #subm-tbl col:nth-child(2){width:31%;}
+    #subm-tbl col:nth-child(3){width:9%;}
+    #subm-tbl col:nth-child(4){width:9%;}
+    #subm-tbl col:nth-child(5){width:9%;}
+    #subm-tbl col:nth-child(6){width:9%;}
+    #subm-tbl col:nth-child(7){width:9%;}
     #subm-tbl col:nth-child(8){width:9%;}
     .preview-shell { border-radius: 20px; overflow: hidden; border: 1px solid var(--line); background: var(--surface-2); }
     iframe { width: 100%; min-height: 1000px; border: none; background: white; }
@@ -13016,7 +13577,9 @@ struct ScanSetupTemplate {
     .hero-quick-actions { display:flex; gap:8px; flex-wrap:nowrap; align-items:center; }
     .hero-quick-actions .copy-button, .hero-quick-actions .open-path-btn { font-size:12px; padding:8px 12px; white-space:nowrap; }
     .soft-chip { display:inline-flex; align-items:center; min-height: 32px; padding: 0 12px; border-radius: 999px; border:1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 13px; font-weight: 700; }
-    .soft-chip.success { background: var(--success-bg); color: var(--success-text); }
+    .soft-chip.success { gap:7px; padding:0 16px 0 12px; background:linear-gradient(135deg,rgba(26,143,71,0.12),rgba(26,143,71,0.06)); color:var(--success-text); border:1.5px solid rgba(26,143,71,0.35); box-shadow:0 0 0 4px rgba(26,143,71,0.07),0 2px 8px rgba(26,143,71,0.12); font-size:12px; letter-spacing:0.02em; }
+    .soft-chip.success svg { flex:0 0 auto; }
+    body.dark-theme .soft-chip.success { background:linear-gradient(135deg,rgba(143,226,168,0.12),rgba(143,226,168,0.05)); border-color:rgba(143,226,168,0.3); box-shadow:0 0 0 4px rgba(143,226,168,0.07),0 2px 8px rgba(0,0,0,0.2); }
     .toolbar-row { display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; margin-bottom: 12px; }
     .muted { color: var(--muted); }
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
@@ -13168,7 +13731,7 @@ struct ScanSetupTemplate {
     <section class="hero">
       <div class="hero-top">
         <div>
-          <div class="soft-chip success">Run finished successfully</div>
+          <div class="soft-chip success"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>Run finished successfully</div>
           <h1 class="hero-title">{{ report_title }}</h1>
           <p class="hero-subtitle">Your HTML, PDF, and JSON artifacts are now saved. Use the quick actions below to view, download, or copy the saved paths for sharing outside oxide-sloc.</p>
         </div>
@@ -13387,8 +13950,8 @@ struct ScanSetupTemplate {
           <div class="pill-row"><span class="soft-chip">{{ submodule_rows.len() }} submodule{% if submodule_rows.len() != 1 %}s{% endif %}</span></div>
         </div>
         <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
-        <table id="subm-tbl" style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:800px;">
-          <colgroup><col><col><col><col><col><col><col><col></colgroup>
+        <table id="subm-tbl" style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:1050px;">
+          <colgroup><col style="width:15%"><col style="width:31%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"></colgroup>
           <thead>
             <tr>
               <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
@@ -13411,7 +13974,7 @@ struct ScanSetupTemplate {
               <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.code_lines }}</td>
               <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.comment_lines }}</td>
               <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.blank_lines }}</td>
-              <td style="padding:10px 8px;border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 10px;min-height:0;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
+              <td style="padding:10px 8px;border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 10px;min-height:0;display:block;margin:0 auto;width:fit-content;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -14137,11 +14700,12 @@ struct ScanSetupTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -14587,11 +15151,12 @@ struct ResultTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -14647,7 +15212,7 @@ struct ScanWaitTemplate {
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -14661,6 +15226,8 @@ struct ScanWaitTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page{max-width:1720px;margin:0 auto;padding:28px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 18px;font-size:28px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
@@ -14788,11 +15355,12 @@ struct ScanWaitTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -14811,6 +15379,220 @@ struct ErrorTemplate {
     last_report_url: Option<String>,
     /// Label for the secondary action button; defaults to "View last report" when None.
     last_report_label: Option<String>,
+    csp_nonce: String,
+}
+
+// ── RelocateScanTemplate ──────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(
+    source = r##"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OxideSLOC | Locate Scan Files</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{{ csp_nonce }}">
+    :root {
+      --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
+      --line:#e6d0bf; --line-strong:#dcb89f; --text:#43342d; --muted:#7b675b; --muted-2:#a08878;
+      --nav:#283790; --nav-2:#013e6b; --accent:#6f9bff; --accent-2:#4a78ee;
+      --oxide:#d37a4c; --oxide-2:#b85d33; --shadow:0 18px 42px rgba(77,44,20,0.12);
+    }
+    body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }
+    *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    @keyframes wmFade{from{opacity:var(--wm-op,0.08);}to{opacity:calc(var(--wm-op,0.08)*0.3);}}
+    .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
+    .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media (max-width:1400px){.nav-right{gap:6px;}.nav-pill,.nav-dropdown-btn,.theme-toggle{padding:0 10px;}}
+    @media (max-width:1150px){.nav-right{gap:4px;}.nav-pill,.nav-dropdown-btn,.theme-toggle{padding:0 8px;font-size:11px;min-height:34px;}.brand-subtitle{display:none;}.server-online-pill{width:34px;padding:0;justify-content:center;font-size:0;gap:0;min-height:34px;}}
+    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
+    .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
+    .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
+    .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
+    .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
+    .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
+    .page{max-width:860px;margin:0 auto;padding:28px 24px 40px;position:relative;z-index:1;}
+    .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
+    h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
+    .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 18px;}
+    .error-box{border-radius:16px;border:1px solid var(--line);background:var(--surface-2);padding:16px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:12.5px;margin-bottom:22px;}
+    .actions{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;}
+    .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid rgba(111,144,255,0.30);text-decoration:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);cursor:pointer;}
+    .btn-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid var(--line-strong);text-decoration:none;color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;cursor:pointer;}
+    .btn-secondary:hover{background:var(--line);}
+    .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
+    .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .relocate-section{border:1px solid var(--line);border-radius:14px;padding:20px 22px;background:var(--surface-2);}
+    .relocate-section h2{margin:0 0 4px;font-size:15px;font-weight:800;color:var(--text);}
+    .relocate-section p{margin:0 0 14px;font-size:13px;color:var(--muted);line-height:1.5;}
+    .relocate-row{display:flex;gap:8px;align-items:stretch;}
+    .relocate-input{flex:1;min-width:0;padding:10px 14px;border-radius:10px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+    .relocate-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(111,155,255,0.15);}
+    body.dark-theme .relocate-input{background:var(--surface-2);}
+  </style>
+</head>
+<body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  <div class="top-nav">
+    <div class="top-nav-inner">
+      <a class="brand" href="/">
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo" />
+        <div class="brand-copy">
+          <div class="brand-title">OxideSLOC</div>
+          <div class="brand-subtitle">local code analysis - metrics, history and reports</div>
+        </div>
+      </a>
+      <div class="nav-right">
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
+          </div>
+        </div>
+        <a class="nav-pill" style="background:rgba(255,255,255,0.22);" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
+        <div class="nav-dropdown">
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+          </div>
+        </div>
+        <div class="server-status-wrap">
+          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
+          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="panel">
+      <h1>Scan Files Moved</h1>
+      <p class="panel-subtitle">The scan output folder was moved, renamed, or deleted. Browse to its new location to restore the comparison.</p>
+      <div class="error-box">{{ message }}</div>
+      <div class="relocate-section">
+        <h2>Locate Scan Output</h2>
+        <p>Select the folder that contains the scan output files (result_*.json, result_*.html, etc.).</p>
+        <form method="post" action="/relocate-scan">
+          <input type="hidden" name="run_id" value="{{ run_id }}">
+          <input type="hidden" name="redirect_url" value="{{ redirect_url }}">
+          <div class="relocate-row">
+            <input type="text" id="relocate-folder" name="folder_path"
+                   value="{{ folder_hint }}"
+                   placeholder="Path to folder containing scan output..."
+                   class="relocate-input" autocomplete="off" spellcheck="false">
+            {% if !server_mode %}
+            <button type="button" id="browse-relocate-btn" class="btn-secondary">Browse&hellip;</button>
+            {% endif %}
+          </div>
+          <div style="margin-top:12px;">
+            <button type="submit" class="btn-primary" style="border:none;">Restore Scan</button>
+          </div>
+        </form>
+      </div>
+      <div class="actions">
+        <a class="btn-secondary" href="/compare-scans">Compare Scans</a>
+        <a class="btn-secondary" href="/view-reports">View Reports</a>
+      </div>
+    </div>
+  </div>
+  <script nonce="{{ csp_nonce }}">
+    (function(){var k="oxide-theme",b=document.body,s=localStorage.getItem(k);if(s==="dark")b.classList.add("dark-theme");document.getElementById("theme-toggle").addEventListener("click",function(){var d=b.classList.toggle("dark-theme");localStorage.setItem(k,d?"dark":"light");});})();
+    (function spawnCodeParticles(){var c=document.getElementById('code-particles');if(!c)return;var snips=['scan moved','fn analyze()','result.json','.html .pdf','locate files','restore scan','folder path','result*.json','run_id','compare','pub fn run','use std::fs','Result<()>','git main','files: 60','cargo build','Ok(run)','match lang','fn main() {','.rs .go .py','sloc_core','render_html'];for(var i=0;i<38;i++){(function(idx){var el=document.createElement('span');el.className='code-particle';el.textContent=snips[idx%snips.length];var l=(Math.random()*94+2).toFixed(1),t=(Math.random()*88+6).toFixed(1),dur=(Math.random()*10+9).toFixed(1),delay=(Math.random()*18).toFixed(1),rot=(Math.random()*26-13).toFixed(1),op=(Math.random()*0.09+0.06).toFixed(3);el.style.left=l+'%';el.style.top=t+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';c.appendChild(el);})(i);}})();
+    (function randomizeWatermarks(){var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));var placed=[];function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}var half=Math.floor(wms.length/2);wms.forEach(function(img,i){var pos=pick(i<half),w=Math.floor(Math.random()*60+80),rot=(Math.random()*40-20).toFixed(1),op=(Math.random()*0.08+0.05).toFixed(2),dur=(Math.random()*6+5).toFixed(1),delay=(Math.random()*10).toFixed(1);img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;img.style.animation='wmFade '+dur+'s ease-in-out -'+delay+'s infinite alternate';});})();
+  </script>
+  <script nonce="{{ csp_nonce }}">
+  (function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){
+      var btn=document.getElementById('settings-btn');if(!btn)return;
+      var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
+      document.body.appendChild(m);
+      var g=document.getElementById('scheme-grid');
+      if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
+      var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
+      btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
+      if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
+      document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  (function(){
+    var btn=document.getElementById('browse-relocate-btn');
+    if(!btn)return;
+    btn.addEventListener('click',function(){
+      btn.disabled=true;btn.textContent='...';
+      var inp=document.getElementById('relocate-folder');
+      var hint=inp?inp.value:'';
+      fetch('/pick-directory?kind=reports&current='+encodeURIComponent(hint))
+        .then(function(r){return r.json();})
+        .then(function(d){
+          btn.disabled=false;btn.textContent='Browse…';
+          if(d&&d.selected_path&&inp)inp.value=d.selected_path;
+        })
+        .catch(function(){btn.disabled=false;btn.textContent='Browse…';});
+    });
+  }());
+  </script>
+</body>
+</html>
+"##,
+    ext = "html"
+)]
+struct RelocateScanTemplate {
+    message: String,
+    run_id: String,
+    folder_hint: String,
+    redirect_url: String,
+    server_mode: bool,
     csp_nonce: String,
 }
 
@@ -14852,7 +15634,7 @@ struct ErrorTemplate {
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -14866,6 +15648,8 @@ struct ErrorTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
@@ -15133,7 +15917,7 @@ struct ErrorTemplate {
                 data-branch="{{ entry.git_branch }}"
                 data-commit="{{ entry.git_commit }}"
                 data-html-url="/runs/html/{{ entry.run_id }}">
-              <td>{{ entry.timestamp }}</td>
+              <td><span class="ts-local" data-utc-ms="{{ entry.timestamp_utc_ms }}">{{ entry.timestamp }}</span></td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
               <td><span class="run-id-chip">{{ entry.run_id_short }}</span></td>
               <td><span class="metric-num">{{ entry.files_analyzed }}</span><div class="metric-secondary">{{ entry.files_skipped }} skipped</div></td>
@@ -15475,11 +16259,12 @@ struct ErrorTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -15540,7 +16325,7 @@ struct HistoryTemplate {
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -15554,6 +16339,8 @@ struct HistoryTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
@@ -15830,7 +16617,7 @@ struct HistoryTemplate {
                 data-commit="{{ entry.git_commit }}"
                 data-submodules="{{ entry.submodule_names_csv }}">
               <td><span class="sel-badge" id="badge-{{ entry.run_id }}"></span></td>
-              <td>{{ entry.timestamp }}</td>
+              <td><span class="ts-local" data-utc-ms="{{ entry.timestamp_utc_ms }}">{{ entry.timestamp }}</span></td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
               <td><span class="run-id-chip" title="OxideSLOC internal scan ID">{{ entry.run_id_short }}</span></td>
               <td><span class="metric-num">{{ entry.files_analyzed }}</span></td>
@@ -16226,11 +17013,12 @@ struct HistoryTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -16290,7 +17078,7 @@ struct CompareSelectTemplate {
     .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
@@ -16304,6 +17092,8 @@ struct CompareSelectTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page{max-width:1720px;margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .hero{background:linear-gradient(180deg,rgba(255,255,255,0.20),transparent),var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 28px 28px;margin-bottom:18px;}
@@ -16604,7 +17394,7 @@ struct CompareSelectTemplate {
             <div class="meta-card-row"><span class="meta-label">Branch:</span>{% if !baseline_git_branch.is_empty() %}<span class="git-chip">{{ baseline_git_branch }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
             <div class="meta-card-row"><span class="meta-label">Last commit on:</span>{% if let Some(date) = baseline_git_commit_date %}<span class="meta-value">{{ date }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
             <div class="meta-card-row"><span class="meta-label">Last commit by:</span>{% if let Some(author) = baseline_git_author %}<span class="meta-value">{{ author }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
-            <div class="meta-card-row"><span class="meta-label">Scanned on:</span><span class="meta-value">{{ baseline_timestamp }}</span></div>
+            <div class="meta-card-row"><span class="meta-label">Scanned on:</span><span class="meta-value ts-local" data-utc-ms="{{ baseline_timestamp_utc_ms }}">{{ baseline_timestamp }}</span></div>
             {% if let Some(tags) = baseline_git_tags %}
             <div class="meta-card-row"><span class="meta-label">Tags:</span><span class="meta-value">{{ tags }}</span></div>
             {% endif %}
@@ -16635,7 +17425,7 @@ struct CompareSelectTemplate {
             <div class="meta-card-row"><span class="meta-label">Branch:</span>{% if !current_git_branch.is_empty() %}<span class="git-chip">{{ current_git_branch }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
             <div class="meta-card-row"><span class="meta-label">Last commit on:</span>{% if let Some(date) = current_git_commit_date %}<span class="meta-value">{{ date }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
             <div class="meta-card-row"><span class="meta-label">Last commit by:</span>{% if let Some(author) = current_git_author %}<span class="meta-value">{{ author }}</span>{% else %}<span class="meta-value">—</span>{% endif %}</div>
-            <div class="meta-card-row"><span class="meta-label">Scanned on:</span><span class="meta-value">{{ current_timestamp }}</span></div>
+            <div class="meta-card-row"><span class="meta-label">Scanned on:</span><span class="meta-value ts-local" data-utc-ms="{{ current_timestamp_utc_ms }}">{{ current_timestamp }}</span></div>
             {% if let Some(tags) = current_git_tags %}
             <div class="meta-card-row"><span class="meta-label">Tags:</span><span class="meta-value">{{ tags }}</span></div>
             {% endif %}
@@ -17436,11 +18226,12 @@ struct CompareSelectTemplate {
     function init(){
       var btn=document.getElementById('settings-btn');if(!btn)return;
       var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+      m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
       document.body.appendChild(m);
       var g=document.getElementById('scheme-grid');
       if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
       var cl=document.getElementById('settings-close');
+      window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
       btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
       if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
@@ -17463,7 +18254,9 @@ struct CompareTemplate {
     baseline_run_id_short: String,
     current_run_id_short: String,
     baseline_timestamp: String,
+    baseline_timestamp_utc_ms: i64,
     current_timestamp: String,
+    current_timestamp_utc_ms: i64,
     project_path: String,
     baseline_code: u64,
     current_code: u64,
@@ -17717,7 +18510,7 @@ struct LoginTemplate {
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;display:inline-flex;align-items:center;min-height:38px;}
     .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
     .theme-toggle .icon-sun{display:none;} body.dark-theme .theme-toggle .icon-sun{display:block;} body.dark-theme .theme-toggle .icon-moon{display:none;}
-    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:240px;max-width:300px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
     .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
     .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
     .settings-close{background:none;border:none;cursor:pointer;padding:4px;color:var(--muted-2);display:flex;align-items:center;border-radius:6px;}
@@ -17730,6 +18523,8 @@ struct LoginTemplate {
     .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
     .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
     .page{max-width:960px;margin:0 auto;padding:40px 24px 60px;position:relative;z-index:1;}
     .page-header{margin-bottom:28px;}
     .page-title{font-size:28px;font-weight:900;letter-spacing:-0.03em;margin:0 0 6px;}
@@ -18925,11 +19720,12 @@ ok</div>
         try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
         var btn=document.getElementById('settings-btn');if(!btn)return;
         var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
-        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div></div>';
+        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
         document.body.appendChild(m);
         var g=document.getElementById('scheme-grid');
         if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});
         var cl=document.getElementById('settings-close');
+        window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);
         btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});
         if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});
         document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});

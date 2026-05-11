@@ -268,6 +268,11 @@ if [[ -f "$DIST_ARCHIVE" ]]; then
             "Expand-Archive -Path '$WIN_ARCHIVE' -DestinationPath '$WIN_DEST' -Force"
     else
         tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
+        # Tolerate tarballs that use the platform-named binary instead of bare "oxide-sloc"
+        if [[ "$PLATFORM" == linux ]] && [[ ! -f "$EXE" ]] && \
+           [[ -f "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" ]]; then
+            mv "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" "$EXE"
+        fi
     fi
     if [[ -f "$EXE" ]]; then
         [[ "$PLATFORM" == linux ]] && chmod +x "$EXE"
@@ -321,6 +326,10 @@ fi
 if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
     echo " Extracting pre-built binary from dist/..."
     tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
+    # Tolerate tarballs that use the platform-named binary instead of bare "oxide-sloc"
+    if [[ ! -f "$EXE" ]] && [[ -f "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" ]]; then
+        mv "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" "$EXE"
+    fi
     if [[ -f "$EXE" ]]; then
         chmod +x "$EXE"
         echo " [OK] Extracted $(basename "$EXE")"

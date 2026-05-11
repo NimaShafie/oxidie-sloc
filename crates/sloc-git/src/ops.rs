@@ -24,8 +24,21 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
 
 // ── clone / fetch ─────────────────────────────────────────────────────────────
 
+fn validate_clone_url(url: &str) -> Result<()> {
+    let lower = url.to_lowercase();
+    let allowed = ["https://", "http://", "git://", "ssh://", "git@"];
+    if !allowed.iter().any(|p| lower.starts_with(p)) {
+        bail!(
+            "git URL rejected: only https://, http://, git://, ssh://, and git@ URLs are \
+             permitted (got {url:?})"
+        );
+    }
+    Ok(())
+}
+
 /// Clone `url` into `dest`, or fetch all refs if the repo already exists.
 pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
+    validate_clone_url(url)?;
     if dest.join(".git").exists() {
         run_git(dest, &["fetch", "--all", "--tags", "--prune"])?;
     } else {
