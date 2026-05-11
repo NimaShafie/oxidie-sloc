@@ -250,7 +250,7 @@ pub(super) struct CompareRefsQuery {
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -258,11 +258,9 @@ pub(super) struct CompareRefsQuery {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Webhooks</a>
-            <a href="/confluence-setup"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>Confluence</a>
+            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap">

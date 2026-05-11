@@ -294,13 +294,31 @@ fi
 
 # ── 7. Build ──────────────────────────────────────────────────────────────────
 
-echo "==> Building oxide-sloc (first build takes several minutes)..."
+LOG_DIR="$KIT_DIR/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/kit-install-$(date +%Y-%m-%d-%H-%M-%S).log"
+
+# Tee all remaining output to the log file.
+exec > >(tee -a "$LOG_FILE") 2>&1
+printf '# oxide-sloc kit install log — %s\n# Target: %s\n\n' "$(date)" "$BUILD_TARGET"
+
+_on_exit() {
+    local ec=$?
+    [[ $ec -eq 0 ]] && return
+    printf '\n[FAILED] Build exited with code %d.\n' "$ec"
+    printf '  Log dir:  %s\n' "$LOG_DIR"
+    printf '  Log file: %s\n' "$(basename "$LOG_FILE")"
+    printf '  \033]8;;file://%s\033\\Click to open log\033]8;;\033\\\n' "$LOG_FILE"
+}
+trap '_on_exit' EXIT
+
+echo "==> Building oxide-sloc (offline release build — target: $BUILD_TARGET)..."
 cd "$BUILD_DIR"
 cargo build --release --offline --target "$BUILD_TARGET" -p oxide-sloc
 
 BINARY="$BUILD_DIR/target/${BUILD_TARGET}/release/oxide-sloc"
 if [[ ! -f "$BINARY" ]]; then
-    echo "ERROR: Build failed — binary not found at $BINARY" >&2
+    echo "ERROR: Build succeeded but binary not found at $BINARY" >&2
     exit 1
 fi
 

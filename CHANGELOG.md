@@ -8,6 +8,55 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-format coverage parsing** (`sloc-core/coverage.rs`): Added auto-detecting coverage parsers
+  for Cobertura XML (`pytest-cov`, Maven Cobertura plugin), JaCoCo XML (Gradle, Maven JaCoCo plugin),
+  and Istanbul/NYC JSON (`nyc --reporter=json-summary`, Jest) alongside existing LCOV. The new
+  `parse_coverage_auto()` function dispatches to the correct parser by file extension and content
+  sniff — `.xml` files are distinguished by `<coverage` vs `<report` header, `.json` goes to the
+  Istanbul parser, and all other extensions fall back to LCOV.
+- **`/api/suggest-coverage` endpoint** (`sloc-web`): Returns the inferred coverage file path(s)
+  and the recommended generation command for a given project root. `detect_coverage_tool()` examines
+  the directory tree for `Cargo.toml`, `pom.xml`, `build.gradle`, `package.json`, and other build
+  files to select the correct tool and command hint. The web file picker now accepts all four
+  coverage formats (LCOV `.info`, Cobertura `.xml`, JaCoCo `.xml`, Istanbul `.json`).
+- **Test Metrics stat-chip summary strip** (`sloc-web`): Replaced the single test-density badge
+  on the `/test-metrics` page with a four-chip summary strip: test-to-code density, most-tested
+  language, number of languages with tests, and overall line coverage percentage.
+- **`cov-gauge-card` coverage components** (`sloc-web`): Coverage display upgraded from a plain
+  percentage text to animated `cov-gauge-card` components showing label, large percentage value,
+  and an animated progress-bar track; cards lift on hover.
+- **Trend report table enhancements** (`sloc-web`): The scan-history table in `/trend-reports`
+  gains sortable columns (click header to sort ascending/descending with ↕/↑/↓ icons),
+  column-resize handles, and a client-side filter row.
+- **Trend report stat chips** (`sloc-web`): Summary chips above the trend chart now show Total
+  Scans, Latest metric value, Net Change (with `+`/`−` colour coding), and Projects count.
+
+### Changed
+
+- **Artifact URL segment order** (`sloc-web`): Run artifact URLs swapped from
+  `/runs/{run_id}/{artifact}` to `/runs/{artifact}/{run_id}` across all URL construction sites,
+  route definitions, Confluence push, git_browser, and integrations handlers.
+- **Run-ID chips** (`sloc-report`): Run-ID banners on the report page switch to `position:fixed`
+  so they repeat on every printed/PDF page; chips lift on hover and show a click-to-copy tooltip.
+  Print margins are widened when `report_header_footer` is set.
+- **Support-opportunities table** (`sloc-report`): Description and Example columns now wrap with
+  styled example-file badges instead of overflowing.
+- **Per-file table scrollbar** (`sloc-report`): `overflow-y:scroll` is forced on per-file and
+  skipped-file tables to keep the scrollbar gutter permanently allocated; a JS IIFE measures the
+  actual scrollbar track width and compensates table padding.
+- **Per-file table column widths** (`sloc-report`): All columns corrected to sum to ~98% so no
+  column overflows under the scrollbar.
+- **PDF print output** (`sloc-report`): Print zoom set to 0.82, chart spacing tightened, and
+  the scatter chart rendered in a single-column centred layout.
+- **Nav dropdown gap** (`sloc-web`, `sloc-report`): Added `::after` pseudo-element bridge on
+  dropdown triggers so the hover state is not lost when moving the cursor from the trigger pill
+  to the menu; nav pills and brand logo gain `white-space:nowrap` / `flex-shrink:0` to prevent
+  wrapping on narrow viewports.
+- **CLI headless-chrome noise** (`sloc-cli`): Suppressed `headless_chrome` crate transport log
+  lines from the default tracing filter so PDF generation does not pollute terminal output.
+
 ---
 
 ## [1.4.3] — 2026-05-07

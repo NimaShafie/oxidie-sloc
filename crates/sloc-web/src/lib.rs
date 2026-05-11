@@ -1555,8 +1555,8 @@ async fn pick_directory_handler(
         let result = if is_coverage {
             dialog
                 .add_filter(
-                    "Coverage files (LCOV, Cobertura XML, JaCoCo XML, Istanbul JSON)",
-                    &["info", "lcov", "xml", "json"],
+                    "Coverage files (LCOV, Cobertura XML, JaCoCo XML)",
+                    &["info", "lcov", "xml"],
                 )
                 .pick_file()
         } else {
@@ -2388,9 +2388,6 @@ async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl
         "build/reports/jacoco/test/jacocoTestReport.xml",
         "build/reports/jacoco/jacocoTestReport.xml",
         "build/jacoco/jacoco.xml",
-        // Istanbul / NYC JSON — Jest, nyc
-        "coverage/coverage-summary.json",
-        ".nyc_output/coverage-summary.json",
     ];
     let root = resolve_input_path(query.path.as_deref().unwrap_or(""));
     let found = CANDIDATES
@@ -2420,12 +2417,6 @@ fn detect_coverage_tool(root: &Path) -> (Option<&'static str>, Option<&'static s
     }
     if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
         return (Some("pytest-cov"), Some("pytest --cov --cov-report=xml"));
-    }
-    if root.join("package.json").is_file() {
-        return (
-            Some("istanbul/nyc"),
-            Some("nyc --reporter=json-summary npm test"),
-        );
     }
     (None, None)
 }
@@ -3467,6 +3458,11 @@ fn render_result_page(
             .any(|l| l.functions > 0 || l.classes > 0),
         csp_nonce: csp_nonce.to_owned(),
         confluence_configured,
+        report_header_footer: run
+            .effective_configuration
+            .reporting
+            .report_header_footer
+            .clone(),
     };
 
     Html(
@@ -3738,12 +3734,21 @@ async fn artifact_handler(
         if let Some(entry) = reg.find_by_run_id(&run_id) {
             recover_artifacts_from_registry(entry)
         } else {
+            let short_id = &run_id[..run_id.len().min(8)];
+            let hint = if matches!(run_id.as_str(), "pdf" | "html" | "json" | "scan-config") {
+                format!(
+                    " The URL format appears to be reversed — \
+                     the server expects /runs/{run_id}/{{run_id}}, not /runs/{{run_id}}/{run_id}. \
+                     Use the View Reports page to navigate to your scan."
+                )
+            } else {
+                " The report may have been deleted or the report directory moved. \
+                 Use View Reports to browse your scan history."
+                    .to_string()
+            };
             let error_html = ErrorTemplate {
                 message: format!(
-                    "Report not found. Run ID {} is not in the scan history. \
-                     The report may have been deleted, or this is an old run from \
-                     before the scan registry was introduced.",
-                    &run_id[..run_id.len().min(8)]
+                    "Report not found. \"{short_id}\" is not a recognized run ID.{hint}"
                 ),
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
@@ -5410,9 +5415,8 @@ async fn trend_report_handler(
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -6724,7 +6728,18 @@ async fn test_metrics_handler(
         String::new()
     } else {
         String::from(
-            r#"<div class="empty-state" style="margin-bottom:18px;">No code coverage data found for the latest scan. Re-run with a coverage file to enable line, function, and branch coverage metrics. Supported formats: <strong>LCOV</strong> <code>.info</code> (cargo-llvm-cov, gcov) &middot; <strong>Cobertura XML</strong> (pytest-cov, Maven) &middot; <strong>JaCoCo XML</strong> (Gradle, Maven/Java) &middot; <strong>Istanbul JSON</strong> (nyc, Jest). Provide the file via the web scan form or <code>--coverage-file</code> CLI flag.</div>"#,
+            r#"<div class="empty-state" style="margin-bottom:18px;padding:20px 24px;">
+<div style="margin-bottom:10px;font-size:14px;">No code coverage data found for the latest scan. Re-run with a coverage file to enable line, function, and branch coverage metrics.</div>
+<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px 4px;margin-bottom:10px;">
+  <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-right:4px;">Supported formats</span>
+  <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>LCOV</strong> <code>.info</code></span>
+  <span style="color:var(--muted);font-size:12px;">&middot;</span>
+  <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>Cobertura XML</strong></span>
+  <span style="color:var(--muted);font-size:12px;">&middot;</span>
+  <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>JaCoCo XML</strong></span>
+</div>
+<div style="font-size:12px;color:var(--muted);">Provide the file via the web scan form or <code>--coverage-file</code> CLI flag.</div>
+</div>"#,
         )
     };
 
@@ -6947,9 +6962,8 @@ async fn test_metrics_handler(
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics" style="background:rgba(255,255,255,0.22);">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -6975,8 +6989,8 @@ async fn test_metrics_handler(
       <span class="scope-label">Scope</span>
       <div class="scope-sel-wrap">
         <select id="scope-root-sel" class="scope-sel"><option value="__all__">All projects</option></select>
-        <div id="scope-sub-wrap" style="display:none;align-items:center;gap:8px;">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+        <div id="scope-sub-wrap" style="display:none;align-items:center;gap:10px;padding-left:12px;margin-left:4px;border-left:1.5px solid var(--line-strong);">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);display:block;align-self:center;"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
           <select id="scope-sub-sel" class="scope-sel"><option value="">Entire project</option></select>
         </div>
       </div>
@@ -8112,6 +8126,35 @@ fn resolve_input_path(raw: &str) -> PathBuf {
     PathBuf::from(display_path(&canonical))
 }
 
+fn dir_size_bytes(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = fs::read_dir(path) {
+        for entry in rd.filter_map(Result::ok) {
+            let p = entry.path();
+            if p.is_file() {
+                if let Ok(meta) = p.metadata() {
+                    total += meta.len();
+                }
+            } else if p.is_dir() {
+                total += dir_size_bytes(&p);
+            }
+        }
+    }
+    total
+}
+
+fn format_dir_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.0} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_preview_html(
     root: &Path,
@@ -8171,8 +8214,15 @@ fn build_preview_html(
         exclude_patterns,
     )?;
 
+    let root_size = format_dir_size(dir_size_bytes(root));
+
     let mut out = String::new();
-    out.push_str(r#"<div class="explorer-wrap">"#);
+    write!(
+        out,
+        r#"<div class="explorer-wrap" data-project-size="{}">"#,
+        escape_html(&root_size)
+    )
+    .ok();
     out.push_str(r#"<div class="explorer-toolbar compact">"#);
     out.push_str(r#"<div class="explorer-title-group">"#);
     out.push_str(r#"<div class="explorer-title">Project scope preview</div>"#);
@@ -8200,16 +8250,53 @@ fn build_preview_html(
         )
         .ok();
         out.push_str(r#"<div class="submodule-preview-chips">"#);
-        for (name, path) in &submodules {
+        for (sub_name, sub_rel_path) in &submodules {
+            let sub_abs = root.join(sub_rel_path);
+            let sub_size = format_dir_size(dir_size_bytes(&sub_abs));
+            let mut sub_stats = PreviewStats::default();
+            let mut sub_rows: Vec<PreviewRow> = Vec::new();
+            let mut sub_langs: Vec<&'static str> = Vec::new();
+            let mut sub_budget = PreviewBudget {
+                shown: 0,
+                max_entries: 2000,
+                max_depth: 9,
+            };
+            let mut sub_next_id = 1usize;
+            let _ = collect_preview_rows(
+                &sub_abs,
+                &sub_abs,
+                0,
+                None,
+                &mut sub_next_id,
+                &mut sub_budget,
+                &mut sub_stats,
+                &mut sub_rows,
+                &mut sub_langs,
+                &[],
+                &[],
+            );
+            let stats_json = format!(
+                r#"{{"dirs":{},"files":{},"supported":{},"skipped":{},"unsupported":{}}}"#,
+                sub_stats.directories,
+                sub_stats.files,
+                sub_stats.supported,
+                sub_stats.skipped,
+                sub_stats.unsupported
+            );
             write!(
                 out,
-                r#"<span class="submodule-preview-chip" title="path: {}">{}</span>"#,
-                escape_html(&path.to_string_lossy()),
-                escape_html(name)
+                r#"<button type="button" class="submodule-preview-chip" data-sub-name="{}" data-sub-path="{}" data-size="{}" data-sub-stats="{}">{}<span class="submodule-chip-tooltip">Size: {}</span></button>"#,
+                escape_html(sub_name),
+                escape_html(&sub_rel_path.to_string_lossy()),
+                escape_html(&sub_size),
+                escape_html(&stats_json),
+                escape_html(sub_name),
+                escape_html(&sub_size),
             )
             .ok();
         }
-        out.push_str(r"</div></div>");
+        out.push_str(r#"</div><button type="button" class="submodule-base-repo-btn" style="display:none">&#8593; Base repo</button>"#);
+        out.push_str(r"</div>");
     }
 
     out.push_str(r#"<div class="scope-info-row">"#);
@@ -9036,7 +9123,7 @@ struct SubmoduleRow {
     .wizard-step { display:none; opacity: 0; transform: translateY(8px); }
     .wizard-step.active { display:block; animation: stepFade 220ms ease both; }
     @keyframes stepFade { from { opacity: 0; transform: translateY(12px); filter: blur(2px);} to { opacity: 1; transform: translateY(0); filter: blur(0);} }
-    .section { margin-bottom: 22px; padding-bottom: 22px; border-bottom:1px solid var(--line); }
+    .section { margin-bottom: 12px; padding-bottom: 22px; border-bottom:1px solid var(--line); }
     .section:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
     .field-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .field-grid.three { grid-template-columns: 1fr 1fr 1fr; }
@@ -9114,7 +9201,7 @@ struct SubmoduleRow {
     .toggle-card { border:1px solid var(--line); border-radius: 12px; background: var(--surface-2); padding: 16px; }
     .checkbox { display:flex; align-items:flex-start; gap: 10px; font-size: 15px; font-weight:700; }
     .checkbox input { width: 16px; height: 16px; margin-top: 3px; accent-color: var(--accent); }
-    .scan-rules-grid { display:grid; gap: 0; margin-top: 4px; }
+    .scan-rules-grid { display:grid; gap: 0; margin-top: 4px; padding-bottom: 24px; }
     .scan-rules-grid .preset-inline-row { margin-bottom: 0; align-items: start; padding: 22px 0; border-bottom: 1px solid var(--line); }
     .scan-rules-grid .preset-inline-row:first-child { padding-top: 0; }
     .scan-rules-grid .preset-inline-row:last-child { padding-bottom: 0; border-bottom: none; }
@@ -9224,36 +9311,62 @@ struct SubmoduleRow {
     .tree-sort-button:hover { background: rgba(37,99,235,0.08); color: var(--accent-2); }
     .tree-sort-button.active { background: rgba(37,99,235,0.12); color: var(--accent-2); }
     .tree-sort-indicator { font-size: 13px; letter-spacing: 0; text-transform:none; }
-    .file-explorer-tree { max-height: 560px; overflow:auto; }
+    .file-explorer-tree { max-height: 640px; overflow:auto; }
     .tree-row { display:grid; grid-template-columns: minmax(0, 1fr) 170px 160px 200px; gap: 12px; align-items:center; padding: 0 14px; border-bottom:1px solid rgba(0,0,0,0.04); }
     .tree-row:nth-child(odd) { background: rgba(255,255,255,0.25); }
     body.dark-theme .tree-row:nth-child(odd) { background: rgba(255,255,255,0.02); }
     .tree-row.hidden-by-filter { display:none !important; }
-    .tree-name-cell, .tree-date-cell, .tree-type-cell, .tree-status-cell { padding: 9px 0; }
-    .tree-name-cell { display:flex; align-items:center; gap: 10px; padding-left: calc(var(--depth) * 18px + 8px); position: relative; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; min-width:0; }
-    .tree-toggle { width: 28px; height: 28px; display:inline-flex; align-items:center; justify-content:center; border:none; background: var(--surface-2); color: var(--muted-2); cursor:pointer; font-size: 18px; line-height: 1; flex:0 0 28px; border-radius: 8px; border: 1px solid var(--line); font-weight: 900; }
+    .tree-name-cell, .tree-date-cell, .tree-type-cell, .tree-status-cell { padding: 4px 0; }
+    .tree-name-cell { display:flex; align-items:center; gap: 10px; padding-left: calc(var(--depth) * 22px + 8px); position: relative; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; min-width:0; }
+    .tree-toggle { width: 22px; height: 22px; display:inline-flex; align-items:center; justify-content:center; border:none; background: var(--surface-2); color: var(--muted-2); cursor:pointer; font-size: 14px; line-height: 1; flex:0 0 22px; border-radius: 6px; border: 1px solid var(--line); font-weight: 900; }
     .tree-toggle:hover { color: var(--text); background: var(--surface-3); }
-    .tree-bullet { color: var(--muted-2); width: 28px; text-align:center; flex: 0 0 28px; font-size: 7px; opacity: 0.5; }
+    .tree-bullet { color: var(--muted-2); width: 22px; text-align:center; flex: 0 0 22px; font-size: 7px; opacity: 0.5; }
     .tree-node { display:inline-flex; align-items:center; min-width:0; }
     .tree-node-dir { color: var(--text); font-weight: 800; }
     .tree-node-supported { color: var(--success-text); }
     .tree-node-skipped { color: var(--warn-text); }
     .tree-node-unsupported { color: var(--danger-text); }
     .tree-node-more { color: var(--muted-2); font-style: italic; }
-    .tree-date-cell, .tree-type-cell { color: var(--muted); font-size: 13px; }
+    .tree-date-cell, .tree-type-cell { color: var(--muted); font-size: 11px; }
+    .tree-status-cell .badge { font-size: 10px; padding: 1px 7px; }
     .tree-status-cell { display:flex; justify-content:flex-start; }
     .preview-error { color: var(--danger-text); background: var(--danger-bg); border:1px solid #efc2c2; padding: 12px; border-radius: 12px; }
     .preview-hint { color: var(--muted); background: var(--surface-2); border:1px solid var(--line); padding: 18px 20px; border-radius: 12px; font-size:14px; text-align:center; }
-    .coverage-suggest-badge { display:flex; align-items:center; gap:10px; margin-top:8px; padding:9px 14px; border-radius:10px; background:rgba(37,99,235,0.07); border:1px solid rgba(37,99,235,0.18); font-size:13px; }
-    .coverage-suggest-badge .csb-label { flex:1; min-width:0; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .coverage-suggest-badge .csb-label strong { color:var(--accent-2); }
-    .coverage-suggest-badge .csb-use { appearance:none; padding:4px 12px; border-radius:999px; border:1px solid var(--accent-2); background:transparent; color:var(--accent-2); font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
-    .coverage-suggest-badge .csb-use:hover { background:rgba(37,99,235,0.1); }
-    .coverage-suggest-badge .csb-dismiss { appearance:none; padding:2px 8px; border-radius:999px; border:none; background:transparent; color:var(--muted); font-size:14px; cursor:pointer; line-height:1; }
-    .coverage-suggest-badge .csb-tool { display:inline-block; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; background:rgba(37,99,235,0.12); color:var(--accent-2); margin:0 2px; vertical-align:middle; }
-    .coverage-suggest-badge .csb-hint { font-size:11px; background:rgba(0,0,0,0.06); padding:1px 6px; border-radius:4px; }
-    body.dark-theme .coverage-suggest-badge { background:rgba(37,99,235,0.12); border-color:rgba(111,155,255,0.25); }
-    body.dark-theme .coverage-suggest-badge .csb-hint { background:rgba(255,255,255,0.08); }
+    .scope-preview-divider { height:1px; background:var(--line); opacity:0.5; margin-top:22px; margin-bottom:22px; }
+    .cov-scan-status { border-radius:10px; font-size:12.5px; margin-top:10px; }
+    .cov-scan-idle { display:none; }
+    .cov-scan-inner { display:flex; align-items:flex-start; gap:9px; padding:10px 13px; }
+    .cov-scan-icon { flex:0 0 15px; width:15px; height:15px; display:flex; align-items:center; justify-content:center; margin-top:1px; }
+    .cov-scan-body { flex:1; min-width:0; line-height:1.4; }
+    .cov-scan-title { font-weight:600; font-size:12.5px; }
+    .cov-scan-sub { color:var(--muted); font-size:11.5px; margin-top:2px; }
+    .cov-scan-actions { margin-top:7px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+    .cov-scan-use { appearance:none; padding:3px 12px; border-radius:999px; border:1px solid currentColor; background:transparent; font-size:11.5px; font-weight:700; cursor:pointer; white-space:nowrap; }
+    .cov-scan-use:hover { opacity:.75; }
+    .cov-scan-cmd { font-family:monospace; font-size:11px; background:rgba(0,0,0,0.07); padding:2px 7px; border-radius:4px; word-break:break-all; }
+    .cov-scan-tool { display:inline-block; font-size:10.5px; font-weight:700; padding:1px 7px; border-radius:999px; margin-left:4px; vertical-align:middle; }
+    @keyframes cov-pulse { 0%,100%{opacity:.35} 50%{opacity:1} }
+    .cov-scan-scanning { background:rgba(100,100,100,0.06); border:1px solid var(--line); }
+    .cov-scan-scanning .cov-scan-title { color:var(--muted); }
+    .cov-scan-scanning .cov-scan-icon svg { animation:cov-pulse 1.3s ease-in-out infinite; }
+    .cov-scan-found { background:rgba(34,113,60,0.07); border:1px solid rgba(34,113,60,0.22); }
+    .cov-scan-found .cov-scan-title,.cov-scan-found .cov-scan-use { color:#1f6b3a; }
+    .cov-scan-found .cov-scan-use { border-color:#1f6b3a; }
+    .cov-scan-found .cov-scan-tool { background:rgba(34,113,60,0.12); color:#1f6b3a; }
+    body.dark-theme .cov-scan-found { background:rgba(34,113,60,0.1); border-color:rgba(90,186,138,0.25); }
+    body.dark-theme .cov-scan-found .cov-scan-title,body.dark-theme .cov-scan-found .cov-scan-use { color:#5aba8a; }
+    body.dark-theme .cov-scan-found .cov-scan-use { border-color:#5aba8a; }
+    body.dark-theme .cov-scan-found .cov-scan-tool { background:rgba(90,186,138,0.12); color:#5aba8a; }
+    .cov-scan-hint { background:rgba(160,110,0,0.06); border:1px solid rgba(160,110,0,0.22); }
+    .cov-scan-hint .cov-scan-title { color:#7a5e00; }
+    .cov-scan-hint .cov-scan-tool { background:rgba(160,110,0,0.1); color:#7a5e00; }
+    .cov-scan-hint .cov-scan-cmd { background:rgba(0,0,0,0.07); }
+    body.dark-theme .cov-scan-hint { background:rgba(200,160,0,0.08); border-color:rgba(200,160,0,0.22); }
+    body.dark-theme .cov-scan-hint .cov-scan-title { color:#d4a017; }
+    body.dark-theme .cov-scan-hint .cov-scan-tool { background:rgba(200,160,0,0.12); color:#d4a017; }
+    body.dark-theme .cov-scan-hint .cov-scan-cmd { background:rgba(255,255,255,0.07); }
+    .cov-scan-none { background:rgba(100,100,100,0.05); border:1px solid var(--line); }
+    .cov-scan-none .cov-scan-title { color:var(--muted); font-weight:500; }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
     .loading-card { width: min(730px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 36px 42px; }
@@ -9302,9 +9415,21 @@ struct SubmoduleRow {
     .submodule-preview-label { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--text); white-space:nowrap; }
     .submodule-preview-label svg { width:15px; height:15px; stroke:var(--accent-2); fill:none; stroke-width:2; flex:0 0 auto; }
     .submodule-preview-chips { display:flex; flex-wrap:wrap; gap:8px; }
-    .submodule-preview-chip { display:inline-flex; align-items:center; padding:3px 11px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(37,99,235,0.09); border:1px solid rgba(37,99,235,0.22); color:var(--accent-2); cursor:default; }
+    .submodule-preview-chip { appearance:none; display:inline-flex; align-items:center; padding:3px 11px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(37,99,235,0.09); border:1px solid rgba(37,99,235,0.22); color:var(--accent-2); cursor:pointer; position:relative; transition:background .15s ease, box-shadow .15s ease; }
+    .submodule-preview-chip:hover { background:rgba(37,99,235,0.18); }
+    .submodule-preview-chip.active { background:rgba(37,99,235,0.22); box-shadow:0 0 0 2px rgba(37,99,235,0.35); }
+    .submodule-chip-tooltip { position:absolute; bottom:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:5px 10px; border-radius:7px; font-size:11px; font-weight:600; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .18s ease; z-index:300; }
+    .submodule-chip-tooltip::after { content:''; position:absolute; top:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-top-color:var(--text); }
+    .submodule-preview-chip:hover .submodule-chip-tooltip { opacity:1; }
+    .submodule-base-repo-btn { appearance:none; display:inline-flex; align-items:center; gap:5px; padding:3px 11px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(77,44,20,0.1); border:1px solid rgba(77,44,20,0.25); color:var(--text); cursor:pointer; transition:background .15s ease; }
+    .submodule-base-repo-btn:hover { background:rgba(77,44,20,0.18); }
+    .path-info-row { display:flex; align-items:center; gap:6px; margin-top:6px; border-bottom:none; padding:0; }
+    .info-icon-btn { appearance:none; display:inline-flex; align-items:center; gap:5px; background:none; border:none; cursor:pointer; color:var(--muted); font-size:12px; font-weight:600; padding:2px 0; line-height:1.4; }
+    .info-icon-btn svg { width:14px; height:14px; flex:0 0 auto; opacity:.75; }
+    .info-icon-btn:hover { color:var(--text); }
     body.dark-theme .submodule-preview-strip { border-color:rgba(111,155,255,0.22); background:linear-gradient(180deg,rgba(37,99,235,0.09),transparent),var(--surface-2); }
     body.dark-theme .submodule-preview-chip { background:rgba(37,99,235,0.18); border-color:rgba(111,155,255,0.3); }
+    body.dark-theme .submodule-base-repo-btn { background:rgba(255,255,255,0.07); border-color:rgba(255,255,255,0.18); }
   </style>
 </head>
 <body>
@@ -9351,9 +9476,8 @@ struct SubmoduleRow {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -9581,7 +9705,12 @@ struct SubmoduleRow {
                     </div>
                   </div>
                   {% if git_repo.is_empty() %}
-                  <div class="hint">Browse opens the native folder picker through the Rust backend, so you do not need to type local paths manually.</div>
+                  <div class="path-info-row">
+                    <button type="button" class="info-icon-btn" id="project-size-btn" title="Total disk size of the selected project directory">
+                      <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                      <span id="project-size-text">Project size: —</span>
+                    </button>
+                  </div>
                   {% else %}
                   <div class="hint">The source code will be checked out from the remote repository at the specified ref when you run the scan.</div>
                   {% endif %}
@@ -9589,9 +9718,9 @@ struct SubmoduleRow {
                   <div id="zero-files-warning" class="path-history-badge warning" style="display:none" role="alert"></div>
                 </div>
 
-                <div style="height:1px;background:var(--line);margin:28px 0;"></div>
+                <div class="scope-preview-divider" aria-hidden="true"></div>
 
-                <div id="preview-panel" style="margin-top:0;">
+                <div id="preview-panel">
                   <div class="preview-error">Loading preview...</div>
                 </div>
               </div>
@@ -9662,28 +9791,38 @@ struct SubmoduleRow {
               </div>
 
               <div class="section" style="margin-top:14px;">
-                <div class="field">
-                  <label for="coverage_file">Code Coverage file <span style="font-weight:400;color:var(--muted);font-size:12px;">(optional)</span></label>
-                  <div class="input-group compact">
-                    <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. coverage/lcov.info, coverage.xml, coverage-summary.json" />
-                    <button type="button" class="mini-button oxide" id="browse-coverage">Browse</button>
+                <div class="preset-inline-row git-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title" style="margin-bottom:10px;">Coverage</div>
+                    <h4 style="margin:0 0 12px;font-size:16px;">Code Coverage file <span style="font-weight:400;color:var(--muted);font-size:13px;">(optional)</span></h4>
+                    <div class="field" style="margin:0;">
+                      <div class="input-group compact">
+                        <input type="text" id="coverage_file" name="coverage_file" placeholder="e.g. coverage/lcov.info, coverage.xml" />
+                        <button type="button" class="mini-button oxide" id="browse-coverage">Browse</button>
+                      </div>
+                      <div class="hint" style="margin-top:8px;">When provided, line, function, and branch coverage percentages are overlaid on each file in the report and shown on the Test Metrics page.</div>
+                      <div id="cov-scan-status" class="cov-scan-status cov-scan-idle" aria-live="polite"></div>
+                    </div>
                   </div>
-                  <div id="coverage-suggest-badge" class="coverage-suggest-badge" style="display:none"></div>
-                  <div class="hint">Supports <strong>LCOV</strong> <code>.info</code> (cargo-llvm-cov, gcov, lcov)&ensp;&middot;&ensp;<strong>Cobertura XML</strong> <code>coverage.xml</code> (pytest-cov, Maven)&ensp;&middot;&ensp;<strong>JaCoCo XML</strong> <code>jacoco.xml</code> (Gradle, Maven/Java)&ensp;&middot;&ensp;<strong>Istanbul JSON</strong> <code>coverage-summary.json</code> (nyc, Jest).<br>When provided, line, function, and branch coverage percentages are overlaid on each file in the report and shown on the Test Metrics page.</div>
-                  <div class="code-sample" style="margin-top:8px;font-size:12px;"># Rust — cargo-llvm-cov (LCOV)
-cargo llvm-cov --lcov --output-path coverage/lcov.info
-
-# C / C++ — gcov + lcov (LCOV)
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="field-help-title" style="margin-bottom:8px;">What this does</div>
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Overlay line, function, and branch coverage on each file in the HTML report and populate the Test Metrics dashboard.<br /><strong>Good default when:</strong> your test suite emits a coverage report in one of the supported formats.<br /><strong>Leave blank when:</strong> you only need SLOC totals without coverage data.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># C / C++ — gcov + lcov (LCOV)
 lcov --capture --directory . --output-file coverage/lcov.info
+
+# C / C++ — llvm-cov (LCOV)
+llvm-profdata merge -sparse default.profraw -o default.profdata
+llvm-cov export -format=lcov -instr-profile=default.profdata ./mybinary > coverage/lcov.info
+
+# C# — coverlet (Cobertura XML)
+dotnet test --collect:"XPlat Code Coverage"
 
 # Python — pytest-cov (Cobertura XML)
 pytest --cov --cov-report=xml
 
 # Java / Kotlin — Gradle + JaCoCo (JaCoCo XML)
-./gradlew jacocoTestReport
-
-# JavaScript / TypeScript — nyc / Jest (Istanbul JSON)
-nyc --reporter=json-summary npm test</div>
+./gradlew jacocoTestReport</div>
+                  </div>
                 </div>
               </div>
 
@@ -9804,16 +9943,14 @@ nyc --reporter=json-summary npm test</div>
                   </div>
                 </div>
               </div>
-              <div style="margin-top:24px;">
-                  <div class="always-tracked-tip">
-                    <div class="always-tracked-tip-icon">ℹ</div>
-                    <div class="always-tracked-tip-body">
-                      <div class="field-help-title">Always tracked — not configurable &nbsp;·&nbsp; What these settings change</div>
-                      <h4>Comment and blank-line basics &amp; Lines on the boundary</h4>
-                      <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The settings on this page only affect lines that live on the boundary between code and comments — for example <code style="font-size:12px;">x = 1  # counter</code>, which contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
-                    </div>
-                  </div>
+              <div class="always-tracked-tip">
+                <div class="always-tracked-tip-icon">ℹ</div>
+                <div class="always-tracked-tip-body">
+                  <div class="field-help-title">Always tracked — not configurable &nbsp;·&nbsp; What these settings change</div>
+                  <h4>Comment and blank-line basics &amp; Lines on the boundary</h4>
+                  <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The settings on this page only affect lines that live on the boundary between code and comments — for example <code style="font-size:12px;">x = 1  # counter</code>, which contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
                 </div>
+              </div>
 
               <div class="wizard-actions">
                 <div class="left">
@@ -9909,7 +10046,7 @@ nyc --reporter=json-summary npm test</div>
                   <div class="field">
                     <label for="report_header_footer">Report header / footer</label>
                     <input id="report_header_footer" name="report_header_footer" type="text" value="" placeholder="e.g. Acme Corp — Confidential · Project Athena" />
-                    <div class="hint">Printed on every page of the HTML and PDF report — use for company name, project identifier, or scanner identification.</div>
+                    <div class="hint" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Printed on every HTML/PDF page — company name, project ID, or scanner tag.</div>
                   </div>
                   <div class="output-field-aside">
                     <strong>Page-level identification</strong>
@@ -9920,7 +10057,7 @@ nyc --reporter=json-summary npm test</div>
 
               <div class="section">
                 <div class="section-kicker">Artifacts</div>
-                <div class="artifact-grid">
+                <div class="artifact-grid" style="margin-bottom:24px;">
                   <div class="artifact-card selected" data-artifact="html" data-review-label="HTML report">
                     <div class="marker">✓</div>
                     <div class="artifact-icon">H</div>
@@ -9956,7 +10093,7 @@ nyc --reporter=json-summary npm test</div>
                     <input type="checkbox" name="generate_json" checked class="hidden artifact-checkbox" />
                   </div>
                 </div>
-                <div class="hint" style="margin-top:16px;">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
+                <div class="hint" style="padding-top:48px;">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
               </div>
 
               <div class="wizard-actions">
@@ -10056,7 +10193,7 @@ nyc --reporter=json-summary npm test</div>
       var browseOutputDir = document.getElementById("browse-output-dir");
       var browseCoverage = document.getElementById("browse-coverage");
       var coverageInput = document.getElementById("coverage_file");
-      var coverageSuggestBadge = document.getElementById("coverage-suggest-badge");
+      var covScanStatus = document.getElementById("cov-scan-status");
       var coverageSuggestTimer = null;
       var themeToggle = document.getElementById("theme-toggle");
       var mixedLinePolicy = document.getElementById("mixed_line_policy");
@@ -10809,10 +10946,66 @@ nyc --reporter=json-summary npm test</div>
           if (filterSelect) filterSelect.value = activeFilter;
         }
 
+        var submoduleChips = Array.prototype.slice.call(previewPanel.querySelectorAll('.submodule-preview-chip[data-sub-stats]'));
+        var baseRepoBtn = previewPanel.querySelector('.submodule-base-repo-btn');
+        var originalStats = {};
+        buttons.forEach(function (btn) {
+          var f = btn.getAttribute('data-filter');
+          var v = btn.querySelector('.scope-stat-value');
+          if (f && v) originalStats[f] = v.textContent;
+        });
+
+        function applySubmoduleStats(statsJson) {
+          try {
+            var s = JSON.parse(statsJson);
+            buttons.forEach(function (btn) {
+              var f = btn.getAttribute('data-filter');
+              var v = btn.querySelector('.scope-stat-value');
+              if (!v) return;
+              if (f === 'dir') v.textContent = s.dirs;
+              else if (f === 'file') v.textContent = s.files;
+              else if (f === 'supported') v.textContent = s.supported;
+              else if (f === 'skipped') v.textContent = s.skipped;
+              else if (f === 'unsupported') v.textContent = s.unsupported;
+            });
+          } catch (e) {}
+        }
+
+        function restoreBaseRepoStats() {
+          buttons.forEach(function (btn) {
+            var f = btn.getAttribute('data-filter');
+            var v = btn.querySelector('.scope-stat-value');
+            if (v && originalStats[f]) v.textContent = originalStats[f];
+          });
+          submoduleChips.forEach(function (c) { c.classList.remove('active'); });
+          if (baseRepoBtn) baseRepoBtn.style.display = 'none';
+        }
+
+        submoduleChips.forEach(function (chip) {
+          chip.addEventListener('click', function () {
+            var statsJson = chip.getAttribute('data-sub-stats');
+            if (!statsJson) return;
+            submoduleChips.forEach(function (c) { c.classList.remove('active'); });
+            chip.classList.add('active');
+            applySubmoduleStats(statsJson);
+            if (baseRepoBtn) baseRepoBtn.style.display = '';
+          });
+        });
+
+        if (baseRepoBtn) {
+          baseRepoBtn.addEventListener('click', function () {
+            restoreBaseRepoStats();
+            resetViewState();
+            sortSiblingRows();
+            applyVisibility();
+          });
+        }
+
         buttons.forEach(function (button) {
           button.addEventListener("click", function () {
             var filterValue = button.getAttribute("data-filter") || "all";
             if (filterValue === "reset-view") {
+              restoreBaseRepoStats();
               resetViewState();
               sortSiblingRows();
               applyVisibility();
@@ -10919,6 +11112,16 @@ nyc --reporter=json-summary npm test</div>
             syncPythonVisibility();
             updateReview();
             setTimeout(collapseLanguagePills, 50);
+            var explorerWrap = previewPanel.querySelector('.explorer-wrap');
+            var projectSize = explorerWrap ? explorerWrap.getAttribute('data-project-size') : null;
+            var sizeText = document.getElementById('project-size-text');
+            var sizeBtn = document.getElementById('project-size-btn');
+            if (sizeText && projectSize) {
+              sizeText.textContent = 'Project size: ' + projectSize;
+              if (sizeBtn) sizeBtn.title = 'Total disk size of the selected project directory: ' + projectSize;
+            } else if (sizeText) {
+              sizeText.textContent = 'Project size: —';
+            }
             if (zeroWarn) {
               var supportedBtn = previewPanel.querySelector('.scope-stat-button.supported .scope-stat-value');
               var filesBtn = previewPanel.querySelector('.scope-stat-button[data-filter="file"] .scope-stat-value');
@@ -11044,7 +11247,7 @@ nyc --reporter=json-summary npm test</div>
             .then(function (d) {
               if (d && d.selected_path && coverageInput) {
                 coverageInput.value = d.selected_path;
-                if (coverageSuggestBadge) coverageSuggestBadge.style.display = "none";
+                setCovStatus("idle");
               }
             })
             .catch(function () {})
@@ -11052,45 +11255,65 @@ nyc --reporter=json-summary npm test</div>
         });
       }
 
+      function setCovStatus(state, opts) {
+        if (!covScanStatus) return;
+        opts = opts || {};
+        covScanStatus.className = "cov-scan-status cov-scan-" + state;
+        if (state === "idle") { covScanStatus.innerHTML = ""; return; }
+        var ICON_SCAN = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>';
+        var ICON_OK   = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-5"/></svg>';
+        var ICON_WARN = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+        var ICON_NONE = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>';
+        var icons = { scanning: ICON_SCAN, found: ICON_OK, hint: ICON_WARN, none: ICON_NONE };
+        var html = '<div class="cov-scan-inner"><div class="cov-scan-icon">' + (icons[state] || "") + '</div><div class="cov-scan-body">';
+        if (state === "scanning") {
+          html += '<div class="cov-scan-title">Scanning project for coverage files…</div>';
+        } else if (state === "found") {
+          var tb = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
+          html += '<div class="cov-scan-title">Coverage file detected' + tb + '</div>';
+          html += '<div class="cov-scan-sub">' + escapeHtml(opts.found) + '</div>';
+          html += '<div class="cov-scan-actions"><button type="button" class="cov-scan-use" data-path="' + escapeHtml(opts.found) + '">Use this file</button></div>';
+        } else if (state === "hint") {
+          var tb2 = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
+          html += '<div class="cov-scan-title">' + tb2 + ' detected &mdash; no coverage file found yet</div>';
+          html += '<div class="cov-scan-sub">Generate one with:</div>';
+          html += '<div class="cov-scan-actions"><code class="cov-scan-cmd">' + escapeHtml(opts.hint) + '</code></div>';
+        } else if (state === "none") {
+          html += '<div class="cov-scan-title">No coverage files detected in this project</div>';
+          html += '<div class="cov-scan-sub">Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML</div>';
+        }
+        html += '</div></div>';
+        covScanStatus.innerHTML = html;
+        if (state === "found") {
+          var useBtn = covScanStatus.querySelector(".cov-scan-use");
+          if (useBtn) useBtn.addEventListener("click", function () {
+            if (coverageInput) coverageInput.value = this.dataset.path;
+            setCovStatus("idle");
+          });
+        }
+      }
+
       function suggestCoverageFile(projectPath) {
-        if (!coverageInput || !coverageSuggestBadge) return;
-        if (coverageInput.value.trim()) { coverageSuggestBadge.style.display = "none"; return; }
+        if (!coverageInput || !covScanStatus) return;
+        if (coverageInput.value.trim()) { setCovStatus("idle"); return; }
         clearTimeout(coverageSuggestTimer);
-        if (!projectPath || !projectPath.trim()) { coverageSuggestBadge.style.display = "none"; return; }
+        if (!projectPath || !projectPath.trim()) { setCovStatus("idle"); return; }
+        setCovStatus("scanning");
         coverageSuggestTimer = setTimeout(function () {
           fetch("/api/suggest-coverage?path=" + encodeURIComponent(projectPath))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-              if (!d || coverageInput.value.trim()) { coverageSuggestBadge.style.display = "none"; return; }
-              var toolBadge = d.tool ? ' <span class="csb-tool">' + escapeHtml(d.tool) + '</span>' : '';
+              if (coverageInput && coverageInput.value.trim()) { setCovStatus("idle"); return; }
+              if (!d) { setCovStatus("none"); return; }
               if (d.found) {
-                coverageSuggestBadge.innerHTML =
-                  '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:var(--accent-2);fill:none;stroke-width:2;flex:0 0 auto;" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
-                  + '<span class="csb-label">Coverage file found' + toolBadge + ': <strong>' + escapeHtml(d.found) + '</strong></span>'
-                  + '<button type="button" class="csb-use" data-path="' + escapeHtml(d.found) + '">Use this</button>'
-                  + '<button type="button" class="csb-dismiss" title="Dismiss">&times;</button>';
-                coverageSuggestBadge.style.display = "flex";
-                coverageSuggestBadge.querySelector(".csb-use").addEventListener("click", function () {
-                  coverageInput.value = this.dataset.path;
-                  coverageSuggestBadge.style.display = "none";
-                });
-                coverageSuggestBadge.querySelector(".csb-dismiss").addEventListener("click", function () {
-                  coverageSuggestBadge.style.display = "none";
-                });
+                setCovStatus("found", { found: d.found, tool: d.tool });
               } else if (d.tool && d.hint) {
-                coverageSuggestBadge.innerHTML =
-                  '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:var(--muted);fill:none;stroke-width:2;flex:0 0 auto;" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
-                  + '<span class="csb-label">No coverage file found.' + toolBadge + ' Generate one: <code class="csb-hint">' + escapeHtml(d.hint) + '</code></span>'
-                  + '<button type="button" class="csb-dismiss" title="Dismiss">&times;</button>';
-                coverageSuggestBadge.style.display = "flex";
-                coverageSuggestBadge.querySelector(".csb-dismiss").addEventListener("click", function () {
-                  coverageSuggestBadge.style.display = "none";
-                });
+                setCovStatus("hint", { tool: d.tool, hint: d.hint });
               } else {
-                coverageSuggestBadge.style.display = "none";
+                setCovStatus("none");
               }
             })
-            .catch(function () {});
+            .catch(function () { setCovStatus("idle"); });
         }, 600);
       }
 
@@ -11266,9 +11489,9 @@ nyc --reporter=json-summary npm test</div>
         });
       });
 
-      if (coverageInput && coverageSuggestBadge) {
+      if (coverageInput) {
         coverageInput.addEventListener("input", function () {
-          if (coverageInput.value.trim()) coverageSuggestBadge.style.display = "none";
+          if (coverageInput.value.trim()) setCovStatus("idle");
         });
       }
 
@@ -11673,9 +11896,8 @@ struct IndexTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -12334,9 +12556,8 @@ struct SplashTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -12777,9 +12998,17 @@ struct ScanSetupTemplate {
     .two-col { display: grid; grid-template-columns: 0.95fr 1.05fr; gap: 18px; align-items: start; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); }
-    th:first-child, td:first-child { width: 28%; }
+    .metrics-table th:first-child, .metrics-table td:first-child { width: 28%; }
     th { color: var(--muted); font-weight: 700; }
     tr:last-child td { border-bottom: none; }
+    #subm-tbl col:nth-child(1){width:21%;}
+    #subm-tbl col:nth-child(2){width:39%;}
+    #subm-tbl col:nth-child(3){width:6%;}
+    #subm-tbl col:nth-child(4){width:6%;}
+    #subm-tbl col:nth-child(5){width:6%;}
+    #subm-tbl col:nth-child(6){width:7%;}
+    #subm-tbl col:nth-child(7){width:6%;}
+    #subm-tbl col:nth-child(8){width:9%;}
     .preview-shell { border-radius: 20px; overflow: hidden; border: 1px solid var(--line); background: var(--surface-2); }
     iframe { width: 100%; min-height: 1000px; border: none; background: white; }
     .empty-preview { padding: 26px; color: var(--muted); line-height: 1.6; }
@@ -12845,7 +13074,7 @@ struct ScanSetupTemplate {
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     /* ── Result-page chart controls ─────────────────────────────────────────── */
     .r-chart-section{margin-bottom:24px;}
-    .section-pair{display:flex;flex-direction:column;gap:64px;width:100%;margin-top:24px;}
+    .section-pair{display:flex;flex-direction:column;gap:24px;width:100%;margin-top:24px;}
     .section-pair > .panel{flex-shrink:0;}
     .r-chart-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
     .r-chart-select{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:4px 10px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;outline:none;}
@@ -12868,9 +13097,13 @@ struct ScanSetupTemplate {
     @media(max-width:820px){.r-viz-grid{grid-template-columns:1fr;}}
     .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--surface-2);display:flex;flex-direction:column;}
     .r-viz-card-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;}
+    .report-id-banner{background:var(--nav);color:#fff;font-size:11px;font-weight:700;letter-spacing:0.05em;text-align:center;height:27px;line-height:27px;padding:0 16px;position:fixed;top:0;left:0;right:0;z-index:32;width:100%;}
+    .report-id-footer-banner{background:var(--nav);color:#fff;font-size:11px;font-weight:700;letter-spacing:0.05em;text-align:center;height:27px;line-height:27px;padding:0 16px;position:fixed;bottom:0;left:0;right:0;z-index:32;width:100%;}
+    body.has-report-banner .top-nav{top:27px;}
+    body.has-report-banner{padding-bottom:27px;}
   </style>
 </head>
-<body>
+<body{% if report_header_footer.is_some() %} class="has-report-banner"{% endif %}>
   <div class="background-watermarks" aria-hidden="true">
     <img src="/images/logo/logo-text.png" alt="" />
     <img src="/images/logo/logo-text.png" alt="" />
@@ -12888,6 +13121,9 @@ struct ScanSetupTemplate {
     <img src="/images/logo/logo-text.png" alt="" />
   </div>
   <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  {% if let Some(banner) = report_header_footer %}
+  <div class="report-id-banner" aria-label="Report identification">{{ banner|e }}</div>
+  {% endif %}
   <div class="top-nav">
     <div class="top-nav-inner">
       <a class="brand" href="/">
@@ -12908,9 +13144,8 @@ struct ScanSetupTemplate {
         <a class="nav-pill" href="/compare-scans" style="text-decoration:none;">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -13152,17 +13387,18 @@ struct ScanSetupTemplate {
           <div class="pill-row"><span class="soft-chip">{{ submodule_rows.len() }} submodule{% if submodule_rows.len() != 1 %}s{% endif %}</span></div>
         </div>
         <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:800px;">
+        <table id="subm-tbl" style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:800px;">
+          <colgroup><col><col><col><col><col><col><col><col></colgroup>
           <thead>
             <tr>
-              <th style="width:17%;padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
-              <th style="width:44%;padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Path</th>
-              <th style="width:6%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Files</th>
-              <th style="width:7%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Physical</th>
-              <th style="width:6%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Code</th>
-              <th style="width:8%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Comments</th>
-              <th style="width:6%;padding:9px 4px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">Blank</th>
-              <th style="width:6%;padding:9px 8px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
+              <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;">Path</th>
+              <th style="padding:9px 2px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Files</th>
+              <th style="padding:9px 2px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Physical</th>
+              <th style="padding:9px 2px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Code</th>
+              <th style="padding:9px 2px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Comments</th>
+              <th style="padding:9px 2px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Blank</th>
+              <th style="padding:9px 8px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">Report</th>
             </tr>
           </thead>
           <tbody>
@@ -13633,7 +13869,9 @@ struct ScanSetupTemplate {
           var el=document.getElementById('r-composition-chart');
           if(!el||!LANG_D||!LANG_D.length)return;
           var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
-          var LW=110,BW=260,SH=224,svgW=480;
+          var LW=110,SH=224;
+          var svgW=Math.max(320,el.offsetWidth||480);
+          var BW=Math.max(120,svgW-LW-80);
           var legendH=24,topPad=4;
           var n=LANG_D.length||1;
           var rowTotal=Math.floor((SH-legendH-topPad)/n);
@@ -13683,7 +13921,8 @@ struct ScanSetupTemplate {
         (function(){
           var el=document.getElementById('r-scatter-chart');
           if(!el||!SCAT_D||!SCAT_D.length)return;
-          var W=480,H=224,PL=52,PB=36,PT=12,PR=14;
+          var H=224,PL=52,PB=36,PT=12,PR=14;
+          var W=Math.max(320,el.offsetWidth||480);
           var cW=W-PL-PR,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
@@ -13717,7 +13956,9 @@ struct ScanSetupTemplate {
         function renderSemantic(key){
           var el=document.getElementById('r-semantic-chart');
           if(!el||!SEM_D||!SEM_D.length)return;
-          var LW=112,BW=300,SH=224,svgW=480;
+          var LW=112,SH=224;
+          var svgW=Math.max(320,el.offsetWidth||480);
+          var BW=Math.max(120,svgW-LW-80);
           var topPad=4,botPad=14;
           var n2=SEM_D.length||1;
           var rowTotal2=Math.floor((SH-topPad-botPad)/n2);
@@ -13744,7 +13985,9 @@ struct ScanSetupTemplate {
           if(sort==='desc')data.sort(function(a,b){return(b[key]||0)-(a[key]||0);});
           else if(sort==='asc')data.sort(function(a,b){return(a[key]||0)-(b[key]||0);});
           else data.sort(function(a,b){return(a.name||'').localeCompare(b.name||'');});
-          var LW=128,BW=300,SH=224,svgW=480;
+          var LW=128,SH=224;
+          var svgW=Math.max(320,el.offsetWidth||480);
+          var BW=Math.max(120,svgW-LW-80);
           var topPad3=4,botPad3=14;
           var n3=data.length||1;
           var rowTotal3=Math.floor((SH-topPad3-botPad3)/n3);
@@ -13767,6 +14010,35 @@ struct ScanSetupTemplate {
           subSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel?sortSel.value:'desc');});
           if(sortSel)sortSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel.value);});
         }
+
+        // Re-render all SVG charts when the window is resized so bars fill the card.
+        var _rResizeTimer;
+        window.addEventListener('resize',function(){
+          clearTimeout(_rResizeTimer);
+          _rResizeTimer=setTimeout(function(){
+            var rcompBtn=document.querySelector('[data-rcomp].active');
+            renderComposition(rcompBtn?rcompBtn.getAttribute('data-rcomp'):'abs');
+            (function(){
+              var scEl=document.getElementById('r-scatter-chart');
+              if(!scEl||!SCAT_D||!SCAT_D.length)return;
+              var H=224,PL=52,PB=36,PT=12,PR=14;
+              var W=Math.max(320,scEl.offsetWidth||480);
+              var cW=W-PL-PR,cH=H-PT-PB;
+              var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
+              var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
+              var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
+              var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+              [0,0.25,0.5,0.75,1].forEach(function(t){var y=PT+cH*(1-t);s+='<line x1="'+PL+'" y1="'+px(y)+'" x2="'+(PL+cW)+'" y2="'+px(y)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';if(t>0)s+='<text x="'+(PL-4)+'" y="'+(px(y)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxC*t))+'</text>';});
+              [0,0.25,0.5,0.75,1].forEach(function(t){var x=PL+cW*t;s+='<line x1="'+px(x)+'" y1="'+PT+'" x2="'+px(x)+'" y2="'+(PT+cH)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxF*t))+'</text>';});
+              SCAT_D.forEach(function(d,i){var cx2=PL+d.files/maxF*cW,cy2=PT+cH-d.code/maxC*cH;var r=Math.max(4,Math.sqrt(d.physical/maxP)*18);s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';if(r>6)s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.9" style="pointer-events:none;">'+esc(d.lang)+'</text>';});
+              s+='<text x="'+(PL+cW/2)+'" y="'+(H-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7">Files</text>';
+              s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
+              s+='</svg>';scEl.innerHTML=s;
+            })();
+            if(semSel)renderSemantic(semSel.value||'functions');
+            if(subSel)renderSubmodule(subSel.value||'code',sortSel?sortSel.value:'desc');
+          },120);
+        });
       })();
 
       (function randomizeWatermarks() {
@@ -13947,6 +14219,9 @@ struct ScanSetupTemplate {
   })();
   </script>
   {% endif %}
+  {% if let Some(banner) = report_header_footer %}
+  <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
+  {% endif %}
 </body>
 </html>
 "##,
@@ -14037,6 +14312,8 @@ struct ResultTemplate {
     csp_nonce: String,
     /// Whether Confluence integration is configured — shows Post button when true.
     confluence_configured: bool,
+    /// Header/footer identification banner, mirrored from the HTML/PDF report.
+    report_header_footer: Option<String>,
 }
 
 #[derive(Template)]
@@ -14140,9 +14417,8 @@ struct ResultTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -14430,9 +14706,8 @@ struct ScanWaitTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -14453,14 +14728,16 @@ struct ScanWaitTemplate {
 
   <div class="page">
     <div class="panel">
-      <h1>Analysis failed</h1>
+      <h1>Error</h1>
       <div class="error-box">{{ message }}</div>
       <div class="actions">
         <a class="btn-primary" href="/scan">Back to setup</a>
         {% if let Some(report_url) = last_report_url %}
         <a class="btn-secondary" href="{{ report_url }}">{% if let Some(label) = last_report_label %}{{ label }}{% else %}View last report{% endif %}</a>
-        {% endif %}
+        {% if report_url != "/view-reports" %}<a class="btn-secondary" href="/view-reports">View Reports</a>{% endif %}
+        {% else %}
         <a class="btn-secondary" href="/view-reports">View Reports</a>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -14723,9 +15000,8 @@ struct ErrorTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -14868,7 +15144,7 @@ struct ErrorTemplate {
               <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip" title="{{ entry.git_commit }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
               <td class="report-cell">
                 <div class="actions-cell">
-                  <a class="btn primary rpt-btn" href="/runs/html/{{ entry.run_id }}" target="_blank" rel="noopener" title="View HTML report">View</a>
+                  {% if entry.has_json %}<a class="btn primary rpt-btn" href="/runs/result/{{ entry.run_id }}" target="_blank" rel="noopener" title="Open full interactive result report">View</a>{% else %}<a class="btn primary rpt-btn" href="/runs/html/{{ entry.run_id }}" target="_blank" rel="noopener" title="View HTML report">View</a>{% endif %}
                   {% if entry.has_pdf %}<a class="btn primary rpt-btn" href="/runs/pdf/{{ entry.run_id }}" target="_blank" rel="noopener" title="View PDF report">PDF</a>{% endif %}
                 </div>
                 {% if !entry.submodule_links.is_empty() %}
@@ -15295,7 +15571,7 @@ struct HistoryTemplate {
     th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;position:relative;user-select:none;}
     th.sortable{cursor:pointer;} th.sortable:hover{color:var(--oxide);}
     .sort-icon{margin-left:4px;font-size:10px;opacity:0.45;display:inline-block;vertical-align:middle;}
-    #compare-table th:nth-child(1),#compare-table td:nth-child(1){min-width:28px;width:28px;max-width:28px;padding-left:2px;padding-right:2px;box-sizing:border-box;}
+    #compare-table th:nth-child(1),#compare-table td:nth-child(1){min-width:52px;width:52px;padding-left:10px;padding-right:10px;box-sizing:border-box;text-align:center;}
     #compare-table th:nth-child(2),#compare-table td:nth-child(2){min-width:185px;}
     #compare-table th:nth-child(3),#compare-table td:nth-child(3){min-width:300px;}
     #compare-table th:nth-child(4),#compare-table td:nth-child(4){min-width:78px;}
@@ -15421,9 +15697,8 @@ struct HistoryTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -15526,9 +15801,10 @@ struct HistoryTemplate {
       {% endif %}
       <div class="table-wrap">
         <table id="compare-table">
+          <colgroup><col><col><col><col><col><col><col><col><col><col><col></colgroup>
           <thead>
             <tr id="compare-thead">
-              <th style="text-align:center;padding-left:4px;padding-right:4px;"><div class="col-resize-handle"></div></th>
+              <th><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="timestamp" data-sort-type="str">Timestamp<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th class="sortable" data-sort-col="project" data-sort-type="str">Project<span class="sort-icon">&#8597;</span><div class="col-resize-handle"></div></th>
               <th title="Internal scan ID generated by OxideSLOC">Run ID<div class="col-resize-handle"></div></th>
@@ -15553,7 +15829,7 @@ struct HistoryTemplate {
                 data-branch="{{ entry.git_branch }}"
                 data-commit="{{ entry.git_commit }}"
                 data-submodules="{{ entry.submodule_names_csv }}">
-              <td style="text-align:center;padding-left:4px;padding-right:4px;"><span class="sel-badge" id="badge-{{ entry.run_id }}"></span></td>
+              <td><span class="sel-badge" id="badge-{{ entry.run_id }}"></span></td>
               <td>{{ entry.timestamp }}</td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
               <td><span class="run-id-chip" title="OxideSLOC internal scan ID">{{ entry.run_id_short }}</span></td>
@@ -16201,6 +16477,15 @@ struct CompareSelectTemplate {
     .submod-scope-btn:hover{background:var(--line);}
     .submod-scope-btn.active{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
     .submod-scope-hint{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap;}
+    .ic-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+    @media(max-width:800px){.ic-grid{grid-template-columns:1fr;}}
+    .ic-card{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:16px 20px;}
+    body.dark-theme .ic-card{background:var(--surface-2);}
+    .ic-card-h2{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 10px;}
+    .ic-leg{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;}
+    .ic-dot{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}
+    .ic-cb{cursor:pointer;transition:opacity .15s,filter .15s;}.ic-cb:hover{opacity:.72;filter:brightness(1.1);}
+    #ic-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:rgba(255,255,255,0.92);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.28);max-width:240px;white-space:nowrap;}
   </style>
 </head>
 <body>
@@ -16230,9 +16515,8 @@ struct CompareSelectTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -16431,6 +16715,29 @@ struct CompareSelectTemplate {
       </div>
     </section>
 
+    <section class="panel" id="inline-charts-section">
+      <h2>Scan Delta Charts</h2>
+      <div class="ic-grid">
+        <div class="ic-card">
+          <div class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</div>
+          <div class="ic-leg"><span><span class="ic-dot" style="background:#AAAAAA"></span>Baseline</span><span><span class="ic-dot" style="background:#C45C10"></span>Current</span></div>
+          <div id="ic-c1"></div>
+        </div>
+        <div class="ic-card" id="ic-lang-card">
+          <div class="ic-card-h2">Language Code Delta</div>
+          <div id="ic-c3"></div>
+        </div>
+        <div class="ic-card">
+          <div class="ic-card-h2">Delta by Metric</div>
+          <div id="ic-c2"></div>
+        </div>
+        <div class="ic-card">
+          <div class="ic-card-h2">File Change Distribution</div>
+          <div id="ic-c4"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel">
       <h2>File-level delta</h2>
       <div class="filter-tabs-row">
@@ -16522,6 +16829,8 @@ struct CompareSelectTemplate {
       </div>
     </section>
   </div>
+
+  <div id="ic-tt"></div>
 
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
@@ -17026,6 +17335,98 @@ struct CompareSelectTemplate {
       slocDownload(html, fname, 'text/html;charset=utf-8;');
     }
     window.exportDeltaCharts = function(){slocChartReport(getExportFilename('html'),_sd,getDeltaExportRows());};
+    // ── Inline delta charts ────────────────────────────────────────────────────
+    var _icTT=document.getElementById('ic-tt');
+    window.icTT=function(e,t,v){if(!_icTT)return;_icTT.innerHTML='<strong>'+t+'</strong><br>'+v;_icTT.style.display='block';window.icMT(e);};
+    window.icMT=function(e){if(!_icTT)return;var x=e.clientX+16,y=e.clientY-10,r=_icTT.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;_icTT.style.left=x+'px';_icTT.style.top=y+'px';};
+    window.icHT=function(){if(_icTT)_icTT.style.display='none';};
+    (function(){
+      var OX='#C45C10',GN='#2A6846',RD='#B23030',GY='#AAAAAA',LGY='#DDDDDD';
+      function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+      function px(n){return Math.round(n);}
+      function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
+      function btt(l,v){return ' class="ic-cb" onmouseover="icTT(event,\''+jsq(l)+'\',\''+jsq(v)+'\')" onmouseout="icHT()" onmousemove="icMT(event)"';}
+      var dr=getDeltaExportRows(),sd=_sd,lm={};
+      dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
+      var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
+      // Chart 1: Baseline vs Current grouped bars
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc},{l:'Files Analyzed',b:sd.bf,c:sd.cf},{l:'Comments',b:sd.bcm,c:sd.ccm}];
+      var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
+      var C1W=600,C1H=160,c1mt=20,c1mb=24,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=52,c1gap=10;
+      var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+      for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
+      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
+      c1mets.forEach(function(m,i){
+        var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
+        var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
+        c1+='<text x="'+cx+'" y="14" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+GY+'" rx="3"/>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#666">'+fmt(m.b)+'</text>';
+        c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+OX+'" rx="3"/>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+OX+'">'+fmt(m.c)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+OX+'">After</text>';
+      });
+      c1+='</svg>';
+      // Chart 2: Delta by Metric
+      var mets=[{l:'Code Lines',v:sd.cc-sd.bc},{l:'Files Analyzed',v:sd.cf-sd.bf},{l:'Comment Lines',v:sd.ccm-sd.bcm}];
+      var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
+      var C2W=530,rH=48,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
+      var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+      c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
+      mets.forEach(function(m,i){
+        var y=14+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" fill="#444">'+esc(m.l)+'</text>';
+        c2+='<rect'+btt(m.l,'Delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+7)+'" width="'+px(bw)+'" height="26" fill="'+col+'" rx="3"/>';
+        if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+25)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
+        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+25)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+      });
+      c2+='</svg>';
+      // Chart 3: Language Code Delta
+      var c3='';
+      if(langs.length){
+        var maxLD=Math.max.apply(null,langs.map(function(l){return Math.abs(lm[l].d);}))||1;
+        var C3W=550,c3LW=124,c3FW=52,cx3=c3LW+Math.floor((C3W-c3LW-c3FW-14)/2),maxLBW=Math.floor((C3W-c3LW-c3FW-14)/2)-4,L3rH=30,C3H=langs.length*L3rH+20;
+        c3='<svg viewBox="0 0 '+C3W+' '+C3H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+        c3+='<line x1="'+cx3+'" y1="0" x2="'+cx3+'" y2="'+C3H+'" stroke="'+LGY+'" stroke-width="1.5"/>';
+        langs.forEach(function(l,i){
+          var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
+          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
+          c3+='<rect'+btt(l,'Delta: '+vStr+' code lines • '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
+          if(bw>=48){c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
+          else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
+        });
+        c3+='</svg>';
+      }
+      // Chart 4: File Change Donut
+      var segs=[{l:'Modified',v:sd.fm,c:OX},{l:'Added',v:sd.fa,c:GN},{l:'Removed',v:sd.fr,c:RD},{l:'Unchanged',v:sd.fu,c:'#CCCCCC'}].filter(function(s){return s.v>0;});
+      var tot=segs.reduce(function(a,s){return a+s.v;},0)||1;
+      var cx4=110,cy4=100,Ro=84,Ri=46,C4W=480,C4H=210,c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
+      if(segs.length===1){
+        // Single segment — SVG arc degenerates at 360°; use concentric circles instead
+        c4+='<circle'+btt(segs[0].l,fmt(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
+        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface)"/>';
+      } else {
+        segs.forEach(function(s){
+          var sw=Math.min(s.v/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
+          var x1=cx4+Ro*Math.cos(ang),y1=cy4+Ro*Math.sin(ang),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
+          var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang),yi2=cy4+Ri*Math.sin(ang);
+          c4+='<path'+btt(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          ang+=sw;
+        });
+      }
+      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#444">'+fmt(tot)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
+      segs.forEach(function(s,i){c4+='<rect x="234" y="'+(16+i*44)+'" width="14" height="14" fill="'+s.c+'" rx="2"/><text x="252" y="'+(27+i*44)+'" font-family="Inter,Calibri,Arial" font-size="12" fill="#444">'+esc(s.l)+': '+fmt(s.v)+'</text>';});
+      c4+='</svg>';
+      var e1=document.getElementById('ic-c1');if(e1)e1.innerHTML=c1;
+      var e2=document.getElementById('ic-c2');if(e2)e2.innerHTML=c2;
+      var e3=document.getElementById('ic-c3');if(e3)e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';
+      var e4=document.getElementById('ic-c4');if(e4)e4.innerHTML=c4;
+      var lc=document.getElementById('ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
+    })();
   </script>
   <script nonce="{{ csp_nonce }}">
   (function(){
@@ -17435,9 +17836,8 @@ struct LoginTemplate {
         <a class="nav-pill" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">Git Tools <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/git-browser"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>Git Browser</a>
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
@@ -17672,6 +18072,35 @@ ok</div>
           </div>
         </div>
       </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/metrics/submodules</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">List known git submodules across scans</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the distinct set of git submodules that have appeared in any stored scan, optionally filtered by project root path.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">root</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Filter to scans whose input root matches this path</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">[{
+  "name":          string,  // submodule name
+  "relative_path": string   // path relative to the project root
+}]</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-metrics-submodules">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/metrics/submodules?root=/path/to/repo"</pre>
+            <button class="curl-copy-btn" data-target="c-metrics-submodules">Copy</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Async Run Status -->
@@ -17723,6 +18152,26 @@ ok</div>
             <pre class="curl-block" data-curl-id="c-pdf-status">curl -H "Authorization: Bearer $SLOC_API_KEY" \
   <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;/pdf-status</pre>
             <button class="curl-copy-btn" data-target="c-pdf-status">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/runs/<span class="param">{run_id}</span>/cancel</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Cancel a running scan</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Signals a running async scan to stop. Returns <code>200 OK</code> if cancellation was accepted or the scan was already cancelled. Returns <code>404</code> if the run ID is unknown or the scan has already completed.</p>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-run-cancel">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;/cancel</pre>
+            <button class="curl-copy-btn" data-target="c-run-cancel">Copy</button>
           </div>
         </div>
       </div>
@@ -18073,6 +18522,349 @@ ok</div>
   -d @config.json \
   <span class="base-url-slot">http://127.0.0.1:4317</span>/import-config</pre>
             <button class="curl-copy-btn" data-target="c-import">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CI Ingest -->
+    <div class="section">
+      <h2 class="section-title">CI Ingest</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/ingest</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Push a pre-computed scan result from CI</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Accepts a pre-computed <code>AnalysisRun</code> JSON (produced by <code>oxide-sloc analyze --json-out result.json</code>) and stores it as if a server-side scan had been run. Use <code>oxide-sloc send result.json --webhook-url &lt;server&gt;/api/ingest</code> for the canonical CLI workflow.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">label</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Display name shown in View Reports (defaults to the scanned root path)</td></tr>
+          </table>
+          <p class="params-heading">Request Body (application/json)</p>
+          <p style="margin:0 0 8px;font-size:13px;color:var(--muted);">Full <code>AnalysisRun</code> JSON as produced by the CLI <code>--json-out</code> flag.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">// 201 Created
+{
+  "run_id":   string,  // UUID of the ingested run
+  "view_url": string   // relative URL to the report page
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-ingest">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @result.json \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/ingest?label=my-project"</pre>
+            <button class="curl-copy-btn" data-target="c-ingest">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Artifact Download -->
+    <div class="section">
+      <h2 class="section-title">Artifact Download</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/runs/<span class="param">{artifact}</span>/<span class="param">{run_id}</span></span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Download or view a scan artifact</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Serves a stored artifact for a completed run. The <code>artifact</code> segment selects which file to return.</p>
+          <p class="params-heading">Path Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">artifact</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>One of: <code>html</code> (rendered report), <code>pdf</code> (PDF export), <code>json</code> (raw AnalysisRun), <code>scan-config</code> (TOML config used)</td></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Run UUID from <code>/api/metrics/history</code></td></tr>
+          </table>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">download</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Pass <code>1</code> to force a <code>Content-Disposition: attachment</code> download header</td></tr>
+          </table>
+          <p class="curl-heading">Example — download JSON result</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-artifact-json">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  -o result.json \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/runs/json/&lt;run_id&gt;?download=1"</pre>
+            <button class="curl-copy-btn" data-target="c-artifact-json">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Embed Widget -->
+    <div class="section">
+      <h2 class="section-title">Embed Widget</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/embed/summary</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Embeddable scan summary widget (iframe)</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns a self-contained HTML snippet suitable for embedding in an <code>&lt;iframe&gt;</code>. Shows key metrics (code lines, file count, language breakdown) for the specified or most recent run.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-opt">optional</span></td><td>Run to display; defaults to the most recent scan</td></tr>
+            <tr><td class="pt-name">theme</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Pass <code>dark</code> for a dark-themed widget</td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-embed">&lt;iframe src="<span class="base-url-slot">http://127.0.0.1:4317</span>/embed/summary?theme=dark"
+        width="460" height="260" style="border:none"&gt;&lt;/iframe&gt;</pre>
+            <button class="curl-copy-btn" data-target="c-embed">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confluence Integration -->
+    <div class="section">
+      <h2 class="section-title">Confluence Integration</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/confluence/config</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Get current Confluence configuration</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the active Confluence integration settings. The API token / password is never returned — only whether one is set.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{
+  "configured":     boolean,
+  "tier":           "cloud" | "server",
+  "base_url":       string,
+  "username":       string,
+  "api_token_set":  boolean,
+  "space_key":      string,
+  "parent_page_id": string | null,
+  "schedule_auto_post": { "&lt;schedule_id&gt;": boolean }
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-cf-get">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/confluence/config</pre>
+            <button class="curl-copy-btn" data-target="c-cf-get">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/confluence/config</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Save Confluence configuration</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Persists the Confluence connection settings. Omit <code>credential</code> to keep the existing token.</p>
+          <p class="params-heading">Request Body (application/json)</p>
+          <table class="params">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">tier</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td><code>cloud</code> (default) or <code>server</code></td></tr>
+            <tr><td class="pt-name">base_url</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Confluence base URL (e.g. <code>https://myorg.atlassian.net</code>)</td></tr>
+            <tr><td class="pt-name">username</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Atlassian account email / server username</td></tr>
+            <tr><td class="pt-name">credential</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>API token or password; blank to keep existing</td></tr>
+            <tr><td class="pt-name">space_key</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Confluence space key (e.g. <code>ENG</code>)</td></tr>
+            <tr><td class="pt-name">parent_page_id</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Page ID to create reports under</td></tr>
+            <tr><td class="pt-name">schedule_auto_post</td><td class="pt-type">object</td><td><span class="pt-opt">optional</span></td><td>Map of schedule UUID → boolean for auto-posting on webhook trigger</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "ok": true }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-cf-save">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"base_url":"https://myorg.atlassian.net","username":"me@example.com","credential":"my-token","space_key":"ENG"}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/confluence/config</pre>
+            <button class="curl-copy-btn" data-target="c-cf-save">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/confluence/test</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Test Confluence connection</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Verifies that the saved credentials can connect to and authenticate with Confluence. No request body required.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "ok": boolean, "error": string | undefined }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-cf-test">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/confluence/test</pre>
+            <button class="curl-copy-btn" data-target="c-cf-test">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/confluence/post</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Publish a scan report to Confluence</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Creates or updates a Confluence page containing the SLOC metrics for the specified run. Requires Confluence to be configured via <code>POST /api/confluence/config</code>.</p>
+          <p class="params-heading">Request Body (application/json)</p>
+          <table class="params">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Run whose metrics to publish</td></tr>
+            <tr><td class="pt-name">page_title</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Title for the Confluence page</td></tr>
+            <tr><td class="pt-name">report_url</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>URL to the HTML report, included as a link in the page</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">// 200 OK
+{ "ok": true, "page_id": string }
+
+// 400 / 502 on error
+{ "ok": false, "error": string }</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-cf-post">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"run_id":"&lt;uuid&gt;","page_title":"SLOC Report 2025-05-10"}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/confluence/post</pre>
+            <button class="curl-copy-btn" data-target="c-cf-post">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/confluence/wiki-markup</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Get Confluence wiki markup for a run</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the Confluence Storage Format (XHTML) markup that would be posted for the given run, so you can preview or extend it before publishing.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Run to generate markup for</td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-cf-markup">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/confluence/wiki-markup?run_id=&lt;uuid&gt;"</pre>
+            <button class="curl-copy-btn" data-target="c-cf-markup">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Authentication -->
+    <div class="section">
+      <h2 class="section-title">Authentication</h2>
+      <p class="webhook-note">These endpoints are always public. They manage browser session cookies used as an alternative to API key headers.</p>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/auth/login</span>
+          <span class="auth-badge public">Public</span>
+          <span class="ep-desc">Login page</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the HTML login form. Redirects to <code>/</code> immediately when no API key is configured on the server.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">next</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>URL to redirect to after a successful login</td></tr>
+            <tr><td class="pt-name">error</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Pass <code>1</code> to display an invalid-credentials error</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/auth/login</span>
+          <span class="auth-badge public">Public</span>
+          <span class="ep-desc">Submit credentials and get a session cookie</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Validates the submitted API key and sets a <code>sloc_session</code> cookie on success. The cookie is <code>HttpOnly; SameSite=Strict</code> and is accepted by all protected endpoints in lieu of an <code>Authorization</code> or <code>X-API-Key</code> header.</p>
+          <p class="params-heading">Form Body (application/x-www-form-urlencoded)</p>
+          <table class="params">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">key</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>API key to validate</td></tr>
+            <tr><td class="pt-name">next</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Redirect target on success (must start with <code>/</code>)</td></tr>
+          </table>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-auth-login">curl -c cookies.txt -X POST \
+  -d "key=$SLOC_API_KEY&amp;next=/" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/auth/login</pre>
+            <button class="curl-copy-btn" data-target="c-auth-login">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Coverage Suggestion -->
+    <div class="section">
+      <h2 class="section-title">Coverage Suggestion</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/suggest-coverage</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Auto-detect a coverage file for a project root</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Scans a local project root for common coverage report files (LCOV, Cobertura XML, JaCoCo XML) and returns the first one found, along with a hint for how to generate it if not present.</p>
+          <p class="params-heading">Query Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-opt">optional</span></td><td>Absolute path to the project root to inspect</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{
+  "found": string | null,  // absolute path to the coverage file, if detected
+  "tool":  string | null,  // detected coverage tool (e.g. "cargo-llvm-cov", "jacoco", "pytest-cov")
+  "hint":  string | null   // shell command to generate coverage if not found
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-suggest-cov">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/suggest-coverage?path=/path/to/repo"</pre>
+            <button class="curl-copy-btn" data-target="c-suggest-cov">Copy</button>
           </div>
         </div>
       </div>

@@ -12,6 +12,7 @@ This crate is the main entry point for analysis:
 - Binary detection via long-line + low-whitespace heuristic
 - Generated/vendor/lockfile skip logic
 - Git submodule discovery and per-submodule breakdown
+- **Multi-format coverage parsing** (`coverage.rs`): `parse_coverage_auto(path, content)` auto-detects the format by file extension and content sniff, then dispatches to `parse_lcov`, `parse_cobertura` (Cobertura XML / pytest-cov / Maven), `parse_jacoco` (JaCoCo XML / Gradle / Maven), or `parse_istanbul` (Istanbul/NYC JSON / Jest). `lookup_coverage` matches per-file paths with three fallback strategies; `aggregate_line_coverage` produces a weighted-average percentage.
 
 ## Usage
 

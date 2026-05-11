@@ -6,10 +6,14 @@ HTML report rendering and PDF export for [oxide-sloc](https://github.com/oxide-s
 
 This crate handles all output rendering:
 
-- **`render_html(run) -> Result<String>`** — Askama-templated HTML report with light/dark theme, language charts, per-file breakdown, and warning analysis
-- **`write_pdf_from_html(html, path)`** — spawns a locally installed headless Chromium-based browser, polls for file stability, 45 s timeout
+- **`render_html(run) -> Result<String>`** — Askama-templated HTML report with light/dark theme, language charts, per-file breakdown, warning analysis, and animated coverage gauge cards (`cov-gauge-card`)
+- **`write_pdf_from_html(html, path)`** — spawns a locally installed headless Chromium-based browser, polls for file stability, 45 s timeout; PDF print uses 0.82 zoom, tighter chart spacing, and a single-column centred scatter chart
 - Browser discovery: checks Chrome, Edge, Brave, Vivaldi, and Opera on Windows and Linux paths
 - Set `SLOC_BROWSER` env var to override browser path; `SLOC_BROWSER_NOSANDBOX=1` passes `--no-sandbox` (required in Docker)
+- **Stat-chip components** — summary strip used on multiple pages (test metrics, trend reports): compact value + label + exact-value sub-label + hover tooltip
+- **Run-ID chips** — `position:fixed` banners repeat on every printed/PDF page; chips show click-to-copy tooltip on hover; print margins widen when `report_header_footer` is set
+- **Support-opportunities table** — Description and Example columns wrap with styled example-file badges
+- **Per-file table** — `overflow-y:scroll` forced to keep scrollbar gutter permanently allocated; JS IIFE compensates padding for scrollbar track width; column widths corrected to sum to ~98%
 
 ## Usage
 

@@ -92,7 +92,9 @@ bash scripts/run.sh
 ```
 
 `scripts/internal/airgap-build.sh` verifies the vendor checksum, extracts, writes
-`.cargo/config.toml`, and runs `cargo build --release --offline`.
+`.cargo/config.toml`, and runs `cargo build --release --offline`. All output streams
+to the terminal and is simultaneously captured to a timestamped log under `logs/`; on
+failure, the log path and a clickable link are printed.
 
 > **What vendor.tar.xz covers:** All Rust crate sources (~328 crates). The Rust toolchain
 > itself is not included. If you also need to transfer the toolchain, use
@@ -172,7 +174,8 @@ The embedded `install.sh`:
 1. Installs the Rust toolchain into `.tools/rust/` — no root, no system PATH changes.
 2. Installs the musl C toolchain into `.tools/musl/` — no root.
 3. Verifies and extracts the vendor crate sources.
-4. Builds a fully static oxide-sloc binary in the kit directory.
+4. Builds a fully static oxide-sloc binary with an animated three-phase progress display
+   (Verify sources → Compile release build → Install binary) and a frozen completion summary.
 
 After a successful build:
 
@@ -206,18 +209,23 @@ bash install.sh --gnu   # use system gcc instead of bundled musl-gcc
 Users interact with three scripts only. Internal scripts under `scripts/internal/` are
 called automatically and should not be invoked directly.
 
-| Script | Purpose |
-|---|---|
-| `bash scripts/install.sh` | Install oxide-sloc (auto-detects best path) |
-| `bash scripts/run.sh` | Launch web UI (localhost) |
-| `bash scripts/serve-server.sh` | Launch web UI as LAN server |
+| Script | Purpose | Build progress display |
+|---|---|---|
+| `bash scripts/install.sh` | Install oxide-sloc (auto-detects best path) | Yes — Verify sources → Compile release build → Install binary |
+| `bash scripts/run.sh` | Launch web UI (localhost) | Yes — Resolve dependencies → Compile workspace → Launch server |
+| `bash scripts/serve-server.sh` | Launch web UI as LAN server | Yes — Resolve dependencies → Compile workspace → Launch server |
 
-| Internal script | Called by |
-|---|---|
-| `scripts/internal/airgap-build.sh` | `install.sh` (vendor build path) |
-| `scripts/internal/make-airgap-kit.sh` | Run manually on networked machine to produce Option D kit |
-| `scripts/internal/update-vendor.sh` | Maintainer tooling — regenerates `vendor.tar.xz` |
-| `scripts/internal/install-hooks.sh` | Developer setup — installs git hooks |
+All three scripts show a live animated progress indicator with spinner, progress bar, elapsed
+timer, and cycling status messages when compiling from source. On completion the display
+freezes with all milestones checked (✓) so the summary remains visible. Every run writes a
+timestamped log to `logs/`; on failure the log path and a clickable terminal link are printed.
+
+| Internal script | Called by | Build progress display |
+|---|---|---|
+| `scripts/internal/airgap-build.sh` | Manually (Option C manual path) | No — plain streaming output; logs to `logs/airgap-build-*.log` |
+| `scripts/internal/make-airgap-kit.sh` | Run manually on networked machine to produce Option D kit | Kit's embedded `install.sh` logs to `logs/kit-install-*.log` on the air-gapped machine |
+| `scripts/internal/update-vendor.sh` | Maintainer tooling — regenerates `vendor.tar.xz` | No |
+| `scripts/internal/install-hooks.sh` | Developer setup — installs git hooks | No |
 
 ---
 

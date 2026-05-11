@@ -1,5 +1,9 @@
 # Jenkins job bootstrap
 
+> **New to Jenkins?** See `docs/jenkins-manual-setup.md` for a complete step-by-step
+> guide to creating the pipeline through the Jenkins web UI with no CLI required.
+> This file covers the CLI bootstrap path for operators who prefer scripted setup.
+
 ## Operator workflow (overview)
 
 1. `cp ci/jenkins/.env.example ci/jenkins/.env` — fill in `JENKINS_TOKEN`
@@ -9,6 +13,55 @@
 5. Run the seed-build curl (Step 2 below)
 
 On a network-connected agent, step 2 is optional.
+
+## New pipeline features
+
+The Jenkinsfile now supports three additional capability tiers beyond the basic SLOC scan.
+Enable each tier by setting the corresponding build parameters.
+
+### Unit test results (JUnit)
+
+Set `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`.
+
+Requires `cargo-nextest` on the agent:
+```bash
+cargo install cargo-nextest
+```
+
+What you get:
+- JUnit XML written to `<OUTPUT_SUBDIR>/test-results/junit.xml` and archived.
+- **"Test Result"** sidebar link on each build with pass/fail/skip counts.
+- Test trend chart on the job page.
+- `RUST_BACKTRACE=1` always set — full stack traces on panics.
+- Transient test failures retried once (configured in `.config/nextest.toml`).
+
+Use `TEST_FAIL_FAST = true` to abort on the first failure for faster feedback.
+
+### Standalone code coverage
+
+Check `COVERAGE_STANDALONE`.
+
+Requires `cargo-llvm-cov` on the agent (vendored in `ci/tools/Cargo.toml`):
+```bash
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+```
+
+What you get:
+- LCOV (`lcov.info`) and Cobertura XML (`sonar-coverage.xml`) archived per build.
+- Browsable HTML report archived under `coverage/html/` per build.
+- **"Coverage Report"** sidebar link on each build.
+- "Line coverage % over time" trend chart on the job page.
+- Optional threshold gate: set `COVERAGE_THRESHOLD = 60` to fail builds below 60 % coverage.
+- When `GENERATE_COVERAGE` is also enabled, coverage runs once and is reused by SonarQube.
+
+### Artifact repository push
+
+Set `ARTIFACT_REPO_TYPE` to any backend (artifactory, nexus, s3, minio, azure-blob, generic-http)
+and fill in `ARTIFACT_REPO_URL`.  Add credentials `SLOC_ARTIFACT_REPO_USER` /
+`SLOC_ARTIFACT_REPO_PASS` in Jenkins for authenticated repositories.
+
+---
 
 ---
 
@@ -99,87 +152,140 @@ All lines must print `[ok]`. Fix any `[fail]` before continuing.
 
 ---
 
-## Installing plugins
+## Installing plugins (air-gapped — recommended)
 
-Required plugins are listed in `ci/jenkins/plugins.txt`. The full set includes:
+All required plugins are bundled with the repository in `jenkins-plugins.tar.xz`,
+following the same model as `vendor.tar.xz` for Rust crates.
+No internet access is needed after a plain `git clone`.
 
-| Plugin | Purpose |
-|--------|---------|
-| `workflow-aggregator` | Declarative Pipeline syntax |
-| `pipeline-utility-steps` | `readJSON` in `post { success }` |
-| `git` | SCM checkout |
-| `ws-cleanup` | `cleanWs()` in `post { cleanup }` |
-| `credentials-binding` | SMTP / webhook credential bindings |
-| `htmlpublisher` | "SLOC Report" sidebar link |
-| `plot` | Build-over-build trend charts |
-| `pipeline-stage-view` | Stage view in the job UI |
-| `timestamper` | Timestamps on console output |
-| `copyartifact` | Copy artifacts to/from downstream jobs |
-| `bitbucket` | Bitbucket Branch Source (optional) |
-| `bitbucket-build-status-notifier` | Bitbucket build status (optional) |
-| `ansicolor` | ANSI color in Rust compiler output |
+The full plugin list is in `ci/jenkins/plugins.txt`.
 
-### Path 1 — Docker (online)
+### One-time bundle generation (networked machine, run once)
 
+Run this on any machine that has Docker and internet access, then commit the output:
+
+```bash
+bash ci/jenkins/bundle-jenkins-plugins.sh
+# Outputs: jenkins-plugins.tar.xz + jenkins-plugins.tar.xz.sha256
+
+# If the archive exceeds 100 MB, enable git LFS first:
+#   git lfs install && git lfs track 'jenkins-plugins.tar.xz'
+
+git add jenkins-plugins.tar.xz jenkins-plugins.tar.xz.sha256
+git commit -m "ci: bundle Jenkins plugins for air-gapped install"
+```
+
+The bundle script downloads all plugins **and their full transitive dependency trees**
+using the official `jenkins-plugin-cli` that ships with `jenkins/jenkins:lts-jdk21`.
+After committing, every `git clone` has everything needed for a completely offline setup.
+
+Re-run whenever `ci/jenkins/plugins.txt` changes (added or removed plugins) and
+commit both files atomically — the controller Dockerfile and install script both
+verify the SHA-256 checksum before extracting.
+
+---
+
+### Path A — Docker controller image (recommended for Docker setups)
+
+`ci/jenkins/Dockerfile.controller` builds a Jenkins controller with all plugins
+pre-installed from `jenkins-plugins.tar.xz`.  The resulting image needs no network
+access at runtime and never contacts the Jenkins update center.
+
+```bash
+# Build once after generating the bundle:
+docker build \
+    -t jenkins-oxide-sloc-controller:latest \
+    -f ci/jenkins/Dockerfile.controller \
+    .
+
+# Run:
+docker run -d \
+    --name jenkins-controller \
+    -p 8080:8080 \
+    -v jenkins_home:/var/jenkins_home \
+    jenkins-oxide-sloc-controller:latest
+```
+
+In `docker-compose.yml`, replace `image: jenkins/jenkins:lts` with:
+
+```yaml
+build:
+  context: .
+  dockerfile: ci/jenkins/Dockerfile.controller
+image: jenkins-oxide-sloc-controller:latest
+```
+
+Rebuild the image whenever `jenkins-plugins.tar.xz` is updated.
+
+---
+
+### Path B — Install into a running Jenkins instance
+
+Use this for native / systemd Jenkins or an already-running Docker container
+where you cannot rebuild the image.
+
+```bash
+# From the repo root on the Jenkins host (or inside the container):
+bash ci/jenkins/install-jenkins-plugins.sh --restart
+```
+
+The install script verifies the checksum, extracts all `.hpi` files to
+`$JENKINS_HOME/plugins/`, pins each plugin (prevents update-center replacement),
+and optionally restarts Jenkins.
+
+To install without restarting (then restart manually):
+```bash
+bash ci/jenkins/install-jenkins-plugins.sh
+# Restart Jenkins manually — Docker:
+docker restart <container-name>
+# Native:
+sudo systemctl restart jenkins
+```
+
+To install to a custom path (e.g., inside a Dockerfile `RUN` step):
+```bash
+bash ci/jenkins/install-jenkins-plugins.sh \
+    --target-dir /usr/share/jenkins/ref/plugins
+```
+
+---
+
+### Path C — Online install (internet-connected Jenkins)
+
+Only use this when the machine has internet access and a running Jenkins instance.
+
+**Docker:**
 ```bash
 docker exec -u root <container> jenkins-plugin-cli \
-  --plugins $(grep -Ev '^#|^$' ci/jenkins/plugins.txt | awk '{print $1}' | tr '\n' ' ')
+  --plugins $(grep -Ev '^[[:space:]]*#|^[[:space:]]*$' ci/jenkins/plugins.txt \
+              | awk '{print $1}' | tr '\n' ' ')
+docker restart <container>
 ```
 
-### Path 2 — Docker (air-gapped)
-
-```bash
-# On a networked machine — download each .hpi:
-while IFS= read -r line; do
-  [[ "$line" =~ ^#|^$ ]] && continue
-  id=$(echo "$line" | awk '{print $1}')
-  curl -L -o "${id}.hpi" "https://updates.jenkins.io/latest/${id}.hpi"
-done < ci/jenkins/plugins.txt
-
-# Transfer .hpi files to the air-gapped host, then install:
-docker exec -u root <container> \
-  cp /host/path/<plugin>.hpi /var/jenkins_home/plugins/<plugin>.hpi
-# Restart Jenkins to load the plugins.
-```
-
-Alternatively: **Manage Jenkins → Plugins → Advanced → Deploy Plugin → Upload .hpi file**
-
-### Path 3 — Native / systemd install (Jenkins CLI jar)
-
-Use this when Jenkins runs directly on the host (not in Docker):
-
+**Native (Jenkins CLI jar):**
 ```bash
 set -a; source ci/jenkins/.env; set +a
 curl -sS -o jenkins-cli.jar "${JENKINS_URL}/jnlpJars/jenkins-cli.jar"
 java -jar jenkins-cli.jar -s "${JENKINS_URL}" -auth "${JENKINS_USER}:${JENKINS_TOKEN}" \
-    install-plugin $(grep -Ev '^#|^$' ci/jenkins/plugins.txt | awk '{print $1}')
-java -jar jenkins-cli.jar -s "${JENKINS_URL}" -auth "${JENKINS_USER}:${JENKINS_TOKEN}" safe-restart
+    install-plugin $(grep -Ev '^[[:space:]]*#|^[[:space:]]*$' ci/jenkins/plugins.txt \
+                     | awk '{print $1}')
+java -jar jenkins-cli.jar -s "${JENKINS_URL}" -auth "${JENKINS_USER}:${JENKINS_TOKEN}" \
+    safe-restart
 ```
 
-Wait ~30 seconds for Jenkins to come back up, then re-run `preflight.sh` (check c verifies all plugins are active).
+---
 
 ### Plugin verification
 
-`ci/jenkins/preflight.sh` check (c) queries the plugin manager and prints `[ok]` / `[fail]` per plugin. Run it after any plugin install before proceeding. You can also verify manually:
+`ci/jenkins/preflight.sh` check (c) queries the running Jenkins plugin manager and
+prints `[ok]` / `[fail]` per plugin in `ci/jenkins/plugins.txt`:
 
 ```bash
 set -a; source ci/jenkins/.env; set +a
-curl -su "${JENKINS_USER}:${JENKINS_TOKEN}" \
-    "${JENKINS_URL}/pluginManager/api/json?depth=1" \
-  | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-required = [l.split()[0] for l in open('ci/jenkins/plugins.txt') if l.strip() and not l.startswith('#')]
-installed = {p['shortName']: p.get('active') and p.get('enabled') for p in data['plugins']}
-for r in required:
-    status = 'ok' if installed.get(r) else ('disabled' if r in installed else 'MISSING')
-    print(f'  {status:8s}  {r}')
-missing = [r for r in required if not installed.get(r)]
-if missing: sys.exit(1)
-"
+bash ci/jenkins/preflight.sh
 ```
 
-Exit code 0 = all plugins active. Non-zero = at least one missing or disabled.
+Exit code 0 = all plugins active and enabled.  Non-zero = at least one missing or disabled.
 
 ---
 

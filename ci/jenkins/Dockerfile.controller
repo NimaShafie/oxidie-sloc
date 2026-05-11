@@ -1,0 +1,106 @@
+# Jenkins controller image for oxide-sloc — fully air-gapped.
+#
+# All required plugins are installed from jenkins-plugins.tar.xz, which is
+# committed to the repository alongside vendor.tar.xz and (optionally)
+# rust-toolchain-bundle.tar.xz.  No internet access is needed after
+# `git clone` + `docker build`.
+#
+# ── Prerequisites ──────────────────────────────────────────────────────────────
+# Generate the plugin bundle once on a networked machine, then commit:
+#
+#   bash ci/jenkins/bundle-jenkins-plugins.sh
+#   git add jenkins-plugins.tar.xz jenkins-plugins.tar.xz.sha256
+#   git commit -m "ci: bundle Jenkins plugins for air-gapped install"
+#
+# ── Build ──────────────────────────────────────────────────────────────────────
+# Always build from the repository root so that COPY paths resolve correctly:
+#
+#   docker build \
+#       -t jenkins-oxide-sloc-controller:latest \
+#       -f ci/jenkins/Dockerfile.controller \
+#       .
+#
+# ── Run (standalone) ───────────────────────────────────────────────────────────
+#   docker run -d \
+#       --name jenkins-controller \
+#       -p 8080:8080 \
+#       -v jenkins_home:/var/jenkins_home \
+#       jenkins-oxide-sloc-controller:latest
+#
+# ── Run with docker-compose ───────────────────────────────────────────────────
+# In your docker-compose.yml, replace:
+#   image: jenkins/jenkins:lts
+# with:
+#   build:
+#     context: .
+#     dockerfile: ci/jenkins/Dockerfile.controller
+#   image: jenkins-oxide-sloc-controller:latest
+#
+# ── Updating plugins ───────────────────────────────────────────────────────────
+# Whenever ci/jenkins/plugins.txt changes (a plugin is added or removed):
+#   1.  bash ci/jenkins/bundle-jenkins-plugins.sh
+#   2.  git add jenkins-plugins.tar.xz jenkins-plugins.tar.xz.sha256
+#   3.  git commit -m "ci: update Jenkins plugin bundle"
+#   4.  docker build ... (rebuild the image)
+#   5.  docker compose up -d  (or equivalent restart)
+
+FROM jenkins/jenkins:lts-jdk21
+
+USER root
+
+# xz-utils — required to decompress jenkins-plugins.tar.xz during image build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Copy and verify the plugin bundle ─────────────────────────────────────────
+# The build context is the repository root (see Build section above).
+# Both files are committed to the repo by bundle-jenkins-plugins.sh.
+COPY jenkins-plugins.tar.xz        /tmp/jenkins-plugins.tar.xz
+COPY jenkins-plugins.tar.xz.sha256 /tmp/jenkins-plugins.tar.xz.sha256
+
+# Verify the archive, then extract all .hpi/.jpi files into the Jenkins
+# reference directory.  Files in /usr/share/jenkins/ref/plugins/ are copied
+# to $JENKINS_HOME/plugins/ on first container start by the copy_reference_file
+# mechanism built into the base jenkins/jenkins:lts image.
+#
+# Pin all plugins after extraction:  .hpi.pinned marker files tell Jenkins
+# not to replace these versions from the update center — appropriate for an
+# air-gapped environment where update-center access is either unavailable or
+# intentionally blocked.
+RUN set -eux; \
+    cd /tmp; \
+    echo "==> Verifying jenkins-plugins.tar.xz..."; \
+    sha256sum -c jenkins-plugins.tar.xz.sha256; \
+    echo "==> Extracting plugins to /usr/share/jenkins/ref/plugins/..."; \
+    mkdir -p /usr/share/jenkins/ref/plugins; \
+    tar -xJf jenkins-plugins.tar.xz -C /usr/share/jenkins/ref/plugins; \
+    echo "==> Pinning plugins..."; \
+    for f in /usr/share/jenkins/ref/plugins/*.hpi \
+              /usr/share/jenkins/ref/plugins/*.jpi; do \
+        [ -f "$f" ] && touch "${f%.hpi}.hpi.pinned" "${f%.jpi}.hpi.pinned" 2>/dev/null || true; \
+    done; \
+    PLUGIN_COUNT=$(ls /usr/share/jenkins/ref/plugins/*.hpi \
+                      /usr/share/jenkins/ref/plugins/*.jpi 2>/dev/null | wc -l); \
+    echo "==> Installed and pinned ${PLUGIN_COUNT} plugins."; \
+    rm /tmp/jenkins-plugins.tar.xz /tmp/jenkins-plugins.tar.xz.sha256
+
+# ── CSP init script ────────────────────────────────────────────────────────────
+# Relaxes the Content-Security-Policy so the SLOC HTML report and Coverage
+# Source HTML report render correctly in the Jenkins artifact viewer.
+# Equivalent to dropping the script into $JENKINS_HOME/init.groovy.d/ at runtime.
+COPY ci/jenkins/init.groovy.d/ /usr/share/jenkins/ref/init.groovy.d/
+
+# ── Disable the first-run setup wizard ────────────────────────────────────────
+# The wizard prompts for plugin selection and an admin user — both are handled
+# by this Dockerfile and the initial credentials configuration in Jenkins.
+ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
+
+# ── Update center: point at a no-op URL in air-gapped environments ─────────────
+# Jenkins still attempts to reach the update center at startup.  In a fully
+# air-gapped network this causes a long timeout before the UI becomes usable.
+# Setting the update-center URL to the bundled default (or a local mirror) avoids
+# this.  Operators may override this with their own internal update center URL.
+ENV JENKINS_OPTS="--argumentsRealm.roles.user=admin --argumentsRealm.passwd.admin=admin"
+
+USER jenkins

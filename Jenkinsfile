@@ -280,6 +280,53 @@ pipeline {
             description:  'Include report.pdf in the artifact repository push ' +
                           '(only when GENERATE_PDF is checked).'
         )
+
+        // ── Test runner & results ──────────────────────────────────────────────
+        choice(
+            name:    'TEST_RUNNER',
+            choices: ['cargo-test', 'cargo-nextest'],
+            description: 'Test runner for the Unit tests stage.\n' +
+                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)\n' +
+                         '  cargo-nextest — faster parallel runner with JUnit XML output;\n' +
+                         '                  requires cargo-nextest on the agent:\n' +
+                         '                    cargo install cargo-nextest\n' +
+                         '                  Enables the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.'
+        )
+        booleanParam(
+            name:         'PUBLISH_TEST_RESULTS',
+            defaultValue: true,
+            description:  'Publish JUnit XML test results to Jenkins (requires TEST_RUNNER = cargo-nextest). ' +
+                          'Results appear as a "Test Result" sidebar link, per-build trend chart, and build badge. ' +
+                          'Has no effect when TEST_RUNNER is "cargo-test" (no XML is generated).'
+        )
+        booleanParam(
+            name:         'TEST_FAIL_FAST',
+            defaultValue: false,
+            description:  'Stop on the first test failure instead of running all tests to completion. ' +
+                          'Useful for fast feedback on a known-broken area; leave unchecked to see all failures at once.'
+        )
+
+        // ── Standalone code coverage ───────────────────────────────────────────
+        booleanParam(
+            name:         'COVERAGE_STANDALONE',
+            defaultValue: false,
+            description:  'Run a dedicated Coverage stage independent of the SonarQube scan. ' +
+                          'Generates LCOV, Cobertura XML, and a browsable HTML coverage report. ' +
+                          'The HTML report is published as a "Coverage Report" sidebar link. ' +
+                          'Requires cargo-llvm-cov (preferred) or cargo-tarpaulin on the agent:\n' +
+                          '  cargo install cargo-llvm-cov && rustup component add llvm-tools-preview\n' +
+                          'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.\n' +
+                          'When both COVERAGE_STANDALONE and GENERATE_COVERAGE are enabled, ' +
+                          'coverage runs once (Coverage stage) and is reused by SonarQube.'
+        )
+        string(
+            name:         'COVERAGE_THRESHOLD',
+            defaultValue: '0',
+            description:  'Minimum line-coverage percentage required to pass the build (0 = disabled). ' +
+                          'Only enforced when COVERAGE_STANDALONE is enabled. ' +
+                          'Coverage percentage is derived from the LCOV lcov.info summary lines (LH / LF). ' +
+                          'Example: 60  fails the build if fewer than 60 % of lines are covered.'
+        )
     }
 
     environment {
@@ -418,6 +465,16 @@ CARGOEOF
         // ── 2. Quality Gates ───────────────────────────────────────────────────
         // Format and Lint run in parallel; Unit tests follow.
         // All skipped when SKIP_QUALITY_GATES is checked for faster scan-only runs.
+        //
+        // TEST_RUNNER controls which test harness is used:
+        //   cargo-test    — standard stable runner; console output only
+        //   cargo-nextest — faster parallel runner; produces JUnit XML at
+        //                   <OUTPUT_SUBDIR>/test-results/junit.xml for the
+        //                   Jenkins "Test Result" sidebar link (requires
+        //                   PUBLISH_TEST_RESULTS + cargo-nextest on the agent).
+        //
+        // TEST_FAIL_FAST — stop on first failure (default: run all)
+        // RUST_BACKTRACE=1 is always set so panics include full stack traces.
         stage('Quality Gates') {
             when { expression { !params.SKIP_QUALITY_GATES } }
             stages {
@@ -433,14 +490,63 @@ CARGOEOF
                                         -- -D warnings \
                                            -W clippy::pedantic \
                                            -W clippy::nursery \
-                                           -A clippy::multiple_crate_versions
+                                           -A clippy::multiple_crate_versions \
+                                        2>&1 | tee clippy-output.txt
+                                    WARN_COUNT=$(grep -c '^warning' clippy-output.txt 2>/dev/null || echo 0)
+                                    echo "Clippy warnings captured: ${WARN_COUNT}"
                                 '''
                             }
                         }
                     }
                 }
                 stage('Unit tests') {
-                    steps { sh 'cargo test --workspace' }
+                    environment {
+                        // Full backtraces on panics — essential for diagnosing test failures.
+                        RUST_BACKTRACE = '1'
+                    }
+                    steps {
+                        script {
+                            def outDir     = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+                            def resultsDir = "${outDir}/test-results"
+                            sh "mkdir -p '${resultsDir}'"
+
+                            if (params.TEST_RUNNER == 'cargo-nextest') {
+                                // cargo-nextest: parallel runner with JUnit XML output.
+                                // JUnit XML is written by the CI profile defined in
+                                // .config/nextest.toml (junit.path = "junit.xml").
+                                // The file lands at the workspace root; we move it into
+                                // the output directory so archiveArtifacts picks it up.
+                                sh """
+                                    if ! cargo nextest --version >/dev/null 2>&1; then
+                                        echo "ERROR: cargo-nextest not found on this agent."
+                                        echo "  Install: cargo install cargo-nextest"
+                                        echo "  Or set TEST_RUNNER to 'cargo-test'."
+                                        exit 1
+                                    fi
+                                """
+                                def failFastFlag = params.TEST_FAIL_FAST ? '--fail-fast' : '--no-fail-fast'
+                                sh """
+                                    cargo nextest run --workspace ${failFastFlag} --profile ci \
+                                        2>&1 | tee '${resultsDir}/nextest-output.txt'
+                                """
+                                // Move JUnit XML written by .config/nextest.toml CI profile
+                                sh "mv -f junit.xml '${resultsDir}/junit.xml' 2>/dev/null || true"
+
+                                if (params.PUBLISH_TEST_RESULTS) {
+                                    junit testResults:         "${params.OUTPUT_SUBDIR}/test-results/junit.xml",
+                                          allowEmptyResults:   true,
+                                          skipPublishingChecks: false
+                                }
+                            } else {
+                                // cargo test (stable default) — no JUnit XML, console output only.
+                                def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
+                                sh """
+                                    cargo test --workspace ${failFastFlag} \
+                                        2>&1 | tee '${resultsDir}/cargo-test-output.txt'
+                                """
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -450,6 +556,163 @@ CARGOEOF
             steps {
                 // retry once on transient network or registry errors
                 retry(2) { sh 'cargo build --release -p oxide-sloc' }
+            }
+        }
+
+        // ── 3a. Coverage ──────────────────────────────────────────────────────
+        // Standalone code-coverage stage — runs independently of SonarQube.
+        // Enabled by COVERAGE_STANDALONE.  Produces:
+        //
+        //   <OUTPUT_SUBDIR>/coverage/lcov.info          — LCOV (line + branch coverage)
+        //   <OUTPUT_SUBDIR>/coverage/sonar-coverage.xml — Cobertura XML (SonarQube import)
+        //   <OUTPUT_SUBDIR>/coverage/html/index.html    — browsable HTML source view
+        //
+        // Jenkins integration via the Coverage plugin (recordCoverage step):
+        //   • Line %, branch %, function % shown on every build page
+        //   • Build-over-build coverage trend chart (no Plot CSV needed)
+        //   • Per-file drill-down from the Jenkins UI
+        //   • Quality-gate enforcement via COVERAGE_THRESHOLD (no shell math needed)
+        //   Install: see ci/jenkins/plugins.txt — plugin ID: coverage
+        //
+        // When both COVERAGE_STANDALONE and GENERATE_COVERAGE are enabled, the
+        // SonarQube stage reuses the lcov.info from this stage — tests run only once.
+        //
+        // Prerequisites:
+        //   cargo-llvm-cov (preferred, vendored in ci/tools/Cargo.toml) — produces
+        //     LCOV with line + branch data and an HTML source report.
+        //   cargo-tarpaulin — fallback; produces LCOV (line coverage only).
+        //   genhtml (lcov system package) — fallback HTML when cargo-llvm-cov absent.
+        //   llvm-tools rustup component — required by cargo-llvm-cov (in rust-toolchain.toml).
+        stage('Coverage') {
+            when {
+                allOf {
+                    expression { params.COVERAGE_STANDALONE }
+                    expression { !params.SKIP_QUALITY_GATES }
+                }
+            }
+            steps {
+                script {
+                    def outDir      = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+                    def coverageDir = "${outDir}/coverage"
+                    sh "mkdir -p '${coverageDir}'"
+
+                    // ── 1. Ensure cargo-llvm-cov is available ─────────────────
+                    // Installs from the vendored source tree (no internet needed).
+                    // llvm-tools component is declared in rust-toolchain.toml and
+                    // will already be present in any toolchain bundle built from it.
+                    sh '''
+                        if ! cargo llvm-cov --version >/dev/null 2>&1; then
+                            echo "Installing cargo-llvm-cov from vendor (offline)..."
+                            cargo install --offline cargo-llvm-cov || \
+                                echo "WARNING: cargo-llvm-cov unavailable; tarpaulin fallback will be used."
+                        fi
+                        rustup component add llvm-tools 2>/dev/null || true
+                    '''
+
+                    // ── 2. Generate LCOV + Cobertura XML ─────────────────────
+                    // ci/sonar/generate-coverage.sh tries cargo-llvm-cov first
+                    // (LCOV includes branch data: BRH/BRF lines), then falls back
+                    // to cargo-tarpaulin (line coverage only, no branch data).
+                    sh "bash ci/sonar/generate-coverage.sh '${coverageDir}'"
+
+                    // ── 3. Generate browsable HTML source report ──────────────
+                    // Priority:
+                    //   a) cargo-llvm-cov --html  — annotated source view with
+                    //      line + branch hit/miss highlighting
+                    //   b) genhtml (lcov package)  — standard LCOV HTML; works
+                    //      even when cargo-llvm-cov is absent (tarpaulin case)
+                    sh """
+                        if cargo llvm-cov --version >/dev/null 2>&1; then
+                            echo "==> Generating HTML report with cargo-llvm-cov"
+                            cargo llvm-cov --workspace --all-features \
+                                --html --output-dir '${coverageDir}/html'
+                        elif command -v genhtml >/dev/null 2>&1; then
+                            echo "==> Generating HTML report with genhtml (lcov fallback)"
+                            genhtml '${coverageDir}/lcov.info' \
+                                --output-directory '${coverageDir}/html' \
+                                --legend \
+                                --branch-coverage \
+                                --title 'oxide-sloc coverage' \
+                                2>&1 | tail -20
+                        else
+                            echo "HTML coverage report: skipped (install cargo-llvm-cov or lcov package)."
+                        fi
+                    """
+
+                    // ── 4. Feed LCOV + Cobertura into the Jenkins Coverage plugin
+                    // recordCoverage provides native Jenkins UI integration:
+                    //   • Coverage summary badge on the build page
+                    //   • Line / branch / function percentages
+                    //   • Per-file source drill-down
+                    //   • Build-over-build trend chart (built into the plugin)
+                    //   • Quality-gate enforcement (COVERAGE_THRESHOLD)
+                    //
+                    // Both parsers are registered; Jenkins shows the union of what
+                    // each file finds — LCOV is the primary source (it carries branch
+                    // data), Cobertura provides the function-level metric.
+                    //
+                    // Requires the "coverage" plugin — see ci/jenkins/plugins.txt.
+                    script {
+                        def threshold = params.COVERAGE_THRESHOLD?.trim()?.isDouble()
+                                            ? params.COVERAGE_THRESHOLD.trim().toDouble()
+                                            : (params.COVERAGE_THRESHOLD?.trim()?.isInteger()
+                                                ? params.COVERAGE_THRESHOLD.trim().toInteger() as Double
+                                                : 0.0)
+
+                        def lcovFile     = "${params.OUTPUT_SUBDIR}/coverage/lcov.info"
+                        def coberturaFile = "${params.OUTPUT_SUBDIR}/coverage/sonar-coverage.xml"
+
+                        def tools = []
+                        if (fileExists("${env.WORKSPACE}/${lcovFile}")) {
+                            tools << [parser: 'LCOV', pattern: lcovFile]
+                        }
+                        if (fileExists("${env.WORKSPACE}/${coberturaFile}")) {
+                            tools << [parser: 'COBERTURA', pattern: coberturaFile]
+                        }
+
+                        if (tools.isEmpty()) {
+                            echo 'WARNING: No coverage data files found — recordCoverage skipped.'
+                        } else {
+                            // Quality gates: line coverage threshold is user-configured;
+                            // branch coverage is advisory (UNSTABLE, not FAILURE) because
+                            // tarpaulin may not emit branch data.
+                            def gates = []
+                            if (threshold > 0) {
+                                gates << [threshold: threshold, metric: 'LINE',
+                                          baseline: 'PROJECT', criticality: 'FAILURE']
+                                gates << [threshold: threshold * 0.7, metric: 'BRANCH',
+                                          baseline: 'PROJECT', criticality: 'UNSTABLE']
+                            }
+
+                            recordCoverage(
+                                tools:               tools,
+                                id:                  'oxide-sloc-coverage',
+                                name:                'Coverage',
+                                // Keep source snapshots on every build so drill-down
+                                // works on historical builds, not just the latest.
+                                sourceCodeRetention: 'EVERY_BUILD',
+                                qualityGates:        gates
+                            )
+                        }
+                    }
+
+                    // ── 5. Publish HTML source report as a sidebar link ───────
+                    // The Coverage plugin provides its own trend view; this sidebar
+                    // link gives direct access to the annotated source HTML produced
+                    // by cargo-llvm-cov or genhtml.
+                    if (fileExists("${coverageDir}/html/index.html")) {
+                        publishHTML(target: [
+                            allowMissing         : false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll              : true,
+                            reportDir            : "${params.OUTPUT_SUBDIR}/coverage/html",
+                            reportFiles          : 'index.html',
+                            reportName           : 'Coverage Source',
+                        ])
+                    } else {
+                        echo 'Annotated HTML source report not available for this run.'
+                    }
+                }
             }
         }
 
@@ -618,17 +881,31 @@ CARGOEOF
 
                 script {
                     if (params.GENERATE_COVERAGE) {
-                        sh '''
-                            # Install cargo-llvm-cov from the vendored source tree.
-                            # The .cargo/config.toml written in the Setup stage redirects
-                            # crates-io to vendor/, so --offline resolves entirely from disk.
-                            # Skip if already cached in CARGO_HOME from a prior build.
-                            if ! cargo llvm-cov --version >/dev/null 2>&1; then
-                                echo "Installing cargo-llvm-cov from vendor..."
-                                cargo install --offline cargo-llvm-cov
-                            fi
-                            bash ci/sonar/generate-coverage.sh coverage
-                        '''
+                        // If the standalone Coverage stage already ran (COVERAGE_STANDALONE),
+                        // reuse its output — no need to instrument and run tests twice.
+                        def outDir      = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+                        def coverageDir = "${outDir}/coverage"
+                        def alreadyDone = fileExists("${coverageDir}/lcov.info")
+
+                        if (alreadyDone && params.COVERAGE_STANDALONE) {
+                            echo "Coverage already generated by the Coverage stage — reusing for SonarQube."
+                            sh "ln -sfn '${coverageDir}' coverage 2>/dev/null || true"
+                        } else {
+                            sh """
+                                mkdir -p '${coverageDir}'
+                                # Install cargo-llvm-cov from the vendored source tree.
+                                # The .cargo/config.toml written in the Setup stage redirects
+                                # crates-io to vendor/, so --offline resolves entirely from disk.
+                                if ! cargo llvm-cov --version >/dev/null 2>&1; then
+                                    echo "Installing cargo-llvm-cov from vendor..."
+                                    cargo install --offline cargo-llvm-cov
+                                fi
+                                rustup component add llvm-tools 2>/dev/null || true
+                                bash ci/sonar/generate-coverage.sh '${coverageDir}'
+                                # Symlink to legacy path so sonar-project.properties still resolves.
+                                ln -sfn '${coverageDir}' coverage 2>/dev/null || true
+                            """
+                        }
                     }
                 }
 
@@ -722,15 +999,18 @@ CARGOEOF
 
         // ── 7. Archive & Publish ───────────────────────────────────────────────
         // Generates trend-chart CSV data for the Plot plugin, archives all build
-        // artifacts, and publishes the HTML report as a build sidebar link.
+        // artifacts (binary, reports, test-results, coverage), and publishes the
+        // HTML report as a build sidebar link.
         //
         // Prerequisite plugins — see ci/jenkins/plugins.txt:
-        //   htmlpublisher  → "SLOC Report" sidebar link
+        //   htmlpublisher  → "SLOC Report" and "Coverage Report" sidebar links
         //   plot           → build-over-build trend charts on the job page
+        //   junit          → "Test Result" sidebar link (cargo-nextest runs only)
         //
         // CSV files written here (consumed by post { always } plot() calls):
         //   summary.csv      — aggregate totals: code / comment / blank / files
         //   per_language.csv — per-language code-line counts
+        //   coverage.csv     — line coverage % (when COVERAGE_STANDALONE is enabled)
         stage('Archive & Publish') {
             steps {
                 script {
@@ -738,37 +1018,59 @@ CARGOEOF
 
                     // Write CSV trend data consumed by the Plot plugin.
                     sh """python3 - <<'PYEOF'
-import json, csv, os, sys
+import json, csv, os, sys, re
 
-result_path = "${outDir}/result.json"
-if not os.path.exists(result_path):
-    print("result.json not found — skipping CSV generation")
-    sys.exit(0)
+out = "${outDir}"
 
-data   = json.load(open(result_path))
-totals = data["summary_totals"]
-out    = "${outDir}"
+# ── SLOC summary CSV ─────────────────────────────────────────────────────
+result_path = out + "/result.json"
+if os.path.exists(result_path):
+    data   = json.load(open(result_path))
+    totals = data["summary_totals"]
 
-# summary.csv — one aggregate row per build for trend line charts
-with open(out + "/summary.csv", "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(["code_lines", "comment_lines", "blank_lines", "files_analyzed"])
-    w.writerow([totals["code_lines"], totals["comment_lines"],
-                totals["blank_lines"], totals["files_analyzed"]])
+    # summary.csv — one aggregate row per build for trend line charts
+    with open(out + "/summary.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["code_lines", "comment_lines", "blank_lines", "files_analyzed"])
+        w.writerow([totals["code_lines"], totals["comment_lines"],
+                    totals["blank_lines"], totals["files_analyzed"]])
 
-# per_language.csv — one row per language for the per-language bar chart
-langs = data.get("totals_by_language", [])
-with open(out + "/per_language.csv", "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(["language", "code_lines"])
-    for lang in langs:
-        display = lang.get("language", {})
-        name = display if isinstance(display, str) else str(display)
-        w.writerow([name, lang["code_lines"]])
+    # per_language.csv — one row per language for the per-language bar chart
+    langs = data.get("totals_by_language", [])
+    with open(out + "/per_language.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["language", "code_lines"])
+        for lang in langs:
+            display = lang.get("language", {})
+            name = display if isinstance(display, str) else str(display)
+            w.writerow([name, lang["code_lines"]])
 
-print("Trend CSVs written to:", out)
+    print("SLOC trend CSVs written to:", out)
+else:
+    print("result.json not found — skipping SLOC CSV generation")
+
+# ── Coverage CSV ─────────────────────────────────────────────────────────
+lcov_path = out + "/coverage/lcov.info"
+if os.path.exists(lcov_path):
+    total = hit = 0
+    for line in open(lcov_path):
+        line = line.strip()
+        if line.startswith("LF:"):
+            total += int(line[3:])
+        elif line.startswith("LH:"):
+            hit += int(line[3:])
+    pct = round(hit / total * 100, 1) if total > 0 else 0.0
+    with open(out + "/coverage.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["line_coverage_pct"])
+        w.writerow([pct])
+    print(f"Coverage trend CSV: {pct}% line coverage ({hit}/{total} lines hit)")
+else:
+    print("lcov.info not found — skipping coverage CSV")
 PYEOF"""
 
+                    // Archive binary + all output subdirectory contents.
+                    // Includes: reports, result.json, test-results/, coverage/, CSVs.
                     archiveArtifacts artifacts: "target/release/oxide-sloc, ${params.OUTPUT_SUBDIR}/**",
                         fingerprint: true,
                         allowEmptyArchive: true
@@ -955,15 +1257,56 @@ PYEOF"""
     post {
         success {
             script {
-                // Set build description and display name from JSON totals.
-                // Runs before cleanup so result.json is still on disk.
+                // Set build description and display name from JSON totals + optional
+                // test-result and coverage stats.  Runs before cleanup so all output
+                // files are still on disk.
                 try {
                     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
                     def result = readJSON file: "${outDir}/result.json"
                     def t      = result.summary_totals
-                    currentBuild.description =
-                        "scan=${params.SCAN_PATH}  code=${t.code_lines}  files=${t.files_analyzed}  " +
-                        "comments=${t.comment_lines}  blank=${t.blank_lines}"
+
+                    // Base description from SLOC totals
+                    def desc = "scan=${params.SCAN_PATH}  code=${t.code_lines}  " +
+                               "files=${t.files_analyzed}  comments=${t.comment_lines}  " +
+                               "blank=${t.blank_lines}"
+
+                    // Append test-result stats (cargo-nextest JUnit XML)
+                    def junitPath = "${outDir}/test-results/junit.xml"
+                    if (fileExists(junitPath)) {
+                        try {
+                            def junit = readFile(junitPath)
+                            def testsMatch   = junit =~ /tests="(\d+)"/
+                            def failMatch    = junit =~ /failures="(\d+)"/
+                            def errMatch     = junit =~ /errors="(\d+)"/
+                            def totalTests   = testsMatch   ? testsMatch[0][1]   : '?'
+                            def failCount    = failMatch    ? failMatch[0][1]    : '0'
+                            def errCount     = errMatch     ? errMatch[0][1]     : '0'
+                            desc += "  tests=${totalTests} fail=${failCount} err=${errCount}"
+                        } catch (Exception ex) {
+                            echo "Could not parse JUnit XML for description: ${ex.message}"
+                        }
+                    }
+
+                    // Append coverage percentage (from LCOV lcov.info)
+                    def lcovPath = "${outDir}/coverage/lcov.info"
+                    if (fileExists(lcovPath)) {
+                        try {
+                            def pct = sh(
+                                script: """
+                                    TOTAL=\$(grep -E '^LF:' '${lcovPath}' | awk -F: '{s+=\$2} END{print s+0}')
+                                    HIT=\$(grep -E '^LH:' '${lcovPath}'   | awk -F: '{s+=\$2} END{print s+0}')
+                                    [ "\${TOTAL}" -gt 0 ] && \\
+                                        awk "BEGIN { printf \\"%.1f\\", (\${HIT}/\${TOTAL})*100 }" || echo "N/A"
+                                """,
+                                returnStdout: true
+                            ).trim()
+                            desc += "  coverage=${pct}%"
+                        } catch (Exception ex) {
+                            echo "Could not read coverage for description: ${ex.message}"
+                        }
+                    }
+
+                    currentBuild.description = desc
                     currentBuild.displayName = "#${env.BUILD_NUMBER} — ${params.SCAN_PATH}"
                 } catch (Exception ex) {
                     echo "Could not set build metadata: ${ex.message}"
@@ -1010,10 +1353,12 @@ PYEOF"""
             // Plot plugin trend charts — install the "plot" plugin to activate.
             // Each call is individually guarded; a missing plugin or missing CSV silently no-ops.
             //
-            // Suggested chart configuration in Job Config → Post-build Actions → Plot Build Data:
-            //   Chart 1 — "SLOC totals over time"  series: code_lines, comment_lines, blank_lines
-            //   Chart 2 — "Files analyzed"          series: files_analyzed      from summary.csv
-            //   Chart 3 — "Per-language breakdown"  series: code_lines          from per_language.csv
+            // Charts generated automatically (no manual job config required):
+            //   "SLOC totals over time"    — code_lines / comment_lines / blank_lines
+            //   "Files analyzed"           — files_analyzed       (from summary.csv)
+            //   "Per-language breakdown"   — code_lines by lang   (from per_language.csv)
+            //   "Line coverage % over time"— line_coverage_pct    (from coverage.csv,
+            //                                only when COVERAGE_STANDALONE is enabled)
             script {
                 def outDir = "${params.OUTPUT_SUBDIR}"
                 try {
@@ -1041,6 +1386,19 @@ PYEOF"""
                          numBuilds      : '20'
                 } catch (Exception ex) {
                     echo "Plot (per-language) unavailable or no CSV data yet: ${ex.message}"
+                }
+                try {
+                    plot csvFileName    : 'sloc-coverage.csv',
+                         csvSeries      : [[file: "${outDir}/coverage.csv",
+                                            inclusionFlag: 'INCLUDE_BY_STRING',
+                                            url: '', displayTableFlag: false]],
+                         group          : 'SLOC Trends',
+                         title          : 'Line coverage % over time',
+                         style          : 'line',
+                         yaxis          : 'Coverage %',
+                         numBuilds      : '50'
+                } catch (Exception ex) {
+                    echo "Plot (coverage) unavailable or no CSV data yet: ${ex.message}"
                 }
             }
         }
