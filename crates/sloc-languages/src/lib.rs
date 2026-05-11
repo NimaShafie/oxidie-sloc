@@ -2738,7 +2738,9 @@ pub mod ts {
         }
 
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
+            #[allow(clippy::cast_possible_truncation)]
+            // child_count bounded by tree-sitter u32 capacity
+            if let Some(child) = node.child(i as u32) {
                 visit(child, ctx);
             }
         }

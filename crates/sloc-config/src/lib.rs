@@ -169,6 +169,7 @@ pub struct BudgetConfig {
 
 impl BudgetConfig {
     /// Returns `true` if no limits are configured.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.total_max == 0 && self.per_language.is_empty()
     }
@@ -218,11 +219,11 @@ pub struct ReportingConfig {
     pub include_skipped_files_section: bool,
     pub include_warnings_section: bool,
     pub theme: String,
-    /// Optional company or team name shown in the report header instead of "OxideSLOC".
+    /// Optional company or team name shown in the report header instead of "`OxideSLOC`".
     #[serde(default)]
     pub company_name: Option<String>,
     /// Path to a PNG/SVG logo file to embed in the report header.
-    /// If unset, the default OxideSLOC logo is used.
+    /// If unset, the default `OxideSLOC` logo is used.
     #[serde(default)]
     pub logo_path: Option<std::path::PathBuf>,
     /// CSS hex colour (e.g. `#3b82f6`) used as the primary accent throughout the report.
