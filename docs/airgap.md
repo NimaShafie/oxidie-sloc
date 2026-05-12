@@ -258,7 +258,7 @@ git add toolchain/
 git commit -m "ci: add Rust toolchain bundle for offline builds"
 ```
 
-The script compresses with 7-zip level 9 and splits the output into ≤45 MB parts,
+The script compresses with gzip -9 and splits the output into ≤45 MB parts,
 so every committed file is well within GitHub's per-file limit.
 
 ### GitHub Actions (self-hosted runner)

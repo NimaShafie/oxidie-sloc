@@ -46,7 +46,7 @@ else
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
-# Prefer vendor.tar.gz (7-zip compressed) if present; fall back to vendor.tar.xz
+# Prefer vendor.tar.gz (gzip-compressed) if present; fall back to vendor.tar.xz
 if [[ -f "$REPO_ROOT/vendor.tar.gz" ]]; then
     VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.gz"
     VENDOR_DECOMP="tar -xzf"
@@ -350,7 +350,7 @@ fi
 # ── 2.7. Bootstrap Rust from bundled toolchain ──────────────────────────────
 # If cargo is not on PATH but a toolchain archive is committed to toolchain/,
 # extract it locally into .tools/ and export the paths.
-# Archives are 7-zip level-9 .tar.gz files split into ≤45 MB parts by
+# Archives are gzip-9 .tar.gz files split into ≤45 MB parts by
 # bundle-rust-toolchain.sh.  Parts:  rustup/  (toolchains)  and  cargo/  (bin/).
 if ! command -v cargo &>/dev/null; then
     if [[ "$PLATFORM" == windows ]]; then
