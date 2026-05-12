@@ -147,7 +147,11 @@ build_one() {
     fi
 
     if [[ -n "$rustup_init" ]]; then
-        RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
+        # rustup-init.exe is a native Windows EXE and cannot interpret MSYS2-style
+        # paths like /c/Users/... — convert to Windows paths before passing as env vars.
+        WIN_RUSTUP_HOME="$(cygpath -w "$rustup_home" 2>/dev/null || echo "$rustup_home")"
+        WIN_CARGO_HOME="$(cygpath -w "$cargo_home" 2>/dev/null || echo "$cargo_home")"
+        RUSTUP_HOME="$WIN_RUSTUP_HOME" CARGO_HOME="$WIN_CARGO_HOME" \
             "$rustup_init" -y \
                 --default-toolchain "$RUST_VER" \
                 --profile minimal \
