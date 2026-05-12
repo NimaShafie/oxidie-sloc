@@ -340,6 +340,61 @@ if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
     echo " [WARN] Extraction completed but binary not found — archive may be corrupt."
 fi
 
+# ── 2.7. Bootstrap Rust from bundled toolchain ──────────────────────────────
+# If cargo is not on PATH but a standalone Rust installer tarball is committed
+# to toolchain/, extract it and install Rust locally into .tools/rust/.
+# After this block, PATH includes .tools/rust/bin so step 3 finds cargo.
+if ! command -v cargo &>/dev/null; then
+    if [[ "$PLATFORM" == windows ]]; then
+        TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-windows-x64.tar.gz"
+    else
+        TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-linux-${LINUX_ARCH}.tar.gz"
+    fi
+
+    if [[ -f "$TOOLCHAIN_ARCHIVE" ]]; then
+        echo " No Rust toolchain detected — bootstrapping from bundled archive..."
+        echo " (one-time, ~170-250 MB extract)"
+
+        TOOLCHAIN_CHECKSUMS="$REPO_ROOT/toolchain/checksums.sha256"
+        if [[ -f "$TOOLCHAIN_CHECKSUMS" ]] && command -v sha256sum &>/dev/null; then
+            ARCHIVE_NAME="$(basename "$TOOLCHAIN_ARCHIVE")"
+            EXPECTED_SUM="$(grep "$ARCHIVE_NAME" "$TOOLCHAIN_CHECKSUMS" 2>/dev/null | awk '{print $1}')"
+            if [[ -n "$EXPECTED_SUM" ]]; then
+                ACTUAL_SUM="$(sha256sum "$TOOLCHAIN_ARCHIVE" | awk '{print $1}')"
+                if [[ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]]; then
+                    echo " [ERROR] Toolchain checksum mismatch — archive may be corrupt." >&2
+                    echo "         Expected: $EXPECTED_SUM" >&2
+                    echo "         Actual:   $ACTUAL_SUM" >&2
+                    exit 1
+                fi
+                echo " [OK] Toolchain checksum verified."
+            fi
+        fi
+
+        TOOLS_DIR="$REPO_ROOT/.tools"
+        RUST_PREFIX="$TOOLS_DIR/rust"
+        mkdir -p "$RUST_PREFIX"
+
+        echo " Extracting Rust toolchain..."
+        tar xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
+
+        # The tarball contains its own install.sh; run it to copy binaries into prefix
+        RUST_INSTALLER="$(find "$TOOLS_DIR" -name install.sh -maxdepth 3 2>/dev/null | grep -v vendor | head -1)"
+        if [[ -z "$RUST_INSTALLER" ]]; then
+            echo " [ERROR] No install.sh found inside toolchain archive." >&2
+            exit 1
+        fi
+        bash "$RUST_INSTALLER" --prefix="$RUST_PREFIX" --disable-ldconfig
+        # Clean up extracted source tree (binaries now live in prefix)
+        find "$TOOLS_DIR" -maxdepth 1 -name 'rust-*' -type d -exec rm -rf {} + 2>/dev/null || true
+
+        export PATH="$RUST_PREFIX/bin:$PATH"
+        export CARGO_HOME="$RUST_PREFIX/cargo"
+        export RUSTUP_HOME="$RUST_PREFIX/rustup"
+        echo " [OK] Rust toolchain bootstrapped at .tools/rust/"
+    fi
+fi
+
 # ── 3. Build from vendored sources ──────────────────────────────────────────
 if command -v cargo &>/dev/null; then
     if [[ ! -d "$VENDOR_DIR" ]]; then
@@ -387,14 +442,18 @@ echo ""
 echo " No pre-built binary found and no Rust toolchain detected."
 echo ""
 if [[ "$PLATFORM" == windows ]]; then
-    echo " Expected: dist/oxide-sloc-windows-x64.zip  (committed pre-built binary)"
-    echo " That file is missing from this clone — your repository may be incomplete."
+    echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
+    echo "   On any machine with internet access:"
+    echo "     bash scripts/internal/bundle-rust-toolchain.sh windows-x64"
+    echo "     git lfs install"
+    echo "     git add toolchain/"
+    echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
+    echo "     git push"
     echo ""
-    echo " If you cloned from GitHub, re-clone and ensure Git LFS / large files are"
-    echo " fetched:  git clone https://github.com/oxide-sloc/oxide-sloc"
+    echo " After the toolchain is committed, re-run this script on any fresh clone."
     echo ""
-    echo " To build from source (requires Rust ≥1.95):"
-    echo "   bash scripts/internal/airgap-build.sh vendor.tar.xz"
+    echo " If Rust is already installed (https://rustup.rs), just re-run:"
+    echo "   bash scripts/install.sh"
     echo ""
     echo " Full deployment guide: docs/airgap.md"
 else
