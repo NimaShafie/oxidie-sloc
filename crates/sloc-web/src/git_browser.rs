@@ -26,19 +26,19 @@ use super::{
 // ── query types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub(super) struct GitBrowserQuery {
+pub struct GitBrowserQuery {
     pub repo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct ScanRefQuery {
+pub struct ScanRefQuery {
     pub repo: String,
     pub ref_name: String,
     pub label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct CompareRefsQuery {
+pub struct CompareRefsQuery {
     pub repo: String,
     pub baseline_ref: String,
     pub current_ref: String,
@@ -781,7 +781,7 @@ pub(super) struct CompareRefsQuery {
 </html>"##,
     ext = "html"
 )]
-pub(super) struct GitBrowserTemplate {
+pub struct GitBrowserTemplate {
     pub csp_nonce: String,
     pub repo_url: String,
     pub repo_url_json: String,
@@ -790,7 +790,7 @@ pub(super) struct GitBrowserTemplate {
 
 // ── handlers ──────────────────────────────────────────────────────────────────
 
-pub(super) async fn git_browser_handler(
+pub async fn git_browser_handler(
     State(_state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Query(q): Query<GitBrowserQuery>,
@@ -810,7 +810,7 @@ pub(super) async fn git_browser_handler(
     )
 }
 
-pub(super) async fn api_list_refs(
+pub async fn api_list_refs(
     State(state): State<AppState>,
     Query(q): Query<GitBrowserQuery>,
 ) -> impl IntoResponse {
@@ -836,7 +836,7 @@ fn is_valid_git_ref(s: &str) -> bool {
         && !s.contains("..")
 }
 
-pub(super) async fn api_scan_ref(
+pub async fn api_scan_ref(
     State(state): State<AppState>,
     Query(q): Query<ScanRefQuery>,
 ) -> impl IntoResponse {
@@ -871,7 +871,7 @@ pub(super) async fn api_scan_ref(
     }
 }
 
-pub(super) async fn api_compare_refs(
+pub async fn api_compare_refs(
     State(state): State<AppState>,
     Query(q): Query<CompareRefsQuery>,
 ) -> impl IntoResponse {

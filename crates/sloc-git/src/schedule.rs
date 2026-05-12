@@ -30,7 +30,8 @@ pub enum ScanScheduleProvider {
 }
 
 impl ScanScheduleProvider {
-    pub fn display_name(&self) -> &'static str {
+    #[must_use]
+    pub const fn display_name(&self) -> &'static str {
         match self {
             Self::GitHub => "GitHub",
             Self::GitLab => "GitLab",
@@ -61,6 +62,7 @@ pub struct ScanSchedule {
 }
 
 impl ScanSchedule {
+    #[must_use]
     pub fn new_webhook(
         repo_url: String,
         branch: String,
@@ -83,6 +85,7 @@ impl ScanSchedule {
         }
     }
 
+    #[must_use]
     pub fn new_poll(repo_url: String, branch: String, interval_secs: u64, label: String) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -113,6 +116,7 @@ pub struct ScheduleStore {
 }
 
 impl ScheduleStore {
+    #[must_use]
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
@@ -120,12 +124,15 @@ impl ScheduleStore {
             .unwrap_or_default()
     }
 
+    /// # Errors
+    /// Returns an error if serialization or writing to disk fails.
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
     }
 
+    #[must_use]
     pub fn find_matching<'a>(&'a self, repo_url: &str, branch: &str) -> Vec<&'a ScanSchedule> {
         self.schedules
             .iter()

@@ -49,8 +49,17 @@ flamegraph.svg
 perf.data
 perf.data.old
 
-# dist/ — all compiled binaries and archives (released as GitHub release assets)
+# Compiled binaries — never committed; users build from toolchain/ + vendor sources
+*.exe
+*.dll
+
+# dist/ — compiled binaries and archives (released as GitHub release assets)
 /dist/
+
+# toolchain/ — bundled Rust standalone installer tarballs (7-zip level 9 .tar.gz)
+# committed directly to git (no LFS). Only ignore temp extraction dirs.
+/toolchain/tmp/
+/.tools/
 
 # Generated report artefacts under tests/fixtures/
 tests/fixtures/**/sloc/

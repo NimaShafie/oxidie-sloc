@@ -246,6 +246,31 @@ jobs:
             vendor.tar.xz
             vendor.tar.xz.sha256
 
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate CycloneDX SBOM
+        run: cargo cyclonedx --format json --output-file sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
   sign:
     name: Sign release artifacts
     needs: [build]
@@ -540,7 +565,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [build, vendor, sign, virustotal]
+    needs: [build, vendor, sign, virustotal, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -581,6 +606,13 @@ jobs:
           path: vt-report/
         continue-on-error: true
 
+      - name: Download SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sbom
+          path: artifacts/
+        continue-on-error: true
+
       - name: Merge signed artifacts into artifacts dir
         shell: bash
         run: |
@@ -593,11 +625,16 @@ jobs:
       - name: Create Linux tarball archives
         shell: bash
         run: |
+          # The binary inside the archive must be named "oxide-sloc" so that
+          # install.sh --online can find it after extraction ($EXE is always
+          # $REPO_ROOT/oxide-sloc regardless of the tarball filename).
           for arch in x86_64 arm64; do
             binary="artifacts/oxide-sloc-linux-${arch}"
             if [[ -f "$binary" ]]; then
+              cp "$binary" artifacts/oxide-sloc
               tar czf "artifacts/oxide-sloc-linux-${arch}.tar.gz" \
-                -C artifacts "oxide-sloc-linux-${arch}"
+                -C artifacts "oxide-sloc"
+              rm artifacts/oxide-sloc
               echo "Created oxide-sloc-linux-${arch}.tar.gz"
             fi
           done
@@ -696,3 +733,47 @@ jobs:
             ```bash
             cargo install --git https://github.com/oxide-sloc/oxide-sloc oxide-sloc
             ```
+
+  smoke-install:
+    name: Smoke test — install.sh --online
+    needs: [publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: ubuntu:22.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install prerequisites (curl, openssl, ca-certificates)
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends curl openssl ca-certificates
+
+      - name: Install via install.sh --online
+        run: bash scripts/install.sh --online
+
+      - name: Verify binary is executable and reports a version
+        run: |
+          test -x ./oxide-sloc
+          ./oxide-sloc --version
+
+      - name: Smoke test server with auth
+        shell: bash
+        run: |
+          SLOC_API_KEY=test ./oxide-sloc serve --server &
+          PID=$!
+          sleep 4
+          FAILED=0
+          for path in /auth/login /healthz; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer test" "http://127.0.0.1:4317${path}")
+            if [[ "$code" != "200" ]]; then
+              echo "FAIL: ${path} -> ${code}"
+              FAILED=1
+            else
+              echo "OK:   ${path} -> ${code}"
+            fi
+          done
+          kill "$PID" 2>/dev/null || true
+          exit "$FAILED"

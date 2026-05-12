@@ -19,5 +19,6 @@ chrono.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+subtle = "2"
 tokio = { workspace = true }
 uuid.workspace = true

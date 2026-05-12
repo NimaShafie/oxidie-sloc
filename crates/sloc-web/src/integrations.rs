@@ -652,7 +652,7 @@ use super::{AppState, CspNonce};
 </html>"##,
     ext = "html"
 )]
-pub(super) struct IntegrationsTemplate {
+pub struct IntegrationsTemplate {
     pub csp_nonce: String,
     pub server_url: String,
     pub version: &'static str,
@@ -660,7 +660,7 @@ pub(super) struct IntegrationsTemplate {
 
 // ── handler ───────────────────────────────────────────────────────────────────
 
-pub(super) async fn integrations_handler(
+pub async fn integrations_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
 ) -> impl IntoResponse {

@@ -143,6 +143,9 @@ const fn default_true() -> bool {
 }
 
 /// Validates that `s` is a CSS hex colour: `#RGB` or `#RRGGBB`.
+///
+/// # Errors
+/// Returns an error if `s` does not start with `#` or is not a 3- or 6-digit hex colour.
 pub fn validate_hex_color(s: &str) -> Result<()> {
     let hex = s
         .strip_prefix('#')
@@ -169,6 +172,7 @@ pub struct BudgetConfig {
 
 impl BudgetConfig {
     /// Returns `true` if no limits are configured.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.total_max == 0 && self.per_language.is_empty()
     }
@@ -218,11 +222,11 @@ pub struct ReportingConfig {
     pub include_skipped_files_section: bool,
     pub include_warnings_section: bool,
     pub theme: String,
-    /// Optional company or team name shown in the report header instead of "OxideSLOC".
+    /// Optional company or team name shown in the report header instead of "`OxideSLOC`".
     #[serde(default)]
     pub company_name: Option<String>,
     /// Path to a PNG/SVG logo file to embed in the report header.
-    /// If unset, the default OxideSLOC logo is used.
+    /// If unset, the default `OxideSLOC` logo is used.
     #[serde(default)]
     pub logo_path: Option<std::path::PathBuf>,
     /// CSS hex colour (e.g. `#3b82f6`) used as the primary accent throughout the report.
@@ -270,9 +274,11 @@ impl Default for WebConfig {
     }
 }
 
-/// A named configuration profile.  All sub-config sections are optional; any
-/// present section *replaces* the corresponding base config section in full.
-/// Commonly used to represent different scanning contexts in the same repo
+/// A named configuration profile.
+///
+/// All sub-config sections are optional; any present section *replaces* the
+/// corresponding base config section in full. Commonly used to represent
+/// different scanning contexts in the same repo
 /// (e.g. `[profile.frontend]`, `[profile.backend]`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileConfig {
