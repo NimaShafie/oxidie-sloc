@@ -145,7 +145,10 @@ build_one() {
     echo "  Creating tar archive..."
     # Bundle: toolchain binaries + cargo home (registry cache stripped)
     rm -rf "$cargo_home/registry" "$cargo_home/git"
-    tar -cf "$tmp_tar" \
+    # --hard-dereference: store hardlinked files as independent regular files so
+    # that extraction on Windows (Git Bash tar) never needs to create symlinks.
+    # On Linux this also dereferences the rustup proxy symlinks in cargo/bin/.
+    tar --hard-dereference -cf "$tmp_tar" \
         -C "$work_dir" \
         "rustup" \
         "cargo"
