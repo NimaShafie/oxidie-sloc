@@ -32,6 +32,8 @@ wildcards = "deny"
 skip = [
   { name = "getrandom", version = "0.2" },
   { name = "getrandom", version = "0.3" },
+  # getrandom 0.4 pulled by uuid ≥ 1.23 and tempfile ≥ 3.27 (via headless_chrome)
+  { name = "getrandom", version = "0.4" },
   { name = "hashbrown", version = "0.15" },
   { name = "r-efi", version = "5" },
   { name = "windows-sys", version = "0.52" },

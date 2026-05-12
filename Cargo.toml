@@ -52,5 +52,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 
+[workspace.lints.clippy]
+# Transitive dependency version splits that are unavoidable given the current
+# Rust ecosystem state.  Each duplicate pair is already documented in deny.toml
+# under [bans] skip = [...] which is the authoritative allowlist for cargo-deny.
+#
+# Active duplicates (as of Cargo.lock):
+#   hashbrown  0.15.5 (indexmap) vs 0.17.0 (foldhash / newer indexmap)
+#   getrandom  0.2 (ring) / 0.3 (rand) / 0.4 (uuid ≥ 1.23, tempfile ≥ 3.27)
+#   windows-sys 0.52 / 0.59 / 0.60 / 0.61 (Windows crate ecosystem transition)
+#   wit-bindgen 0.51 / 0.57 (wasmtime dependency split)
+multiple_crate_versions = "allow"
+
 [workspace.metadata.oxide-sloc]
 product_name = "oxide-sloc"
