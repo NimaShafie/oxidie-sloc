@@ -10,25 +10,13 @@ fresh machine with **no internet connection**:
 | All Rust crate sources | `vendor.tar.xz` | 35 MB | Cargo's full dependency graph |
 | Cargo offline config | `.cargo/config.toml` | — | Redirects crate lookups to `vendor/` |
 | Rust version pin | `rust-toolchain.toml` | — | Channel 1.95 |
-| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz` | ~200 MB | **Committed via git LFS** — see below |
+| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz` | ~70-90 MB | Committed directly to git (7-zip ultra, no LFS) |
 
 `bash scripts/install.sh` detects which of these apply and picks the right build path
 automatically. No flags, no extra downloads, no pre-installed tooling beyond Git Bash
 (Windows) or `bash` + `tar` (Linux).
 
-### Git LFS note
-
-The Rust toolchain archives in `toolchain/` exceed GitHub's 100 MB file limit and are
-stored in git LFS. After cloning, run:
-
-```bash
-git lfs install   # run once per machine
-git lfs pull      # fetch the toolchain archives
-```
-
-If LFS is not configured, the `toolchain/*.tar.gz` files will be pointer stubs (~200
-bytes) instead of the real archives and `install.sh` will fall through to the "no Rust"
-error path. See [Setting up LFS](#setting-up-git-lfs) below.
+A plain `git clone` is sufficient — no `git lfs pull` or extra setup required.
 
 ---
 
@@ -36,9 +24,9 @@ error path. See [Setting up LFS](#setting-up-git-lfs) below.
 
 | Path | Prereqs on target machine | When to use |
 |---|---|---|
-| **[Option A — Bundled toolchain build](#option-a--build-from-bundled-rust-toolchain)** | Git Bash / `bash`, `tar` | No Rust, no internet — toolchain committed via LFS |
+| **[Option A — Bundled toolchain build](#option-a--build-from-bundled-rust-toolchain)** | Git Bash / `bash`, `tar` | No Rust, no internet — toolchain committed to git |
 | **[Option B — Vendor source build](#option-b--vendor-only-source-build)** | Rust ≥1.95 already installed | Rust is already on the machine |
-| **[Option C — Airgap kit (Linux, no Rust)](#option-c--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust, no LFS — full self-contained kit |
+| **[Option C — Airgap kit (Linux, no Rust)](#option-c--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust — full self-contained kit |
 | **[Option D — Download from GitHub](#option-d--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, has internet |
 
 In all cases:
@@ -55,15 +43,15 @@ downloads (Option D only).
 
 ## Option A — Build from bundled Rust toolchain
 
-**No Rust installed. No internet required after `git clone` (+ `git lfs pull`).**
+**No Rust installed. No internet required after `git clone`.**
 
-The repository includes a standalone Rust installer tarball in `toolchain/` (stored via
-git LFS). `install.sh` detects it automatically, installs Rust locally into `.tools/rust/`
-(inside the repo, no system-wide changes, no root required), and then compiles
-oxide-sloc from the vendored crate sources.
+The repository includes a standalone Rust toolchain archive in `toolchain/` (committed
+directly to git, 7-zip ultra compressed, no LFS). `install.sh` detects it automatically,
+installs Rust locally into `.tools/` (inside the repo, no system-wide changes, no root
+required), and then compiles oxide-sloc from the vendored crate sources.
 
 ```bash
-# On the air-gapped machine — after git clone and git lfs pull:
+# On the air-gapped machine — after git clone (no extra steps needed):
 bash scripts/install.sh   # bootstraps Rust, builds from vendor.tar.xz
 bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
@@ -96,16 +84,15 @@ bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ### Populating the toolchain archive (maintainer workflow)
 
 The toolchain archive must be generated on a machine with internet access and committed
-via git LFS before it can be used offline:
+to the repository:
 
 ```bash
 # On any machine with internet access:
-bash scripts/internal/bundle-rust-toolchain.sh windows-x64   # Windows (~200 MB)
-bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64  # Linux x64 (~170 MB)
-bash scripts/internal/bundle-rust-toolchain.sh linux-arm64   # Linux arm64 (~170 MB)
+bash scripts/internal/bundle-rust-toolchain.sh windows-x64   # Windows (~70-90 MB)
+bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64  # Linux x64 (~60-80 MB)
+bash scripts/internal/bundle-rust-toolchain.sh linux-arm64   # Linux arm64 (~60-80 MB)
 
-# Commit via git LFS:
-git lfs install
+# Commit directly — no git LFS required (7-zip ultra keeps each archive under 100 MB):
 git add toolchain/
 git commit -m "chore: bundle Rust toolchain for offline builds"
 git push

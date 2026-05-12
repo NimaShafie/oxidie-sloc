@@ -425,12 +425,12 @@ fi
 if command -v cargo &>/dev/null; then
     if [[ ! -d "$VENDOR_DIR" ]]; then
         if [[ -f "$VENDOR_ARCHIVE" ]]; then
-            echo " Decompressing vendor.tar.xz (22 MB → 362 MB, one-time)..."
-            tar -xJf "$VENDOR_ARCHIVE" -C "$REPO_ROOT"
+            echo " Decompressing $(basename "$VENDOR_ARCHIVE") (one-time)..."
+            $VENDOR_DECOMP "$VENDOR_ARCHIVE" -C "$REPO_ROOT"
             echo " [OK] Vendor sources ready."
         else
-            echo " [ERROR] Neither vendor/ nor vendor.tar.xz found." >&2
-            echo "         vendor.tar.xz is committed to the repository — ensure you have" >&2
+            echo " [ERROR] Neither vendor/ nor vendor.tar.xz / vendor.tar.gz found." >&2
+            echo "         The vendor archive is committed to the repository — ensure you have" >&2
             echo "         the complete repository, not just source files." >&2
             exit 1
         fi
@@ -471,7 +471,6 @@ if [[ "$PLATFORM" == windows ]]; then
     echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
     echo "   On any machine with internet access:"
     echo "     bash scripts/internal/bundle-rust-toolchain.sh windows-x64"
-    echo "     git lfs install"
     echo "     git add toolchain/"
     echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
     echo "     git push"
@@ -483,24 +482,19 @@ if [[ "$PLATFORM" == windows ]]; then
     echo ""
     echo " Full deployment guide: docs/airgap.md"
 else
-    echo " Options (see docs/airgap.md for details):"
+    echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
+    echo "   On any machine with internet access:"
+    echo "     bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64"
+    echo "     git add toolchain/"
+    echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
+    echo "     git push"
     echo ""
-    echo "  • Internet available (opt-in — re-run with --online):"
-    echo "    install.sh fetches the release binary from GitHub automatically"
-    echo "    when curl is present and no Rust toolchain is detected."
-    echo "    curl is required. Run: bash scripts/install.sh --online"
+    echo " After the toolchain is committed, re-run this script on any fresh clone."
     echo ""
-    echo "  • Pre-staged dist/ bundle (Option B — no internet on target machine):"
-    echo "    Place dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz here, then re-run:"
-    echo "    bash scripts/install.sh"
+    echo " If Rust is already installed (https://rustup.rs), just re-run:"
+    echo "   bash scripts/install.sh"
     echo ""
-    echo "  • Full air-gap kit (Option D — no internet, no Rust, no curl):"
-    echo "    On a networked machine: bash scripts/internal/make-airgap-kit.sh"
-    echo "    Transfer the kit archive, then:"
-    echo "    tar xzf oxide-sloc-airgap-kit-*.tar.gz && cd oxide-sloc-airgap-kit-*/"
-    echo "    bash install.sh"
+    echo " Full deployment guide: docs/airgap.md"
 fi
-echo ""
-echo " Full deployment guide: docs/airgap.md"
 echo ""
 exit 1
