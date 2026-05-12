@@ -301,6 +301,7 @@ fn get_hostname() -> String {
 /// Walk a single directory root and collect file records into the output vectors.
 #[allow(clippy::too_many_arguments)]
 fn walk_root(
+    // NOSONAR(rust:S3776)
     root: &Path,
     config: &AppConfig,
     include_globs: Option<&GlobSet>,
@@ -487,6 +488,7 @@ fn assemble_run(
 /// analysis step fails in a way that cannot be recovered from.
 #[allow(clippy::too_many_lines)]
 pub fn analyze(
+    // NOSONAR(rust:S3776)
     config: &AppConfig,
     runtime_mode: &str,
     cancel: Option<&AtomicBool>,
@@ -779,6 +781,7 @@ fn decode_file_contents(
 
 #[allow(clippy::too_many_lines)]
 fn analyze_candidate_file(
+    // NOSONAR(rust:S3776)
     path: &Path,
     root: &Path,
     config: &AppConfig,

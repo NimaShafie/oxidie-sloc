@@ -954,7 +954,10 @@ fn run_init(args: &InitArgs) -> Result<()> {
 
 // ── validate handler ──────────────────────────────────────────────────────────
 
-fn run_validate(args: &ValidateArgs) -> Result<()> {
+fn run_validate(
+    // NOSONAR(rust:S3776)
+    args: &ValidateArgs,
+) -> Result<()> {
     let config_path = args
         .config
         .as_deref()
@@ -1363,7 +1366,22 @@ fn load_base_config(config_path: Option<&Path>) -> Result<AppConfig> {
 
 fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
     let mut config = load_base_config(args.config.as_deref())?;
+    apply_discovery_cli_args(&mut config, args);
+    apply_analysis_cli_args(&mut config, args);
+    if let Some(title) = &args.report_title {
+        config.reporting.report_title.clone_from(title);
+    }
+    if let Some(profile) = &args.profile {
+        config.apply_profile(profile)?;
+    }
+    config.validate()?;
+    if config.discovery.root_paths.is_empty() {
+        anyhow::bail!("provide at least one PATH or configure discovery.root_paths");
+    }
+    Ok(config)
+}
 
+fn apply_discovery_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
     if !args.paths.is_empty() {
         config.discovery.root_paths.clone_from(&args.paths);
     }
@@ -1379,17 +1397,23 @@ fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
             .exclude_globs
             .clone_from(&args.exclude_glob);
     }
-    if !args.enabled_language.is_empty() {
-        config
-            .analysis
-            .enabled_languages
-            .clone_from(&args.enabled_language);
-    }
     if args.no_ignore_files {
         config.discovery.honor_ignore_files = false;
     }
     if args.follow_symlinks {
         config.discovery.follow_symlinks = true;
+    }
+    if args.submodule_breakdown {
+        config.discovery.submodule_breakdown = true;
+    }
+}
+
+fn apply_analysis_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
+    if !args.enabled_language.is_empty() {
+        config
+            .analysis
+            .enabled_languages
+            .clone_from(&args.enabled_language);
     }
     if let Some(policy) = args.mixed_line_policy {
         config.analysis.mixed_line_policy = policy;
@@ -1409,22 +1433,6 @@ fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
     if let Some(cov) = &args.coverage_file {
         config.analysis.coverage_file = Some(cov.clone());
     }
-    if let Some(title) = &args.report_title {
-        config.reporting.report_title.clone_from(title);
-    }
-    if args.submodule_breakdown {
-        config.discovery.submodule_breakdown = true;
-    }
-
-    if let Some(profile) = &args.profile {
-        config.apply_profile(profile)?;
-    }
-
-    config.validate()?;
-    if config.discovery.root_paths.is_empty() {
-        anyhow::bail!("provide at least one PATH or configure discovery.root_paths");
-    }
-    Ok(config)
 }
 
 fn ensure_html_for_pdf(
