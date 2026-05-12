@@ -49,12 +49,15 @@ flamegraph.svg
 perf.data
 perf.data.old
 
+# Compiled binaries — never committed; users build from toolchain/ + vendor sources
+*.exe
+*.dll
+
 # dist/ — compiled binaries and archives (released as GitHub release assets)
 /dist/
 
-# toolchain/ — bundled Rust standalone installer tarballs committed via git LFS
-# for offline builds on machines without a pre-installed Rust toolchain.
-# Only ignore temp extraction directories created during installation.
+# toolchain/ — bundled Rust standalone installer tarballs (7-zip level 9 .tar.gz)
+# committed directly to git (no LFS). Only ignore temp extraction dirs.
 /toolchain/tmp/
 /.tools/
 

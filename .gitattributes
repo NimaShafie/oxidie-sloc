@@ -26,25 +26,18 @@
 *.hpi binary
 *.jpi binary
 
-# ── Large binary archives — git LFS ──────────────────────────────────────────
-# vendor.tar.xz (~35 MB) fits within GitHub's 100 MB limit — no LFS needed.
-# Rust toolchain tarballs in toolchain/ are ~170-250 MB and REQUIRE git LFS.
-# jenkins-plugins.tar.xz can exceed 100 MB depending on transitive deps.
+# ── Large binary archives ────────────────────────────────────────────────────
+# All archives are committed directly to git — no git LFS is used or required.
+# 7-zip ultra (level 9) compression keeps toolchain archives under 100 MB so
+# they stay within GitHub's per-file limit without LFS.
 #
-# toolchain/ LFS tracking (active — run once per machine after clone):
-#   git lfs install
-#   git lfs pull    # fetches LFS objects for toolchain/ archives
-#
-# To add more LFS-tracked file patterns:
-#   git lfs track 'jenkins-plugins.tar.xz'
-#   git add .gitattributes
-#
-# If bundle-jenkins-plugins.sh warns that the archive exceeds 100 MB, run the
-# above commands before committing jenkins-plugins.tar.xz.
+# vendor.tar.xz   ~35 MB  — Rust crate sources, xz-compressed
+# toolchain/      ~70-90 MB per platform — minimal Rust compiler, gz-compressed
+# jenkins-plugins.tar.xz — varies; rebuild with bundle-jenkins-plugins.sh if needed
 
-# Rust toolchain installer tarballs — stored in git LFS (200-250 MB each)
-toolchain/*.tar.gz  filter=lfs diff=lfs merge=lfs -text
-toolchain/*.tar.xz  filter=lfs diff=lfs merge=lfs -text
+# Rust toolchain installer tarballs — binary blobs, committed directly
+toolchain/*.tar.gz  binary
+toolchain/*.tar.xz  binary
 
 # Vendor sources must never be normalized by git — cargo checksum verification
 # compares the exact bytes on disk to the SHA-256 in .cargo-checksum.json.
