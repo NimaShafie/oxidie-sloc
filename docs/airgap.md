@@ -90,6 +90,20 @@ bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 > linker. Git for Windows includes MinGW-w64 GCC at `/mingw64/bin/gcc.exe` — available
 > automatically in every Git Bash session. No separate installation needed.
 
+> **GUI system libraries:** The default build is headless and requires no GUI system
+> libraries (`libwayland`, `libgtk`, `libxdo`). To enable native file-dialog support
+> (Linux desktop only), build with:
+> ```bash
+> cargo build --release --offline --features native-dialog
+> ```
+> and install the required packages first:
+> ```bash
+> # Debian / Ubuntu
+> apt install libwayland-dev libgtk-3-dev libxdo-dev
+> # RHEL 8/9 equivalents
+> dnf install wayland-devel gtk3-devel libxdo-devel
+> ```
+
 ### Populating the toolchain archive (maintainer workflow)
 
 The toolchain archive must be generated on a machine with internet access and committed
