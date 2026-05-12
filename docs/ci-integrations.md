@@ -93,11 +93,12 @@ bash ci/jenkins/bundle-rust-toolchain.sh
 # outputs: rust-toolchain-bundle.tar.xz + rust-toolchain-bundle.tar.xz.sha256
 ```
 
-Because the bundle is typically 200–350 MB, git LFS is required:
+Because the bundle is typically 200–350 MB, split it into ≤45 MB parts before committing:
 
 ```bash
-git lfs install && git lfs track '*.tar.xz'
-git add .gitattributes rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.sha256
+split -b 45m rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.
+rm rust-toolchain-bundle.tar.xz
+git add rust-toolchain-bundle.tar.xz.* rust-toolchain-bundle.tar.xz.sha256
 git commit -m "ci: add Rust toolchain bundle for offline builds"
 ```
 

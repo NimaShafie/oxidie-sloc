@@ -27,17 +27,19 @@
 *.jpi binary
 
 # ── Large binary archives ────────────────────────────────────────────────────
-# All archives are committed directly to git — no git LFS is used or required.
-# 7-zip ultra (level 9) compression keeps toolchain archives under 100 MB so
-# they stay within GitHub's per-file limit without LFS.
+# All archives are committed directly to git.
+# 7-zip ultra (level 9) + split at 45 MB keeps every committed file within
+# GitHub's per-file limit.
 #
-# vendor.tar.xz   ~35 MB  — Rust crate sources, xz-compressed
-# toolchain/      ~70-90 MB per platform — minimal Rust compiler, gz-compressed
+# vendor.tar.xz        ~35 MB  — Rust crate sources, xz-compressed
+# toolchain/           ≤45 MB per part — Rust toolchain split parts
 # jenkins-plugins.tar.xz — varies; rebuild with bundle-jenkins-plugins.sh if needed
 
-# Rust toolchain installer tarballs — binary blobs, committed directly
-toolchain/*.tar.gz  binary
-toolchain/*.tar.xz  binary
+# Rust toolchain archives — binary blobs, committed directly
+# Parts produced by bundle-rust-toolchain.sh: *.tar.gz.aa, *.tar.gz.ab, …
+toolchain/*.tar.gz    binary
+toolchain/*.tar.xz    binary
+toolchain/*.tar.gz.*  binary
 
 # Vendor sources must never be normalized by git — cargo checksum verification
 # compares the exact bytes on disk to the SHA-256 in .cargo-checksum.json.

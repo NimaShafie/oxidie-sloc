@@ -19,15 +19,13 @@
 #   rust-toolchain-bundle.tar.xz.sha256 — SHA-256 checksum
 #
 # Committing the bundle:
-#   The bundle typically exceeds GitHub's 100 MB single-file limit, so git LFS is
-#   required.  If LFS is not set up, use the Dockerfile.agent approach instead
-#   (the image bakes the toolchain in at build time — no bundle file needed).
-#
-#   With LFS:
-#     git lfs install
-#     git lfs track '*.tar.xz'          # or just rust-toolchain-bundle.tar.xz
-#     git add .gitattributes rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.sha256
+#   The bundle is typically 200-350 MB — split before committing:
+#     split -b 45m rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.
+#     rm rust-toolchain-bundle.tar.xz
+#     git add rust-toolchain-bundle.tar.xz.* rust-toolchain-bundle.tar.xz.sha256
 #     git commit -m "ci: add Rust <version> toolchain bundle for offline builds"
+#   Alternatively, rebuild ci/jenkins/Dockerfile.agent — it bakes the toolchain
+#   at image build time so no bundle file is needed.
 
 set -euo pipefail
 
@@ -73,9 +71,10 @@ echo "  Archive : ${ARCHIVE}"
 echo "  Size    : ${SIZE}"
 echo "  SHA-256 : $(cat "${SHA_FILE}")"
 echo ""
-echo "To commit for fully offline Jenkins builds (git LFS required for files > 100 MB):"
-echo "  git lfs install && git lfs track '*.tar.xz'"
-echo "  git add .gitattributes rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.sha256"
+echo "To commit for fully offline Jenkins builds, split before committing:"
+echo "  split -b 45m rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz."
+echo "  rm rust-toolchain-bundle.tar.xz"
+echo "  git add rust-toolchain-bundle.tar.xz.* rust-toolchain-bundle.tar.xz.sha256"
 echo "  git commit -m 'ci: add Rust ${TOOLCHAIN} toolchain bundle for offline builds'"
 echo ""
 echo "Alternatively, rebuild ci/jenkins/Dockerfile.agent — it bakes the toolchain"
