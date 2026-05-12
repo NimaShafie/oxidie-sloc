@@ -1,0 +1,111 @@
+name: Test Windows install
+
+# Manual-dispatch only — on-demand verification harness, not a CI gate.
+# Run via: gh workflow run test-windows-install.yml --ref main
+# Or: Actions tab → "Test Windows install" → Run workflow
+# Expected runtime: ~10–15 minutes. Expected outcome: all steps green.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  windows-install-smoke:
+    name: Windows air-gapped install smoke test
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # windows-latest ships with rustup pre-installed. Delete it so install.sh
+      # takes the bundled-toolchain bootstrap path, not the "Rust already installed" shortcut.
+      - name: Remove pre-installed Rust
+        run: |
+          rm -rf "$USERPROFILE/.rustup" "$USERPROFILE/.cargo" || true
+          # Also strip .cargo/bin and .rustup/bin from the Git Bash PATH so that
+          # stale PATH entries (pointing at now-deleted dirs) don't confuse command -v.
+          NEW_PATH=$(printf '%s' "$PATH" | tr ':' '\n' \
+            | grep -Ev '\.(cargo|rustup)[/\\]' \
+            | tr '\n' ':' \
+            | sed 's/:$//')
+          echo "PATH=$NEW_PATH" >> "$GITHUB_ENV"
+
+      # Hard-fail the run if cargo is still reachable after the cleanup above.
+      # A silent pass here would mean we tested the wrong code path.
+      - name: Guard — cargo must not be on PATH
+        run: |
+          if command -v cargo &>/dev/null; then
+            echo "ERROR: cargo still found at $(command -v cargo) — cleanup failed" >&2
+            echo "       The test-premise is violated; re-examine the cleanup step." >&2
+            exit 1
+          fi
+          echo "OK: cargo not found — bundled-toolchain bootstrap path will run."
+
+      # Rust's x86_64-pc-windows-gnu target requires a MinGW GCC linker.
+      # Git for Windows ships one; make sure it is on PATH.
+      - name: Ensure MinGW gcc is on PATH (GNU target linker)
+        run: |
+          if ! command -v gcc &>/dev/null; then
+            for d in \
+              "/c/Program Files/Git/mingw64/bin" \
+              "/mingw64/bin" \
+              "/c/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin"; do
+              if [[ -f "$d/gcc.exe" ]]; then
+                echo "$d" >> "$GITHUB_PATH"
+                echo "Added MinGW gcc from: $d"
+                break
+              fi
+            done
+          fi
+          gcc --version || {
+            echo "[WARN] gcc not found — link step will likely fail."
+            echo "       See POSSIBLE FAILURE MODE (a) in the workflow comments."
+          }
+
+      # This is the actual test: a plain `bash scripts/install.sh` on a machine
+      # that has no Rust, just the committed toolchain/ split archives.
+      # install.sh will: verify checksums, cat-reassemble the .aa/.ab/…/.ae parts,
+      # extract to .tools/, export RUSTUP_HOME/CARGO_HOME/PATH, decompress
+      # vendor.tar.xz, write .cargo/config.toml, and run cargo build --release --offline.
+      - name: Run install.sh (offline, bundled-toolchain path)
+        run: bash scripts/install.sh
+
+      - name: Verify binary exists and reports version
+        run: |
+          if [[ ! -f "oxide-sloc.exe" ]]; then
+            echo "ERROR: oxide-sloc.exe not found after install" >&2
+            exit 1
+          fi
+          ./oxide-sloc.exe --version
+
+      # Brief end-to-end check: start the web server, hit /healthz, expect 200.
+      # Note: sleep 6 rather than 4 (Linux baseline) to give Windows more warmup time.
+      - name: Server smoke test — healthz
+        run: |
+          ./oxide-sloc.exe serve &
+          SERVER_PID=$!
+          sleep 6
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4317/healthz \
+            || echo "000")
+          kill "$SERVER_PID" 2>/dev/null || true
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "ERROR: /healthz returned HTTP $HTTP_CODE (expected 200)" >&2
+            exit 1
+          fi
+          echo "OK: /healthz -> $HTTP_CODE"
+
+      - name: Upload install logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: install-logs-${{ github.run_number }}
+          path: logs/install-*.log
+          if-no-files-found: ignore
