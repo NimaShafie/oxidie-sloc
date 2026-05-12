@@ -49,11 +49,14 @@ flamegraph.svg
 perf.data
 perf.data.old
 
-# dist/ — pre-built deployment binaries are committed here for offline/airgap installs.
-# Ignore CI-generated temporaries; explicitly allow the committed pre-built archives.
-/dist/tmp/
-/dist/*.sig
-/dist/oxide-sloc-bundle*
+# dist/ — compiled binaries and archives (released as GitHub release assets)
+/dist/
+
+# toolchain/ — bundled Rust standalone installer tarballs committed via git LFS
+# for offline builds on machines without a pre-installed Rust toolchain.
+# Only ignore temp extraction directories created during installation.
+/toolchain/tmp/
+/.tools/
 
 # Generated report artefacts under tests/fixtures/
 tests/fixtures/**/sloc/

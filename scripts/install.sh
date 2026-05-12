@@ -260,22 +260,6 @@ fi
 
 # ── 2. Pre-built binary ─────────────────────────────────────────────────────
 if [[ -f "$DIST_ARCHIVE" ]]; then
-    # Verify checksum if dist/checksums.sha256 is present
-    CHECKSUMS_FILE="$REPO_ROOT/dist/checksums.sha256"
-    if [[ -f "$CHECKSUMS_FILE" ]] && command -v sha256sum &>/dev/null; then
-        ARCHIVE_NAME="$(basename "$DIST_ARCHIVE")"
-        EXPECTED_SUM="$(grep "$ARCHIVE_NAME" "$CHECKSUMS_FILE" 2>/dev/null | awk '{print $1}')"
-        if [[ -n "$EXPECTED_SUM" ]]; then
-            ACTUAL_SUM="$(sha256sum "$DIST_ARCHIVE" | awk '{print $1}')"
-            if [[ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]]; then
-                echo " [ERROR] Checksum mismatch for $(basename "$DIST_ARCHIVE") — archive may be corrupt." >&2
-                echo "         Expected: $EXPECTED_SUM" >&2
-                echo "         Actual:   $ACTUAL_SUM" >&2
-                exit 1
-            fi
-            echo " [OK] Checksum verified."
-        fi
-    fi
     echo " Extracting pre-built binary from dist/..."
     if [[ "$PLATFORM" == windows ]]; then
         WIN_ARCHIVE="$(cygpath -w "$DIST_ARCHIVE")"
