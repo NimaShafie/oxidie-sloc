@@ -23,14 +23,16 @@ When compiling from source, both scripts display a live animated build indicator
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**Internet requirements — nothing. Every path works from a plain `git clone`:**
+**Internet requirements by scenario:**
 
-| Scenario | What ships in the repo | What happens |
+| Scenario | What's needed | What happens |
 |---|---|---|
-| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz.aa` + `.ab` … (≤45 MB each) + `vendor.tar.xz` | install.sh reassembles parts, bootstraps Rust, builds from vendor |
-| **Rust already installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | builds offline directly from vendor sources |
+| **Rust already installed** | `vendor.tar.xz` (committed, ~35 MB) | builds offline — no internet required |
+| **No Rust, toolchain committed** | `toolchain/` archives + `vendor.tar.xz` | install.sh bootstraps Rust from `toolchain/`, builds offline |
+| **No Rust, Linux, has curl** | `--online` flag | downloads release binary from GitHub Releases |
+| **No Rust, no internet, Linux** | Option C air-gap kit | see [`docs/airgap.md`](./docs/airgap.md) |
 
-Toolchain archives are 7-zip ultra compressed and split into ≤45 MB parts — every committed file is well within GitHub's per-file limit. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details.
+No network calls are made by default. The **Rust-already-installed** path works on any fresh clone. The **no-Rust, no-internet** path additionally requires the maintainer to have committed the toolchain archive (`bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine — see [`docs/airgap.md`](./docs/airgap.md)).
 
 ---
 
@@ -104,7 +106,7 @@ bash scripts/run.sh        # http://127.0.0.1:4317
 
 The script tries in order: bundled Rust toolchain (`toolchain/`) → system Rust + vendor sources. **No network calls are made by default.**
 
-- **No Rust, no internet (Windows or Linux):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz.*` split parts (committed to git), reassembles them, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. No extra steps after `git clone`.
+- **No Rust, no internet (Windows or Linux, toolchain committed):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz.*` split parts, reassembles them, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires that a maintainer has previously run `bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine and committed the `toolchain/` archives — see [`docs/airgap.md`](./docs/airgap.md).
 - **Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
 - **Linux, no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
 - **Linux, no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).

@@ -12884,7 +12884,7 @@ struct IndexTemplate {
             var dx = (e.clientX - (rect.left + rect.width / 2)) / (rect.width / 2);
             var dy = (e.clientY - (rect.top + rect.height / 2)) / (rect.height / 2);
             card.style.transition = 'transform 0.08s linear,box-shadow 0.18s ease,border-color 0.18s ease';
-            card.style.transform = 'perspective(700px) rotateX('+(-dy*7).toFixed(2)+'deg) rotateY('+(dx*7).toFixed(2)+'deg) translateY(-5px) scale(1.03)';
+            card.style.transform = 'perspective(700px) rotateX('+(-dy*4.2).toFixed(2)+'deg) rotateY('+(dx*4.2).toFixed(2)+'deg) translateY(-5px) scale(1.03)';
           });
           card.addEventListener('mouseleave', function() {
             card.style.transition = '';
@@ -17540,7 +17540,7 @@ struct CompareSelectTemplate {
       <div class="ic-grid">
         <div class="ic-card">
           <div class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</div>
-          <div class="ic-leg"><span><span class="ic-dot" style="background:#AAAAAA"></span>Baseline</span><span><span class="ic-dot" style="background:#C45C10"></span>Current</span></div>
+          <div class="ic-leg"><span><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
           <div id="ic-c1"></div>
         </div>
         <div class="ic-card" id="ic-lang-card">
@@ -18025,7 +18025,7 @@ struct CompareSelectTemplate {
       }
 
       // ── Chart 1: Baseline vs Current grouped bars ────────────────────────
-      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc},{l:'Files Analyzed',b:sd.bf,c:sd.cf},{l:'Comments',b:sd.bcm,c:sd.ccm}];
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#93C5FD',cc:'#2563EB'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#C4B5FD',cc:'#7C3AED'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#6EE7B7',cc:'#0D9488'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
       var C1W=600,C1H=160,c1mt=20,c1mb=24,c1ml=14,c1mr=14;
       var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=52,c1gap=10;
@@ -18036,17 +18036,17 @@ struct CompareSelectTemplate {
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
         c1+='<text x="'+cx+'" y="14" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
-        c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+GY+'" rx="3"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#666">'+fmt(m.b)+'</text>';
-        c1+='<rect class="cb" x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+OX+'" rx="3"'+barTT(m.l,'Current: '+fmt(m.c))+'/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+OX+'">'+fmt(m.c)+'</text>';
+        c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<rect class="cb" x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"'+barTT(m.l,'Current: '+fmt(m.c))+'/>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+OX+'">After</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">After</text>';
       });
       c1+='</svg>';
 
       // ── Chart 2: Delta by Metric ─────────────────────────────────────────
-      var mets=[{l:'Code Lines',v:sd.cc-sd.bc},{l:'Files Analyzed',v:sd.cf-sd.bf},{l:'Comment Lines',v:sd.ccm-sd.bcm}];
+      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#2563EB'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#7C3AED'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#0D9488'}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
       var C2W=530,rH=48,C2H=mets.length*rH+28,c2LW=144,c2RP=18;
       var cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
@@ -18056,7 +18056,7 @@ struct CompareSelectTemplate {
         var y=14+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2);
         var col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw;
         var sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" fill="#444">'+esc(m.l)+'</text>';
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
         c2+='<rect class="cb" x="'+px(bx)+'" y="'+(y+7)+'" width="'+px(bw)+'" height="26" fill="'+col+'" rx="3"'+barTT(m.l,'Delta: '+vStr)+'/>';
         if(bw>=52){
           c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+25)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';
@@ -18142,8 +18142,11 @@ struct CompareSelectTemplate {
         '<p class="sub">'+esc(proj)+'&nbsp;&middot;&nbsp;'+esc(sd.bts)+' &rarr; '+esc(sd.cts)+'<\/p>'+
         '<div class="two-col">'+
         '<div class="card"><h2>Code Metrics &mdash; Baseline vs Current<\/h2>'+
-        '<div class="leg"><span><span class="dot" style="background:#AAAAAA"><\/span>Baseline<\/span>'+
-        '<span><span class="dot" style="background:#C45C10"><\/span>Current<\/span><\/div>'+c1+'<\/div>'+
+        '<div class="leg">'+
+        '<span><span class="dot" style="background:#93C5FD"><\/span><span style="color:#2563EB;font-weight:600">Code Lines<\/span><\/span>'+
+        '<span><span class="dot" style="background:#C4B5FD"><\/span><span style="color:#7C3AED;font-weight:600">Files<\/span><\/span>'+
+        '<span><span class="dot" style="background:#6EE7B7"><\/span><span style="color:#0D9488;font-weight:600">Comments<\/span><\/span>'+
+        '<span style="font-size:10px;color:#888">&nbsp;(faded&nbsp;=&nbsp;before)<\/span><\/div>'+c1+'<\/div>'+
         (langs.length?'<div class="card"><h2>Language Code Delta<\/h2>'+c3+'<\/div>':'<div><\/div>')+
         '<\/div>'+
         '<div class="two-col">'+
@@ -18171,7 +18174,7 @@ struct CompareSelectTemplate {
       dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
       var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
       // Chart 1: Baseline vs Current grouped bars
-      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc},{l:'Files Analyzed',b:sd.bf,c:sd.cf},{l:'Comments',b:sd.bcm,c:sd.ccm}];
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#93C5FD',cc:'#2563EB'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#C4B5FD',cc:'#7C3AED'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#6EE7B7',cc:'#0D9488'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
       var C1W=600,C1H=160,c1mt=20,c1mb=24,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=52,c1gap=10;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
@@ -18181,23 +18184,23 @@ struct CompareSelectTemplate {
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
         c1+='<text x="'+cx+'" y="14" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
-        c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+GY+'" rx="3"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#666">'+fmt(m.b)+'</text>';
-        c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+OX+'" rx="3"/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+OX+'">'+fmt(m.c)+'</text>';
+        c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"/>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"/>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+OX+'">After</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">After</text>';
       });
       c1+='</svg>';
       // Chart 2: Delta by Metric
-      var mets=[{l:'Code Lines',v:sd.cc-sd.bc},{l:'Files Analyzed',v:sd.cf-sd.bf},{l:'Comment Lines',v:sd.ccm-sd.bcm}];
+      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#2563EB'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#7C3AED'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#0D9488'}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
       var C2W=530,rH=48,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){
         var y=14+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" fill="#444">'+esc(m.l)+'</text>';
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
         c2+='<rect'+btt(m.l,'Delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+7)+'" width="'+px(bw)+'" height="26" fill="'+col+'" rx="3"/>';
         if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+25)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
         else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+25)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
