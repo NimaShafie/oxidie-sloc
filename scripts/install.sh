@@ -401,8 +401,35 @@ if ! command -v cargo &>/dev/null; then
         mkdir -p "$TOOLS_DIR"
 
         echo " Extracting toolchain archive..."
-        if [[ "${#TOOLCHAIN_PARTS[@]}" -gt 0 ]]; then
-            # Reassemble split parts and pipe directly into tar
+        if [[ "$PLATFORM" == windows ]]; then
+            # Windows: Git Bash tar records rustup's proxy hardlinks (cargo.exe,
+            # rustc.exe, etc.) as POSIX symlinks pointing to rustup.exe.  Symlink
+            # creation fails with ENOENT when the target hasn't been extracted yet
+            # (alphabetical ordering puts cargo.exe before rustup.exe).  Extract
+            # while tolerating those specific errors, then copy rustup.exe over
+            # any proxy that tar couldn't create.
+            _tar_stderr="$(mktemp)"
+            if [[ "${#TOOLCHAIN_PARTS[@]}" -gt 0 ]]; then
+                cat "${TOOLCHAIN_PARTS[@]}" | tar -xzf - -C "$TOOLS_DIR" \
+                    2>"$_tar_stderr" || true
+            else
+                tar -xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR" \
+                    2>"$_tar_stderr" || true
+            fi
+            # Surface any real errors (non-symlink); silently discard symlink noise.
+            grep -v "Cannot create symlink" "$_tar_stderr" >&2 || true
+            rm -f "$_tar_stderr"
+            # Patch missing proxy binaries: every file in cargo/bin/ that tar
+            # couldn't create is a hardlink alias of rustup.exe — copy it there.
+            _rustup_proxy="$TOOLS_DIR/cargo/bin/rustup.exe"
+            if [[ -f "$_rustup_proxy" ]]; then
+                for _proxy in cargo.exe rustc.exe rustdoc.exe; do
+                    [[ -f "$TOOLS_DIR/cargo/bin/$_proxy" ]] || \
+                        cp "$_rustup_proxy" "$TOOLS_DIR/cargo/bin/$_proxy"
+                done
+                echo " [OK] Windows toolchain proxy binaries verified."
+            fi
+        elif [[ "${#TOOLCHAIN_PARTS[@]}" -gt 0 ]]; then
             cat "${TOOLCHAIN_PARTS[@]}" | tar -xzf - -C "$TOOLS_DIR"
         else
             tar -xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
