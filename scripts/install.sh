@@ -46,7 +46,14 @@ else
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
-VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.xz"
+# Prefer vendor.tar.gz (7-zip compressed) if present; fall back to vendor.tar.xz
+if [[ -f "$REPO_ROOT/vendor.tar.gz" ]]; then
+    VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.gz"
+    VENDOR_DECOMP="tar -xzf"
+else
+    VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.xz"
+    VENDOR_DECOMP="tar -xJf"
+fi
 VENDOR_DIR="$REPO_ROOT/vendor"
 
 LOG_DIR="$REPO_ROOT/logs"
@@ -341,9 +348,10 @@ if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
 fi
 
 # ── 2.7. Bootstrap Rust from bundled toolchain ──────────────────────────────
-# If cargo is not on PATH but a standalone Rust installer tarball is committed
-# to toolchain/, extract it and install Rust locally into .tools/rust/.
-# After this block, PATH includes .tools/rust/bin so step 3 finds cargo.
+# If cargo is not on PATH but a toolchain archive is committed to toolchain/,
+# extract it locally into .tools/ and export the paths.
+# Archives are 7-zip level-9 .tar.gz files bundled by bundle-rust-toolchain.sh.
+# They contain:  rustup/  (toolchains, settings)  and  cargo/  (bin/cargo).
 if ! command -v cargo &>/dev/null; then
     if [[ "$PLATFORM" == windows ]]; then
         TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-windows-x64.tar.gz"
@@ -353,8 +361,9 @@ if ! command -v cargo &>/dev/null; then
 
     if [[ -f "$TOOLCHAIN_ARCHIVE" ]]; then
         echo " No Rust toolchain detected — bootstrapping from bundled archive..."
-        echo " (one-time, ~170-250 MB extract)"
+        echo " (one-time, ~70-90 MB extract → ~300-500 MB on disk)"
 
+        # Verify checksum
         TOOLCHAIN_CHECKSUMS="$REPO_ROOT/toolchain/checksums.sha256"
         if [[ -f "$TOOLCHAIN_CHECKSUMS" ]] && command -v sha256sum &>/dev/null; then
             ARCHIVE_NAME="$(basename "$TOOLCHAIN_ARCHIVE")"
@@ -372,26 +381,43 @@ if ! command -v cargo &>/dev/null; then
         fi
 
         TOOLS_DIR="$REPO_ROOT/.tools"
-        RUST_PREFIX="$TOOLS_DIR/rust"
-        mkdir -p "$RUST_PREFIX"
+        mkdir -p "$TOOLS_DIR"
 
-        echo " Extracting Rust toolchain..."
-        tar xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
+        echo " Extracting toolchain archive (7-zip gzip)..."
+        tar -xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
 
-        # The tarball contains its own install.sh; run it to copy binaries into prefix
-        RUST_INSTALLER="$(find "$TOOLS_DIR" -name install.sh -maxdepth 3 2>/dev/null | grep -v vendor | head -1)"
-        if [[ -z "$RUST_INSTALLER" ]]; then
-            echo " [ERROR] No install.sh found inside toolchain archive." >&2
+        # Archive layout (from bundle-rust-toolchain.sh):
+        #   .tools/rustup/toolchains/<ver>-<target>/bin/  ← rustc, etc.
+        #   .tools/cargo/bin/                              ← cargo
+        RUSTUP_HOME_LOCAL="$TOOLS_DIR/rustup"
+        CARGO_HOME_LOCAL="$TOOLS_DIR/cargo"
+
+        # Find the toolchain bin dir
+        TC_BIN="$(find "$RUSTUP_HOME_LOCAL/toolchains" -maxdepth 2 -name bin -type d 2>/dev/null | head -1)"
+
+        export RUSTUP_HOME="$RUSTUP_HOME_LOCAL"
+        export CARGO_HOME="$CARGO_HOME_LOCAL"
+        export PATH="$CARGO_HOME_LOCAL/bin:${TC_BIN:-$RUSTUP_HOME_LOCAL/bin}:$PATH"
+
+        if ! command -v cargo &>/dev/null; then
+            echo " [ERROR] cargo not found after toolchain extraction." >&2
+            echo "         Verify the toolchain archive is complete and try:" >&2
+            echo "           bash scripts/internal/bundle-rust-toolchain.sh" >&2
             exit 1
         fi
-        bash "$RUST_INSTALLER" --prefix="$RUST_PREFIX" --disable-ldconfig
-        # Clean up extracted source tree (binaries now live in prefix)
-        find "$TOOLS_DIR" -maxdepth 1 -name 'rust-*' -type d -exec rm -rf {} + 2>/dev/null || true
+        echo " [OK] Rust toolchain bootstrapped at .tools/"
 
-        export PATH="$RUST_PREFIX/bin:$PATH"
-        export CARGO_HOME="$RUST_PREFIX/cargo"
-        export RUSTUP_HOME="$RUST_PREFIX/rustup"
-        echo " [OK] Rust toolchain bootstrapped at .tools/rust/"
+        # RHEL/Linux: ensure a C linker is available (needed by Rust GNU target)
+        if [[ "$PLATFORM" == linux ]] && ! command -v cc &>/dev/null && ! command -v gcc &>/dev/null; then
+            echo ""
+            echo " [WARN] No C linker (cc/gcc) found." >&2
+            echo "        The Rust GNU target requires a C linker to link executables." >&2
+            echo "        Install with:" >&2
+            echo "          RHEL/CentOS:  sudo dnf install gcc" >&2
+            echo "          Debian/Ubuntu: sudo apt install gcc" >&2
+            echo "        Then re-run: bash scripts/install.sh" >&2
+            exit 1
+        fi
     fi
 fi
 
