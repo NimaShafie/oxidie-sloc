@@ -8,9 +8,6 @@ FROM rust:1.95-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     xz-utils \
-    libwayland-dev \
-    libgtk-3-dev \
-    libxdo-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
