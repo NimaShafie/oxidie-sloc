@@ -301,6 +301,7 @@ fn get_hostname() -> String {
 /// Walk a single directory root and collect file records into the output vectors.
 #[allow(clippy::too_many_arguments)]
 fn walk_root(
+    // NOSONAR(rust:S3776)
     root: &Path,
     config: &AppConfig,
     include_globs: Option<&GlobSet>,
@@ -345,14 +346,14 @@ fn walk_root(
 
     // Phase 2: analyze files in parallel using scoped threads.
     // Each thread gets a contiguous slice; results are merged afterwards.
-    let thread_count = std::thread::available_parallelism()
-        .map(|n| n.get().min(MAX_ANALYSIS_THREADS))
-        .unwrap_or(DEFAULT_ANALYSIS_THREADS);
+    let thread_count = std::thread::available_parallelism().map_or(DEFAULT_ANALYSIS_THREADS, |n| {
+        n.get().min(MAX_ANALYSIS_THREADS)
+    });
     let chunk_size = paths.len().div_ceil(thread_count);
 
     let chunk_results: Vec<Vec<Result<Option<FileRecord>>>> =
         std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
-            let handles: Vec<_> = paths
+            paths
                 .chunks(chunk_size)
                 .map(|chunk| {
                     s.spawn(move || -> Vec<Result<Option<FileRecord>>> {
@@ -374,10 +375,6 @@ fn walk_root(
                         results
                     })
                 })
-                .collect();
-
-            handles
-                .into_iter()
                 .map(|h| {
                     h.join()
                         .map_err(|_| anyhow::anyhow!("analysis thread panicked"))
@@ -491,6 +488,7 @@ fn assemble_run(
 /// analysis step fails in a way that cannot be recovered from.
 #[allow(clippy::too_many_lines)]
 pub fn analyze(
+    // NOSONAR(rust:S3776)
     config: &AppConfig,
     runtime_mode: &str,
     cancel: Option<&AtomicBool>,
@@ -783,6 +781,7 @@ fn decode_file_contents(
 
 #[allow(clippy::too_many_lines)]
 fn analyze_candidate_file(
+    // NOSONAR(rust:S3776)
     path: &Path,
     root: &Path,
     config: &AppConfig,
@@ -1020,7 +1019,7 @@ fn build_summary(analyzed: &[FileRecord], skipped: &[FileRecord]) -> SummaryTota
 }
 
 /// Construct a zero-filled `LanguageSummary` for the given language.
-fn zeroed_summary(language: Language) -> LanguageSummary {
+const fn zeroed_summary(language: Language) -> LanguageSummary {
     LanguageSummary {
         language,
         files: 0,

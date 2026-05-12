@@ -18,7 +18,7 @@ impl FileCoverage {
         if self.lines_found == 0 {
             0.0
         } else {
-            (self.lines_hit as f64 / self.lines_found as f64) * 100.0
+            (f64::from(self.lines_hit) / f64::from(self.lines_found)) * 100.0
         }
     }
 
@@ -27,7 +27,7 @@ impl FileCoverage {
         if self.functions_found == 0 {
             0.0
         } else {
-            (self.functions_hit as f64 / self.functions_found as f64) * 100.0
+            (f64::from(self.functions_hit) / f64::from(self.functions_found)) * 100.0
         }
     }
 
@@ -36,7 +36,7 @@ impl FileCoverage {
         if self.branches_found == 0 {
             0.0
         } else {
-            (self.branches_hit as f64 / self.branches_found as f64) * 100.0
+            (f64::from(self.branches_hit) / f64::from(self.branches_found)) * 100.0
         }
     }
 }
@@ -107,6 +107,7 @@ pub fn parse_lcov(content: &str) -> HashMap<PathBuf, FileCoverage> {
 /// 2. Suffix match: find a coverage path whose components end with the relative path
 /// 3. Filename-only fallback when the relative path is a bare filename
 #[must_use]
+#[allow(clippy::implicit_hasher)] // public API; callers always use the default hasher
 pub fn lookup_coverage<'a>(
     map: &'a HashMap<PathBuf, FileCoverage>,
     relative_path: &str,
@@ -149,6 +150,8 @@ pub fn aggregate_line_coverage(records: &[&FileCoverage]) -> Option<f64> {
         return None;
     }
     let total_hit: u64 = records.iter().map(|c| u64::from(c.lines_hit)).sum();
+    // ratio/percentage display, precision loss acceptable
+    #[allow(clippy::cast_precision_loss)]
     Some((total_hit as f64 / total_found as f64) * 100.0)
 }
 
@@ -184,74 +187,16 @@ pub fn parse_coverage_auto(path: &Path, content: &str) -> HashMap<PathBuf, FileC
 #[must_use]
 pub fn parse_cobertura(content: &str) -> HashMap<PathBuf, FileCoverage> {
     let mut result: HashMap<PathBuf, FileCoverage> = HashMap::new();
-
-    // Split on "<class " tokens to get per-class blocks.
     let mut remaining = content;
     while let Some(class_start) = remaining.find("<class ") {
         remaining = &remaining[class_start + 7..];
-
-        // Extract filename="..."
-        let filename = match extract_attr(remaining, "filename") {
-            Some(f) => f,
-            None => continue,
+        let Some(filename) = extract_attr(remaining, "filename") else {
+            continue;
         };
-
-        // Find the end of this class element (either </class> or next <class)
         let class_end = remaining.find("</class>").unwrap_or(remaining.len());
         let class_block = &remaining[..class_end];
-
-        // Count <line elements and hits
-        let mut lines_found: u32 = 0;
-        let mut lines_hit: u32 = 0;
-        let mut method_found: u32 = 0;
-        let mut method_hit: u32 = 0;
-        let mut branch_found: u32 = 0;
-        let mut branch_hit: u32 = 0;
-
-        let mut scan = class_block;
-        while let Some(pos) = scan.find("<line ") {
-            scan = &scan[pos + 6..];
-            lines_found += 1;
-            if let Some(hits_str) = extract_attr(scan, "hits") {
-                if hits_str.trim() != "0" {
-                    lines_hit += 1;
-                }
-            }
-            // branch coverage within <line branch="true" condition-coverage="50% (1/2)">
-            if extract_attr(scan, "branch").as_deref() == Some("true") {
-                if let Some(cond) = extract_attr(scan, "condition-coverage") {
-                    // parse "50% (1/2)" → branch_hit=1, branch_found=2
-                    if let Some(frac) = cond.find('(') {
-                        let frac_str = &cond[frac + 1..];
-                        if let Some(slash) = frac_str.find('/') {
-                            let num: u32 = frac_str[..slash].trim().parse().unwrap_or(0);
-                            let den_end = frac_str[slash + 1..].find(')').unwrap_or(0);
-                            let den: u32 = frac_str[slash + 1..slash + 1 + den_end]
-                                .trim()
-                                .parse()
-                                .unwrap_or(0);
-                            branch_hit += num;
-                            branch_found += den;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Count methods from <method elements inside the class block
-        let mut mscan = class_block;
-        while let Some(pos) = mscan.find("<method ") {
-            mscan = &mscan[pos + 8..];
-            method_found += 1;
-            // A method is "hit" if any of its lines have hits>0; approximate via line-rate attr
-            if let Some(lr) = extract_attr(mscan, "line-rate") {
-                let rate: f64 = lr.parse().unwrap_or(0.0);
-                if rate > 0.0 {
-                    method_hit += 1;
-                }
-            }
-        }
-
+        let (lines_found, lines_hit, branch_found, branch_hit) = cobertura_scan_lines(class_block);
+        let (method_found, method_hit) = cobertura_scan_methods(class_block);
         let entry = result
             .entry(PathBuf::from(&filename))
             .or_insert(FileCoverage {
@@ -269,16 +214,79 @@ pub fn parse_cobertura(content: &str) -> HashMap<PathBuf, FileCoverage> {
         entry.branches_found += branch_found;
         entry.branches_hit += branch_hit;
     }
-
     result
 }
 
-/// Parse a JaCoCo XML report (`jacoco.xml`) into a per-file coverage map.
+/// Count `<line>` hits and branch coverage within a Cobertura `<class>` block.
+fn cobertura_scan_lines(class_block: &str) -> (u32, u32, u32, u32) {
+    let mut lines_found: u32 = 0;
+    let mut lines_hit: u32 = 0;
+    let mut branch_found: u32 = 0;
+    let mut branch_hit: u32 = 0;
+    let mut scan = class_block;
+    while let Some(pos) = scan.find("<line ") {
+        scan = &scan[pos + 6..];
+        lines_found += 1;
+        if extract_attr(scan, "hits").is_some_and(|h| h.trim() != "0") {
+            lines_hit += 1;
+        }
+        if extract_attr(scan, "branch").as_deref() == Some("true") {
+            let (hit, found) = parse_cobertura_branch_fraction(scan);
+            branch_hit += hit;
+            branch_found += found;
+        }
+    }
+    (lines_found, lines_hit, branch_found, branch_hit)
+}
+
+/// Parse `condition-coverage="50% (1/2)"` → `(hit=1, found=2)`.
+fn parse_cobertura_branch_fraction(scan: &str) -> (u32, u32) {
+    let Some(cond) = extract_attr(scan, "condition-coverage") else {
+        return (0, 0);
+    };
+    let Some(frac_start) = cond.find('(') else {
+        return (0, 0);
+    };
+    let frac_str = &cond[frac_start + 1..];
+    let Some(slash) = frac_str.find('/') else {
+        return (0, 0);
+    };
+    let num: u32 = frac_str[..slash].trim().parse().unwrap_or(0);
+    let den_end = frac_str[slash + 1..].find(')').unwrap_or(0);
+    let den: u32 = frac_str[slash + 1..slash + 1 + den_end]
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    (num, den)
+}
+
+/// Count `<method>` elements and how many have a non-zero line-rate in a Cobertura class block.
+fn cobertura_scan_methods(class_block: &str) -> (u32, u32) {
+    let mut method_found: u32 = 0;
+    let mut method_hit: u32 = 0;
+    let mut mscan = class_block;
+    while let Some(pos) = mscan.find("<method ") {
+        mscan = &mscan[pos + 8..];
+        method_found += 1;
+        let rate: f64 = extract_attr(mscan, "line-rate")
+            .and_then(|lr| lr.parse().ok())
+            .unwrap_or(0.0);
+        if rate > 0.0 {
+            method_hit += 1;
+        }
+    }
+    (method_found, method_hit)
+}
+
+/// Parse a `JaCoCo` XML report (`jacoco.xml`) into a per-file coverage map.
 ///
-/// JaCoCo is produced by the Gradle `jacocoTestReport` task and the Maven JaCoCo plugin.
+/// `JaCoCo` is produced by the Gradle `jacocoTestReport` task and the Maven `JaCoCo` plugin.
 /// Paths are reconstructed as `package/sourcefile` (e.g. `com/example/Main.java`).
 #[must_use]
-pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
+pub fn parse_jacoco(
+    // NOSONAR(rust:S3776)
+    content: &str,
+) -> HashMap<PathBuf, FileCoverage> {
     let mut result: HashMap<PathBuf, FileCoverage> = HashMap::new();
 
     let mut scan = content;
@@ -291,9 +299,8 @@ pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
         let mut sf_scan = pkg_block;
         while let Some(sf_start) = sf_scan.find("<sourcefile ") {
             sf_scan = &sf_scan[sf_start + 12..];
-            let sf_name = match extract_attr(sf_scan, "name") {
-                Some(n) => n,
-                None => continue,
+            let Some(sf_name) = extract_attr(sf_scan, "name") else {
+                continue;
             };
             let sf_end = sf_scan.find("</sourcefile>").unwrap_or(sf_scan.len());
             let sf_block = &sf_scan[..sf_end];
@@ -335,7 +342,7 @@ pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
             let path = if pkg_name.is_empty() {
                 PathBuf::from(&sf_name)
             } else {
-                PathBuf::from(format!("{}/{}", pkg_name, sf_name))
+                PathBuf::from(format!("{pkg_name}/{sf_name}"))
             };
 
             result.insert(
@@ -381,11 +388,18 @@ pub fn parse_istanbul(content: &str) -> HashMap<PathBuf, FileCoverage> {
         if path_str == "total" {
             continue;
         }
+        // Line/function/branch counts are always small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let lines_total: u32 = file_val["lines"]["total"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let lines_covered: u32 = file_val["lines"]["covered"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let fn_total: u32 = file_val["functions"]["total"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let fn_covered: u32 = file_val["functions"]["covered"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let br_total: u32 = file_val["branches"]["total"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let br_covered: u32 = file_val["branches"]["covered"].as_u64().unwrap_or(0) as u32;
 
         result.insert(

@@ -38,6 +38,7 @@ pub struct BaselineStore {
 }
 
 impl BaselineStore {
+    #[must_use]
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
@@ -61,6 +62,7 @@ impl BaselineStore {
         self.baselines.insert(entry.name.clone(), entry);
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&BaselineEntry> {
         self.baselines.get(name)
     }
@@ -72,9 +74,7 @@ impl BaselineStore {
 
 /// Returns the path to the baselines file, honouring `SLOC_BASELINES_PATH`.
 pub fn resolve_baselines_path() -> PathBuf {
-    std::env::var("SLOC_BASELINES_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_baselines_path())
+    std::env::var("SLOC_BASELINES_PATH").map_or_else(|_| default_baselines_path(), PathBuf::from)
 }
 
 /// Result of a baseline comparison check.
@@ -112,7 +112,8 @@ impl BaselineCheckResult {
 
 /// Compare `current_code_lines` to a stored baseline.
 ///
-/// Returns `Err` if the named baseline does not exist.
+/// # Errors
+/// Returns an error if the named baseline does not exist.
 pub fn check_against_baseline(
     store: &BaselineStore,
     name: &str,
@@ -124,11 +125,16 @@ pub fn check_against_baseline(
     })?;
 
     let baseline_code = entry.summary.code_lines;
+    // Signed delta: values are line counts bounded well within i64 range.
+    #[allow(clippy::cast_possible_wrap)] // line counts fit in i64
     let delta = current_code_lines as i64 - baseline_code as i64;
     let delta_pct = if baseline_code == 0 {
         0.0
     } else {
-        (delta as f64 / baseline_code as f64) * 100.0
+        // ratio/percentage display, precision loss acceptable
+        #[allow(clippy::cast_precision_loss)]
+        let result = (delta as f64 / baseline_code as f64) * 100.0;
+        result
     };
 
     let exceeded = max_delta_pct.is_some_and(|limit| delta_pct > limit);

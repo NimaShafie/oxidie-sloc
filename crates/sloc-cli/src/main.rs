@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 #![allow(clippy::multiple_crate_versions)]
 
+use std::fmt::Write as FmtWrite;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -206,7 +207,7 @@ struct AnalyzeArgs {
     #[arg(long, value_name = "NAME")]
     set_baseline: Option<String>,
 
-    /// Exit with code 5 if code lines grew more than MAX_DELTA_PCT % vs. the named
+    /// Exit with code 5 if code lines grew more than `MAX_DELTA_PCT` % vs. the named
     /// baseline. Omit --max-delta-pct to fail on any growth.
     #[arg(long, value_name = "NAME")]
     fail_above_baseline: Option<String>,
@@ -217,7 +218,7 @@ struct AnalyzeArgs {
 
     /// Path to an LCOV .info file (from lcov, gcov, cargo-llvm-cov, etc.) to attach
     /// per-file line and function coverage data to the analysis output.
-    /// Can also be set via the SLOC_COVERAGE_FILE environment variable.
+    /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[arg(long, value_name = "FILE")]
     coverage_file: Option<PathBuf>,
 }
@@ -367,19 +368,19 @@ struct SendArgs {
     report_url: Option<String>,
 
     // --- Atlassian Confluence ---
-    /// Confluence base URL (e.g. https://myco.atlassian.net or https://confluence.corp.com).
-    /// Defaults to SLOC_CONFLUENCE_URL env var.
+    /// Confluence base URL (e.g. <https://myco.atlassian.net> or <https://confluence.corp.com>).
+    /// Defaults to `SLOC_CONFLUENCE_URL` env var.
     #[arg(long, value_name = "URL", env = "SLOC_CONFLUENCE_URL")]
     confluence_url: Option<String>,
     /// Atlassian account email (Cloud) or username (Server).
-    /// Defaults to SLOC_CONFLUENCE_USER env var.
+    /// Defaults to `SLOC_CONFLUENCE_USER` env var.
     #[arg(long, value_name = "USER", env = "SLOC_CONFLUENCE_USER")]
     confluence_username: Option<String>,
     /// API token (Cloud) or password/PAT (Server).
-    /// Prefer the SLOC_CONFLUENCE_TOKEN env var to avoid credential exposure in process listings.
+    /// Prefer the `SLOC_CONFLUENCE_TOKEN` env var to avoid credential exposure in process listings.
     #[arg(long, value_name = "TOKEN", env = "SLOC_CONFLUENCE_TOKEN")]
     confluence_token: Option<String>,
-    /// Target Confluence space key (e.g. ENG). Defaults to SLOC_CONFLUENCE_SPACE env var.
+    /// Target Confluence space key (e.g. ENG). Defaults to `SLOC_CONFLUENCE_SPACE` env var.
     #[arg(long, value_name = "KEY", env = "SLOC_CONFLUENCE_SPACE")]
     confluence_space: Option<String>,
     /// Optional numeric parent page ID to nest the created page under.
@@ -572,7 +573,7 @@ async fn main() -> Result<()> {
         Commands::Validate(args) => run_validate(&args),
         Commands::Send(args) => run_send(*args).await,
         Commands::GitScan(args) => run_git_scan(args).await,
-        Commands::GitCompare(args) => run_git_compare(args).await,
+        Commands::GitCompare(args) => run_git_compare(args),
         Commands::Watch(args) => run_watch(args).await,
         Commands::PrComment(args) => run_pr_comment(args).await,
     }
@@ -652,6 +653,9 @@ fn check_exit_conditions(
     }
 }
 
+// Multiple conditions (total and per-language) each set `violated`; an if-let-seq refactor
+// would be less clear here since both conditions need to print their own error messages.
+#[allow(clippy::useless_let_if_seq)]
 fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
     let mut violated = false;
 
@@ -950,11 +954,14 @@ fn run_init(args: &InitArgs) -> Result<()> {
 
 // ── validate handler ──────────────────────────────────────────────────────────
 
-fn run_validate(args: &ValidateArgs) -> Result<()> {
+fn run_validate(
+    // NOSONAR(rust:S3776)
+    args: &ValidateArgs,
+) -> Result<()> {
     let config_path = args
         .config
         .as_deref()
-        .unwrap_or(std::path::Path::new(".oxide-sloc.toml"));
+        .unwrap_or_else(|| std::path::Path::new(".oxide-sloc.toml"));
 
     if !config_path.exists() {
         anyhow::bail!(
@@ -1173,7 +1180,7 @@ const BLOCKED_WEBHOOK_HOSTS: &[&str] = &[
 
 /// Returns `true` when `ip` falls into a range that must not receive outbound requests
 /// (loopback, private RFC-1918/FC00, link-local, broadcast, unspecified, multicast).
-fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
+const fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback()
@@ -1359,7 +1366,22 @@ fn load_base_config(config_path: Option<&Path>) -> Result<AppConfig> {
 
 fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
     let mut config = load_base_config(args.config.as_deref())?;
+    apply_discovery_cli_args(&mut config, args);
+    apply_analysis_cli_args(&mut config, args);
+    if let Some(title) = &args.report_title {
+        config.reporting.report_title.clone_from(title);
+    }
+    if let Some(profile) = &args.profile {
+        config.apply_profile(profile)?;
+    }
+    config.validate()?;
+    if config.discovery.root_paths.is_empty() {
+        anyhow::bail!("provide at least one PATH or configure discovery.root_paths");
+    }
+    Ok(config)
+}
 
+fn apply_discovery_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
     if !args.paths.is_empty() {
         config.discovery.root_paths.clone_from(&args.paths);
     }
@@ -1375,17 +1397,23 @@ fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
             .exclude_globs
             .clone_from(&args.exclude_glob);
     }
-    if !args.enabled_language.is_empty() {
-        config
-            .analysis
-            .enabled_languages
-            .clone_from(&args.enabled_language);
-    }
     if args.no_ignore_files {
         config.discovery.honor_ignore_files = false;
     }
     if args.follow_symlinks {
         config.discovery.follow_symlinks = true;
+    }
+    if args.submodule_breakdown {
+        config.discovery.submodule_breakdown = true;
+    }
+}
+
+fn apply_analysis_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
+    if !args.enabled_language.is_empty() {
+        config
+            .analysis
+            .enabled_languages
+            .clone_from(&args.enabled_language);
     }
     if let Some(policy) = args.mixed_line_policy {
         config.analysis.mixed_line_policy = policy;
@@ -1405,22 +1433,6 @@ fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
     if let Some(cov) = &args.coverage_file {
         config.analysis.coverage_file = Some(cov.clone());
     }
-    if let Some(title) = &args.report_title {
-        config.reporting.report_title.clone_from(title);
-    }
-    if args.submodule_breakdown {
-        config.discovery.submodule_breakdown = true;
-    }
-
-    if let Some(profile) = &args.profile {
-        config.apply_profile(profile)?;
-    }
-
-    config.validate()?;
-    if config.discovery.root_paths.is_empty() {
-        anyhow::bail!("provide at least one PATH or configure discovery.root_paths");
-    }
-    Ok(config)
 }
 
 fn ensure_html_for_pdf(
@@ -1744,52 +1756,50 @@ async fn confluence_upsert_cloud(
     let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
     let existing_ver = find_resp["results"][0]["version"]["number"]
         .as_u64()
-        .map(|v| v as u32);
+        // Confluence version numbers are tiny; truncation is not possible in practice.
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
-    match (existing_id, existing_ver) {
-        (Some(page_id), Some(ver)) => {
-            let payload = serde_json::json!({
-                "version": { "number": ver + 1 },
-                "title": page_title,
-                "body": { "representation": "storage", "value": body_html }
-            });
-            let resp = client
-                .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
-            }
-            println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    if let (Some(page_id), Some(ver)) = (existing_id, existing_ver) {
+        let payload = serde_json::json!({
+            "version": { "number": ver + 1 },
+            "title": page_title,
+            "body": { "representation": "storage", "value": body_html }
+        });
+        let resp = client
+            .put(format!("{base_url}/wiki/api/v2/pages/{page_id}"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
         }
-        _ => {
-            let mut payload = serde_json::json!({
-                "spaceId": space_id,
-                "title": page_title,
-                "body": { "representation": "storage", "value": body_html }
-            });
-            if let Some(pid) = parent_id {
-                payload["parentId"] = serde_json::Value::String(pid.to_owned());
-            }
-            let resp = client
-                .post(format!("{base_url}/wiki/api/v2/pages"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
-            }
-            let created: serde_json::Value = resp.json().await?;
-            let new_id = created["id"].as_str().unwrap_or("?");
-            println!("send: created Confluence page '{page_title}' (id: {new_id})");
+        println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    } else {
+        let mut payload = serde_json::json!({
+            "spaceId": space_id,
+            "title": page_title,
+            "body": { "representation": "storage", "value": body_html }
+        });
+        if let Some(pid) = parent_id {
+            payload["parentId"] = serde_json::Value::String(pid.to_owned());
         }
+        let resp = client
+            .post(format!("{base_url}/wiki/api/v2/pages"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+        }
+        let created: serde_json::Value = resp.json().await?;
+        let new_id = created["id"].as_str().unwrap_or("?");
+        println!("send: created Confluence page '{page_title}' (id: {new_id})");
     }
     Ok(())
 }
@@ -1818,55 +1828,53 @@ async fn confluence_upsert_server(
     let existing_id = find_resp["results"][0]["id"].as_str().map(str::to_owned);
     let existing_ver = find_resp["results"][0]["version"]["number"]
         .as_u64()
-        .map(|v| v as u32);
+        // Confluence version numbers are tiny; truncation is not possible in practice.
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
-    match (existing_id, existing_ver) {
-        (Some(page_id), Some(ver)) => {
-            let payload = serde_json::json!({
-                "version": { "number": ver + 1 },
-                "type": "page",
-                "title": page_title,
-                "space": { "key": space },
-                "body": { "storage": { "value": body_html, "representation": "storage" } }
-            });
-            let resp = client
-                .put(format!("{base_url}/rest/api/content/{page_id}"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
-            }
-            println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    if let (Some(page_id), Some(ver)) = (existing_id, existing_ver) {
+        let payload = serde_json::json!({
+            "version": { "number": ver + 1 },
+            "type": "page",
+            "title": page_title,
+            "space": { "key": space },
+            "body": { "storage": { "value": body_html, "representation": "storage" } }
+        });
+        let resp = client
+            .put(format!("{base_url}/rest/api/content/{page_id}"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Confluence update failed (HTTP {})", resp.status());
         }
-        _ => {
-            let mut payload = serde_json::json!({
-                "type": "page",
-                "space": { "key": space },
-                "title": page_title,
-                "body": { "storage": { "value": body_html, "representation": "storage" } }
-            });
-            if let Some(pid) = parent_id {
-                payload["ancestors"] = serde_json::json!([{ "id": pid }]);
-            }
-            let resp = client
-                .post(format!("{base_url}/rest/api/content"))
-                .header("Authorization", auth)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
-            }
-            let created: serde_json::Value = resp.json().await?;
-            let new_id = created["id"].as_str().unwrap_or("?");
-            println!("send: created Confluence page '{page_title}' (id: {new_id})");
+        println!("send: updated Confluence page '{page_title}' (id: {page_id})");
+    } else {
+        let mut payload = serde_json::json!({
+            "type": "page",
+            "space": { "key": space },
+            "title": page_title,
+            "body": { "storage": { "value": body_html, "representation": "storage" } }
+        });
+        if let Some(pid) = parent_id {
+            payload["ancestors"] = serde_json::json!([{ "id": pid }]);
         }
+        let resp = client
+            .post(format!("{base_url}/rest/api/content"))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Confluence create failed (HTTP {status}): {body}");
+        }
+        let created: serde_json::Value = resp.json().await?;
+        let new_id = created["id"].as_str().unwrap_or("?");
+        println!("send: created Confluence page '{page_title}' (id: {new_id})");
     }
     Ok(())
 }
@@ -1922,7 +1930,7 @@ fn percent_encode(s: &str) -> String {
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
-                out.push_str(&format!("{b:02X}"));
+                write!(out, "{b:02X}").expect("write to String is infallible");
             }
         }
     }
@@ -1971,19 +1979,20 @@ fn build_pr_comment_body(
     // Summary table
     out.push_str("| Metric | Value |\n");
     out.push_str("|--------|-------|\n");
-    out.push_str(&format!("| Files analyzed | {} |\n", totals.files_analyzed));
-    out.push_str(&format!(
-        "| Code lines | {} |\n",
-        fmt_thousands(totals.code_lines)
-    ));
-    out.push_str(&format!(
-        "| Comment lines | {} |\n",
+    writeln!(out, "| Files analyzed | {} |", totals.files_analyzed).expect("infallible");
+    writeln!(out, "| Code lines | {} |", fmt_thousands(totals.code_lines)).expect("infallible");
+    writeln!(
+        out,
+        "| Comment lines | {} |",
         fmt_thousands(totals.comment_lines)
-    ));
-    out.push_str(&format!(
-        "| Blank lines | {} |\n",
+    )
+    .expect("infallible");
+    writeln!(
+        out,
+        "| Blank lines | {} |",
         fmt_thousands(totals.blank_lines)
-    ));
+    )
+    .expect("infallible");
 
     // Delta section
     if let Some(cmp) = comparison {
@@ -1998,16 +2007,15 @@ fn build_pr_comment_body(
         out.push_str("\n### Changes vs. Target Branch\n\n");
         out.push_str("| | Delta |\n");
         out.push_str("|--|-------|\n");
-        out.push_str(&format!("| Code Δ | {} |\n", sign(s.code_lines_delta)));
-        out.push_str(&format!(
-            "| Comment Δ | {} |\n",
-            sign(s.comment_lines_delta)
-        ));
-        out.push_str(&format!("| Blank Δ | {} |\n", sign(s.blank_lines_delta)));
-        out.push_str(&format!(
-            "| Files | +{} added / -{} removed / ~{} modified |\n",
+        writeln!(out, "| Code Δ | {} |", sign(s.code_lines_delta)).expect("infallible");
+        writeln!(out, "| Comment Δ | {} |", sign(s.comment_lines_delta)).expect("infallible");
+        writeln!(out, "| Blank Δ | {} |", sign(s.blank_lines_delta)).expect("infallible");
+        writeln!(
+            out,
+            "| Files | +{} added / -{} removed / ~{} modified |",
             cmp.files_added, cmp.files_removed, cmp.files_modified
-        ));
+        )
+        .expect("infallible");
     }
 
     // Top languages
@@ -2016,20 +2024,22 @@ fn build_pr_comment_body(
         out.push_str("| Language | Files | Code | Comments | Blank |\n");
         out.push_str("|----------|-------|------|----------|-------|\n");
         for l in run.totals_by_language.iter().take(10) {
-            out.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+            writeln!(
+                out,
+                "| {} | {} | {} | {} | {} |",
                 l.language.display_name(),
                 l.files,
                 l.code_lines,
                 l.comment_lines,
                 l.blank_lines,
-            ));
+            )
+            .expect("infallible");
         }
         out.push_str("\n</details>\n");
     }
 
     if let Some(url) = report_url {
-        out.push_str(&format!("\n[View full report]({url})\n"));
+        writeln!(out, "\n[View full report]({url})").expect("infallible");
     }
 
     out.push_str("\n*Generated by [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc)*\n");
@@ -2180,7 +2190,9 @@ fn write_git_scan_outputs(
 
 // ── git-compare handler ───────────────────────────────────────────────────────
 
-async fn run_git_compare(args: GitCompareArgs) -> Result<()> {
+// Args are matched by the dispatch pattern; taking ownership is idiomatic for handler functions.
+#[allow(clippy::needless_pass_by_value)]
+fn run_git_compare(args: GitCompareArgs) -> Result<()> {
     let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
     let quiet = args.quiet;
     let dest = git_clone_path(&args.repo, &clones_dir);
@@ -2265,7 +2277,7 @@ async fn run_watch(args: WatchArgs) -> Result<()> {
         if sha == last_sha {
             continue;
         }
-        last_sha = sha.clone();
+        last_sha.clone_from(&sha);
         if !quiet {
             eprintln!("[watch] new commit {sha} — scanning…");
         }

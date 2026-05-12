@@ -23,12 +23,14 @@ When compiling from source, both scripts display a live animated build indicator
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**Internet requirements:**
-- **Windows** — no internet needed; `oxide-sloc.exe` is bundled in the repository root.
-- **Linux with Rust** — no internet needed; `vendor.tar.xz` covers all crate sources for a fully offline build.
-- **Linux without Rust** — place `dist/oxide-sloc-linux-x86_64.tar.gz` alongside the repo (no internet needed), or run `bash scripts/install.sh --online` to download it from GitHub when `curl` is available.
+**Internet requirements — nothing. Every path works from a plain `git clone`:**
 
-See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths.
+| Scenario | What ships in the repo | What happens |
+|---|---|---|
+| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz` (~70-90 MB, no LFS) + `vendor.tar.xz` | install.sh bootstraps Rust, then builds from vendor |
+| **Rust already installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | builds offline directly from vendor sources |
+
+No git LFS required — toolchain archives are 7-zip ultra compressed and committed directly to git. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details.
 
 ---
 
@@ -57,8 +59,8 @@ Then open `http://<your-ip>:4317` from any device on the same network (`hostname
 > `Authorization: Bearer <key>` header — browsers don't send this on their own.
 > Instead, navigate to `http://<your-ip>:4317/auth/login` and paste the key into the
 > sign-in form (the server sets an `HttpOnly` session cookie for subsequent requests).
-> Alternatively: leave `SLOC_API_KEY` unset for a quick trusted-LAN test (all endpoints
-> become unauthenticated), or use a header-injecting extension (ModHeader / Requestly).
+> Alternatively: pass `--no-auth` to `serve-server.sh` for a quick trusted-LAN test (all
+> endpoints become unauthenticated), or use a header-injecting extension (ModHeader / Requestly).
 
 When an API key is set, CLI/curl callers must include it:
 
@@ -93,20 +95,19 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ## Installation
 
-### Path A — Bundled binary (no internet required)
+### Path A — Build from source (no internet required)
 
 ```bash
 bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
 bash scripts/run.sh        # http://127.0.0.1:4317
 ```
 
-The script tries in order: binary in repo root → `dist/` bundle → offline vendor build. **No network calls are made by default.**
+The script tries in order: bundled Rust toolchain (`toolchain/`) → system Rust + vendor sources. **No network calls are made by default.**
 
-- **Windows:** `oxide-sloc.exe` is in the repository root. Clone and run — nothing to build, no internet required.
-- **Linux with Rust:** builds from the committed `vendor.tar.xz` — no internet required.
-- **Linux without Rust, pre-staged bundle:** place `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) alongside the repo and re-run — no internet required.
-- **Linux without Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch and extract the release binary automatically. Pass `--offline` or set `OXIDE_SLOC_NO_DOWNLOAD=1` to explicitly suppress network calls (now the default, kept for compatibility).
-- **Linux without Rust, no internet:** use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
+- **No Rust, no internet (Windows or Linux):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz` (committed to git), bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. No extra steps after `git clone`.
+- **Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
+- **Linux, no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
+- **Linux, no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 

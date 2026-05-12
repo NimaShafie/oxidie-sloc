@@ -34,11 +34,12 @@ pub enum ConfluenceTier {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfluenceConfig {
     pub tier: ConfluenceTier,
-    /// Base URL, e.g. "https://mycompany.atlassian.net" or "https://confluence.corp.com"
+    /// Base URL, e.g. "<https://mycompany.atlassian.net>" or "<https://confluence.corp.com>"
     pub base_url: String,
     /// Cloud: Atlassian account email. Server: username (blank if using a PAT).
     pub username: String,
     /// Cloud: API token. Server: password or Personal Access Token.
+    #[serde(skip)]
     pub credential: String,
     pub space_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,10 +70,16 @@ pub struct ConfluenceConfigStore {
 
 impl ConfluenceConfigStore {
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
+        let mut store: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(ref mut cfg) = store.config {
+            if let Ok(token) = std::env::var("SLOC_CONFLUENCE_TOKEN") {
+                cfg.credential = token;
+            }
+        }
+        store
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -165,11 +172,13 @@ impl ConfluenceClient {
             .json()
             .await?;
         let results = resp["results"].as_array();
-        if results.map(|a| a.is_empty()).unwrap_or(true) {
+        if results.is_none_or(std::vec::Vec::is_empty) {
             return Ok(None);
         }
         let page = &resp["results"][0];
         let id = page["id"].as_str().unwrap_or("").to_owned();
+        // Confluence version numbers are small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let ver = page["version"]["number"].as_u64().unwrap_or(1) as u32;
         Ok(Some(PageSummary {
             id,
@@ -193,11 +202,13 @@ impl ConfluenceClient {
             .json()
             .await?;
         let results = resp["results"].as_array();
-        if results.map(|a| a.is_empty()).unwrap_or(true) {
+        if results.is_none_or(std::vec::Vec::is_empty) {
             return Ok(None);
         }
         let page = &resp["results"][0];
         let id = page["id"].as_str().unwrap_or("").to_owned();
+        // Confluence version numbers are small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
         let ver = page["version"]["number"].as_u64().unwrap_or(1) as u32;
         Ok(Some(PageSummary {
             id,
@@ -397,7 +408,7 @@ pub async fn post_to_confluence(
 // ── request / response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub(super) struct SaveConfluenceConfig {
+pub struct SaveConfluenceConfig {
     pub tier: Option<String>,
     pub base_url: String,
     pub username: String,
@@ -410,46 +421,50 @@ pub(super) struct SaveConfluenceConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct PostToConfluenceRequest {
+pub struct PostToConfluenceRequest {
     pub run_id: String,
     pub page_title: String,
     pub report_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct RunIdQuery {
+pub struct RunIdQuery {
     pub run_id: String,
 }
 
 // ── route handlers ────────────────────────────────────────────────────────────
 
-pub(super) async fn api_get_confluence_config(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn api_get_confluence_config(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.confluence.lock().await;
-    match &store.config {
-        None => Json(serde_json::json!({
-            "configured": false,
-            "tier": "cloud",
-            "base_url": "",
-            "username": "",
-            "api_token_set": false,
-            "space_key": "",
-            "parent_page_id": null,
-            "schedule_auto_post": {}
-        })),
-        Some(c) => Json(serde_json::json!({
-            "configured": true,
-            "tier": if c.tier == ConfluenceTier::Cloud { "cloud" } else { "server" },
-            "base_url": c.base_url,
-            "username": c.username,
-            "api_token_set": !c.credential.is_empty(),
-            "space_key": c.space_key,
-            "parent_page_id": c.parent_page_id,
-            "schedule_auto_post": c.schedule_auto_post
-        })),
-    }
+    Json(store.config.as_ref().map_or_else(
+        || {
+            serde_json::json!({
+                "configured": false,
+                "tier": "cloud",
+                "base_url": "",
+                "username": "",
+                "api_token_set": false,
+                "space_key": "",
+                "parent_page_id": null,
+                "schedule_auto_post": {}
+            })
+        },
+        |c| {
+            serde_json::json!({
+                "configured": true,
+                "tier": if c.tier == ConfluenceTier::Cloud { "cloud" } else { "server" },
+                "base_url": c.base_url,
+                "username": c.username,
+                "api_token_set": !c.credential.is_empty(),
+                "space_key": c.space_key,
+                "parent_page_id": c.parent_page_id,
+                "schedule_auto_post": c.schedule_auto_post
+            })
+        },
+    ))
 }
 
-pub(super) async fn api_save_confluence_config(
+pub async fn api_save_confluence_config(
     State(state): State<AppState>,
     Json(body): Json<SaveConfluenceConfig>,
 ) -> impl IntoResponse {
@@ -481,10 +496,11 @@ pub(super) async fn api_save_confluence_config(
         schedule_auto_post: body.schedule_auto_post.clone(),
     });
     let _ = store.save(&state.confluence_path);
+    drop(store);
     Json(serde_json::json!({ "ok": true }))
 }
 
-pub(super) async fn api_test_confluence(State(state): State<AppState>) -> Response {
+pub async fn api_test_confluence(State(state): State<AppState>) -> Response {
     let config = {
         let store = state.confluence.lock().await;
         store.config.clone()
@@ -507,7 +523,7 @@ pub(super) async fn api_test_confluence(State(state): State<AppState>) -> Respon
     }
 }
 
-pub(super) async fn api_post_to_confluence(
+pub async fn api_post_to_confluence(
     State(state): State<AppState>,
     Json(body): Json<PostToConfluenceRequest>,
 ) -> Response {
@@ -610,7 +626,7 @@ pub(super) async fn api_post_to_confluence(
     }
 }
 
-pub(super) async fn api_wiki_markup(
+pub async fn api_wiki_markup(
     State(state): State<AppState>,
     Query(q): Query<RunIdQuery>,
 ) -> Response {
@@ -637,9 +653,8 @@ pub(super) async fn api_wiki_markup(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let run = match read_json(&json_path) {
-        Ok(r) => r,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(run) = read_json(&json_path) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
     let markup = render_confluence_wiki_markup(&run);
@@ -694,6 +709,7 @@ pub async fn maybe_auto_post_confluence(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn urlencoding_encode(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -703,7 +719,7 @@ fn urlencoding_encode(s: &str) -> String {
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
-                out.push_str(&format!("{b:02X}"));
+                write!(out, "{b:02X}").expect("write to String is infallible");
             }
         }
     }

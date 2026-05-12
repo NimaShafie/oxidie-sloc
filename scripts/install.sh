@@ -46,7 +46,14 @@ else
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
-VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.xz"
+# Prefer vendor.tar.gz (7-zip compressed) if present; fall back to vendor.tar.xz
+if [[ -f "$REPO_ROOT/vendor.tar.gz" ]]; then
+    VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.gz"
+    VENDOR_DECOMP="tar -xzf"
+else
+    VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.xz"
+    VENDOR_DECOMP="tar -xJf"
+fi
 VENDOR_DIR="$REPO_ROOT/vendor"
 
 LOG_DIR="$REPO_ROOT/logs"
@@ -268,6 +275,11 @@ if [[ -f "$DIST_ARCHIVE" ]]; then
             "Expand-Archive -Path '$WIN_ARCHIVE' -DestinationPath '$WIN_DEST' -Force"
     else
         tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
+        # Tolerate tarballs that use the platform-named binary instead of bare "oxide-sloc"
+        if [[ "$PLATFORM" == linux ]] && [[ ! -f "$EXE" ]] && \
+           [[ -f "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" ]]; then
+            mv "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" "$EXE"
+        fi
     fi
     if [[ -f "$EXE" ]]; then
         [[ "$PLATFORM" == linux ]] && chmod +x "$EXE"
@@ -321,6 +333,10 @@ fi
 if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
     echo " Extracting pre-built binary from dist/..."
     tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
+    # Tolerate tarballs that use the platform-named binary instead of bare "oxide-sloc"
+    if [[ ! -f "$EXE" ]] && [[ -f "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" ]]; then
+        mv "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" "$EXE"
+    fi
     if [[ -f "$EXE" ]]; then
         chmod +x "$EXE"
         echo " [OK] Extracted $(basename "$EXE")"
@@ -331,16 +347,90 @@ if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
     echo " [WARN] Extraction completed but binary not found — archive may be corrupt."
 fi
 
+# ── 2.7. Bootstrap Rust from bundled toolchain ──────────────────────────────
+# If cargo is not on PATH but a toolchain archive is committed to toolchain/,
+# extract it locally into .tools/ and export the paths.
+# Archives are 7-zip level-9 .tar.gz files bundled by bundle-rust-toolchain.sh.
+# They contain:  rustup/  (toolchains, settings)  and  cargo/  (bin/cargo).
+if ! command -v cargo &>/dev/null; then
+    if [[ "$PLATFORM" == windows ]]; then
+        TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-windows-x64.tar.gz"
+    else
+        TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-linux-${LINUX_ARCH}.tar.gz"
+    fi
+
+    if [[ -f "$TOOLCHAIN_ARCHIVE" ]]; then
+        echo " No Rust toolchain detected — bootstrapping from bundled archive..."
+        echo " (one-time, ~70-90 MB extract → ~300-500 MB on disk)"
+
+        # Verify checksum
+        TOOLCHAIN_CHECKSUMS="$REPO_ROOT/toolchain/checksums.sha256"
+        if [[ -f "$TOOLCHAIN_CHECKSUMS" ]] && command -v sha256sum &>/dev/null; then
+            ARCHIVE_NAME="$(basename "$TOOLCHAIN_ARCHIVE")"
+            EXPECTED_SUM="$(grep "$ARCHIVE_NAME" "$TOOLCHAIN_CHECKSUMS" 2>/dev/null | awk '{print $1}')"
+            if [[ -n "$EXPECTED_SUM" ]]; then
+                ACTUAL_SUM="$(sha256sum "$TOOLCHAIN_ARCHIVE" | awk '{print $1}')"
+                if [[ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]]; then
+                    echo " [ERROR] Toolchain checksum mismatch — archive may be corrupt." >&2
+                    echo "         Expected: $EXPECTED_SUM" >&2
+                    echo "         Actual:   $ACTUAL_SUM" >&2
+                    exit 1
+                fi
+                echo " [OK] Toolchain checksum verified."
+            fi
+        fi
+
+        TOOLS_DIR="$REPO_ROOT/.tools"
+        mkdir -p "$TOOLS_DIR"
+
+        echo " Extracting toolchain archive (7-zip gzip)..."
+        tar -xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
+
+        # Archive layout (from bundle-rust-toolchain.sh):
+        #   .tools/rustup/toolchains/<ver>-<target>/bin/  ← rustc, etc.
+        #   .tools/cargo/bin/                              ← cargo
+        RUSTUP_HOME_LOCAL="$TOOLS_DIR/rustup"
+        CARGO_HOME_LOCAL="$TOOLS_DIR/cargo"
+
+        # Find the toolchain bin dir
+        TC_BIN="$(find "$RUSTUP_HOME_LOCAL/toolchains" -maxdepth 2 -name bin -type d 2>/dev/null | head -1)"
+
+        export RUSTUP_HOME="$RUSTUP_HOME_LOCAL"
+        export CARGO_HOME="$CARGO_HOME_LOCAL"
+        export PATH="$CARGO_HOME_LOCAL/bin:${TC_BIN:-$RUSTUP_HOME_LOCAL/bin}:$PATH"
+
+        if ! command -v cargo &>/dev/null; then
+            echo " [ERROR] cargo not found after toolchain extraction." >&2
+            echo "         Verify the toolchain archive is complete and try:" >&2
+            echo "           bash scripts/internal/bundle-rust-toolchain.sh" >&2
+            exit 1
+        fi
+        echo " [OK] Rust toolchain bootstrapped at .tools/"
+
+        # RHEL/Linux: ensure a C linker is available (needed by Rust GNU target)
+        if [[ "$PLATFORM" == linux ]] && ! command -v cc &>/dev/null && ! command -v gcc &>/dev/null; then
+            echo ""
+            echo " [WARN] No C linker (cc/gcc) found." >&2
+            echo "        The Rust GNU target requires a C linker to link executables." >&2
+            echo "        Install with:" >&2
+            echo "          RHEL/CentOS:  sudo dnf install gcc" >&2
+            echo "          Debian/Ubuntu: sudo apt install gcc" >&2
+            echo "        Then re-run: bash scripts/install.sh" >&2
+            exit 1
+        fi
+    fi
+fi
+
 # ── 3. Build from vendored sources ──────────────────────────────────────────
 if command -v cargo &>/dev/null; then
     if [[ ! -d "$VENDOR_DIR" ]]; then
         if [[ -f "$VENDOR_ARCHIVE" ]]; then
-            echo " Decompressing vendor.tar.xz (22 MB → 362 MB, one-time)..."
-            tar -xJf "$VENDOR_ARCHIVE" -C "$REPO_ROOT"
+            echo " Decompressing $(basename "$VENDOR_ARCHIVE") (one-time)..."
+            $VENDOR_DECOMP "$VENDOR_ARCHIVE" -C "$REPO_ROOT"
             echo " [OK] Vendor sources ready."
         else
-            echo " [ERROR] Neither vendor/ nor vendor.tar.xz found." >&2
-            echo "         vendor.tar.xz is committed to the repository — ensure you have" >&2
+            echo " [ERROR] Neither vendor/ nor vendor.tar.xz / vendor.tar.gz found." >&2
+            echo "         The vendor archive is committed to the repository — ensure you have" >&2
             echo "         the complete repository, not just source files." >&2
             exit 1
         fi
@@ -378,28 +468,33 @@ echo ""
 echo " No pre-built binary found and no Rust toolchain detected."
 echo ""
 if [[ "$PLATFORM" == windows ]]; then
-    echo " oxide-sloc.exe should be present in the repository root."
-    echo " Ensure you have the complete repository package (not just source files)."
+    echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
+    echo "   On any machine with internet access:"
+    echo "     bash scripts/internal/bundle-rust-toolchain.sh windows-x64"
+    echo "     git add toolchain/"
+    echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
+    echo "     git push"
+    echo ""
+    echo " After the toolchain is committed, re-run this script on any fresh clone."
+    echo ""
+    echo " If Rust is already installed (https://rustup.rs), just re-run:"
+    echo "   bash scripts/install.sh"
+    echo ""
     echo " Full deployment guide: docs/airgap.md"
 else
-    echo " Options (see docs/airgap.md for details):"
+    echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
+    echo "   On any machine with internet access:"
+    echo "     bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64"
+    echo "     git add toolchain/"
+    echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
+    echo "     git push"
     echo ""
-    echo "  • Internet available (opt-in — re-run with --online):"
-    echo "    install.sh fetches the release binary from GitHub automatically"
-    echo "    when curl is present and no Rust toolchain is detected."
-    echo "    curl is required. Run: bash scripts/install.sh --online"
+    echo " After the toolchain is committed, re-run this script on any fresh clone."
     echo ""
-    echo "  • Pre-staged dist/ bundle (Option B — no internet on target machine):"
-    echo "    Place dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz here, then re-run:"
-    echo "    bash scripts/install.sh"
+    echo " If Rust is already installed (https://rustup.rs), just re-run:"
+    echo "   bash scripts/install.sh"
     echo ""
-    echo "  • Full air-gap kit (Option D — no internet, no Rust, no curl):"
-    echo "    On a networked machine: bash scripts/internal/make-airgap-kit.sh"
-    echo "    Transfer the kit archive, then:"
-    echo "    tar xzf oxide-sloc-airgap-kit-*.tar.gz && cd oxide-sloc-airgap-kit-*/"
-    echo "    bash install.sh"
+    echo " Full deployment guide: docs/airgap.md"
 fi
-echo ""
-echo " Full deployment guide: docs/airgap.md"
 echo ""
 exit 1

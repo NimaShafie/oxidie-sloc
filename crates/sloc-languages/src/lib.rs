@@ -226,15 +226,15 @@ pub struct RawLineCounts {
     #[serde(default)]
     pub compiler_directive_lines: u64,
     /// Best-effort count of test case / test function definition lines detected lexically
-    /// (GTest, Catch2, PyTest, JUnit, etc.). Always a subset of `code_only_lines`.
+    /// (`GTest`, Catch2, `PyTest`, `JUnit`, etc.). Always a subset of `code_only_lines`.
     #[serde(default)]
     pub test_count: u64,
     /// Best-effort count of test assertion call lines detected lexically
-    /// (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.).
+    /// (`ASSERT_EQ`, `EXPECT_TRUE`, assertEquals, Assert.AreEqual, `assert_eq`!, etc.).
     #[serde(default)]
     pub test_assertion_count: u64,
     /// Best-effort count of test suite / fixture / group declaration lines detected lexically
-    /// (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], [TestFixture], etc.).
+    /// (`TEST_GROUP`, `BOOST_AUTO_TEST_SUITE`, [`TestClass`], [`TestFixture`], etc.).
     #[serde(default)]
     pub test_suite_count: u64,
 }
@@ -362,51 +362,96 @@ fn detect_by_shebang(line: &str) -> Option<Language> {
 
 /// Detect language purely from a (lowercased) file extension.
 fn detect_by_extension(ext: &str) -> Option<Language> {
-    match ext {
-        // --- Original 11 ---
-        "c" | "h" => Some(Language::C),
-        "cc" | "cp" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Some(Language::Cpp),
-        "cs" => Some(Language::CSharp),
-        "go" => Some(Language::Go),
-        "java" => Some(Language::Java),
-        "js" | "mjs" | "cjs" => Some(Language::JavaScript),
-        "py" => Some(Language::Python),
-        "rs" => Some(Language::Rust),
-        "sh" | "bash" | "zsh" | "ksh" => Some(Language::Shell),
-        "ps1" | "psm1" | "psd1" => Some(Language::PowerShell),
-        "ts" | "mts" | "cts" => Some(Language::TypeScript),
-        // --- Extended 30 ---
-        "asm" | "s" => Some(Language::Assembly),
-        "clj" | "cljs" | "cljc" | "edn" => Some(Language::Clojure),
-        "css" => Some(Language::Css),
-        "dart" => Some(Language::Dart),
-        "ex" | "exs" => Some(Language::Elixir),
-        "erl" | "hrl" => Some(Language::Erlang),
-        "fs" | "fsi" | "fsx" => Some(Language::FSharp),
-        "groovy" | "gradle" => Some(Language::Groovy),
-        "hs" | "lhs" => Some(Language::Haskell),
-        "html" | "htm" | "xhtml" => Some(Language::Html),
-        "jl" => Some(Language::Julia),
-        "kt" | "kts" => Some(Language::Kotlin),
-        "lua" => Some(Language::Lua),
-        "mk" => Some(Language::Makefile),
-        "nim" | "nims" => Some(Language::Nim),
-        "m" | "mm" => Some(Language::ObjectiveC),
-        "ml" | "mli" => Some(Language::Ocaml),
-        "pl" | "pm" | "t" => Some(Language::Perl),
-        "php" | "php3" | "php4" | "php5" | "php7" | "phtml" => Some(Language::Php),
-        "r" => Some(Language::R),
-        "rb" | "rake" => Some(Language::Ruby),
-        "scala" | "sc" => Some(Language::Scala),
-        "scss" | "sass" => Some(Language::Scss),
-        "sql" => Some(Language::Sql),
-        "svelte" => Some(Language::Svelte),
-        "swift" => Some(Language::Swift),
-        "vue" => Some(Language::Vue),
-        "xml" | "xsd" | "xsl" | "xslt" | "svg" => Some(Language::Xml),
-        "zig" => Some(Language::Zig),
-        _ => None,
-    }
+    // Static table avoids a large match statement; each extension maps 1-to-1 to a language.
+    static EXT_MAP: &[(&str, Language)] = &[
+        ("c", Language::C),
+        ("h", Language::C),
+        ("cc", Language::Cpp),
+        ("cp", Language::Cpp),
+        ("cpp", Language::Cpp),
+        ("cxx", Language::Cpp),
+        ("hh", Language::Cpp),
+        ("hpp", Language::Cpp),
+        ("hxx", Language::Cpp),
+        ("cs", Language::CSharp),
+        ("go", Language::Go),
+        ("java", Language::Java),
+        ("js", Language::JavaScript),
+        ("mjs", Language::JavaScript),
+        ("cjs", Language::JavaScript),
+        ("py", Language::Python),
+        ("rs", Language::Rust),
+        ("sh", Language::Shell),
+        ("bash", Language::Shell),
+        ("zsh", Language::Shell),
+        ("ksh", Language::Shell),
+        ("ps1", Language::PowerShell),
+        ("psm1", Language::PowerShell),
+        ("psd1", Language::PowerShell),
+        ("ts", Language::TypeScript),
+        ("mts", Language::TypeScript),
+        ("cts", Language::TypeScript),
+        ("asm", Language::Assembly),
+        ("s", Language::Assembly),
+        ("clj", Language::Clojure),
+        ("cljs", Language::Clojure),
+        ("cljc", Language::Clojure),
+        ("edn", Language::Clojure),
+        ("css", Language::Css),
+        ("dart", Language::Dart),
+        ("ex", Language::Elixir),
+        ("exs", Language::Elixir),
+        ("erl", Language::Erlang),
+        ("hrl", Language::Erlang),
+        ("fs", Language::FSharp),
+        ("fsi", Language::FSharp),
+        ("fsx", Language::FSharp),
+        ("groovy", Language::Groovy),
+        ("gradle", Language::Groovy),
+        ("hs", Language::Haskell),
+        ("lhs", Language::Haskell),
+        ("html", Language::Html),
+        ("htm", Language::Html),
+        ("xhtml", Language::Html),
+        ("jl", Language::Julia),
+        ("kt", Language::Kotlin),
+        ("kts", Language::Kotlin),
+        ("lua", Language::Lua),
+        ("mk", Language::Makefile),
+        ("nim", Language::Nim),
+        ("nims", Language::Nim),
+        ("m", Language::ObjectiveC),
+        ("mm", Language::ObjectiveC),
+        ("ml", Language::Ocaml),
+        ("mli", Language::Ocaml),
+        ("pl", Language::Perl),
+        ("pm", Language::Perl),
+        ("t", Language::Perl),
+        ("php", Language::Php),
+        ("php3", Language::Php),
+        ("php4", Language::Php),
+        ("php5", Language::Php),
+        ("php7", Language::Php),
+        ("phtml", Language::Php),
+        ("r", Language::R),
+        ("rb", Language::Ruby),
+        ("rake", Language::Ruby),
+        ("scala", Language::Scala),
+        ("sc", Language::Scala),
+        ("scss", Language::Scss),
+        ("sass", Language::Scss),
+        ("sql", Language::Sql),
+        ("svelte", Language::Svelte),
+        ("swift", Language::Swift),
+        ("vue", Language::Vue),
+        ("xml", Language::Xml),
+        ("xsd", Language::Xml),
+        ("xsl", Language::Xml),
+        ("xslt", Language::Xml),
+        ("svg", Language::Xml),
+        ("zig", Language::Zig),
+    ];
+    EXT_MAP.iter().find_map(|&(e, l)| (e == ext).then_some(l))
 }
 
 /// Detect language from an exact filename (no extension) or well-known filename patterns.
@@ -522,492 +567,28 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
 /// Returns the lexical scan configuration for `language` and whether it uses a C preprocessor.
 /// All fields are static constants except `skip_lines`, which is always empty here; callers that
 /// need non-empty skip sets (currently only Python) must populate the field after this call.
-#[allow(clippy::too_many_lines)]
+///
+/// The implementation delegates to `LANG_SCAN_TABLE` (a static `&[(Language, StaticLangConfig)]`)
+/// defined below the `SP_*` symbol-pattern constants.  Each language appears exactly once in the
+/// table, so the linear scan is O(|languages|) but avoids a 41-arm `match` statement.
 fn language_scan_config(language: Language) -> (ScanConfig, bool) {
-    match language {
-        Language::C => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_C,
-            },
-            true,
-        ),
-        Language::Cpp => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_CPP,
-            },
-            true,
-        ),
-        Language::ObjectiveC => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_OBJECTIVEC,
-            },
-            true,
-        ),
-        Language::CSharp => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: true,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_CSHARP,
-            },
-            false,
-        ),
-        Language::Go => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_GO,
-            },
-            false,
-        ),
-        Language::Java => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_JAVA,
-            },
-            false,
-        ),
-        Language::JavaScript | Language::Svelte | Language::Vue => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_JS,
-            },
-            false,
-        ),
-        Language::Rust => (
-            ScanConfig {
-                // Rust also has //! and /// doc comments — they parse the same as //
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_RUST,
-            },
-            false,
-        ),
-        Language::Shell => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_SHELL,
-            },
-            false,
-        ),
-        Language::PowerShell => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: Some(("<#", "#>")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_POWERSHELL,
-            },
-            false,
-        ),
-        Language::TypeScript => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_TS,
-            },
-            false,
-        ),
-        Language::Python => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: true,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(), // caller fills this in for Python
-                symbol_patterns: SP_PYTHON,
-            },
-            false,
-        ),
-        Language::Assembly => (
-            ScanConfig {
-                line_comments: &[";"],
-                block_comment: None,
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: false,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_ASSEMBLY,
-            },
-            false,
-        ),
-        Language::Clojure => (
-            ScanConfig {
-                line_comments: &[";"],
-                block_comment: None,
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_CLOJURE,
-            },
-            false,
-        ),
-        Language::Css => (
-            ScanConfig {
-                line_comments: &[],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_NONE,
-            },
-            false,
-        ),
-        Language::Dart => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_DART,
-            },
-            false,
-        ),
-        Language::Dockerfile | Language::Makefile => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: false,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_NONE,
-            },
-            false,
-        ),
-        Language::Elixir => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_ELIXIR,
-            },
-            false,
-        ),
-        Language::Erlang => (
-            ScanConfig {
-                line_comments: &["%"],
-                block_comment: None,
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_ERLANG,
-            },
-            false,
-        ),
-        Language::FSharp => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("(*", "*)")),
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_FSHARP,
-            },
-            false,
-        ),
-        Language::Groovy => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_GROOVY,
-            },
-            false,
-        ),
-        Language::Haskell => (
-            ScanConfig {
-                line_comments: &["--"],
-                block_comment: Some(("{-", "-}")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_HASKELL,
-            },
-            false,
-        ),
-        Language::Html | Language::Xml => (
-            ScanConfig {
-                line_comments: &[],
-                block_comment: Some(("<!--", "-->")),
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: false,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_NONE,
-            },
-            false,
-        ),
-        Language::Julia => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: Some(("#=", "=#")),
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: true,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_JULIA,
-            },
-            false,
-        ),
-        Language::Kotlin => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_KOTLIN,
-            },
-            false,
-        ),
-        Language::Lua => (
-            ScanConfig {
-                line_comments: &["--"],
-                block_comment: Some(("--[[", "]]")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_LUA,
-            },
-            false,
-        ),
-        Language::Nim => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: Some(("#[", "]#")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_NIM,
-            },
-            false,
-        ),
-        Language::Ocaml => (
-            ScanConfig {
-                line_comments: &[],
-                block_comment: Some(("(*", "*)")),
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_OCAML,
-            },
-            false,
-        ),
-        Language::Perl => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_PERL,
-            },
-            false,
-        ),
-        Language::Php => (
-            ScanConfig {
-                line_comments: &["//", "#"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_PHP,
-            },
-            false,
-        ),
-        Language::R => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_R,
-            },
-            false,
-        ),
-        Language::Ruby => (
-            ScanConfig {
-                line_comments: &["#"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_RUBY,
-            },
-            false,
-        ),
-        Language::Scala => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_SCALA,
-            },
-            false,
-        ),
-        Language::Scss => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_NONE,
-            },
-            false,
-        ),
-        Language::Sql => (
-            ScanConfig {
-                line_comments: &["--"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: false,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_SQL,
-            },
-            false,
-        ),
-        Language::Swift => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: Some(("/*", "*/")),
-                allow_single_quote_strings: false,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_SWIFT,
-            },
-            false,
-        ),
-        Language::Zig => (
-            ScanConfig {
-                line_comments: &["//"],
-                block_comment: None,
-                allow_single_quote_strings: true,
-                allow_double_quote_strings: true,
-                allow_triple_quote_strings: false,
-                allow_csharp_verbatim_strings: false,
-                skip_lines: HashSet::new(),
-                symbol_patterns: SP_ZIG,
-            },
-            false,
-        ),
-    }
+    let cfg = LANG_SCAN_TABLE
+        .iter()
+        .find_map(|&(l, c)| (l == language).then_some(c))
+        .unwrap_or_else(|| panic!("language_scan_config: no entry for {language:?}"));
+    (
+        ScanConfig {
+            line_comments: cfg.line_comments,
+            block_comment: cfg.block_comment,
+            allow_single_quote_strings: cfg.allow_single_quote_strings,
+            allow_double_quote_strings: cfg.allow_double_quote_strings,
+            allow_triple_quote_strings: cfg.allow_triple_quote_strings,
+            allow_csharp_verbatim_strings: cfg.allow_csharp_verbatim_strings,
+            skip_lines: HashSet::new(),
+            symbol_patterns: cfg.symbol_patterns,
+        },
+        cfg.has_preprocessor,
+    )
 }
 
 /// Per-language keyword prefixes used for best-effort structural symbol detection.
@@ -1022,11 +603,11 @@ struct SymbolPatterns {
     /// Line prefixes (after stripping leading whitespace) that indicate a test case or test
     /// function definition. Matched against code lines only, same as other symbol categories.
     tests: &'static [&'static str],
-    /// Line prefixes that indicate a test assertion call (ASSERT_EQ, assertEquals, assert_eq!,
+    /// Line prefixes that indicate a test assertion call (`ASSERT_EQ`, assertEquals, `assert_eq`!,
     /// Assert.AreEqual, etc.). Matched against code lines only.
     assertions: &'static [&'static str],
     /// Line prefixes that indicate a test suite / fixture / group declaration
-    /// (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], [TestFixture], etc.).
+    /// (`TEST_GROUP`, `BOOST_AUTO_TEST_SUITE`, [`TestClass`], [`TestFixture`], etc.).
     test_suites: &'static [&'static str],
 }
 
@@ -1903,6 +1484,23 @@ const SP_ZIG: SymbolPatterns = SymbolPatterns {
     test_suites: &[],
 };
 
+/// Static (non-heap) language scanning parameters.  All fields are `'static` so this struct
+/// can be stored in a `static` array.  The dynamic `skip_lines` set (used only for Python
+/// docstring detection) is kept in `ScanConfig` and populated by the caller after lookup.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy)]
+struct StaticLangConfig {
+    line_comments: &'static [&'static str],
+    block_comment: Option<(&'static str, &'static str)>,
+    allow_single_quote_strings: bool,
+    allow_double_quote_strings: bool,
+    allow_triple_quote_strings: bool,
+    allow_csharp_verbatim_strings: bool,
+    symbol_patterns: SymbolPatterns,
+    /// `true` for C, C++, and Objective-C (languages that have a C preprocessor).
+    has_preprocessor: bool,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 struct ScanConfig {
@@ -1915,6 +1513,545 @@ struct ScanConfig {
     skip_lines: HashSet<usize>,
     symbol_patterns: SymbolPatterns,
 }
+
+/// Static language-scan configuration table — one entry per supported language.
+/// Used by `language_scan_config` to avoid a 41-arm match.  All `SP_*` constants
+/// referenced here are defined above in the same module.
+static LANG_SCAN_TABLE: &[(Language, StaticLangConfig)] = &[
+    (
+        Language::C,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_C,
+            has_preprocessor: true,
+        },
+    ),
+    (
+        Language::Cpp,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_CPP,
+            has_preprocessor: true,
+        },
+    ),
+    (
+        Language::ObjectiveC,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_OBJECTIVEC,
+            has_preprocessor: true,
+        },
+    ),
+    (
+        Language::CSharp,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: true,
+            symbol_patterns: SP_CSHARP,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Go,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_GO,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Java,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_JAVA,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::JavaScript,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_JS,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Svelte,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_JS,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Vue,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_JS,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Rust,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_RUST,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Shell,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_SHELL,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::PowerShell,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: Some(("<#", "#>")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_POWERSHELL,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::TypeScript,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_TS,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Python,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: true,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_PYTHON,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Assembly,
+        StaticLangConfig {
+            line_comments: &[";"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: false,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_ASSEMBLY,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Clojure,
+        StaticLangConfig {
+            line_comments: &[";"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_CLOJURE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Css,
+        StaticLangConfig {
+            line_comments: &[],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NONE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Dart,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_DART,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Dockerfile,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: false,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NONE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Elixir,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_ELIXIR,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Erlang,
+        StaticLangConfig {
+            line_comments: &["%"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_ERLANG,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::FSharp,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("(*", "*)")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_FSHARP,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Groovy,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_GROOVY,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Haskell,
+        StaticLangConfig {
+            line_comments: &["--"],
+            block_comment: Some(("{-", "-}")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_HASKELL,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Html,
+        StaticLangConfig {
+            line_comments: &[],
+            block_comment: Some(("<!--", "-->")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: false,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NONE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Julia,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: Some(("#=", "=#")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: true,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_JULIA,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Kotlin,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_KOTLIN,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Lua,
+        StaticLangConfig {
+            line_comments: &["--"],
+            block_comment: Some(("--[[", "]]")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_LUA,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Makefile,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: false,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NONE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Nim,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: Some(("#[", "]#")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NIM,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Ocaml,
+        StaticLangConfig {
+            line_comments: &[],
+            block_comment: Some(("(*", "*)")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_OCAML,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Perl,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_PERL,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Php,
+        StaticLangConfig {
+            line_comments: &["//", "#"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_PHP,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::R,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_R,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Ruby,
+        StaticLangConfig {
+            line_comments: &["#"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_RUBY,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Scala,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_SCALA,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Scss,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NONE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Sql,
+        StaticLangConfig {
+            line_comments: &["--"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: false,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_SQL,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Swift,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_SWIFT,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Xml,
+        StaticLangConfig {
+            line_comments: &[],
+            block_comment: Some(("<!--", "-->")),
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: false,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_NONE,
+            has_preprocessor: false,
+        },
+    ),
+    (
+        Language::Zig,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: None,
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: true,
+            allow_triple_quote_strings: false,
+            allow_csharp_verbatim_strings: false,
+            symbol_patterns: SP_ZIG,
+            has_preprocessor: false,
+        },
+    ),
+];
 
 /// Per-call IEEE 1045-1992 flags derived from `AnalysisOptions` plus per-language properties.
 /// Private to this crate; constructed inside `analyze_text`.
@@ -2175,6 +2312,7 @@ fn finalize_line_facts(
 /// lines and returned early without further analysis.
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::many_single_char_names)] // destructuring return from count_symbols; names match field roles
 fn process_physical_line(
     line: &str,
     line_idx: usize,
@@ -2738,7 +2876,9 @@ pub mod ts {
         }
 
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
+            #[allow(clippy::cast_possible_truncation)]
+            // child_count bounded by tree-sitter u32 capacity
+            if let Some(child) = node.child(i as u32) {
                 visit(child, ctx);
             }
         }

@@ -24,8 +24,25 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
 
 // ── clone / fetch ─────────────────────────────────────────────────────────────
 
+fn validate_clone_url(url: &str) -> Result<()> {
+    let lower = url.to_lowercase();
+    let allowed = ["https://", "http://", "git://", "ssh://", "git@"];
+    if !allowed.iter().any(|p| lower.starts_with(p)) {
+        bail!(
+            "git URL rejected: only https://, http://, git://, ssh://, and git@ URLs are \
+             permitted (got {url:?})"
+        );
+    }
+    Ok(())
+}
+
 /// Clone `url` into `dest`, or fetch all refs if the repo already exists.
+///
+/// # Errors
+/// Returns an error if the URL is rejected, the clone directory cannot be created,
+/// or the underlying `git clone` / `git fetch` command fails.
 pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
+    validate_clone_url(url)?;
     if dest.join(".git").exists() {
         run_git(dest, &["fetch", "--all", "--tags", "--prune"])?;
     } else {
@@ -41,6 +58,9 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Resolve `ref_name` to its full SHA in `repo`.
+///
+/// # Errors
+/// Returns an error if `git rev-parse` fails (e.g. the ref does not exist).
 pub fn get_sha(repo: &Path, ref_name: &str) -> Result<String> {
     run_git(repo, &["rev-parse", ref_name])
 }
@@ -48,6 +68,9 @@ pub fn get_sha(repo: &Path, ref_name: &str) -> Result<String> {
 // ── worktree helpers ──────────────────────────────────────────────────────────
 
 /// Create a detached worktree at `worktree_path` pointing at `ref_name`.
+///
+/// # Errors
+/// Returns an error if `git worktree add` fails.
 pub fn create_worktree(repo: &Path, ref_name: &str, worktree_path: &Path) -> Result<()> {
     let wt = worktree_path.to_str().unwrap_or(".");
     run_git(repo, &["worktree", "add", "--detach", wt, ref_name])?;
@@ -55,6 +78,9 @@ pub fn create_worktree(repo: &Path, ref_name: &str, worktree_path: &Path) -> Res
 }
 
 /// Remove a worktree previously created with [`create_worktree`].
+///
+/// # Errors
+/// This function always succeeds; the underlying git command failure is intentionally ignored.
 pub fn destroy_worktree(repo: &Path, worktree_path: &Path) -> Result<()> {
     let wt = worktree_path.to_str().unwrap_or(".");
     let _ = run_git(repo, &["worktree", "remove", "--force", wt]);
@@ -64,6 +90,9 @@ pub fn destroy_worktree(repo: &Path, worktree_path: &Path) -> Result<()> {
 // ── ref listing ───────────────────────────────────────────────────────────────
 
 /// Return all branches, tags, and recent commits for `repo`.
+///
+/// # Errors
+/// Returns an error if any underlying git command fails.
 pub fn list_refs(repo: &Path) -> Result<RepoRefs> {
     Ok(RepoRefs {
         branches: list_branches(repo)?,
@@ -82,8 +111,6 @@ fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| parse_ref_line(l, GitRefKind::Branch))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
         // Drop symbolic HEAD pointers (e.g. origin/HEAD).
         .filter(|r| r.name != "HEAD" && !r.name.ends_with("/HEAD"))
         .map(|mut r| {
@@ -103,41 +130,46 @@ fn list_tags(repo: &Path) -> Result<Vec<GitRef>> {
         repo,
         &["tag", "--sort=-creatordate", &format!("--format={fmt}")],
     )?;
-    out.lines()
+    Ok(out
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| parse_ref_line(l, GitRefKind::Tag))
-        .collect()
+        .collect())
 }
 
-fn parse_ref_line(line: &str, kind: GitRefKind) -> Result<GitRef> {
+fn parse_ref_line(line: &str, kind: GitRefKind) -> GitRef {
     let parts: Vec<&str> = line.splitn(4, '|').collect();
     let name = parts.first().copied().unwrap_or("").to_owned();
     let sha = parts.get(1).copied().unwrap_or("").to_owned();
     let date = parts.get(2).copied().and_then(parse_git_date);
     let message = parts.get(3).map(|s| (*s).to_owned());
-    Ok(GitRef {
+    GitRef {
         kind,
         name,
         sha,
         date,
         message,
-    })
+    }
 }
 
 // ── commit listing ────────────────────────────────────────────────────────────
 
 /// Return up to `limit` commits reachable from `ref_name`.
+///
+/// # Errors
+/// Returns an error if `git log` fails.
 pub fn list_commits(repo: &Path, ref_name: &str, limit: usize) -> Result<Vec<GitCommit>> {
     let fmt = "%H|%h|%an|%aI|%s";
     let n = format!("-{limit}");
     let out = run_git(repo, &["log", ref_name, &format!("--format={fmt}"), &n])?;
-    out.lines()
+    Ok(out
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(parse_commit_line)
-        .collect()
+        .collect())
 }
 
-fn parse_commit_line(line: &str) -> Result<GitCommit> {
+fn parse_commit_line(line: &str) -> GitCommit {
     let p: Vec<&str> = line.splitn(5, '|').collect();
     let sha = p.first().copied().unwrap_or("").to_owned();
     let short_sha = p.get(1).copied().unwrap_or("").to_owned();
@@ -148,13 +180,13 @@ fn parse_commit_line(line: &str) -> Result<GitCommit> {
         .and_then(parse_git_date)
         .unwrap_or_default();
     let subject = p.get(4).copied().unwrap_or("").to_owned();
-    Ok(GitCommit {
+    GitCommit {
         sha,
         short_sha,
         author,
         date,
         subject,
-    })
+    }
 }
 
 fn parse_git_date(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
