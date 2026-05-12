@@ -23,12 +23,15 @@ When compiling from source, both scripts display a live animated build indicator
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**Internet requirements:**
-- **Windows** — no internet needed; `oxide-sloc.exe` is bundled in the repository root.
-- **Linux with Rust** — no internet needed; `vendor.tar.xz` covers all crate sources for a fully offline build.
-- **Linux without Rust** — place `dist/oxide-sloc-linux-x86_64.tar.gz` alongside the repo (no internet needed), or run `bash scripts/install.sh --online` to download it from GitHub when `curl` is available.
+**Internet requirements — nothing. Every path below works from a plain `git clone`:**
 
-See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths.
+| Scenario | What ships in the repo | What happens |
+|---|---|---|
+| **Windows, no Rust** | `dist/oxide-sloc-windows-x64.zip` | installer extracts the binary, done |
+| **Linux, no Rust** | `dist/oxide-sloc-linux-x86_64.tar.gz` | installer extracts the binary, done |
+| **Any platform, Rust installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | installer builds offline from vendor sources |
+
+No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths including air-gap kits for machines without pre-built binaries.
 
 ---
 
@@ -100,13 +103,13 @@ bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
 bash scripts/run.sh        # http://127.0.0.1:4317
 ```
 
-The script tries in order: binary in repo root → `dist/` bundle → offline vendor build. **No network calls are made by default.**
+The script tries in order: `dist/` pre-built bundle → offline vendor build (requires Rust). **No network calls are made by default.**
 
-- **Windows:** `oxide-sloc.exe` is in the repository root. Clone and run — nothing to build, no internet required.
-- **Linux with Rust:** builds from the committed `vendor.tar.xz` — no internet required.
-- **Linux without Rust, pre-staged bundle:** place `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) alongside the repo and re-run — no internet required.
-- **Linux without Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch and extract the release binary automatically. Pass `--offline` or set `OXIDE_SLOC_NO_DOWNLOAD=1` to explicitly suppress network calls (now the default, kept for compatibility).
-- **Linux without Rust, no internet:** use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
+- **Windows (no Rust, no internet):** `dist/oxide-sloc-windows-x64.zip` is committed to the repo. Clone and run — nothing to build, no internet required.
+- **Linux (no Rust, no internet):** `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) is committed to the repo. Same story.
+- **Any platform with Rust installed:** builds from the committed `vendor.tar.xz` — no internet required.
+- **Linux without Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch and extract the release binary automatically.
+- **Linux without Rust, no internet, no `dist/`:** use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 
