@@ -167,9 +167,7 @@ Run this on any machine that has Docker and internet access, then commit the out
 ```bash
 bash ci/jenkins/bundle-jenkins-plugins.sh
 # Outputs: jenkins-plugins.tar.xz + jenkins-plugins.tar.xz.sha256
-
-# If the archive exceeds 100 MB, enable git LFS first:
-#   git lfs install && git lfs track 'jenkins-plugins.tar.xz'
+# If the archive exceeds 45 MB, the script will print split instructions.
 
 git add jenkins-plugins.tar.xz jenkins-plugins.tar.xz.sha256
 git commit -m "ci: bundle Jenkins plugins for air-gapped install"

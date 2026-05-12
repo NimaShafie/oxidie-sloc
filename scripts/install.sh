@@ -350,8 +350,8 @@ fi
 # ── 2.7. Bootstrap Rust from bundled toolchain ──────────────────────────────
 # If cargo is not on PATH but a toolchain archive is committed to toolchain/,
 # extract it locally into .tools/ and export the paths.
-# Archives are 7-zip level-9 .tar.gz files bundled by bundle-rust-toolchain.sh.
-# They contain:  rustup/  (toolchains, settings)  and  cargo/  (bin/cargo).
+# Archives are 7-zip level-9 .tar.gz files split into ≤45 MB parts by
+# bundle-rust-toolchain.sh.  Parts:  rustup/  (toolchains)  and  cargo/  (bin/).
 if ! command -v cargo &>/dev/null; then
     if [[ "$PLATFORM" == windows ]]; then
         TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-windows-x64.tar.gz"
@@ -359,32 +359,54 @@ if ! command -v cargo &>/dev/null; then
         TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-linux-${LINUX_ARCH}.tar.gz"
     fi
 
-    if [[ -f "$TOOLCHAIN_ARCHIVE" ]]; then
-        echo " No Rust toolchain detected — bootstrapping from bundled archive..."
-        echo " (one-time, ~70-90 MB extract → ~300-500 MB on disk)"
+    # Collect split parts (*.tar.gz.aa, .ab, …); fall back to single archive
+    TOOLCHAIN_PARTS=()
+    for _tp in "${TOOLCHAIN_ARCHIVE}".*; do
+        [[ -f "$_tp" ]] && TOOLCHAIN_PARTS+=("$_tp")
+    done
+    HAVE_TOOLCHAIN=false
+    [[ "${#TOOLCHAIN_PARTS[@]}" -gt 0 ]] && HAVE_TOOLCHAIN=true
+    [[ -f "$TOOLCHAIN_ARCHIVE" ]]         && HAVE_TOOLCHAIN=true
 
-        # Verify checksum
+    if [[ "$HAVE_TOOLCHAIN" == true ]]; then
+        echo " No Rust toolchain detected — bootstrapping from bundled archive..."
+        echo " (one-time extract → ~300-500 MB on disk)"
+
+        # Verify checksum of each part or the single archive
         TOOLCHAIN_CHECKSUMS="$REPO_ROOT/toolchain/checksums.sha256"
         if [[ -f "$TOOLCHAIN_CHECKSUMS" ]] && command -v sha256sum &>/dev/null; then
-            ARCHIVE_NAME="$(basename "$TOOLCHAIN_ARCHIVE")"
-            EXPECTED_SUM="$(grep "$ARCHIVE_NAME" "$TOOLCHAIN_CHECKSUMS" 2>/dev/null | awk '{print $1}')"
-            if [[ -n "$EXPECTED_SUM" ]]; then
-                ACTUAL_SUM="$(sha256sum "$TOOLCHAIN_ARCHIVE" | awk '{print $1}')"
-                if [[ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]]; then
-                    echo " [ERROR] Toolchain checksum mismatch — archive may be corrupt." >&2
-                    echo "         Expected: $EXPECTED_SUM" >&2
-                    echo "         Actual:   $ACTUAL_SUM" >&2
-                    exit 1
-                fi
-                echo " [OK] Toolchain checksum verified."
+            _VERIFY_FILES=()
+            if [[ "${#TOOLCHAIN_PARTS[@]}" -gt 0 ]]; then
+                _VERIFY_FILES=("${TOOLCHAIN_PARTS[@]}")
+            else
+                _VERIFY_FILES=("$TOOLCHAIN_ARCHIVE")
             fi
+            for _vf in "${_VERIFY_FILES[@]}"; do
+                _VF_NAME="$(basename "$_vf")"
+                _EXPECTED="$(grep "$_VF_NAME" "$TOOLCHAIN_CHECKSUMS" 2>/dev/null | awk '{print $1}')"
+                if [[ -n "$_EXPECTED" ]]; then
+                    _ACTUAL="$(sha256sum "$_vf" | awk '{print $1}')"
+                    if [[ "$_EXPECTED" != "$_ACTUAL" ]]; then
+                        echo " [ERROR] Toolchain checksum mismatch — ${_VF_NAME} may be corrupt." >&2
+                        echo "         Expected: $_EXPECTED" >&2
+                        echo "         Actual:   $_ACTUAL" >&2
+                        exit 1
+                    fi
+                fi
+            done
+            echo " [OK] Toolchain checksum verified."
         fi
 
         TOOLS_DIR="$REPO_ROOT/.tools"
         mkdir -p "$TOOLS_DIR"
 
-        echo " Extracting toolchain archive (7-zip gzip)..."
-        tar -xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
+        echo " Extracting toolchain archive..."
+        if [[ "${#TOOLCHAIN_PARTS[@]}" -gt 0 ]]; then
+            # Reassemble split parts and pipe directly into tar
+            cat "${TOOLCHAIN_PARTS[@]}" | tar -xzf - -C "$TOOLS_DIR"
+        else
+            tar -xzf "$TOOLCHAIN_ARCHIVE" -C "$TOOLS_DIR"
+        fi
 
         # Archive layout (from bundle-rust-toolchain.sh):
         #   .tools/rustup/toolchains/<ver>-<target>/bin/  ← rustc, etc.

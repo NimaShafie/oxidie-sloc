@@ -489,8 +489,10 @@ Bundle the toolchain on a networked machine and commit the archive:
 ```bash
 bash ci/jenkins/bundle-rust-toolchain.sh
 # Produces: rust-toolchain-bundle.tar.xz + rust-toolchain-bundle.tar.xz.sha256
-git lfs install && git lfs track '*.tar.xz'
-git add rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.sha256
+# Split before committing (bundle is typically 200-350 MB):
+split -b 45m rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.
+rm rust-toolchain-bundle.tar.xz
+git add rust-toolchain-bundle.tar.xz.* rust-toolchain-bundle.tar.xz.sha256
 git commit -m "chore: add rust toolchain bundle for air-gapped agents"
 ```
 

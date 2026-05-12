@@ -27,10 +27,10 @@ When compiling from source, both scripts display a live animated build indicator
 
 | Scenario | What ships in the repo | What happens |
 |---|---|---|
-| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz` (~70-90 MB, no LFS) + `vendor.tar.xz` | install.sh bootstraps Rust, then builds from vendor |
+| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz.aa` + `.ab` … (≤45 MB each) + `vendor.tar.xz` | install.sh reassembles parts, bootstraps Rust, builds from vendor |
 | **Rust already installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | builds offline directly from vendor sources |
 
-No git LFS required — toolchain archives are 7-zip ultra compressed and committed directly to git. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details.
+Toolchain archives are 7-zip ultra compressed and split into ≤45 MB parts — every committed file is well within GitHub's per-file limit. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details.
 
 ---
 
@@ -104,7 +104,7 @@ bash scripts/run.sh        # http://127.0.0.1:4317
 
 The script tries in order: bundled Rust toolchain (`toolchain/`) → system Rust + vendor sources. **No network calls are made by default.**
 
-- **No Rust, no internet (Windows or Linux):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz` (committed to git), bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. No extra steps after `git clone`.
+- **No Rust, no internet (Windows or Linux):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz.*` split parts (committed to git), reassembles them, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. No extra steps after `git clone`.
 - **Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
 - **Linux, no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
 - **Linux, no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).

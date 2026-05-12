@@ -56,8 +56,8 @@ perf.data.old
 # dist/ — compiled binaries and archives (released as GitHub release assets)
 /dist/
 
-# toolchain/ — bundled Rust standalone installer tarballs (7-zip level 9 .tar.gz)
-# committed directly to git (no LFS). Only ignore temp extraction dirs.
+# toolchain/ — bundled Rust toolchain archives (7-zip level 9, split into ≤45 MB parts)
+# committed directly to git. Only ignore temp extraction dirs.
 /toolchain/tmp/
 /.tools/
 

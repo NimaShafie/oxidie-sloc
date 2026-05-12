@@ -19,14 +19,12 @@
 #   jenkins-plugins.tar.xz.sha256 — SHA-256 checksum
 #
 # Committing:
-#   The bundle is typically 50–200 MB compressed.  If it exceeds GitHub's 100 MB
-#   single-file limit, enable git LFS first (the gitattributes entry is already
-#   present in the repo):
-#
-#     git lfs install    # one-time per machine
-#     git lfs track 'jenkins-plugins.tar.xz'
-#
-#   Then commit normally:
+#   If the bundle exceeds 45 MB, split it before committing:
+#     split -b 45m jenkins-plugins.tar.xz jenkins-plugins.tar.xz.
+#     rm jenkins-plugins.tar.xz
+#     git add jenkins-plugins.tar.xz.* jenkins-plugins.tar.xz.sha256
+#     git commit -m "ci: bundle Jenkins plugins for air-gapped install"
+#   Otherwise commit the single file directly:
 #     git add jenkins-plugins.tar.xz jenkins-plugins.tar.xz.sha256
 #     git commit -m "ci: bundle Jenkins plugins for air-gapped install"
 #
@@ -135,12 +133,13 @@ echo "  Plugins : ${TOTAL} .hpi/.jpi files (direct + transitive)"
 echo "  SHA-256 : $(cat "${SHA_FILE}")"
 echo ""
 
-# Warn if the archive may exceed GitHub's 100 MB per-file limit.
+# Warn if the archive exceeds 45 MB — it must be split before committing.
 SIZE_BYTES=$(stat -c%s "${ARCHIVE}" 2>/dev/null || stat -f%z "${ARCHIVE}" 2>/dev/null || echo 0)
-if [ "${SIZE_BYTES}" -gt 104857600 ]; then
-    echo "WARNING: Archive is larger than 100 MB — git LFS is required."
-    echo "  git lfs install"
-    echo "  git lfs track 'jenkins-plugins.tar.xz'"
+if [ "${SIZE_BYTES}" -gt 47185920 ]; then
+    echo "WARNING: Archive is larger than 45 MB — split before committing:"
+    echo "  split -b 45m jenkins-plugins.tar.xz jenkins-plugins.tar.xz."
+    echo "  rm jenkins-plugins.tar.xz"
+    echo "  git add jenkins-plugins.tar.xz.* jenkins-plugins.tar.xz.sha256"
     echo ""
 fi
 

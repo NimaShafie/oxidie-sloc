@@ -10,13 +10,13 @@ fresh machine with **no internet connection**:
 | All Rust crate sources | `vendor.tar.xz` | 35 MB | Cargo's full dependency graph |
 | Cargo offline config | `.cargo/config.toml` | — | Redirects crate lookups to `vendor/` |
 | Rust version pin | `rust-toolchain.toml` | — | Channel 1.95 |
-| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz` | ~70-90 MB | Committed directly to git (7-zip ultra, no LFS) |
+| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz.aa` + `.ab` … | ≤45 MB per part | Split 7-zip archive, committed directly |
 
 `bash scripts/install.sh` detects which of these apply and picks the right build path
 automatically. No flags, no extra downloads, no pre-installed tooling beyond Git Bash
 (Windows) or `bash` + `tar` (Linux).
 
-A plain `git clone` is sufficient — no `git lfs pull` or extra setup required.
+A plain `git clone` is sufficient — no extra setup required after cloning.
 
 ---
 
@@ -46,7 +46,7 @@ downloads (Option D only).
 **No Rust installed. No internet required after `git clone`.**
 
 The repository includes a standalone Rust toolchain archive in `toolchain/` (committed
-directly to git, 7-zip ultra compressed, no LFS). `install.sh` detects it automatically,
+directly to git, 7-zip ultra compressed and split into ≤45 MB parts). `install.sh` detects it automatically,
 installs Rust locally into `.tools/` (inside the repo, no system-wide changes, no root
 required), and then compiles oxide-sloc from the vendored crate sources.
 
@@ -88,11 +88,11 @@ to the repository:
 
 ```bash
 # On any machine with internet access:
-bash scripts/internal/bundle-rust-toolchain.sh windows-x64   # Windows (~70-90 MB)
-bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64  # Linux x64 (~60-80 MB)
-bash scripts/internal/bundle-rust-toolchain.sh linux-arm64   # Linux arm64 (~60-80 MB)
+bash scripts/internal/bundle-rust-toolchain.sh windows-x64   # Windows (produces ≤45 MB parts)
+bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64  # Linux x64
+bash scripts/internal/bundle-rust-toolchain.sh linux-arm64   # Linux arm64
 
-# Commit directly — no git LFS required (7-zip ultra keeps each archive under 100 MB):
+# Commit the parts directly — each part is ≤45 MB:
 git add toolchain/
 git commit -m "chore: bundle Rust toolchain for offline builds"
 git push
@@ -249,8 +249,8 @@ git add toolchain/
 git commit -m "ci: add Rust toolchain bundle for offline builds"
 ```
 
-The 7-zip ultra compressed archive is under 100 MB and commits directly to git — no
-git LFS required.
+The script compresses with 7-zip level 9 and splits the output into ≤45 MB parts,
+so every committed file is well within GitHub's per-file limit.
 
 ### GitHub Actions (self-hosted runner)
 
