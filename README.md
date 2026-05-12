@@ -23,14 +23,14 @@ When compiling from source, both scripts display a live animated build indicator
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**Internet requirements — nothing. Every path works from a `git clone` + `git lfs pull`:**
+**Internet requirements — nothing. Every path works from a plain `git clone`:**
 
 | Scenario | What ships in the repo | What happens |
 |---|---|---|
-| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz` (LFS, ~200 MB) + `vendor.tar.xz` | install.sh bootstraps Rust, then builds from vendor |
+| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz` (~70-90 MB, no LFS) + `vendor.tar.xz` | install.sh bootstraps Rust, then builds from vendor |
 | **Rust already installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | builds offline directly from vendor sources |
 
-The `toolchain/` archives are stored in **git LFS** (they exceed 100 MB). Run `git lfs install && git lfs pull` after cloning if you need the no-Rust path. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details including the LFS setup and air-gap kit options.
+No git LFS required — toolchain archives are 7-zip ultra compressed and committed directly to git. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details.
 
 ---
 
@@ -104,10 +104,10 @@ bash scripts/run.sh        # http://127.0.0.1:4317
 
 The script tries in order: bundled Rust toolchain (`toolchain/`) → system Rust + vendor sources. **No network calls are made by default.**
 
-- **No Rust, no internet (Windows or Linux):** after `git lfs pull`, `install.sh` detects `toolchain/rust-toolchain-*.tar.gz`, bootstraps Rust into `.tools/rust/`, decompresses `vendor.tar.xz`, and builds offline. Requires [git LFS](https://git-lfs.com) to be configured.
+- **No Rust, no internet (Windows or Linux):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz` (committed to git), bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. No extra steps after `git clone`.
 - **Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
 - **Linux, no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
-- **Linux, no Rust, no LFS, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
+- **Linux, no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 

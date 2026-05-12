@@ -155,8 +155,8 @@ The default (without `--online`) makes no network calls.
 
 ## Option C — Airgap kit (Linux, no Rust)
 
-Use this when the target Linux machine has no internet access, no Rust installed, no
-`toolchain/` LFS archive available, and you need a statically-linked binary.
+Use this when the target Linux machine has no internet access, no Rust installed, and
+you need a fully self-contained statically-linked binary kit.
 
 Run `scripts/internal/make-airgap-kit.sh` on any **networked** machine to produce a
 self-contained archive that bundles the Rust toolchain, musl C toolchain, vendor
@@ -204,31 +204,6 @@ bash install.sh
 
 ---
 
-## Setting up git LFS
-
-The toolchain archives in `toolchain/` require git LFS. Set it up once per machine:
-
-```bash
-# Install git LFS (if not already installed):
-# Windows: ships with Git for Windows — already available in Git Bash
-# Linux:   sudo apt install git-lfs   OR   sudo dnf install git-lfs
-
-git lfs install   # hook git LFS into your git config (once per machine)
-git lfs pull      # download the toolchain archives for this clone
-```
-
-To verify LFS is working correctly:
-
-```bash
-ls -lh toolchain/rust-toolchain-*.tar.gz
-# Should show ~170-200 MB files, not 200-byte pointer stubs
-```
-
-If the files are small (pointer stubs), LFS is not configured. Run `git lfs install`
-then `git lfs pull`.
-
----
-
 ## Script overview
 
 Users interact with three scripts only. Internal scripts under `scripts/internal/` are
@@ -266,14 +241,16 @@ docker build -t jenkins-oxide-sloc:latest -f ci/jenkins/Dockerfile.agent .
 docker compose down && docker compose up -d
 ```
 
-**Option 2 — Commit a toolchain bundle (git LFS)**
+**Option 2 — Commit a toolchain bundle directly**
 
 ```bash
-bash ci/jenkins/bundle-rust-toolchain.sh
-git lfs install && git lfs track '*.tar.xz'
-git add .gitattributes rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.sha256
+bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64
+git add toolchain/
 git commit -m "ci: add Rust toolchain bundle for offline builds"
 ```
+
+The 7-zip ultra compressed archive is under 100 MB and commits directly to git — no
+git LFS required.
 
 ### GitHub Actions (self-hosted runner)
 
