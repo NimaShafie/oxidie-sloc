@@ -489,8 +489,10 @@ fi
 echo ""
 echo " No pre-built binary found and no Rust toolchain detected."
 echo ""
+echo " The toolchain/rust-toolchain-*.tar.gz.* archives are NOT present."
+echo " A maintainer must generate and commit them before this offline path works:"
+echo ""
 if [[ "$PLATFORM" == windows ]]; then
-    echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
     echo "   On any machine with internet access:"
     echo "     bash scripts/internal/bundle-rust-toolchain.sh windows-x64"
     echo "     git add toolchain/"
@@ -501,10 +503,7 @@ if [[ "$PLATFORM" == windows ]]; then
     echo ""
     echo " If Rust is already installed (https://rustup.rs), just re-run:"
     echo "   bash scripts/install.sh"
-    echo ""
-    echo " Full deployment guide: docs/airgap.md"
 else
-    echo " To enable fully-offline builds, bundle the Rust toolchain into the repo:"
     echo "   On any machine with internet access:"
     echo "     bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64"
     echo "     git add toolchain/"
@@ -516,7 +515,10 @@ else
     echo " If Rust is already installed (https://rustup.rs), just re-run:"
     echo "   bash scripts/install.sh"
     echo ""
-    echo " Full deployment guide: docs/airgap.md"
+    echo " If this machine has internet access (curl required):"
+    echo "   bash scripts/install.sh --online"
 fi
+echo ""
+echo " Full deployment guide: docs/airgap.md"
 echo ""
 exit 1

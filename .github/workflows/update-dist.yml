@@ -101,6 +101,12 @@ jobs:
           name: oxide-sloc-windows-x64.zip
           path: dist/
 
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist/
+          sha256sum oxide-sloc-linux-x86_64.tar.gz oxide-sloc-windows-x64.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Upload to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -110,5 +116,6 @@ jobs:
           gh release upload "$TAG" \
             dist/oxide-sloc-linux-x86_64.tar.gz \
             dist/oxide-sloc-windows-x64.zip \
+            dist/SHA256SUMS.txt \
             --clobber \
             --repo "$REPO"

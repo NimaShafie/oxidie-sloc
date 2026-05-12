@@ -2,21 +2,27 @@
 
 ## TL;DR — what ships inside the repository
 
-Every `git clone` of oxide-sloc includes everything needed to BUILD the project on a
-fresh machine with **no internet connection**:
+Every `git clone` includes the vendor crate sources. The Rust toolchain archives
+require a separate maintainer step before they are present in the repo.
 
-| What | File | Size | Notes |
+| What | File | Size | Status |
 |---|---|---|---|
-| All Rust crate sources | `vendor.tar.xz` | 35 MB | Cargo's full dependency graph |
-| Cargo offline config | `.cargo/config.toml` | — | Redirects crate lookups to `vendor/` |
-| Rust version pin | `rust-toolchain.toml` | — | Channel 1.95 |
-| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz.aa` + `.ab` … | ≤45 MB per part | Split 7-zip archive, committed directly |
+| All Rust crate sources | `vendor.tar.xz` | 35 MB | **Always committed** |
+| Rust version pin | `rust-toolchain.toml` | — | **Always committed** |
+| Cargo offline config | `.cargo/config.toml` | — | Written by install.sh / CI at build time |
+| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz.aa` + `.ab` … | ≤45 MB per part | **Maintainer step** — only present after running `bundle-rust-toolchain.sh` and committing |
 
 `bash scripts/install.sh` detects which of these apply and picks the right build path
-automatically. No flags, no extra downloads, no pre-installed tooling beyond Git Bash
-(Windows) or `bash` + `tar` (Linux).
+automatically. No network calls are made by default.
 
-A plain `git clone` is sufficient — no extra setup required after cloning.
+**If Rust is already installed on the target machine:** a plain `git clone` +
+`bash scripts/install.sh` builds offline with no extra steps.
+
+**If Rust is NOT installed:** a fully offline build additionally requires the
+maintainer to have committed the `toolchain/` archives (see
+[Populating the toolchain archive](#populating-the-toolchain-archive-maintainer-workflow)
+below). Without them, use [`--online`](#option-d--auto-download-linux-no-rust-has-internet)
+(Linux + curl) or [Option C](#option-c--airgap-kit-linux-no-rust).
 
 ---
 
@@ -24,7 +30,7 @@ A plain `git clone` is sufficient — no extra setup required after cloning.
 
 | Path | Prereqs on target machine | When to use |
 |---|---|---|
-| **[Option A — Bundled toolchain build](#option-a--build-from-bundled-rust-toolchain)** | Git Bash / `bash`, `tar` | No Rust, no internet — toolchain committed to git |
+| **[Option A — Bundled toolchain build](#option-a--build-from-bundled-rust-toolchain)** | Git Bash / `bash`, `tar` | No Rust, no internet — requires toolchain committed to git by maintainer |
 | **[Option B — Vendor source build](#option-b--vendor-only-source-build)** | Rust ≥1.95 already installed | Rust is already on the machine |
 | **[Option C — Airgap kit (Linux, no Rust)](#option-c--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust — full self-contained kit |
 | **[Option D — Download from GitHub](#option-d--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, has internet |
@@ -43,15 +49,18 @@ downloads (Option D only).
 
 ## Option A — Build from bundled Rust toolchain
 
-**No Rust installed. No internet required after `git clone`.**
+**No Rust installed. No internet required — provided the maintainer has committed the
+toolchain archive** (see [Populating the toolchain archive](#populating-the-toolchain-archive-maintainer-workflow) below).
 
-The repository includes a standalone Rust toolchain archive in `toolchain/` (committed
-directly to git, 7-zip ultra compressed and split into ≤45 MB parts). `install.sh` detects it automatically,
+When `toolchain/` archives are present, `install.sh` detects them automatically,
 installs Rust locally into `.tools/` (inside the repo, no system-wide changes, no root
 required), and then compiles oxide-sloc from the vendored crate sources.
 
+If `toolchain/` is absent on a fresh clone (git ls-files toolchain/ returns nothing),
+the maintainer must run `bundle-rust-toolchain.sh` on a networked machine first.
+
 ```bash
-# On the air-gapped machine — after git clone (no extra steps needed):
+# On the air-gapped machine — after git clone (toolchain/ must already be committed):
 bash scripts/install.sh   # bootstraps Rust, builds from vendor.tar.xz
 bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
