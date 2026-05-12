@@ -18,6 +18,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: bundle-toolchain
+  cancel-in-progress: false
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -127,12 +131,12 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
           git add toolchain/
           if git diff --cached --quiet; then
             echo "Toolchain archives unchanged — nothing to commit."
           else
             RUST_VER=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/' | tr -d '[:space:]')
             git commit -m "chore: update bundled Rust toolchain (${RUST_VER})"
-            git pull --rebase origin main
             git push origin main
           fi
