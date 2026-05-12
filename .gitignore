@@ -49,8 +49,11 @@ flamegraph.svg
 perf.data
 perf.data.old
 
-# dist/ — all compiled binaries and archives (released as GitHub release assets)
-/dist/
+# dist/ — pre-built deployment binaries are committed here for offline/airgap installs.
+# Ignore CI-generated temporaries; explicitly allow the committed pre-built archives.
+/dist/tmp/
+/dist/*.sig
+/dist/oxide-sloc-bundle*
 
 # Generated report artefacts under tests/fixtures/
 tests/fixtures/**/sloc/

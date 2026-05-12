@@ -260,6 +260,22 @@ fi
 
 # ── 2. Pre-built binary ─────────────────────────────────────────────────────
 if [[ -f "$DIST_ARCHIVE" ]]; then
+    # Verify checksum if dist/checksums.sha256 is present
+    CHECKSUMS_FILE="$REPO_ROOT/dist/checksums.sha256"
+    if [[ -f "$CHECKSUMS_FILE" ]] && command -v sha256sum &>/dev/null; then
+        ARCHIVE_NAME="$(basename "$DIST_ARCHIVE")"
+        EXPECTED_SUM="$(grep "$ARCHIVE_NAME" "$CHECKSUMS_FILE" 2>/dev/null | awk '{print $1}')"
+        if [[ -n "$EXPECTED_SUM" ]]; then
+            ACTUAL_SUM="$(sha256sum "$DIST_ARCHIVE" | awk '{print $1}')"
+            if [[ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]]; then
+                echo " [ERROR] Checksum mismatch for $(basename "$DIST_ARCHIVE") — archive may be corrupt." >&2
+                echo "         Expected: $EXPECTED_SUM" >&2
+                echo "         Actual:   $ACTUAL_SUM" >&2
+                exit 1
+            fi
+            echo " [OK] Checksum verified."
+        fi
+    fi
     echo " Extracting pre-built binary from dist/..."
     if [[ "$PLATFORM" == windows ]]; then
         WIN_ARCHIVE="$(cygpath -w "$DIST_ARCHIVE")"
@@ -387,8 +403,15 @@ echo ""
 echo " No pre-built binary found and no Rust toolchain detected."
 echo ""
 if [[ "$PLATFORM" == windows ]]; then
-    echo " oxide-sloc.exe should be present in the repository root."
-    echo " Ensure you have the complete repository package (not just source files)."
+    echo " Expected: dist/oxide-sloc-windows-x64.zip  (committed pre-built binary)"
+    echo " That file is missing from this clone — your repository may be incomplete."
+    echo ""
+    echo " If you cloned from GitHub, re-clone and ensure Git LFS / large files are"
+    echo " fetched:  git clone https://github.com/oxide-sloc/oxide-sloc"
+    echo ""
+    echo " To build from source (requires Rust ≥1.95):"
+    echo "   bash scripts/internal/airgap-build.sh vendor.tar.xz"
+    echo ""
     echo " Full deployment guide: docs/airgap.md"
 else
     echo " Options (see docs/airgap.md for details):"

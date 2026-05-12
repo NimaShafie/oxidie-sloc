@@ -1,44 +1,66 @@
 # Air-Gap / Offline Deployment
 
-## Installation paths
+## TL;DR — what ships inside the repository
 
-`bash scripts/install.sh` auto-detects the best available path for your environment. The table
-below maps each scenario to the right option — pick the row that matches your machine.
+Every `git clone` of oxide-sloc includes everything needed to run on a fresh machine
+with **no internet connection and no pre-installed Rust**:
+
+| What | File | Size |
+|---|---|---|
+| Windows pre-built binary | `dist/oxide-sloc-windows-x64.zip` | ~27 MB |
+| Linux pre-built binary (x86_64) | `dist/oxide-sloc-linux-x86_64.tar.gz` | ~8 MB |
+| Linux pre-built binary (arm64) | `dist/oxide-sloc-linux-arm64.tar.gz` | ~8 MB |
+| Binary checksums | `dist/checksums.sha256` | — |
+| All Rust crate sources | `vendor.tar.xz` | 35 MB |
+| Cargo offline config | `.cargo/config.toml` | — |
+
+`bash scripts/install.sh` detects which of these apply and picks the right path
+automatically. No flags, no extra downloads, no pre-installed tooling beyond Git Bash
+(Windows) or `bash` + `tar` (Linux).
+
+---
+
+## Installation paths
 
 | Path | Prereqs on target machine | When to use |
 |---|---|---|
-| **[Option A — Windows bundled binary](#option-a--windows-bundled-binary)** | Git Bash | Windows: `oxide-sloc.exe` is in the repo root |
-| **[Option B — Linux pre-built binary](#option-b--linux-pre-built-binary-dist)** | `bash`, `tar` | Linux binary placed by CI into `dist/` |
-| **[Option C — Vendor source build](#option-c--vendor-only-source-build)** | Rust toolchain already installed | Rust is already on the machine |
-| **[Option E — Download from GitHub (Linux, no Rust, has internet)](#option-e--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, internet available — pass `--online` to fetch the release binary from GitHub |
-| **[Option D — Airgap kit (Linux, no Rust)](#option-d--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust, no internet |
+| **[Option A — Windows pre-built](#option-a--windows-pre-built-binary)** | Git Bash | Windows 10/11 — no Rust, no internet |
+| **[Option B — Linux pre-built](#option-b--linux-pre-built-binary)** | `bash`, `tar` | Linux — no Rust, no internet |
+| **[Option C — Vendor source build](#option-c--vendor-only-source-build)** | Rust ≥1.95 | Rust is already installed |
+| **[Option D — Airgap kit (Linux, no Rust)](#option-d--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust, no dist/ bundle |
+| **[Option E — Download from GitHub](#option-e--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, has internet |
 
-In all cases, start with:
+In all cases:
 
 ```bash
 bash scripts/install.sh   # auto-detects the best available path
 bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
 
-All options make no network calls by default — `install.sh` is offline-first. Option E
-additionally downloads the release binary from GitHub when you explicitly pass `--online`.
-`--offline` (and `OXIDE_SLOC_NO_DOWNLOAD=1`) are kept for backward compatibility; they are
-now no-ops since offline is the default.
+`install.sh` makes no network calls by default. Pass `--online` to opt into GitHub
+downloads (Option E only).
 
 ---
 
-## Option A — Windows bundled binary
+## Option A — Windows pre-built binary
 
-`oxide-sloc.exe` is committed to the repository root. No build step, no Rust installation,
-no internet required.
+**Prerequisites:** Git Bash (ships with Git for Windows). No Rust, no internet, no
+additional downloads.
+
+`dist/oxide-sloc-windows-x64.zip` is committed directly to the repository. Running
+`bash scripts/install.sh` extracts it automatically:
 
 ```bash
-# Clone or copy the repository to the target machine, then:
-bash scripts/install.sh   # detects oxide-sloc.exe and exits immediately
+# On a fresh Windows 10/11 machine — git clone, then:
+bash scripts/install.sh   # finds dist/oxide-sloc-windows-x64.zip, extracts oxide-sloc.exe
 bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 ```
 
-**System requirements:** Git Bash (bundled with Git for Windows), Windows 10/11.
+The installer verifies the SHA-256 checksum (from `dist/checksums.sha256`) before
+extracting. It prints `[OK] Checksum verified.` on success; it exits with an error and
+prints the expected vs actual hashes if the archive is corrupt.
+
+**System requirements:** Git Bash, Windows 10/11 (x64).
 
 To launch as a LAN server reachable from other devices on the network:
 
@@ -46,37 +68,51 @@ To launch as a LAN server reachable from other devices on the network:
 bash scripts/serve-server.sh
 ```
 
+### Troubleshooting — "dist/oxide-sloc-windows-x64.zip not found"
+
+This means the file is missing from the clone. Causes:
+
+1. **Shallow or partial clone** — re-clone with `git clone https://github.com/oxide-sloc/oxide-sloc`
+2. **Git LFS not configured** — if LFS is in use on your server, run `git lfs pull` after cloning
+3. **Repository is not from the canonical source** — ensure you have a complete clone
+
+If `dist/` is missing entirely and you have Rust installed, fall back to Option C:
+`bash scripts/internal/airgap-build.sh vendor.tar.xz`
+
 ---
 
-## Option B — Linux pre-built binary (`dist/`)
+## Option B — Linux pre-built binary
 
-When CI has populated `dist/oxide-sloc-linux-x86_64.tar.gz`, the installer extracts and
-installs it automatically — no Rust or build tools required.
+`dist/oxide-sloc-linux-x86_64.tar.gz` (and `arm64` variant) are committed to the
+repository alongside the Windows zip. No build step, no Rust required.
 
 ```bash
 bash scripts/install.sh   # detects dist/ bundle and extracts
 bash scripts/run.sh
 ```
 
-**Producing the `dist/` bundle on a networked build machine:**
+The installer automatically picks the correct architecture (`x86_64` or `arm64`) and
+verifies the SHA-256 checksum before extracting.
+
+**Producing a fresh `dist/` bundle** (maintainer workflow — run on any machine with Rust):
 
 ```bash
-cargo build --release
-mkdir -p dist
-tar czf dist/oxide-sloc-linux-x86_64.tar.gz -C target/release oxide-sloc
+bash scripts/internal/update-dist.sh
+git add dist/
+git commit -m "chore: update pre-built binaries vX.Y.Z"
 ```
 
-Transfer the full repository (or just `dist/` + `scripts/`) to the target machine via
-USB, internal file server, or SCP to an intermediate host. Then run `bash scripts/install.sh`.
+`update-dist.sh` builds a release binary, packages it into the correct archive, and
+regenerates `dist/checksums.sha256`.
 
 ---
 
 ## Option C — Vendor-only source build
 
-Use this when the Rust toolchain is already installed on the target machine.
+Use this when the Rust toolchain (≥1.95) is already installed on the target machine.
 
-`vendor.tar.xz` and `vendor.tar.xz.sha256` are **committed to the repository** — they are
-present in every `git clone`. No separate download is needed.
+`vendor.tar.xz` and `vendor.tar.xz.sha256` are **committed to the repository** — every
+`git clone` includes them. No separate download is needed.
 
 ```bash
 bash scripts/install.sh   # detects cargo, decompresses vendor.tar.xz, builds offline
@@ -92,21 +128,19 @@ bash scripts/run.sh
 ```
 
 `scripts/internal/airgap-build.sh` verifies the vendor checksum, extracts, writes
-`.cargo/config.toml`, and runs `cargo build --release --offline`. All output streams
-to the terminal and is simultaneously captured to a timestamped log under `logs/`; on
-failure, the log path and a clickable link are printed.
+`.cargo/config.toml`, and runs `cargo build --release --offline`. Output streams to the
+terminal and is captured to a timestamped log under `logs/`.
 
-> **What vendor.tar.xz covers:** All Rust crate sources (~328 crates). The Rust toolchain
-> itself is not included. If you also need to transfer the toolchain, use
-> [Option D](#option-d--airgap-kit-linux-no-rust) instead.
+> **What vendor.tar.xz covers:** all ~328 Rust crate sources needed for a fully offline
+> `cargo build`. The Rust toolchain itself is not included — if you also need to transfer
+> the toolchain, use [Option D](#option-d--airgap-kit-linux-no-rust) instead.
 
 ---
 
 ## Option E — Download from GitHub (Linux, no Rust, has internet)
 
 When `curl` is available and no Rust toolchain is detected, pass `--online` to have
-`install.sh` fetch the matching release binary from GitHub Releases and drop it into `dist/`
-before extracting.
+`install.sh` fetch the matching release binary from GitHub Releases:
 
 ```bash
 bash scripts/install.sh --online   # downloads release binary, extracts
@@ -117,18 +151,21 @@ The downloaded archive is verified against `SHA256SUMS.txt` from the same releas
 `sha256sum` is available.
 
 The default (without `--online`) makes no network calls. `--offline` and
-`OXIDE_SLOC_NO_DOWNLOAD=1` are retained for backward compatibility and behave identically to
-the default.
+`OXIDE_SLOC_NO_DOWNLOAD=1` are retained for backward compatibility.
 
-**System requirements:** `bash`, `tar`, `curl`. `sha256sum` is used for verification when present.
+**System requirements:** `bash`, `tar`, `curl`. `sha256sum` is used when present.
 
 ---
 
 ## Option D — Airgap kit (Linux, no Rust)
 
-Run `scripts/internal/make-airgap-kit.sh` on any **networked** machine to produce a single
-archive that contains everything needed to build oxide-sloc on a machine with no internet
-access, no pre-installed Rust, and no system C compiler.
+Use this when the target Linux machine has no internet access, no Rust installed, and no
+pre-built binary available (e.g., `dist/` is missing or you need a statically-linked
+build for an unusual distribution).
+
+Run `scripts/internal/make-airgap-kit.sh` on any **networked** machine to produce a
+self-contained archive that contains the Rust toolchain, musl C toolchain, vendor
+sources, and the full source tree.
 
 ### What the kit bundles
 
@@ -137,12 +174,11 @@ access, no pre-installed Rust, and no system C compiler.
 | `rust-{ver}-{target}.tar.gz` | Rust host toolchain (rustc, cargo, std) |
 | `rust-std-{ver}-{musl-target}.tar.gz` | Rust musl target standard library |
 | `{arch}-linux-musl-native.tgz` | musl-gcc + headers + libc (no system compiler needed) |
-| `vendor.tar.xz` | All ~328 Rust crate sources (no crates.io needed) |
+| `vendor.tar.xz` | All ~328 Rust crate sources |
 | `oxide-sloc-src.tar.gz` | Full source tree |
 | `install.sh` | Wires everything together and builds |
 
-The result is a **fully static binary** — copy it anywhere on Linux and run it with no
-runtime library dependencies.
+Result: a **fully static binary** — copy it anywhere on Linux with no runtime deps.
 
 ### Generate the kit (networked machine)
 
@@ -157,14 +193,11 @@ bash scripts/internal/make-airgap-kit.sh linux-arm64
 # Output: oxide-sloc-airgap-kit-{platform}-v{version}.tar.gz  (~700 MB)
 ```
 
-Requirements for running the kit builder: `bash`, `curl`, `tar`, `xz-utils`, `sha256sum`,
-`git`, `cargo` (for generating the vendor archive).
+Requirements: `bash`, `curl`, `tar`, `xz-utils`, `sha256sum`, `git`, `cargo`.
 
 ### Build on the air-gapped machine
 
 ```bash
-# Transfer the kit archive via USB, SCP to an intermediate host, internal file server, etc.
-
 tar xzf oxide-sloc-airgap-kit-linux-x86_64-v*.tar.gz
 cd oxide-sloc-airgap-kit-*/
 bash install.sh
@@ -174,8 +207,7 @@ The embedded `install.sh`:
 1. Installs the Rust toolchain into `.tools/rust/` — no root, no system PATH changes.
 2. Installs the musl C toolchain into `.tools/musl/` — no root.
 3. Verifies and extracts the vendor crate sources.
-4. Builds a fully static oxide-sloc binary with an animated three-phase progress display
-   (Verify sources → Compile release build → Install binary) and a frozen completion summary.
+4. Builds a fully static oxide-sloc binary with an animated three-phase progress display.
 
 After a successful build:
 
@@ -204,6 +236,25 @@ bash install.sh --gnu   # use system gcc instead of bundled musl-gcc
 
 ---
 
+## Keeping pre-built binaries up to date
+
+Pre-built binaries in `dist/` must be rebuilt and committed after every release.
+The `update-dist.sh` script handles this:
+
+```bash
+# Run on any machine with Rust and the target's cross-compilation toolchain installed:
+bash scripts/internal/update-dist.sh
+
+# Stage and commit atomically with the vendor archive if deps changed:
+git add dist/ vendor.tar.xz vendor.tar.xz.sha256
+git commit -m "chore: update pre-built binaries and vendor archive vX.Y.Z"
+```
+
+CI (GitHub Actions `release.yml`) runs `update-dist.sh` automatically on tagged releases
+and commits the updated `dist/` back to the repository before creating the GitHub Release.
+
+---
+
 ## Script overview
 
 Users interact with three scripts only. Internal scripts under `scripts/internal/` are
@@ -215,15 +266,15 @@ called automatically and should not be invoked directly.
 | `bash scripts/run.sh` | Launch web UI (localhost) | Yes — Resolve dependencies → Compile workspace → Launch server |
 | `bash scripts/serve-server.sh` | Launch web UI as LAN server | Yes — Resolve dependencies → Compile workspace → Launch server |
 
-All three scripts show a live animated progress indicator with spinner, progress bar, elapsed
-timer, and cycling status messages when compiling from source. On completion the display
-freezes with all milestones checked (✓) so the summary remains visible. Every run writes a
-timestamped log to `logs/`; on failure the log path and a clickable terminal link are printed.
+All three scripts show a live animated progress indicator when compiling from source.
+Every run writes a timestamped log to `logs/`; on failure the log path and a clickable
+terminal link are printed.
 
 | Internal script | Called by | Build progress display |
 |---|---|---|
-| `scripts/internal/airgap-build.sh` | Manually (Option C manual path) | No — plain streaming output; logs to `logs/airgap-build-*.log` |
-| `scripts/internal/make-airgap-kit.sh` | Run manually on networked machine to produce Option D kit | Kit's embedded `install.sh` logs to `logs/kit-install-*.log` on the air-gapped machine |
+| `scripts/internal/airgap-build.sh` | Manually (Option C manual path) | No — plain streaming output |
+| `scripts/internal/update-dist.sh` | Maintainers; CI release workflow | No |
+| `scripts/internal/make-airgap-kit.sh` | Run manually on networked machine (Option D) | No |
 | `scripts/internal/update-vendor.sh` | Maintainer tooling — regenerates `vendor.tar.xz` | No |
 | `scripts/internal/install-hooks.sh` | Developer setup — installs git hooks | No |
 
@@ -234,22 +285,19 @@ timestamped log to `logs/`; on failure the log path and a clickable terminal lin
 ### Jenkins
 
 `vendor.tar.xz` is committed to the repo — Cargo crate sources are fully covered after a
-`git clone` with no extra download. The Rust toolchain (compiler, cargo, rustfmt, clippy)
-is **not** in git; two air-gapped options are supported:
+`git clone`. The Rust toolchain is not in git; two options:
 
 **Option 1 — Rebuild `ci/jenkins/Dockerfile.agent` (recommended)**
 
-The Dockerfile bakes the pinned toolchain into `/opt/rust-toolchain` at image build time.
-All pipeline runs after the image rebuild are fully offline:
+The Dockerfile bakes the pinned toolchain into the image at build time. All pipeline runs
+after the image rebuild are fully offline:
 
 ```bash
 docker build -t jenkins-oxide-sloc:latest -f ci/jenkins/Dockerfile.agent .
 docker compose down && docker compose up -d
 ```
 
-**Option 2 — Commit a toolchain bundle**
-
-Run once on a networked Linux machine, then commit the output via git LFS:
+**Option 2 — Commit a toolchain bundle (git LFS)**
 
 ```bash
 bash ci/jenkins/bundle-rust-toolchain.sh
@@ -262,9 +310,8 @@ The Jenkinsfile Setup stage detects and extracts the bundle automatically.
 
 ### GitLab CI
 
-The included `.gitlab-ci.yml` works the same way. Use a self-hosted GitLab runner with
-Rust pre-installed and `vendor.tar.xz` available in the runner's workspace cache or via
-a custom pre-clone step.
+Use a self-hosted GitLab runner with Rust pre-installed and `vendor.tar.xz` available in
+the runner's workspace cache or via a custom pre-clone step.
 
 ### GitHub Actions (self-hosted runner)
 
