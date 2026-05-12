@@ -102,7 +102,6 @@ build_one() {
             sh -s -- -y --default-toolchain "$RUST_VER" \
                 --profile minimal \
                 --no-modify-path \
-                --target "$rust_target" \
                 2>&1 | grep -v "^info:" | grep -v "^$" || true
         rustup_init=""
     fi
@@ -115,9 +114,9 @@ build_one() {
         RUSTUP_HOME="$WIN_RUSTUP_HOME" CARGO_HOME="$WIN_CARGO_HOME" \
             "$rustup_init" -y \
                 --default-toolchain "$RUST_VER" \
+                --default-host "$rust_target" \
                 --profile minimal \
                 --no-modify-path \
-                --target "$rust_target" \
                 2>&1 | grep -v "^info:" | grep -v "^$" || true
     fi
 

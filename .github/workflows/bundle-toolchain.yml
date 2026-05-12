@@ -41,10 +41,10 @@ jobs:
           path: toolchain/rust-toolchain-linux-x86_64.tar.gz.*
           retention-days: 1
 
-  # ── Linux arm64 (cross-compile on x86_64 host) ───────────────────────────
+  # ── Linux arm64 (native arm64 runner) ───────────────────────────────────
   linux-arm64:
     name: Bundle linux-arm64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
