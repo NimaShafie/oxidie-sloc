@@ -23,15 +23,14 @@ When compiling from source, both scripts display a live animated build indicator
 | **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 | **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
-**Internet requirements — nothing. Every path below works from a plain `git clone`:**
+**Internet requirements — nothing. Every path works from a `git clone` + `git lfs pull`:**
 
 | Scenario | What ships in the repo | What happens |
 |---|---|---|
-| **Windows, no Rust** | `dist/oxide-sloc-windows-x64.zip` | installer extracts the binary, done |
-| **Linux, no Rust** | `dist/oxide-sloc-linux-x86_64.tar.gz` | installer extracts the binary, done |
-| **Any platform, Rust installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | installer builds offline from vendor sources |
+| **No Rust, no internet** | `toolchain/rust-toolchain-*.tar.gz` (LFS, ~200 MB) + `vendor.tar.xz` | install.sh bootstraps Rust, then builds from vendor |
+| **Rust already installed** | `vendor.tar.xz` (~35 MB, ~328 crates) | builds offline directly from vendor sources |
 
-No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for all deployment paths including air-gap kits for machines without pre-built binaries.
+The `toolchain/` archives are stored in **git LFS** (they exceed 100 MB). Run `git lfs install && git lfs pull` after cloning if you need the no-Rust path. No network calls are made by default. See [`docs/airgap.md`](./docs/airgap.md) for full details including the LFS setup and air-gap kit options.
 
 ---
 
@@ -96,20 +95,19 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ## Installation
 
-### Path A — Bundled binary (no internet required)
+### Path A — Build from source (no internet required)
 
 ```bash
 bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
 bash scripts/run.sh        # http://127.0.0.1:4317
 ```
 
-The script tries in order: `dist/` pre-built bundle → offline vendor build (requires Rust). **No network calls are made by default.**
+The script tries in order: bundled Rust toolchain (`toolchain/`) → system Rust + vendor sources. **No network calls are made by default.**
 
-- **Windows (no Rust, no internet):** `dist/oxide-sloc-windows-x64.zip` is committed to the repo. Clone and run — nothing to build, no internet required.
-- **Linux (no Rust, no internet):** `dist/oxide-sloc-linux-x86_64.tar.gz` (or `arm64`) is committed to the repo. Same story.
-- **Any platform with Rust installed:** builds from the committed `vendor.tar.xz` — no internet required.
-- **Linux without Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch and extract the release binary automatically.
-- **Linux without Rust, no internet, no `dist/`:** use the Option D air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
+- **No Rust, no internet (Windows or Linux):** after `git lfs pull`, `install.sh` detects `toolchain/rust-toolchain-*.tar.gz`, bootstraps Rust into `.tools/rust/`, decompresses `vendor.tar.xz`, and builds offline. Requires [git LFS](https://git-lfs.com) to be configured.
+- **Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
+- **Linux, no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
+- **Linux, no Rust, no LFS, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 
