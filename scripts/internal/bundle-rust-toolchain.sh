@@ -122,10 +122,11 @@ build_one() {
 
     # ── Identify the installed toolchain directory ────────────────────────────
     local tc_dir
-    tc_dir="$(find "$rustup_home/toolchains" -maxdepth 1 -type d | grep -v '^$' | grep "$rust_target" | head -1)"
+    # grep exits 1 when no match — || true prevents set -euo pipefail from killing the script
+    tc_dir="$(find "$rustup_home/toolchains" -maxdepth 1 -type d | grep -v '^$' | grep "$rust_target" | head -1 || true)"
     if [[ -z "$tc_dir" ]]; then
-        # Try without host arch suffix
-        tc_dir="$(find "$rustup_home/toolchains" -maxdepth 1 -mindepth 1 -type d | head -1)"
+        # Fallback: take whatever toolchain rustup installed
+        tc_dir="$(find "$rustup_home/toolchains" -maxdepth 1 -mindepth 1 -type d | head -1 || true)"
     fi
     if [[ -z "$tc_dir" ]]; then
         echo "[ERROR] Toolchain directory not found after rustup install." >&2
