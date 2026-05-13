@@ -19,4 +19,4 @@ askama.workspace = true
 chrono.workspace = true
 headless_chrome = "1"
 serde_json.workspace = true
-sloc-core = { path = "../sloc-core", version = "1.5.0" }
+sloc-core = { path = "../sloc-core", version = "1.5.1" }
