@@ -231,6 +231,9 @@ jobs:
 
           Remove-Item -Force $certPath
 
+          # Trust the self-signed CA on this runner so /pa chain validation passes
+          certutil -addstore -user Root "certs\sloc-ca.crt"
+
           & $signtool verify /pa /v "${{ matrix.artifact }}"
           if ($LASTEXITCODE -ne 0) { throw "signtool verify failed with exit code $LASTEXITCODE" }
 
