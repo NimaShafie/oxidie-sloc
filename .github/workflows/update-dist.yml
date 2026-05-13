@@ -81,15 +81,21 @@ jobs:
             Write-Output "WINDOWS_CERTIFICATE secret not set — binary will be unsigned."
             exit 0
           }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match 'x64' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "signtool.exe not found in Windows Kits" }
+          Write-Output "Using signtool: $signtool"
           $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
           $certPath  = Join-Path $env:RUNNER_TEMP "signing.pfx"
           [IO.File]::WriteAllBytes($certPath, $certBytes)
-          & signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+          & $signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
             /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
             /d "OxideSLOC" /du "https://github.com/oxide-sloc/oxide-sloc" `
             "target\${{ matrix.target }}\release\oxide-sloc.exe"
           Remove-Item -Force $certPath
-          & signtool verify /pa /v "target\${{ matrix.target }}\release\oxide-sloc.exe"
+          & $signtool verify /pa /v "target\${{ matrix.target }}\release\oxide-sloc.exe"
 
       - name: Package — Windows zip
         if: runner.os == 'Windows'
