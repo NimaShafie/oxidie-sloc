@@ -70,6 +70,27 @@ jobs:
           cp target/${{ matrix.target }}/release/oxide-sloc /tmp/oxide-sloc
           tar czf ${{ matrix.bundle }} -C /tmp oxide-sloc
 
+      - name: Sign Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "WINDOWS_CERTIFICATE secret not set — binary will be unsigned."
+            exit 0
+          }
+          $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          $certPath  = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+          & signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+            /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
+            /d "OxideSLOC" /du "https://github.com/NimaShafie/oxide-sloc" `
+            "target\${{ matrix.target }}\release\oxide-sloc.exe"
+          Remove-Item -Force $certPath
+          & signtool verify /pa /v "target\${{ matrix.target }}\release\oxide-sloc.exe"
+
       - name: Package — Windows zip
         if: runner.os == 'Windows'
         shell: pwsh
@@ -119,3 +140,38 @@ jobs:
             dist/SHA256SUMS.txt \
             --clobber \
             --repo "$REPO"
+
+  # ── Commit signed Windows binary to dist/ for air-gapped Windows installs ──
+  # Linux (RHEL) deployments always build from source — no Linux binary is
+  # committed here. install.sh falls through to the toolchain + vendor path on
+  # Linux because dist/oxide-sloc-linux-*.tar.gz is never present in the repo.
+  commit-dist:
+    name: Commit Windows binary to dist/
+    needs: upload-release-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: main
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-windows-x64.zip
+          path: dist/
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase --autostash origin main
+          git add dist/oxide-sloc-windows-x64.zip
+          if git diff --cached --quiet; then
+            echo "dist/ unchanged — nothing to commit."
+          else
+            TAG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
+            git commit -m "chore: update dist Windows binary (${TAG})"
+            git push origin main
+          fi
