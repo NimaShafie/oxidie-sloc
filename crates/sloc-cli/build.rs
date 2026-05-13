@@ -25,10 +25,7 @@ fn embed_windows_resources() {
     // Write the application manifest so rc.exe can reference it by path.
     let manifest_path = out.join("oxide-sloc.manifest");
     std::fs::write(&manifest_path, make_manifest(&ver_dots)).ok();
-    let manifest_str = manifest_path
-        .to_str()
-        .unwrap_or("")
-        .replace('\\', "/");
+    let manifest_str = manifest_path.to_str().unwrap_or("").replace('\\', "/");
 
     let rc_content = make_rc(&ver_commas, &ver_dots, &manifest_str);
     let rc_path = out.join("oxide-sloc.rc");
@@ -148,7 +145,12 @@ fn try_rc_exe(rc: &std::path::Path, res: &std::path::Path) -> bool {
     }
     for candidate in &candidates {
         if std::process::Command::new(candidate)
-            .args(["/nologo", "/fo", res.to_str().unwrap_or(""), rc.to_str().unwrap_or("")])
+            .args([
+                "/nologo",
+                "/fo",
+                res.to_str().unwrap_or(""),
+                rc.to_str().unwrap_or(""),
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -186,5 +188,9 @@ fn find_winsdk_rc() -> Option<String> {
         .collect();
     versions.sort();
     let rc = versions.last()?.join("x64").join("rc.exe");
-    if rc.exists() { rc.to_str().map(str::to_string) } else { None }
+    if rc.exists() {
+        rc.to_str().map(str::to_string)
+    } else {
+        None
+    }
 }
