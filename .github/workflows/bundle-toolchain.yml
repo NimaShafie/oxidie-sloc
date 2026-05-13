@@ -68,8 +68,37 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
+      # Decode the PFX certificate and expose it via WINDOWS_CERT_PFX / WINDOWS_CERT_PASS
+      # env vars so that bundle-rust-toolchain.sh can sign the PE binaries before archiving.
+      # The step is a no-op when the secret is absent (open-source forks, personal runs).
+      - name: Decode signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "WINDOWS_CERTIFICATE secret not set — toolchain binaries will be unsigned."
+            exit 0
+          }
+          $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          $certPath  = "$env:RUNNER_TEMP\toolchain-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+          Add-Content $env:GITHUB_ENV "WINDOWS_CERT_PFX=$certPath"
+          Add-Content $env:GITHUB_ENV "WINDOWS_CERT_PASS=$($env:WINDOWS_CERTIFICATE_PASSWORD)"
+          Write-Output "Certificate decoded to $certPath"
+
       - name: Bundle toolchain
         run: bash scripts/internal/bundle-rust-toolchain.sh windows-x64
+
+      - name: Clean up signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERT_PFX -and (Test-Path $env:WINDOWS_CERT_PFX)) {
+            Remove-Item -Force $env:WINDOWS_CERT_PFX
+            Write-Output "Signing certificate removed."
+          }
 
       - name: Upload parts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

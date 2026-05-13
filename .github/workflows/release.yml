@@ -25,6 +25,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+      attestations: write   # required for actions/attest-build-provenance
+      id-token: write       # required for OIDC-based attestation signing
     strategy:
       fail-fast: false
       matrix:
@@ -221,6 +223,11 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ matrix.artifact }}
 
   vendor:
     name: Generate vendor archive

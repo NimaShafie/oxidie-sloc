@@ -371,6 +371,14 @@ if ! command -v cargo &>/dev/null; then
     if [[ "$HAVE_TOOLCHAIN" == true ]]; then
         echo " No Rust toolchain detected — bootstrapping from bundled archive..."
         echo " (one-time extract → ~300-500 MB on disk)"
+        echo ""
+        echo " NOTE: If your organisation runs Carbon Black, CrowdStrike, or another"
+        echo " EDR product, the extracted Rust toolchain binaries (.tools/cargo/bin/)"
+        echo " may be flagged if unsigned. Signed toolchain archives (built by a"
+        echo " maintainer with WINDOWS_CERTIFICATE set) resolve this automatically."
+        echo " Windows managed deployments: place oxide-sloc-windows-x64.zip in dist/"
+        echo " to skip compilation entirely. See docs/av-whitelisting.md for details."
+        echo ""
 
         # Verify checksum of each part or the single archive
         TOOLCHAIN_CHECKSUMS="$REPO_ROOT/toolchain/checksums.sha256"
