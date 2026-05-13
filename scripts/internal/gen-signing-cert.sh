@@ -143,20 +143,24 @@ openssl x509 -req \
     -extensions v3_leaf
 
 echo "[5/5] Bundling into PFX (leaf + CA chain)..."
+# Pass the password via environment to avoid exposing it in /proc/<pid>/cmdline
+export PKCS12_PASS="$PFX_PASS"
 openssl pkcs12 -export \
     -out "$OUT_DIR/sloc-sign.pfx" \
     -inkey "$OUT_DIR/sloc-sign.key" \
     -in "$OUT_DIR/sloc-sign.crt" \
     -certfile "$OUT_DIR/sloc-ca.crt" \
-    -passout "pass:$PFX_PASS" \
+    -passout "env:PKCS12_PASS" \
     -name "OxideSLOC Code Signing"
+unset PKCS12_PASS
 
 # Base64-encode the PFX for the GitHub Secret
 base64 -w0 "$OUT_DIR/sloc-sign.pfx" > "$OUT_DIR/sloc-sign.pfx.b64" 2>/dev/null || \
     base64 "$OUT_DIR/sloc-sign.pfx" | tr -d '\n\r' > "$OUT_DIR/sloc-sign.pfx.b64"
 
-# Copy the public CA cert to the repo root so it can be committed
-cp "$OUT_DIR/sloc-ca.crt" "$REPO_ROOT/sloc-ca.crt"
+# Copy the public CA cert into certs/ so it can be committed
+mkdir -p "$REPO_ROOT/certs"
+cp "$OUT_DIR/sloc-ca.crt" "$REPO_ROOT/certs/sloc-ca.crt"
 
 # ── summary ──────────────────────────────────────────────────────────────────
 
@@ -169,7 +173,7 @@ echo "  Done. Files written to: _signing/"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  PUBLIC (safe to commit):"
-echo "    sloc-ca.crt           copied to repo root ← git add this"
+echo "    certs/sloc-ca.crt     copied to certs/ ← git add this"
 echo ""
 echo "  SECRET (never commit — keep these offline):"
 echo "    _signing/sloc-ca.key          root CA private key"
@@ -186,7 +190,7 @@ echo "  NEXT STEPS"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  1. Commit the public CA cert:"
-echo "       git add sloc-ca.crt"
+echo "       git add certs/sloc-ca.crt"
 echo "       git commit -m \"chore: add Authenticode root CA certificate\""
 echo ""
 echo "  2. Set GitHub Actions secrets:"
@@ -194,7 +198,7 @@ echo "       WINDOWS_CERTIFICATE          <- paste content of _signing/sloc-sign
 echo "       WINDOWS_CERTIFICATE_PASSWORD <- the password you just entered"
 echo ""
 echo "  3. On each air-gapped Windows endpoint (run PowerShell as Admin):"
-echo "       Import-Certificate -FilePath sloc-ca.crt -CertStoreLocation Cert:\LocalMachine\Root"
+echo "       Import-Certificate -FilePath certs\sloc-ca.crt -CertStoreLocation Cert:\LocalMachine\Root"
 echo ""
 echo "  4. Verify a signed binary:"
 echo "       (Get-AuthenticodeSignature .\oxide-sloc.exe).Status   # should print: Valid"

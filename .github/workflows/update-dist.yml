@@ -86,7 +86,7 @@ jobs:
           [IO.File]::WriteAllBytes($certPath, $certBytes)
           & signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
             /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
-            /d "OxideSLOC" /du "https://github.com/NimaShafie/oxide-sloc" `
+            /d "OxideSLOC" /du "https://github.com/oxide-sloc/oxide-sloc" `
             "target\${{ matrix.target }}\release\oxide-sloc.exe"
           Remove-Item -Force $certPath
           & signtool verify /pa /v "target\${{ matrix.target }}\release\oxide-sloc.exe"
@@ -125,8 +125,8 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd dist/
-          sha256sum oxide-sloc-linux-x86_64.tar.gz oxide-sloc-windows-x64.zip > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          sha256sum oxide-sloc-linux-x86_64.tar.gz oxide-sloc-windows-x64.zip > SHA256SUMS-dist.txt
+          cat SHA256SUMS-dist.txt
 
       - name: Upload to GitHub release
         env:
@@ -137,7 +137,7 @@ jobs:
           gh release upload "$TAG" \
             dist/oxide-sloc-linux-x86_64.tar.gz \
             dist/oxide-sloc-windows-x64.zip \
-            dist/SHA256SUMS.txt \
+            dist/SHA256SUMS-dist.txt \
             --clobber \
             --repo "$REPO"
 
