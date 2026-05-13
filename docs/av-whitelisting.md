@@ -41,7 +41,7 @@ etc.) are standard Rust project binaries compiled by the Rust project team, but:
   carry no digital signature, giving them a low reputation score in EDR databases.
 
 The main `oxide-sloc` binary may also trigger heuristic detections (VirusTotal shows
-2/71 as of v1.5.0 — both are ML-score / behavioural false positives with no signature
+2/71 as of v1.5.1 — both are ML-score / behavioural false positives with no signature
 match).
 
 ## Recommended path for Windows managed environments (air-gapped)
