@@ -10,6 +10,36 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.1] — 2026-05-12
+
+### Fixed
+
+- **install.sh CA cert import** (`scripts/install.sh`): The self-signed Authenticode CA
+  certificate is now imported silently without prompting the user; previous behaviour
+  popped a native Windows security dialog mid-install.
+- **CI cargo-cyclonedx flag** (`.github/workflows/release.yml`): Corrected an invalid
+  flag passed to `cargo cyclonedx` that caused SBOM generation to fail; `build.rs` is
+  now formatted to satisfy the `rustfmt` CI gate.
+
+### Added
+
+- **Windows CA cert trust — no Admin required** (`scripts/install.sh`): `install.sh`
+  auto-detects the self-signed Authenticode CA certificate committed to `certs/` and
+  offers to import it into the current user's certificate store using `certutil -addstore
+  -user`, which requires no Administrator elevation.
+- **Self-signed Authenticode cert + generator** (`certs/`, `scripts/internal/`): A
+  self-signed code-signing certificate and companion generation script are committed to
+  the repository so Windows builds can be Authenticode-signed immediately without waiting
+  for a commercial CA.
+- **Authenticode signing, SLSA provenance, and dist commit** (`release.yml`): The release
+  workflow now signs `oxide-sloc.exe` with the committed certificate, attaches SLSA
+  provenance, and commits the signed binary to `dist/` for air-gapped Windows deployments.
+- **Windows test job** (`ci.yml`): A `windows-latest` test job is added to the CI matrix,
+  covering `cargo test --workspace` on Windows and closing the gap where signing-related
+  code was only tested on Linux runners.
+
+---
+
 ## [1.5.0] — 2026-05-12
 
 ### Added
