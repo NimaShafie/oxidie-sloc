@@ -51,7 +51,7 @@ jobs:
             artifact: oxide-sloc-macos-x86_64
             binary: oxide-sloc
 
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact: oxide-sloc-macos-arm64
             binary: oxide-sloc
