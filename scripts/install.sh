@@ -75,6 +75,44 @@ print_log_link() {
     printf '  \033]8;;%s\033\\Click to open log\033]8;;\033\\\n' "$url"
 }
 
+# Offer to import sloc-ca.crt into the current user's Windows trust store.
+# Uses certutil -user — no Administrator rights required.
+trust_ca_cert() {
+    [[ "$PLATFORM" != windows ]] && return 0
+    local cert="$REPO_ROOT/sloc-ca.crt"
+    [[ -f "$cert" ]] || return 0
+    local cert_win
+    cert_win="$(cygpath -w "$cert" 2>/dev/null || echo "$cert")"
+    # Skip silently if already trusted
+    if certutil -user -verifystore Root "OxideSLOC Root CA" &>/dev/null 2>&1; then
+        return 0
+    fi
+    echo ""
+    echo " ┌─────────────────────────────────────────────────────────────┐"
+    echo " │  Trust the oxide-sloc signing certificate?                  │"
+    echo " │                                                              │"
+    echo " │  sloc-ca.crt is the root CA used to sign oxide-sloc         │"
+    echo " │  binaries. Importing it lets Windows verify the signature    │"
+    echo " │  without internet access and without Admin rights.           │"
+    echo " │                                                              │"
+    echo " │  This only affects your user account, not other users.      │"
+    echo " └─────────────────────────────────────────────────────────────┘"
+    read -rp "  Import certificate? [Y/n] " _yn
+    case "${_yn:-Y}" in
+        [Yy]*|"")
+            if certutil -user -addstore Root "$cert_win" &>/dev/null 2>&1; then
+                echo " [OK] Certificate imported. Signed binaries will now show: Valid"
+            else
+                echo " [WARN] certutil failed. To import manually (no Admin needed):"
+                echo "        certutil -user -addstore Root sloc-ca.crt"
+            fi
+            ;;
+        *)
+            echo " [Skipped] Run later:  certutil -user -addstore Root sloc-ca.crt"
+            ;;
+    esac
+}
+
 # Runs `cargo build --release --offline -p oxide-sloc` with an animated progress display.
 # Returns the cargo exit code.
 build_with_progress() {
@@ -255,6 +293,7 @@ echo " ════════════════════"
 # ── 1. Already installed ────────────────────────────────────────────────────
 if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == false ]]; then
     echo " [OK] $(basename "$EXE") already present."
+    trust_ca_cert
     echo " Run: bash scripts/run.sh"
     echo " To rebuild from source:  bash scripts/install.sh --rebuild"
     exit 0
@@ -284,6 +323,7 @@ if [[ -f "$DIST_ARCHIVE" ]]; then
     if [[ -f "$EXE" ]]; then
         [[ "$PLATFORM" == linux ]] && chmod +x "$EXE"
         echo " [OK] Extracted $(basename "$EXE")"
+        trust_ca_cert
         echo ""
         echo " Start the web UI:  bash scripts/run.sh"
         exit 0
@@ -340,6 +380,7 @@ if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
     if [[ -f "$EXE" ]]; then
         chmod +x "$EXE"
         echo " [OK] Extracted $(basename "$EXE")"
+        trust_ca_cert
         echo ""
         echo " Start the web UI:  bash scripts/run.sh"
         exit 0
@@ -511,6 +552,7 @@ EOF
         cp "$BUILD_OUTPUT" "$EXE"
         [[ "$PLATFORM" == linux ]] && chmod +x "$EXE"
         echo " [OK] Built and installed $(basename "$EXE")"
+        trust_ca_cert
         echo ""
         echo " Start the web UI:  bash scripts/run.sh"
         exit 0
