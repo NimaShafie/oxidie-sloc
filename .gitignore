@@ -26,6 +26,9 @@ Thumbs.db
 .env
 ci/jenkins/.env
 
+# Signing cert generation output — private keys and PFX bundles, never committed
+/_signing/
+
 # Local test output (not for commit)
 out/
 out.7z
