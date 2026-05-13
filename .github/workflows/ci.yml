@@ -46,9 +46,38 @@ jobs:
       - name: Test
         run: bash ci/test.sh
 
+  check-windows:
+    name: Quality gates (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          key: windows-check
+
+      - name: Lint
+        run: bash ci/lint.sh
+
+      - name: Build
+        run: bash ci/build.sh
+
+      - name: Test
+        run: bash ci/test.sh
+
   smoke:
     name: CLI smoke tests
-    needs: check
+    needs: [check, check-windows, vendor-sync]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
