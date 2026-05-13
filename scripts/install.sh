@@ -87,30 +87,13 @@ trust_ca_cert() {
     if certutil -user -verifystore Root "OxideSLOC Root CA" &>/dev/null 2>&1; then
         return 0
     fi
-    echo ""
-    echo " ┌─────────────────────────────────────────────────────────────┐"
-    echo " │  Trust the oxide-sloc signing certificate?                  │"
-    echo " │                                                              │"
-    echo " │  sloc-ca.crt is the root CA used to sign oxide-sloc         │"
-    echo " │  binaries. Importing it lets Windows verify the signature    │"
-    echo " │  without internet access and without Admin rights.           │"
-    echo " │                                                              │"
-    echo " │  This only affects your user account, not other users.      │"
-    echo " └─────────────────────────────────────────────────────────────┘"
-    read -rp "  Import certificate? [Y/n] " _yn
-    case "${_yn:-Y}" in
-        [Yy]*|"")
-            if certutil -user -addstore Root "$cert_win" &>/dev/null 2>&1; then
-                echo " [OK] Certificate imported. Signed binaries will now show: Valid"
-            else
-                echo " [WARN] certutil failed. To import manually (no Admin needed):"
-                echo "        certutil -user -addstore Root sloc-ca.crt"
-            fi
-            ;;
-        *)
-            echo " [Skipped] Run later:  certutil -user -addstore Root sloc-ca.crt"
-            ;;
-    esac
+    echo " Trusting oxide-sloc signing certificate (current user, no Admin required)..."
+    if certutil -user -addstore Root "$cert_win" &>/dev/null 2>&1; then
+        echo " [OK] Certificate trusted. Signed binaries will verify without internet."
+    else
+        echo " [WARN] certutil failed. To trust manually (no Admin needed):"
+        echo "        certutil -user -addstore Root sloc-ca.crt"
+    fi
 }
 
 # Runs `cargo build --release --offline -p oxide-sloc` with an animated progress display.
