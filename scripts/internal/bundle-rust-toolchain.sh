@@ -137,6 +137,41 @@ build_one() {
     local tc_size
     tc_size="$(du -sm "$tc_dir" | awk '{print $1}')"; echo "  Uncompressed size: ${tc_size} MB"
 
+    # ── Authenticode-sign Windows PE binaries (optional) ─────────────────────
+    # When WINDOWS_CERT_PFX and WINDOWS_CERT_PASS are set (injected by
+    # bundle-toolchain.yml), sign every .exe before packing.  Signed binaries
+    # carry a trusted identity and score significantly better in Carbon Black,
+    # Microsoft Defender, and other reputation-based EDR systems when extracted
+    # on an end user's machine.
+    if [[ "$plat" == "windows-x64" ]] && [[ -n "${WINDOWS_CERT_PFX:-}" ]] && [[ -f "${WINDOWS_CERT_PFX}" ]]; then
+        echo "  Authenticode-signing bundled Windows PE binaries..."
+        _signtool=""
+        if command -v signtool.exe &>/dev/null; then
+            _signtool="signtool.exe"
+        elif command -v signtool &>/dev/null; then
+            _signtool="signtool"
+        fi
+        if [[ -n "$_signtool" ]]; then
+            _pfx_win="$(cygpath -w "$WINDOWS_CERT_PFX" 2>/dev/null || echo "$WINDOWS_CERT_PFX")"
+            _signed=0; _failed=0
+            while IFS= read -r -d '' _bin; do
+                _bin_win="$(cygpath -w "$_bin" 2>/dev/null || echo "$_bin")"
+                if "$_signtool" sign \
+                    /f "$_pfx_win" /p "${WINDOWS_CERT_PASS:-}" \
+                    /tr http://timestamp.digicert.com /td sha256 /fd sha256 \
+                    /d "Oxide SLOC Rust Toolchain" \
+                    "$_bin_win" 2>/dev/null; then
+                    (( _signed++ )) || true
+                else
+                    (( _failed++ )) || true
+                fi
+            done < <(find "$cargo_home/bin" "$rustup_home/toolchains" -name "*.exe" -print0 2>/dev/null)
+            echo "  [OK] Signed ${_signed} toolchain binaries (${_failed} skipped/failed)."
+        else
+            echo "  [WARN] signtool not found — skipping PE signing."
+        fi
+    fi
+
     # ── Package with gzip -9 ────────────────────────────────────────────────
     mkdir -p "$TOOLCHAIN_DIR"
     local output="$TOOLCHAIN_DIR/$output_name"
