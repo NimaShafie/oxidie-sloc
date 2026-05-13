@@ -397,6 +397,7 @@ jobs:
     name: VirusTotal scan
     needs: [build]
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     permissions:
       contents: read
     # Don't fail the release if VT is unavailable or flags something
@@ -414,7 +415,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p vt-report
-          python3 << 'PYEOF'
+          python3 -u << 'PYEOF'
           import glob
           import json
           import os
