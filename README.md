@@ -543,7 +543,7 @@ bash scripts/internal/gen-signing-cert.sh
 This creates a root CA and a code-signing leaf cert, bundles them into a PFX, and prints
 exact next steps. Afterward:
 
-1. Commit the public CA cert: `git add sloc-ca.crt && git commit -m "chore: add Authenticode root CA certificate"`
+1. Commit the public CA cert: `git add certs/sloc-ca.crt && git commit -m "chore: add Authenticode root CA certificate"`
 2. Paste `_signing/sloc-sign.pfx.b64` as `WINDOWS_CERTIFICATE` and the chosen password as
    `WINDOWS_CERTIFICATE_PASSWORD` in the repo's GitHub Actions secrets.
 
@@ -553,8 +553,8 @@ Signatures from a self-signed cert are cryptographically valid but require a one
 import per endpoint (or a single GPO push for domain-joined machines):
 
 ```powershell
-# Run as Administrator — imports sloc-ca.crt from the repo root
-Import-Certificate -FilePath .\sloc-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+# Run as Administrator — imports sloc-ca.crt from the repo
+Import-Certificate -FilePath .\certs\sloc-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
 After import, verify any signed binary:

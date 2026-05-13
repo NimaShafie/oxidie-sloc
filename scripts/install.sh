@@ -79,7 +79,7 @@ print_log_link() {
 # Uses certutil -user — no Administrator rights required.
 trust_ca_cert() {
     [[ "$PLATFORM" != windows ]] && return 0
-    local cert="$REPO_ROOT/sloc-ca.crt"
+    local cert="$REPO_ROOT/certs/sloc-ca.crt"
     [[ -f "$cert" ]] || return 0
     local cert_win
     cert_win="$(cygpath -w "$cert" 2>/dev/null || echo "$cert")"
@@ -92,7 +92,7 @@ trust_ca_cert() {
         echo " [OK] Certificate trusted. Signed binaries will verify without internet."
     else
         echo " [WARN] certutil failed. To trust manually (no Admin needed):"
-        echo "        certutil -user -addstore Root sloc-ca.crt"
+        echo "        certutil -user -addstore Root certs/sloc-ca.crt"
     fi
 }
 
