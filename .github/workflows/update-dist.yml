@@ -81,6 +81,7 @@ jobs:
             Write-Output "WINDOWS_CERTIFICATE secret not set — binary will be unsigned."
             exit 0
           }
+          $ErrorActionPreference = 'Stop'
           $signtool = (Get-Item 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' `
             -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending |
@@ -97,8 +98,13 @@ jobs:
             /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
             /d "OxideSLOC" /du "https://github.com/oxide-sloc/oxide-sloc" `
             "target\${{ matrix.target }}\release\oxide-sloc.exe"
+          if ($LASTEXITCODE -ne 0) {
+            Remove-Item -Force $certPath -ErrorAction SilentlyContinue
+            throw "signtool sign failed with exit code $LASTEXITCODE"
+          }
           Remove-Item -Force $certPath
           & $signtool verify /pa /v "target\${{ matrix.target }}\release\oxide-sloc.exe"
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed with exit code $LASTEXITCODE" }
 
       - name: Package — Windows zip
         if: runner.os == 'Windows'
