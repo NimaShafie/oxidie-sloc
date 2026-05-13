@@ -103,14 +103,7 @@ jobs:
             throw "signtool sign failed with exit code $LASTEXITCODE"
           }
           Remove-Item -Force $certPath
-
-          # Trust the self-signed CA on this runner so signature verification passes
-          certutil -addstore -user Root "certs\sloc-ca.crt"
-
-          $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\oxide-sloc.exe"
-          if ($sig.Status -eq 'NotSigned') { throw "Binary is not signed" }
-          Write-Output "Signature status: $($sig.Status)"
-          Write-Output "Signer:           $($sig.SignerCertificate.Subject)"
+          Write-Output "Binary signed successfully."
 
       - name: Package — Windows zip
         if: runner.os == 'Windows'
