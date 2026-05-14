@@ -1418,13 +1418,23 @@ struct WarningOpportunityRow {
         font-size: 10px !important;
       }
 
-      /* Keep warning consoles collapsed in print — they are too long and
-         create blank pages when expanded. Show the summary label only. */
+      /* Collapse all <details> in print except the warnings block */
       details { border: 1px solid #ddd !important; border-radius: 8px !important; }
       details > summary { display: block !important; font-size: 10px !important; }
       details > div { display: none !important; }
       .warning-console { display: none !important; }
       .warning-console-actions { display: none !important; }
+      /* Always expand the run-warnings details in PDF */
+      details.warnings-details > div { display: block !important; }
+      details.warnings-details .warning-console {
+        display: block !important;
+        max-height: none !important;
+        overflow: visible !important;
+        font-size: 8px !important;
+        white-space: pre-wrap !important;
+        word-break: break-all !important;
+      }
+      details.warnings-details .code-block-toolbar { display: none !important; }
 
       /* Pill badges */
       .pill { font-size: 9px !important; padding: 2px 6px !important; min-height: auto !important; }
@@ -2153,7 +2163,7 @@ struct WarningOpportunityRow {
         </div>
 
         <div>
-          <details open>
+          <details open class="warnings-details">
             <summary>Detailed run warnings ({{ warning_count }})</summary>
             <div>
               <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">Raw warning messages emitted during the scan — unsupported file formats, encoding fallbacks, binary detections, and per-file parse issues. Scroll to see all warnings. High counts typically indicate many non-code assets (JSON configs, docs, lockfiles) in the scanned directory.</p>
@@ -3029,7 +3039,10 @@ struct WarningOpportunityRow {
         function px(n){return Math.round(n);}
         var data = SUB_D.slice().sort(function(a,b){return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));}).slice(0,15);
         var maxT = Math.max.apply(null, data.map(function(d){return (d.code||0)+(d.comment||0)+(d.blank||0);})) || 1;
-        var LW=90, BW=750, rHb=30, bH=20, legH=28, topPad=8;
+        // Scale bar height so few-submodule repos render at comparable height to Submodule Breakdown.
+        var rHb = Math.max(32, Math.min(72, Math.round(240 / Math.max(data.length, 1))));
+        var bH  = Math.round(rHb * 0.62);
+        var LW=90, BW=750, legH=28, topPad=8;
         var SH = data.length * rHb + legH + topPad;
         var svgW = LW + BW + 55;
         var s = '<svg viewBox="0 0 '+svgW+' '+SH+'" width="100%" style="display:block;" xmlns="http://www.w3.org/2000/svg">';

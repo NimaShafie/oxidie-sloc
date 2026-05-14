@@ -156,12 +156,11 @@ build_with_progress() {
     local is_linking=0 first_draw=1
     local NLINES=9
     local resolution_msgs=(
-        "Reading Cargo.lock..."
-        "Verifying vendor archive..."
-        "Checking source checksums..."
-        "Scanning crate manifests..."
-        "Validating offline sources..."
-        "Preparing release build..."
+        "Scanning vendor crate manifests..."
+        "Resolving dependency graph..."
+        "Checking crate versions..."
+        "Verifying source checksums..."
+        "Building compile plan..."
     )
     local msg_idx=0 frame_count=0 msg_interval=17  # rotate every ~2 s (17 × 0.12 s)
 
@@ -190,24 +189,44 @@ build_with_progress() {
         fi
 
         local bar="" fill=0 i
-        if [[ "$total_pkgs" -gt 0 && "$compiled" -gt 0 ]]; then
-            fill=$(( compiled * bar_w / total_pkgs ))
-            [[ $fill -gt $bar_w ]] && fill=$bar_w
-        fi
-        for (( i = 0; i < bar_w; i++ )); do
-            if   [[ $i -lt $fill ]]; then
-                bar+='='
-            elif [[ $i -eq $fill && $compiled -gt 0 && $fill -lt $bar_w ]]; then
-                bar+='>'
+        if [[ "$compiled" -eq 0 ]]; then
+            # Phase 1: bouncing scanner — cargo is silent during resolution so we can't
+            # track real progress; use an indeterminate animation to show activity.
+            local scanner_w=5
+            local bounce_range=$(( bar_w - scanner_w ))
+            local bounce_pos=$(( frame_count % (bounce_range * 2) ))
+            local scan_left
+            if [[ $bounce_pos -le $bounce_range ]]; then
+                scan_left=$bounce_pos
             else
-                bar+=' '
+                scan_left=$(( bounce_range * 2 - bounce_pos ))
             fi
-        done
+            for (( i = 0; i < bar_w; i++ )); do
+                if [[ $i -ge $scan_left && $i -lt $(( scan_left + scanner_w )) ]]; then
+                    bar+='='
+                else
+                    bar+='.'
+                fi
+            done
+        else
+            if [[ "$total_pkgs" -gt 0 ]]; then
+                fill=$(( compiled * bar_w / total_pkgs ))
+                [[ $fill -gt $bar_w ]] && fill=$bar_w
+            fi
+            for (( i = 0; i < bar_w; i++ )); do
+                if   [[ $i -lt $fill ]];                          then bar+='='
+                elif [[ $i -eq $fill && $fill -lt $bar_w ]];     then bar+='>'
+                else                                                   bar+=' '
+                fi
+            done
+        fi
 
         local count_str pct_str=""
-        if [[ "$total_pkgs" -gt 0 ]]; then
+        if [[ "$compiled" -eq 0 ]]; then
+            count_str="scanning..."
+        elif [[ "$total_pkgs" -gt 0 ]]; then
             count_str="${compiled} / ~${total_pkgs}"
-            [[ "$compiled" -gt 0 ]] && pct_str="($(( compiled * 100 / total_pkgs ))%)"
+            pct_str="($(( compiled * 100 / total_pkgs ))%)"
         else
             count_str="${compiled} crates"
         fi
@@ -236,10 +255,23 @@ build_with_progress() {
         printf "     Current:  %-50s\033[K\n"       "$current_display"
         printf "     Elapsed:  %-50s\033[K\n"       "$elapsed_str"
         printf "     \033[K\n"
-        printf "     Milestones:\033[K\n"
-        printf "     %b  Verify sources\033[K\n"         "$ic_res"
-        printf "     %b  Compile release build\033[K\n"  "$ic_cmp"
-        printf "     %b  Install binary\033[K\n"         "$ic_lnk"
+        if [[ "$compiled" -eq 0 ]]; then
+            # Phase 1: show verification sub-steps; step 2 advances at ~60s, step 3 at ~120s
+            local ic_vs2 ic_vs3
+            if   [[ $elapsed -lt 60  ]]; then ic_vs2="$frame"; ic_vs3='\xe2\x97\x8b'
+            elif [[ $elapsed -lt 120 ]]; then ic_vs2="$frame"; ic_vs3="$frame"
+            else                               ic_vs2="$frame"; ic_vs3="$frame"
+            fi
+            printf "     Scan steps:\033[K\n"
+            printf "     \xe2\x9c\x93  Read Cargo.lock (%d packages)\033[K\n"  "$total_pkgs"
+            printf "     %b  Validate vendor manifests\033[K\n"                 "$ic_vs2"
+            printf "     %b  Build compile plan\033[K\n"                        "$ic_vs3"
+        else
+            printf "     Milestones:\033[K\n"
+            printf "     %b  Verify sources\033[K\n"         "$ic_res"
+            printf "     %b  Compile release build\033[K\n"  "$ic_cmp"
+            printf "     %b  Install binary\033[K\n"         "$ic_lnk"
+        fi
 
         sleep 0.12
     done

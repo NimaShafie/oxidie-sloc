@@ -597,6 +597,12 @@ fn language_scan_config(language: Language) -> (ScanConfig, bool) {
 #[derive(Debug, Clone, Copy)]
 struct SymbolPatterns {
     functions: &'static [&'static str],
+    /// Line prefixes that classify as a function only when the line ALSO contains `(`
+    /// AND there is no `=` between the prefix and the first `(`.  Used for C/C++ where
+    /// function definitions are led by the return type (`void`, `int`, `bool`, …) with
+    /// no dedicated keyword, so the paren guard distinguishes `void f(x)` from
+    /// `void* p = malloc(n)`.
+    functions_prefix_paren: &'static [&'static str],
     classes: &'static [&'static str],
     variables: &'static [&'static str],
     imports: &'static [&'static str],
@@ -615,6 +621,7 @@ impl SymbolPatterns {
     const fn none() -> Self {
         Self {
             functions: &[],
+            functions_prefix_paren: &[],
             classes: &[],
             variables: &[],
             imports: &[],
@@ -625,7 +632,7 @@ impl SymbolPatterns {
     }
 }
 
-const SP_NONE: SymbolPatterns = SymbolPatterns::none();
+const SP_NONE: SymbolPatterns = SymbolPatterns::none(); // all fields are &[]
 
 const SP_RUST: SymbolPatterns = SymbolPatterns {
     functions: &[
@@ -645,6 +652,7 @@ const SP_RUST: SymbolPatterns = SymbolPatterns {
         "extern fn ",
         "pub extern fn ",
     ],
+    functions_prefix_paren: &[],
     classes: &[
         "struct ",
         "pub struct ",
@@ -684,6 +692,7 @@ const SP_RUST: SymbolPatterns = SymbolPatterns {
 
 const SP_PYTHON: SymbolPatterns = SymbolPatterns {
     functions: &["def ", "async def "],
+    functions_prefix_paren: &[],
     classes: &["class "],
     variables: &[],
     imports: &["import ", "from "],
@@ -712,6 +721,7 @@ const SP_JS: SymbolPatterns = SymbolPatterns {
         "export async function ",
         "export default function ",
     ],
+    functions_prefix_paren: &[],
     classes: &["class ", "export class ", "export default class "],
     variables: &[
         "var ",
@@ -743,6 +753,7 @@ const SP_TS: SymbolPatterns = SymbolPatterns {
         "export async function ",
         "export default function ",
     ],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "export class ",
@@ -778,6 +789,7 @@ const SP_TS: SymbolPatterns = SymbolPatterns {
 
 const SP_GO: SymbolPatterns = SymbolPatterns {
     functions: &["func "],
+    functions_prefix_paren: &[],
     classes: &["type "],
     variables: &["var "],
     imports: &["import "],
@@ -789,6 +801,7 @@ const SP_GO: SymbolPatterns = SymbolPatterns {
 
 const SP_JAVA: SymbolPatterns = SymbolPatterns {
     functions: &[],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "public class ",
@@ -835,6 +848,7 @@ const SP_JAVA: SymbolPatterns = SymbolPatterns {
 
 const SP_CSHARP: SymbolPatterns = SymbolPatterns {
     functions: &[],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "public class ",
@@ -1016,7 +1030,22 @@ const SUITE_PATTERNS_C_CPP: &[&str] = &[
 ];
 
 const SP_C: SymbolPatterns = SymbolPatterns {
+    // C has no function keyword; detect by common return types that precede `(` with no `=`.
     functions: &[],
+    functions_prefix_paren: &[
+        "void ",
+        "int ",
+        "char ",
+        "float ",
+        "double ",
+        "long ",
+        "unsigned ",
+        "size_t ",
+        "static ",
+        "inline ",
+        "const ",
+        "extern ",
+    ],
     classes: &[
         "struct ",
         "typedef struct ",
@@ -1032,8 +1061,32 @@ const SP_C: SymbolPatterns = SymbolPatterns {
 };
 
 const SP_CPP: SymbolPatterns = SymbolPatterns {
-    functions: &[],
-    classes: &["class ", "struct ", "namespace ", "template "],
+    // C++ specific function keyword-prefixes; return-type-led patterns use functions_prefix_paren.
+    functions: &[
+        "virtual ",  // virtual method declaration/definition
+        "explicit ", // explicit constructor modifier
+        "~",         // destructor (e.g. ~MyClass())
+        "operator",  // operator overload (operator==, operator+, …)
+    ],
+    functions_prefix_paren: &[
+        "void ",
+        "bool ",
+        "int ",
+        "char ",
+        "float ",
+        "double ",
+        "long ",
+        "unsigned ",
+        "size_t ",
+        "auto ",
+        "static ",
+        "inline ",
+        "constexpr ",
+        "const ",
+        "extern ",
+    ],
+    // `template<` (no space) is the dominant modern style alongside `template ` (with space).
+    classes: &["class ", "struct ", "namespace ", "template ", "template<"],
     variables: &[],
     imports: &["#include "],
     tests: TEST_PATTERNS_C_CPP,
@@ -1043,6 +1096,7 @@ const SP_CPP: SymbolPatterns = SymbolPatterns {
 
 const SP_SHELL: SymbolPatterns = SymbolPatterns {
     functions: &["function "],
+    functions_prefix_paren: &[],
     classes: &[],
     variables: &["declare ", "local ", "export "],
     imports: &["source ", ". "],
@@ -1053,6 +1107,7 @@ const SP_SHELL: SymbolPatterns = SymbolPatterns {
 
 const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
     functions: &["function ", "Function "],
+    functions_prefix_paren: &[],
     classes: &["class "],
     variables: &[],
     imports: &["Import-Module ", "using "],
@@ -1076,6 +1131,7 @@ const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
         "private suspend fun ",
         "public suspend fun ",
     ],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "data class ",
@@ -1128,6 +1184,7 @@ const SP_SWIFT: SymbolPatterns = SymbolPatterns {
         "private static func ",
         "public static func ",
     ],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "struct ",
@@ -1172,6 +1229,7 @@ const SP_SWIFT: SymbolPatterns = SymbolPatterns {
 
 const SP_RUBY: SymbolPatterns = SymbolPatterns {
     functions: &["def ", "private def ", "protected def "],
+    functions_prefix_paren: &[],
     classes: &["class ", "module "],
     variables: &[],
     imports: &["require ", "require_relative "],
@@ -1183,6 +1241,7 @@ const SP_RUBY: SymbolPatterns = SymbolPatterns {
 
 const SP_SCALA: SymbolPatterns = SymbolPatterns {
     functions: &["def ", "private def ", "protected def ", "override def "],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "case class ",
@@ -1212,6 +1271,7 @@ const SP_PHP: SymbolPatterns = SymbolPatterns {
         "private static function ",
         "protected static function ",
     ],
+    functions_prefix_paren: &[],
     classes: &[
         "class ",
         "abstract class ",
@@ -1248,6 +1308,7 @@ const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
         "defguard ",
         "defguardp ",
     ],
+    functions_prefix_paren: &[],
     classes: &["defmodule ", "defprotocol ", "defimpl "],
     variables: &[],
     imports: &["import ", "alias ", "use ", "require "],
@@ -1259,6 +1320,7 @@ const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
 
 const SP_ERLANG: SymbolPatterns = SymbolPatterns {
     functions: &[],
+    functions_prefix_paren: &[],
     classes: &["-module("],
     variables: &[],
     imports: &["-import(", "-include(", "-include_lib("],
@@ -1275,6 +1337,7 @@ const SP_FSHARP: SymbolPatterns = SymbolPatterns {
         "override ",
         "abstract member ",
     ],
+    functions_prefix_paren: &[],
     classes: &["type "],
     variables: &["let mutable "],
     imports: &["open "],
@@ -1286,6 +1349,7 @@ const SP_FSHARP: SymbolPatterns = SymbolPatterns {
 
 const SP_GROOVY: SymbolPatterns = SymbolPatterns {
     functions: &["def ", "private def ", "public def ", "protected def "],
+    functions_prefix_paren: &[],
     classes: &["class ", "abstract class ", "interface ", "enum ", "trait "],
     variables: &[],
     imports: &["import "],
@@ -1297,6 +1361,7 @@ const SP_GROOVY: SymbolPatterns = SymbolPatterns {
 
 const SP_HASKELL: SymbolPatterns = SymbolPatterns {
     functions: &[],
+    functions_prefix_paren: &[],
     classes: &["class ", "data ", "newtype ", "type "],
     variables: &[],
     imports: &["import "],
@@ -1307,6 +1372,7 @@ const SP_HASKELL: SymbolPatterns = SymbolPatterns {
 
 const SP_LUA: SymbolPatterns = SymbolPatterns {
     functions: &["function ", "local function "],
+    functions_prefix_paren: &[],
     classes: &[],
     variables: &["local "],
     imports: &[],
@@ -1326,6 +1392,7 @@ const SP_NIM: SymbolPatterns = SymbolPatterns {
         "template ",
         "macro ",
     ],
+    functions_prefix_paren: &[],
     classes: &["type "],
     variables: &["var ", "let ", "const "],
     imports: &["import ", "from "],
@@ -1337,6 +1404,7 @@ const SP_NIM: SymbolPatterns = SymbolPatterns {
 
 const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
     functions: &["- (", "+ ("],
+    functions_prefix_paren: &[],
     classes: &["@interface ", "@implementation ", "@protocol "],
     variables: &[],
     imports: &["#import ", "#include "],
@@ -1359,6 +1427,7 @@ const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
 
 const SP_OCAML: SymbolPatterns = SymbolPatterns {
     functions: &["let ", "let rec "],
+    functions_prefix_paren: &[],
     classes: &["type ", "module ", "class "],
     variables: &[],
     imports: &["open "],
@@ -1369,6 +1438,7 @@ const SP_OCAML: SymbolPatterns = SymbolPatterns {
 
 const SP_PERL: SymbolPatterns = SymbolPatterns {
     functions: &["sub "],
+    functions_prefix_paren: &[],
     classes: &["package "],
     variables: &["my ", "our ", "local "],
     imports: &["use ", "require "],
@@ -1379,6 +1449,7 @@ const SP_PERL: SymbolPatterns = SymbolPatterns {
 
 const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
     functions: &["(defn ", "(defn- ", "(defmacro ", "(defmulti "],
+    functions_prefix_paren: &[],
     classes: &[
         "(defrecord ",
         "(defprotocol ",
@@ -1395,6 +1466,7 @@ const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
 
 const SP_JULIA: SymbolPatterns = SymbolPatterns {
     functions: &["function ", "macro "],
+    functions_prefix_paren: &[],
     classes: &[
         "struct ",
         "mutable struct ",
@@ -1411,6 +1483,7 @@ const SP_JULIA: SymbolPatterns = SymbolPatterns {
 
 const SP_DART: SymbolPatterns = SymbolPatterns {
     functions: &[],
+    functions_prefix_paren: &[],
     classes: &["class ", "abstract class ", "mixin ", "extension ", "enum "],
     variables: &["var ", "final ", "const ", "late "],
     imports: &["import "],
@@ -1422,6 +1495,7 @@ const SP_DART: SymbolPatterns = SymbolPatterns {
 
 const SP_R: SymbolPatterns = SymbolPatterns {
     functions: &[],
+    functions_prefix_paren: &[],
     classes: &[],
     variables: &[],
     imports: &["library(", "source("],
@@ -1442,6 +1516,7 @@ const SP_SQL: SymbolPatterns = SymbolPatterns {
         "CREATE PROCEDURE ",
         "CREATE OR REPLACE PROCEDURE ",
     ],
+    functions_prefix_paren: &[],
     classes: &[
         "create table ",
         "create view ",
@@ -1459,6 +1534,7 @@ const SP_SQL: SymbolPatterns = SymbolPatterns {
 
 const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
     functions: &["proc ", "PROC "],
+    functions_prefix_paren: &[],
     classes: &[],
     variables: &[],
     imports: &["include ", "INCLUDE ", "%include "],
@@ -1475,6 +1551,7 @@ const SP_ZIG: SymbolPatterns = SymbolPatterns {
         "inline fn ",
         "pub inline fn ",
     ],
+    functions_prefix_paren: &[],
     classes: &[],
     variables: &["var ", "pub var "],
     imports: &[],
@@ -2446,8 +2523,21 @@ const fn classify_line(raw: &mut RawLineCounts, facts: &LineFacts, trimmed: &str
 
 fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64, u64, u64) {
     let hit = |pats: &[&str]| u64::from(pats.iter().any(|p| trimmed.starts_with(p)));
+    // For return-type-led languages (C/C++): match prefix AND `(` present AND no `=` sits
+    // between the prefix start and the first `(` (guards against `void* p = malloc(n)`).
+    let fn_pp = if patterns.functions_prefix_paren.is_empty() {
+        0
+    } else if let Some(paren_pos) = trimmed.find('(') {
+        if !trimmed[..paren_pos].contains('=') {
+            hit(patterns.functions_prefix_paren)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     (
-        hit(patterns.functions),
+        hit(patterns.functions) | fn_pp,
         hit(patterns.classes),
         hit(patterns.variables),
         hit(patterns.imports),
