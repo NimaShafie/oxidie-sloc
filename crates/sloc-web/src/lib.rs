@@ -17421,7 +17421,7 @@ struct CompareSelectTemplate {
     .tab-btn{padding:6px 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;transition:background .12s ease;}
     .tab-btn.active{background:var(--accent,#6f9bff);border-color:var(--accent,#6f9bff);color:#fff;}
     .tab-btn:hover:not(.active){background:var(--line);}
-    .btn-reset{padding:6px 14px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:background .12s ease;white-space:nowrap;}
+    .btn-reset{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s ease;white-space:nowrap;}
     .btn-reset:hover{background:var(--line);}
     .table-wrap{width:100%;overflow-x:auto;}
     table{width:100%;border-collapse:collapse;font-size:13px;table-layout:auto;}
@@ -17771,7 +17771,7 @@ struct CompareSelectTemplate {
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;">
           <span class="delta-note">* &Delta; = delta (change from baseline &rarr; current)</span>
           <div class="export-group">
-            <button type="button" class="btn-reset" id="delta-reset-btn">&#8635; Reset</button>
+            <button type="button" class="export-btn" id="delta-reset-btn">&#8635; Reset</button>
             <button type="button" class="export-btn" id="delta-csv-btn">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               CSV
@@ -18369,7 +18369,8 @@ struct CompareSelectTemplate {
       function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
       function px(n){return Math.round(n);}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
-      function btt(l,v){return ' class="ic-cb" onmouseover="icTT(event,\''+jsq(l)+'\',\''+jsq(v)+'\')" onmouseout="icHT()" onmousemove="icMT(event)"';}
+      function btt(l,v){return ' class="ic-cb" data-ttl="'+esc(l)+'" data-ttv="'+esc(v)+'"';}
+      function addTT(el){if(!el)return;el.addEventListener('mouseover',function(e){var t=e.target.closest('[data-ttl]');if(t)icTT(e,t.getAttribute('data-ttl'),t.getAttribute('data-ttv'));});el.addEventListener('mouseout',function(e){if(!e.relatedTarget||!el.contains(e.relatedTarget))icHT();});el.addEventListener('mousemove',function(e){icMT(e);});}
       var dr=getDeltaExportRows(),sd=_sd,lm={};
       dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
       var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
@@ -18444,10 +18445,10 @@ struct CompareSelectTemplate {
       c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
       segs.forEach(function(s,i){c4+='<rect x="234" y="'+(16+i*44)+'" width="14" height="14" fill="'+s.c+'" rx="2"/><text x="252" y="'+(27+i*44)+'" font-family="Inter,Calibri,Arial" font-size="12" fill="#444">'+esc(s.l)+': '+fmt(s.v)+'</text>';});
       c4+='</svg>';
-      var e1=document.getElementById('ic-c1');if(e1)e1.innerHTML=c1;
-      var e2=document.getElementById('ic-c2');if(e2)e2.innerHTML=c2;
-      var e3=document.getElementById('ic-c3');if(e3)e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';
-      var e4=document.getElementById('ic-c4');if(e4)e4.innerHTML=c4;
+      var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=c1;addTT(e1);}
+      var e2=document.getElementById('ic-c2');if(e2){e2.innerHTML=c2;addTT(e2);}
+      var e3=document.getElementById('ic-c3');if(e3){e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';addTT(e3);}
+      var e4=document.getElementById('ic-c4');if(e4){e4.innerHTML=c4;addTT(e4);}
       var lc=document.getElementById('ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
     })();
   </script>
