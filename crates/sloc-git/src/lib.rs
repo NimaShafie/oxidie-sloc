@@ -7,6 +7,7 @@ pub mod webhook;
 
 pub use ops::{
     clone_or_fetch, create_worktree, destroy_worktree, get_sha, list_commits, list_refs,
+    normalize_git_url,
 };
 pub use schedule::{ScanSchedule, ScanScheduleKind, ScanScheduleProvider, ScheduleStore};
 pub use webhook::{

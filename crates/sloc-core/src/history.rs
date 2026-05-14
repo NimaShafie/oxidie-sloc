@@ -40,6 +40,10 @@ pub struct RegistryEntry {
     pub html_path: Option<PathBuf>,
     #[serde(default)]
     pub pdf_path: Option<PathBuf>,
+    #[serde(default)]
+    pub csv_path: Option<PathBuf>,
+    #[serde(default)]
+    pub xlsx_path: Option<PathBuf>,
     pub summary: ScanSummarySnapshot,
     /// Git branch active at scan time, if the project is a git repo.
     #[serde(default)]

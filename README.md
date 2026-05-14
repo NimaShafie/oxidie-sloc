@@ -445,9 +445,24 @@ In Docker, Chromium is bundled — no extra setup needed.
 
 ## CSV and Excel export
 
-Every HTML report has **Export CSV** and **Export Excel** buttons in the nav bar. The Excel workbook has four sheets: Summary, By Language, Per File, and Skipped Files — works in Excel, LibreOffice, and Google Sheets.
+**Web UI:** Every analysis run automatically generates `report.csv` and `report.xlsx` alongside the HTML and JSON artifacts. The **Export CSV** and **Export Excel** buttons in the HTML report nav bar serve the pre-generated files directly — no on-the-fly generation. The server-side artifacts are also accessible via:
 
-CLI flags: `-c result.csv -x result.xlsx` on `analyze`, `report`, and `diff`.
+```
+GET /runs/csv/<run_id>
+GET /runs/xlsx/<run_id>
+```
+
+These endpoints work in CI/CD pipelines that call the REST API to pull artifacts after a web-triggered scan.
+
+The Excel workbook has four sheets: Summary, By Language, Per File, and Skipped Files — compatible with Excel, LibreOffice, and Google Sheets.
+
+**CLI:** use `-c result.csv -x result.xlsx` on `analyze`, `report`, and `diff`.
+
+```bash
+oxide-sloc analyze ./my-repo -j result.json -H report.html -c report.csv -x report.xlsx
+oxide-sloc report result.json -c report.csv -x report.xlsx
+oxide-sloc diff baseline.json current.json -c delta.csv -x delta.xlsx
+```
 
 ---
 

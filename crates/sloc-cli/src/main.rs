@@ -831,11 +831,19 @@ fn run_diff(args: &DiffArgs) -> Result<()> {
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let mut config = load_base_config(args.config.as_deref())?;
+    // SLOC_BIND overrides the config file but is itself overridden by --bind.
+    let bind_env = std::env::var("SLOC_BIND").ok().filter(|s| !s.is_empty());
     if args.server {
         config.web.server_mode = true;
-        if args.bind.is_none() && config.web.bind_address.starts_with("127.0.0.1") {
+        if args.bind.is_none()
+            && bind_env.is_none()
+            && config.web.bind_address.starts_with("127.0.0.1")
+        {
             config.web.bind_address = "0.0.0.0:4317".into();
         }
+    }
+    if let Some(bind) = bind_env {
+        config.web.bind_address = bind;
     }
     if let Some(bind) = args.bind {
         config.web.bind_address = bind;

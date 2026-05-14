@@ -27,13 +27,9 @@ SLOC_PORT=4317
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
     PLATFORM=windows
     EXE="$REPO_ROOT/oxide-sloc.exe"
-    EXE_DIST="$REPO_ROOT/dist/oxide-sloc.exe"
-    EXE_BUILD="$REPO_ROOT/target/release/oxide-sloc.exe"
 else
     PLATFORM=linux
     EXE="$REPO_ROOT/oxide-sloc"
-    EXE_DIST="$REPO_ROOT/dist/oxide-sloc"
-    EXE_BUILD="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
 # Parse flags
@@ -263,6 +259,9 @@ print_banner() {
             printf '      %s\n' "$FIREWALL_FIX"
         fi
         printf '\n'
+    elif [[ "$PLATFORM" == windows ]]; then
+        printf '  Firewall: Windows Defender may show a network access dialog.\n'
+        printf '    Click "Allow access" to open port %s \xe2\x80\x94 no admin rights required.\n\n' "$SLOC_PORT"
     fi
 
     printf '  Press Ctrl+C to stop.\n\n'
@@ -490,9 +489,9 @@ if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
     exit 0
 fi
 
-if   [[ -f "$EXE" ]];       then do_launch_binary "$EXE";       exit 0
-elif [[ -f "$EXE_DIST" ]];  then do_launch_binary "$EXE_DIST";  exit 0
-elif [[ -f "$EXE_BUILD" ]]; then do_launch_binary "$EXE_BUILD"; exit 0
+if [[ -f "$EXE" ]]; then
+    do_launch_binary "$EXE"
+    exit 0
 fi
 
 printf '\noxide-sloc: no binary found.\n\n' >&2

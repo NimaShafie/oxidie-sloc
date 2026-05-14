@@ -186,7 +186,11 @@ pub struct CompareRefsQuery {
     .input-icon-prefix svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;}
     .repo-input-padded{padding-left:34px;}
     .card.fetch-card{padding-bottom:0;}
-    .fetch-footer{margin:14px -24px 0;padding:11px 24px 10px;background:var(--surface-2);border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius);font-size:12px;color:var(--muted);line-height:1.4;}
+    .fetch-footer{margin:14px -24px 0;padding:12px 18px 12px 16px;background:var(--surface-2);border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius);font-size:12px;color:var(--muted);line-height:1.5;display:flex;gap:10px;align-items:flex-start;}
+    .fetch-footer-icon{flex-shrink:0;margin-top:1px;color:var(--oxide);opacity:0.75;}
+    .fetch-footer-icon svg{display:block;width:15px;height:15px;}
+    .fetch-footer-body{flex:1;}
+    .fetch-footer-body span+span{display:block;margin-top:4px;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
     /* ── Tabs with icons ── */
@@ -231,6 +235,18 @@ pub struct CompareRefsQuery {
     .pag-btn.active{background:var(--oxide-2);color:#fff;border-color:var(--oxide-2);}
     .pag-btn:disabled{opacity:0.35;cursor:default;}
     .pag-ellipsis{font-size:13px;color:var(--muted);padding:0 3px;line-height:28px;}
+    /* ── Fetch error state (shown in table bodies on failed load) ── */
+    .fetch-error-state{text-align:center;padding:44px 20px 38px;}
+    .fetch-error-icon-wrap{display:inline-flex;width:52px;height:52px;border-radius:14px;background:rgba(220,38,38,0.08);border:2px solid rgba(220,38,38,0.2);align-items:center;justify-content:center;margin-bottom:13px;}
+    .fetch-error-icon-wrap svg{width:26px;height:26px;stroke:#dc2626;fill:none;stroke-width:1.5;}
+    body.dark-theme .fetch-error-icon-wrap{background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);}
+    body.dark-theme .fetch-error-icon-wrap svg{stroke:#f87171;}
+    .fetch-error-title{font-size:14px;font-weight:700;color:var(--text);margin-bottom:9px;}
+    .fetch-error-msg{font-size:12px;color:#991b1b;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#fee2e2;border:1px solid #fca5a5;border-radius:7px;padding:9px 13px;max-width:560px;margin:0 auto 12px;text-align:left;white-space:pre-wrap;word-break:break-all;line-height:1.55;}
+    body.dark-theme .fetch-error-msg{color:#fca5a5;background:#450a0a;border-color:#991b1b;}
+    .fetch-error-hints{font-size:12px;color:var(--muted);max-width:560px;margin:0 auto;text-align:left;background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:10px 13px;line-height:1.6;}
+    .fetch-error-hints code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;background:var(--line);padding:1px 5px;border-radius:4px;word-break:break-all;}
+    .fetch-error-hints b{color:var(--text);}
   </style>
 </head>
 <body>
@@ -340,7 +356,13 @@ pub struct CompareRefsQuery {
         </button>
       </div>
       <div id="statusMsg" style="display:none" class="status-msg"></div>
-      <div class="fetch-footer"><span style="display:block">First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached).</span><span style="display:block;margin-top:4px">Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching.</span></div>
+      <div class="fetch-footer">
+        <span class="fetch-footer-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
+        <span class="fetch-footer-body">
+          <span>First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Browse URLs (e.g. <code style="font-family:ui-monospace,monospace;font-size:11px">/projects/PROJ/repos/REPO/browse</code>) are automatically converted to git clone URLs.</span>
+          <span>Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching. For internal repos with self-signed certificates, set <code style="font-family:ui-monospace,monospace;font-size:11px">SLOC_GIT_SSL_NO_VERIFY=1</code> before starting oxide-sloc.</span>
+        </span>
+      </div>
     </div>
     <div id="loadingPanel" class="skeleton-panel panel-hidden">
       <div class="loading-info">
@@ -459,9 +481,94 @@ pub struct CompareRefsQuery {
         document.getElementById('statusMsg').style.display = 'none';
       }
 
+      // ── Error display helpers ─────────────────────────────────────────────────
+
+      function getErrorHints(errMsg, inputUrl) {
+        var lower = inputUrl.toLowerCase();
+        var errLower = errMsg.toLowerCase();
+
+        // Bitbucket Server/Data Center browse URL
+        if (lower.includes('/projects/') && lower.includes('/repos/')) {
+          var m = inputUrl.match(/^(https?:\/\/[^/]+)(\/[^/]*)\/projects\/([^/]+)\/repos\/([^/]+)/i);
+          if (m) {
+            var derived = m[1] + m[2] + '/scm/' + m[3].toLowerCase() + '/' + m[4].replace(/\.git$/i, '') + '.git';
+            return '<b>Bitbucket Server/Data Center URL detected.</b> The browse URL was automatically converted to: <code>' + esc(derived) + '</code><br>If the fetch failed, verify the repository exists and you have access.';
+          }
+          return '<b>Bitbucket Server/Data Center URL detected.</b> Browse URLs are automatically converted to the git clone format (<code>/scm/PROJECT/repo.git</code>). If the fetch still fails, the derived URL may be wrong for your deployment.';
+        }
+
+        // Bitbucket Cloud browse URL
+        if (lower.includes('bitbucket.org') && lower.includes('/src/')) {
+          return '<b>Bitbucket Cloud browse URL.</b> The <code>/src/…</code> suffix was stripped. If the fetch failed, check that the repository is public or that your git credentials are configured.';
+        }
+
+        // GitLab browse URL
+        if (lower.includes('/-/')) {
+          var repoUrl = inputUrl.replace(/\/-\/.*$/, '').replace(/\.git$/, '') + '.git';
+          return '<b>GitLab browse URL detected.</b> Converted to: <code>' + esc(repoUrl) + '</code>';
+        }
+
+        // GitHub browse URL
+        if ((lower.includes('github.com') || lower.includes('.github.com')) && (lower.includes('/tree/') || lower.includes('/blob/'))) {
+          return '<b>GitHub browse URL detected.</b> The branch/path suffix was stripped to produce a clone URL.';
+        }
+
+        // SSL / certificate errors
+        if (errLower.includes('ssl') || errLower.includes('certificate') || errLower.includes('tls')) {
+          return '<b>SSL certificate error.</b> For corporate/internal repos with self-signed certificates, start oxide-sloc with <code>SLOC_GIT_SSL_NO_VERIFY=1</code>, or add the CA certificate to your system trust store.';
+        }
+
+        // Authentication errors
+        if (errLower.includes('authentication failed') || errLower.includes('could not read username') || errLower.includes('403') || errLower.includes('401')) {
+          return '<b>Authentication required.</b> Configure HTTPS credentials in your <a href="https://git-scm.com/docs/git-credential-store" target="_blank" rel="noopener">git credential store</a>, or use an SSH URL (<code>git@host:project/repo.git</code>).';
+        }
+
+        // Repository not found
+        if (errLower.includes('not found') || errLower.includes('does not exist') || errLower.includes('404') || errLower.includes('repository') && errLower.includes('not')) {
+          return '<b>Repository not found.</b> Verify the URL is correct and the repository is accessible from this machine. For private repos, ensure your credentials are configured in git.';
+        }
+
+        // Connection errors
+        if (errLower.includes('could not resolve host') || errLower.includes('failed to connect') || errLower.includes('connection refused') || errLower.includes('network')) {
+          return '<b>Network error.</b> Check that the host is reachable from this machine. For internal corporate repos, ensure you are connected to the correct network or VPN.';
+        }
+
+        return '';
+      }
+
+      function buildErrorTableHtml(errMsg, inputUrl) {
+        var hints = getErrorHints(errMsg, inputUrl);
+        var short = errMsg.length > 400 ? errMsg.slice(0, 397) + '…' : errMsg;
+        return '<tr><td colspan="6"><div class="fetch-error-state">'
+          + '<div class="fetch-error-icon-wrap"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>'
+          + '<div class="fetch-error-title">Repository fetch failed</div>'
+          + '<div class="fetch-error-msg">' + esc(short) + '</div>'
+          + (hints ? '<div class="fetch-error-hints">' + hints + '</div>' : '')
+          + '</div></td></tr>';
+      }
+
+      function showFetchError(errMsg, inputUrl) {
+        var html = buildErrorTableHtml(errMsg, inputUrl);
+        ['branchBody', 'tagBody', 'commitBody'].forEach(function (id) {
+          var el = document.getElementById(id); if (el) el.innerHTML = html;
+        });
+        ['branchPag', 'tagPag', 'commitPag'].forEach(function (id) {
+          var el = document.getElementById(id); if (el) el.innerHTML = '';
+        });
+        setTabCount('branchCount', 0);
+        setTabCount('tagCount', 0);
+        setTabCount('commitCount', 0);
+        var topbar = document.getElementById('refPanelTopbar');
+        if (topbar) topbar.classList.remove('visible');
+        document.getElementById('refPanel').classList.remove('panel-hidden');
+        // Short summary near the input as well
+        var brief = errMsg.length > 100 ? errMsg.slice(0, 97) + '…' : errMsg;
+        showStatus(brief, false);
+      }
+
       async function fetchRefs() {
         var repo = document.getElementById('repoInput').value.trim();
-        if (!repo) { showStatus('Enter a GitHub, GitLab, or Bitbucket HTTPS URL.', false); return; }
+        if (!repo) { showStatus('Enter a GitHub, GitLab, or Bitbucket URL.', false); return; }
         currentRepo = repo;
         document.getElementById('statusMsg').style.display = 'none';
         document.getElementById('loadSpinner').classList.remove('panel-hidden');
@@ -481,11 +588,11 @@ pub struct CompareRefsQuery {
         try {
           var r = await fetch('/api/git/refs?' + new URLSearchParams({ repo: repo }));
           var data = await r.json();
-          if (!r.ok) { showStatus(data.error || 'Failed to load repository.', false); return; }
+          if (!r.ok) { showFetchError(data.error || 'Failed to load repository.', repo); return; }
           renderRefs(data);
           document.getElementById('refPanel').classList.remove('panel-hidden');
           document.getElementById('statusMsg').style.display = 'none';
-        } catch (e) { showStatus('Network error: ' + e.message, false); }
+        } catch (e) { showFetchError('Network error: ' + e.message, repo); }
         finally {
           clearInterval(timer);
           if (loadingMsg) loadingMsg.lastChild.textContent = baseText;

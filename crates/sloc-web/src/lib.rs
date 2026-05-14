@@ -410,6 +410,8 @@ pub(crate) struct RunArtifacts {
     html_path: Option<PathBuf>,
     pdf_path: Option<PathBuf>,
     json_path: Option<PathBuf>,
+    csv_path: Option<PathBuf>,
+    xlsx_path: Option<PathBuf>,
     scan_config_path: Option<PathBuf>,
     report_title: String,
     result_context: RunResultContext,
@@ -1240,7 +1242,7 @@ async fn add_security_headers(
     );
     let csp = format!(
         "default-src 'self'; \
-         style-src 'self' 'nonce-{nonce}'; \
+         style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob:; \
          script-src 'self' 'nonce-{nonce}'; \
          font-src 'self' data:; \
@@ -1736,6 +1738,8 @@ fn registry_entry_from_run(
             imports: run.summary_totals.imports,
             test_count: run.summary_totals.test_count,
         },
+        csv_path: None,
+        xlsx_path: None,
         git_branch: None,
         git_commit: None,
         git_author: None,
@@ -2014,6 +2018,8 @@ async fn locate_reports_dir_handler(
             json_path: Some(json_path),
             html_path,
             pdf_path: None,
+            csv_path: None,
+            xlsx_path: None,
             summary: ScanSummarySnapshot {
                 files_analyzed: run.summary_totals.files_analyzed,
                 files_skipped: run.summary_totals.files_skipped,
@@ -2301,6 +2307,8 @@ fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -
             json_path: Some(json_path),
             html_path,
             pdf_path: None,
+            csv_path: None,
+            xlsx_path: None,
             summary: ScanSummarySnapshot {
                 files_analyzed: run.summary_totals.files_analyzed,
                 files_skipped: run.summary_totals.files_skipped,
@@ -2827,6 +2835,8 @@ pub(crate) fn build_run_registry_entry(
         json_path: artifacts.json_path.clone(),
         html_path: artifacts.html_path.clone(),
         pdf_path: artifacts.pdf_path.clone(),
+        csv_path: artifacts.csv_path.clone(),
+        xlsx_path: artifacts.xlsx_path.clone(),
         summary: summary_snapshot_from_run(run),
         git_branch: run.git_branch.clone(),
         git_commit: run.git_commit_short.clone(),
@@ -2879,7 +2889,13 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
 }
 
 /// Fire-and-forget: generate the PDF in a background task if one is pending.
-fn spawn_pdf_background(pending_pdf: PendingPdf) {
+/// On failure, clears `pdf_path` in the artifacts map so the results page shows
+/// an error instead of spinning indefinitely.
+fn spawn_pdf_background(
+    pending_pdf: PendingPdf,
+    run_id: String,
+    artifacts: Arc<Mutex<HashMap<String, RunArtifacts>>>,
+) {
     if let Some((pdf_src, pdf_dst, cleanup_src)) = pending_pdf {
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -2890,10 +2906,22 @@ fn spawn_pdf_background(pending_pdf: PendingPdf) {
                 r
             })
             .await;
-            match result {
-                Ok(Err(err)) => eprintln!("[oxide-sloc][pdf] background PDF failed: {err}"),
-                Err(err) => eprintln!("[oxide-sloc][pdf] background PDF task panicked: {err}"),
-                Ok(Ok(())) => {}
+            let failed = match result {
+                Ok(Ok(())) => false,
+                Ok(Err(err)) => {
+                    eprintln!("[oxide-sloc][pdf] background PDF failed: {err}");
+                    true
+                }
+                Err(err) => {
+                    eprintln!("[oxide-sloc][pdf] background PDF task panicked: {err}");
+                    true
+                }
+            };
+            if failed {
+                let mut map = artifacts.lock().await;
+                if let Some(entry) = map.get_mut(&run_id) {
+                    entry.pdf_path = None;
+                }
             }
         });
     }
@@ -3265,7 +3293,7 @@ async fn analyze_handler(
             }
         }
 
-        spawn_pdf_background(pending_pdf);
+        spawn_pdf_background(pending_pdf, run_id.clone(), state_bg.artifacts.clone());
 
         // Mark complete — client is now polling and will be redirected to /runs/result/{run_id}.
         let mut runs = state_bg.async_runs.lock().await;
@@ -3988,6 +4016,8 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
         .as_ref()
         .or(entry.json_path.as_ref())
         .or(entry.pdf_path.as_ref())
+        .or(entry.csv_path.as_ref())
+        .or(entry.xlsx_path.as_ref())
         .and_then(|p| p.parent().map(PathBuf::from))
         .unwrap_or_default();
     // Recover pdf_path: use the persisted one, or look for report.pdf
@@ -3996,11 +4026,40 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
         let candidate = output_dir.join("report.pdf");
         candidate.exists().then_some(candidate)
     });
+    // csv_path / xlsx_path: persisted paths take precedence; fall back to
+    // scanning the run directory for files matching the expected patterns so
+    // that runs created before this feature still surface their artifacts.
+    let csv_path = entry.csv_path.clone().or_else(|| {
+        fs::read_dir(&output_dir).ok().and_then(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .find(|e| {
+                    let n = e.file_name();
+                    let n = n.to_string_lossy();
+                    n.starts_with("report_") && n.ends_with(".csv")
+                })
+                .map(|e| e.path())
+        })
+    });
+    let xlsx_path = entry.xlsx_path.clone().or_else(|| {
+        fs::read_dir(&output_dir).ok().and_then(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .find(|e| {
+                    let n = e.file_name();
+                    let n = n.to_string_lossy();
+                    n.starts_with("report_") && n.ends_with(".xlsx")
+                })
+                .map(|e| e.path())
+        })
+    });
     RunArtifacts {
         output_dir: output_dir.clone(),
         html_path: entry.html_path.clone(),
         pdf_path,
         json_path: entry.json_path.clone(),
+        csv_path,
+        xlsx_path,
         scan_config_path: find_scan_config_in_dir(&output_dir),
         report_title: entry.project_label.clone(),
         result_context: RunResultContext::default(),
@@ -4030,7 +4089,10 @@ async fn artifact_handler(
             recover_artifacts_from_registry(entry)
         } else {
             let short_id = &run_id[..run_id.len().min(8)];
-            let hint = if matches!(run_id.as_str(), "pdf" | "html" | "json" | "scan-config") {
+            let hint = if matches!(
+                run_id.as_str(),
+                "pdf" | "html" | "json" | "csv" | "xlsx" | "scan-config"
+            ) {
                 format!(
                     " The URL format appears to be reversed — \
                      the server expects /runs/{run_id}/{{run_id}}, not /runs/{{run_id}}/{run_id}. \
@@ -4210,6 +4272,83 @@ async fn artifact_handler(
                 return (StatusCode::NOT_FOUND, Html(html)).into_response();
             };
             serve_json_artifact(&path, wants_download, &csp_nonce)
+        }
+        "csv" => {
+            let Some(path) = artifact_set.csv_path else {
+                let msg = "CSV report was not generated for this run, or was not recorded in \
+                           the scan registry."
+                    .to_string();
+                let html = ErrorTemplate {
+                    message: msg,
+                    last_report_url: Some(format!("/runs/html/{run_id}")),
+                    last_report_label: Some("View HTML Report".to_string()),
+                    csp_nonce: csp_nonce.clone(),
+                }
+                .render()
+                .unwrap_or_else(|_| "<pre>CSV not available.</pre>".to_string());
+                return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            };
+            fs::read(&path).map_or_else(
+                |_| StatusCode::NOT_FOUND.into_response(),
+                |bytes| {
+                    let filename = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "report.csv".to_string());
+                    (
+                        [
+                            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                            (
+                                header::CONTENT_DISPOSITION,
+                                format!("attachment; filename=\"{filename}\""),
+                            ),
+                        ],
+                        bytes,
+                    )
+                        .into_response()
+                },
+            )
+        }
+        "xlsx" => {
+            let Some(path) = artifact_set.xlsx_path else {
+                let msg = "Excel report was not generated for this run, or was not recorded in \
+                           the scan registry."
+                    .to_string();
+                let html = ErrorTemplate {
+                    message: msg,
+                    last_report_url: Some(format!("/runs/html/{run_id}")),
+                    last_report_label: Some("View HTML Report".to_string()),
+                    csp_nonce: csp_nonce.clone(),
+                }
+                .render()
+                .unwrap_or_else(|_| "<pre>Excel not available.</pre>".to_string());
+                return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            };
+            fs::read(&path).map_or_else(
+                |_| StatusCode::NOT_FOUND.into_response(),
+                |bytes| {
+                    let filename = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "report.xlsx".to_string());
+                    (
+                        [
+                            (
+                                header::CONTENT_TYPE,
+                                "application/vnd.openxmlformats-officedocument\
+                                 .spreadsheetml.sheet"
+                                    .to_string(),
+                            ),
+                            (
+                                header::CONTENT_DISPOSITION,
+                                format!("attachment; filename=\"{filename}\""),
+                            ),
+                        ],
+                        bytes,
+                    )
+                        .into_response()
+                },
+            )
         }
         "scan-config" => {
             let path = artifact_set
@@ -5742,6 +5881,7 @@ async fn trend_report_handler(
     .watched-chip-rm:hover{{color:var(--oxide);}}
     .watched-none{{font-size:11px;color:var(--muted);font-style:italic;}}
     .watched-bar-right{{display:flex;gap:6px;align-items:center;flex-shrink:0;}}
+    .watched-bar-right .btn{{box-sizing:border-box;height:28px;}}
     body.dark-theme .watched-chip{{background:rgba(255,255,255,0.05);}}
     .mono{{font-family:ui-monospace,monospace;font-size:11px;}}
     a.run-link{{color:var(--accent-2);font-weight:700;text-decoration:none;}}
@@ -7371,6 +7511,7 @@ async fn test_metrics_handler(
     .watched-chip-rm:hover{{color:var(--oxide);}}
     .watched-none{{font-size:11px;color:var(--muted);font-style:italic;}}
     .watched-bar-right{{display:flex;gap:6px;align-items:center;flex-shrink:0;}}
+    .watched-bar-right .btn{{box-sizing:border-box;height:28px;}}
     body.dark-theme .watched-chip{{background:rgba(255,255,255,0.05);}}
     .cov-file-toolbar{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;}}
     .cov-filter-tabs{{display:flex;gap:6px;flex-wrap:wrap;}}
@@ -8224,6 +8365,27 @@ fn persist_run_artifacts(
         pending_pdf = Some((source_html_path, pdf_dest, cleanup_src));
     }
 
+    // CSV and XLSX are always generated (like JSON) — no extra flag required.
+    let csv_path = {
+        let path = run_dir.join(format!("report_{file_stem}.csv"));
+        if let Err(e) = sloc_report::write_csv(run, &path) {
+            eprintln!("[oxide-sloc] CSV write failed (non-fatal): {e:#}");
+            None
+        } else {
+            Some(path)
+        }
+    };
+
+    let xlsx_path = {
+        let path = run_dir.join(format!("report_{file_stem}.xlsx"));
+        if let Err(e) = sloc_report::write_xlsx(run, &path) {
+            eprintln!("[oxide-sloc] XLSX write failed (non-fatal): {e:#}");
+            None
+        } else {
+            Some(path)
+        }
+    };
+
     let scan_config_path = Some(run_dir.join(format!("scan-config_{file_stem}.json")));
 
     Ok((
@@ -8232,6 +8394,8 @@ fn persist_run_artifacts(
             html_path,
             pdf_path,
             json_path,
+            csv_path,
+            xlsx_path,
             scan_config_path,
             report_title: report_title.to_string(),
             result_context,
@@ -10654,8 +10818,7 @@ pytest --cov --cov-report=xml
                     <input type="checkbox" name="generate_json" checked class="hidden artifact-checkbox" />
                   </div>
                 </div>
-                <div style="height:48px;flex-shrink:0;display:block;"></div>
-                <div class="hint">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
+                <div class="hint" style="margin-top:12px;">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
               </div>
 
               <div class="wizard-actions">
@@ -12449,6 +12612,41 @@ struct IndexTemplate {
     body.dark-theme .lan-local-hint code{background:rgba(255,255,255,0.06);}
     .lan-local-hint strong{color:var(--muted);font-weight:600;margin-right:2px;}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    @media (max-height: 1100px) {
+      .page{padding-top:10px;}
+      .hero{margin-bottom:10px;}
+      .hero-logo{width:54px;height:60px;}
+      .hero-logo-shadow{width:42px;}
+      .hero-title{font-size:28px;}
+      .hero-subtitle{font-size:13px;min-height:2em;}
+      .card-sections{gap:16px;margin-bottom:10px;}
+      .card-section-grid-2,.card-section-grid-3{gap:10px;}
+      .action-card{padding:8px 15px 8px;}
+      .action-card-icon{width:34px;height:34px;border-radius:10px;margin-bottom:6px;}
+      .action-card-icon svg{width:18px;height:18px;}
+      .action-card-title{font-size:13px;}
+      .action-card-desc{font-size:11px;margin-bottom:6px;}
+      .action-card-cta{font-size:11px;}
+      .ac-right-row{font-size:11px;}
+      .divider{margin:14px 0;}
+      .info-strip{gap:7px;margin-bottom:12px;}
+      .info-chip{padding:7px 10px;}
+      .info-chip-val{font-size:13px;}
+      .info-chip-label{font-size:9px;}
+      .site-footer{padding:8px 24px;font-size:12px;}
+    }
+    @media (max-height: 850px) {
+      .page{padding-top:6px;}
+      .hero{margin-bottom:6px;}
+      .hero-logo{width:42px;height:46px;}
+      .hero-title{font-size:22px;}
+      .hero-subtitle{font-size:12px;min-height:1.6em;}
+      .card-sections{gap:10px;}
+      .action-card-desc{margin-bottom:4px;}
+      .divider{margin:8px 0;}
+      .info-strip{margin-bottom:6px;}
+      .lan-local-hint{margin-top:10px;}
+    }
   </style>
 </head>
 <body>
@@ -15763,6 +15961,7 @@ struct RelocateScanTemplate {
     .watched-chip-rm:hover{color:var(--oxide);}
     .watched-none{font-size:11px;color:var(--muted);font-style:italic;}
     .watched-bar-right{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+    .watched-bar-right .btn{box-sizing:border-box;height:28px;}
     body.dark-theme .watched-chip{background:rgba(255,255,255,0.05);}
     .rpt-btn{min-width:58px;justify-content:center;}
     .flex-row{display:flex;align-items:center;gap:8px;}
@@ -16431,6 +16630,7 @@ struct HistoryTemplate {
     .watched-chip-rm:hover{color:var(--oxide);}
     .watched-none{font-size:11px;color:var(--muted);font-style:italic;}
     .watched-bar-right{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+    .watched-bar-right .btn{box-sizing:border-box;height:28px;}
     body.dark-theme .watched-chip{background:rgba(255,255,255,0.05);}
     .submod-chips-cell{display:flex;flex-wrap:wrap;gap:2px;align-items:flex-start;max-height:50px;overflow:hidden;}
     .submod-overflow-badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px;background:var(--surface);border:1px solid var(--line-strong);color:var(--muted);white-space:nowrap;}

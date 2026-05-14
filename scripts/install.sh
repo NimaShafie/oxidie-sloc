@@ -2,14 +2,15 @@
 # oxide-sloc installer
 #
 # Usage:
-#   bash scripts/install.sh           # auto-detects best path (offline by default)
-#   bash scripts/install.sh --rebuild # force a fresh build even if binary exists
-#   bash scripts/install.sh --auto    # install rustup automatically if needed (no prompt)
-#   bash scripts/install.sh --offline # explicit offline mode (now the default; kept for compatibility)
-#   bash scripts/install.sh --online  # allow downloading release binary from GitHub if needed
+#   bash scripts/install.sh           # build from source (offline, no Rust required)
+#   bash scripts/install.sh --rebuild # force a fresh build even if a binary already exists
+#   bash scripts/install.sh --auto    # auto-install rustup if cargo is absent (interactive prompt)
 #
-# Environment:
-#   OXIDE_SLOC_NO_DOWNLOAD=1  same as --offline
+# Behavior:
+#   No pre-built oxide-sloc binaries are shipped. Every install compiles from source.
+#   If cargo (Rust) is on PATH  → extract vendor sources + run cargo build --release --offline.
+#   If no cargo on PATH          → bootstrap Rust from toolchain/ archives, then build.
+#   All dependency sources are in vendor.tar.xz (committed). No network access required.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,22 +18,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 FORCE_REBUILD=false
 AUTO_RUSTUP=false
-OFFLINE=true   # default: no internet required; use --online to opt in
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true ;;
         --auto) AUTO_RUSTUP=true ;;
-        --offline) OFFLINE=true ;;
-        --online) OFFLINE=false ;;
     esac
 done
-[[ "${OXIDE_SLOC_NO_DOWNLOAD:-}" == "1" ]] && OFFLINE=true
 
 # Detect Windows (Git Bash / MSYS2 / Cygwin)
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
     PLATFORM=windows
     EXE="$REPO_ROOT/oxide-sloc.exe"
-    DIST_ARCHIVE="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc.exe"
 else
     PLATFORM=linux
@@ -42,7 +38,6 @@ else
         aarch64|arm64) LINUX_ARCH=arm64 ;;
         *)             LINUX_ARCH=x86_64 ;;
     esac
-    DIST_ARCHIVE="$REPO_ROOT/dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
@@ -75,8 +70,46 @@ print_log_link() {
     printf '  \033]8;;%s\033\\Click to open log\033]8;;\033\\\n' "$url"
 }
 
+# After toolchain extraction: check whether the bundled cargo.exe is Authenticode-signed.
+# Uses Get-AuthenticodeSignature (read-only, no admin needed). Prints a clear pass/fail
+# so the user knows immediately if EDR on a corporate device will block the binary.
+# When unsigned, explains the two non-admin paths (signing or IT-managed Rust install).
+check_toolchain_signing() {
+    [[ "$PLATFORM" != windows ]] && return 0
+    local cargo_bin="$TOOLS_DIR/cargo/bin/cargo.exe"
+    [[ -f "$cargo_bin" ]] || return 0
+    local cargo_win
+    cargo_win="$(cygpath -w "$cargo_bin" 2>/dev/null || echo "$cargo_bin")"
+    local status
+    status="$(powershell.exe -NoProfile -NonInteractive -Command \
+        "(Get-AuthenticodeSignature '$cargo_win').Status" 2>/dev/null || echo "Unknown")"
+    if [[ "$status" == "Valid" ]]; then
+        echo " [OK] Toolchain binaries are Authenticode-signed — EDR will not flag them."
+    else
+        echo ""
+        echo " WARNING: The extracted Rust toolchain binaries are unsigned."
+        echo " On a corporate device managed by Carbon Black, CrowdStrike, or Defender"
+        echo " with strict policy, cargo.exe / rustup.exe may be blocked — and without"
+        echo " admin rights there is nothing a local user can do to un-block them."
+        echo ""
+        echo " Two solutions (neither requires admin rights on your machine):"
+        echo ""
+        echo "  1) Ask your project maintainer to activate Authenticode signing:"
+        echo "     Set WINDOWS_CERTIFICATE in GitHub Actions secrets, then re-run"
+        echo "     the 'Bundle Rust toolchain' workflow. The resulting toolchain"
+        echo "     archives will contain signed PE files. No exclusions needed."
+        echo ""
+        echo "  2) Ask your IT team to install Rust (rustup) system-wide."
+        echo "     When cargo is already on PATH, this installer skips .tools/"
+        echo "     extraction entirely — no unsigned PE files are written at all."
+        echo ""
+        echo " See docs/av-whitelisting.md for details."
+        echo ""
+    fi
+}
+
 # Offer to import sloc-ca.crt into the current user's Windows trust store.
-# Uses certutil -user — no Administrator rights required.
+# Uses PowerShell X509Store API — no Administrator rights required, no GUI dialog.
 trust_ca_cert() {
     [[ "$PLATFORM" != windows ]] && return 0
     local cert="$REPO_ROOT/certs/sloc-ca.crt"
@@ -88,10 +121,13 @@ trust_ca_cert() {
         return 0
     fi
     echo " Trusting oxide-sloc signing certificate (current user, no Admin required)..."
-    if certutil -user -addstore Root "$cert_win" &>/dev/null 2>&1; then
+    # X509Store.Add() via .NET imports into CurrentUser\Root without a confirmation dialog,
+    # unlike certutil -addstore which always pops a Windows Security Warning for root certs.
+    local ps_script="\$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('${cert_win}'); \$store = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root','CurrentUser'); \$store.Open('ReadWrite'); \$store.Add(\$cert); \$store.Close()"
+    if powershell.exe -NoProfile -NonInteractive -Command "$ps_script" &>/dev/null 2>&1; then
         echo " [OK] Certificate trusted. Signed binaries will verify without internet."
     else
-        echo " [WARN] certutil failed. To trust manually (no Admin needed):"
+        echo " [WARN] Certificate import failed. To trust manually (no Admin needed):"
         echo "        certutil -user -addstore Root certs/sloc-ca.crt"
     fi
 }
@@ -287,91 +323,7 @@ if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == true ]]; then
     rm -f "$EXE"
 fi
 
-# ── 2. Pre-built binary ─────────────────────────────────────────────────────
-if [[ -f "$DIST_ARCHIVE" ]]; then
-    echo " Extracting pre-built binary from dist/..."
-    if [[ "$PLATFORM" == windows ]]; then
-        WIN_ARCHIVE="$(cygpath -w "$DIST_ARCHIVE")"
-        WIN_DEST="$(cygpath -w "$REPO_ROOT")"
-        powershell -NoProfile -Command \
-            "Expand-Archive -Path '$WIN_ARCHIVE' -DestinationPath '$WIN_DEST' -Force"
-    else
-        tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
-        # Tolerate tarballs that use the platform-named binary instead of bare "oxide-sloc"
-        if [[ "$PLATFORM" == linux ]] && [[ ! -f "$EXE" ]] && \
-           [[ -f "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" ]]; then
-            mv "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" "$EXE"
-        fi
-    fi
-    if [[ -f "$EXE" ]]; then
-        [[ "$PLATFORM" == linux ]] && chmod +x "$EXE"
-        echo " [OK] Extracted $(basename "$EXE")"
-        trust_ca_cert
-        echo ""
-        echo " Start the web UI:  bash scripts/run.sh"
-        exit 0
-    fi
-    echo " [WARN] Extraction completed but binary not found — archive may be corrupt."
-fi
-
-# ── 2.5. Download release binary from GitHub (Linux, --online requested) ────
-if [[ "$PLATFORM" == linux ]] && [[ "$OFFLINE" == false ]] && ! command -v cargo &>/dev/null; then
-    if command -v curl &>/dev/null; then
-        VER=$(grep -m1 '^version = ' "$REPO_ROOT/Cargo.toml" 2>/dev/null | sed 's/version = "\(.*\)"/\1/')
-        if [[ -n "$VER" ]]; then
-            RELEASE_URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/v${VER}/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
-            SUMS_URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/v${VER}/SHA256SUMS.txt"
-            echo " Downloading release binary v${VER} (${LINUX_ARCH}) from GitHub..."
-            mkdir -p "$REPO_ROOT/dist"
-            if curl -fsSL --connect-timeout 10 --max-time 120 -o "$DIST_ARCHIVE" "$RELEASE_URL"; then
-                # Verify SHA256 when sha256sum is available
-                SUMS_TMP=$(mktemp)
-                ASSET="oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
-                if command -v sha256sum &>/dev/null && \
-                   curl -fsSL --connect-timeout 10 --max-time 30 -o "$SUMS_TMP" "$SUMS_URL" 2>/dev/null; then
-                    EXPECTED=$(grep "$ASSET" "$SUMS_TMP" 2>/dev/null | awk '{print $1}' || true)
-                    ACTUAL=$(sha256sum "$DIST_ARCHIVE" | awk '{print $1}')
-                    rm -f "$SUMS_TMP"
-                    if [[ -n "$EXPECTED" ]] && [[ "$EXPECTED" != "$ACTUAL" ]]; then
-                        echo " [ERROR] SHA256 mismatch — download may be corrupt or tampered." >&2
-                        rm -f "$DIST_ARCHIVE"
-                    elif [[ -z "$EXPECTED" ]]; then
-                        echo " [OK] Downloaded (no entry for ${ASSET} in SHA256SUMS.txt — skipping verification)."
-                    else
-                        echo " [OK] Downloaded and verified."
-                    fi
-                else
-                    rm -f "$SUMS_TMP"
-                    echo " [OK] Downloaded (checksum file unavailable — skipping verification)."
-                fi
-            else
-                echo " [WARN] Could not reach GitHub Releases — continuing without download."
-                rm -f "$DIST_ARCHIVE"
-            fi
-        fi
-    fi
-fi
-
-# Re-check dist/ archive after potential download
-if [[ -f "$DIST_ARCHIVE" ]] && [[ ! -f "$EXE" ]]; then
-    echo " Extracting pre-built binary from dist/..."
-    tar xzf "$DIST_ARCHIVE" -C "$REPO_ROOT"
-    # Tolerate tarballs that use the platform-named binary instead of bare "oxide-sloc"
-    if [[ ! -f "$EXE" ]] && [[ -f "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" ]]; then
-        mv "$REPO_ROOT/oxide-sloc-linux-${LINUX_ARCH}" "$EXE"
-    fi
-    if [[ -f "$EXE" ]]; then
-        chmod +x "$EXE"
-        echo " [OK] Extracted $(basename "$EXE")"
-        trust_ca_cert
-        echo ""
-        echo " Start the web UI:  bash scripts/run.sh"
-        exit 0
-    fi
-    echo " [WARN] Extraction completed but binary not found — archive may be corrupt."
-fi
-
-# ── 2.7. Bootstrap Rust from bundled toolchain ──────────────────────────────
+# ── 2. Bootstrap Rust from bundled toolchain (if cargo not on PATH) ──────────
 # If cargo is not on PATH but a toolchain archive is committed to toolchain/,
 # extract it locally into .tools/ and export the paths.
 # Archives are gzip-9 .tar.gz files split into ≤45 MB parts by
@@ -396,14 +348,6 @@ if ! command -v cargo &>/dev/null; then
         echo " No Rust toolchain detected — bootstrapping from bundled archive..."
         echo " (one-time extract → ~300-500 MB on disk)"
         echo ""
-        echo " NOTE: If your organisation runs Carbon Black, CrowdStrike, or another"
-        echo " EDR product, the extracted Rust toolchain binaries (.tools/cargo/bin/)"
-        echo " may be flagged if unsigned. Signed toolchain archives (built by a"
-        echo " maintainer with WINDOWS_CERTIFICATE set) resolve this automatically."
-        echo " Windows managed deployments: place oxide-sloc-windows-x64.zip in dist/"
-        echo " to skip compilation entirely. See docs/av-whitelisting.md for details."
-        echo ""
-
         # Verify checksum of each part or the single archive
         TOOLCHAIN_CHECKSUMS="$REPO_ROOT/toolchain/checksums.sha256"
         if [[ -f "$TOOLCHAIN_CHECKSUMS" ]] && command -v sha256sum &>/dev/null; then
@@ -487,6 +431,7 @@ if ! command -v cargo &>/dev/null; then
             exit 1
         fi
         echo " [OK] Rust toolchain bootstrapped at .tools/"
+        check_toolchain_signing
 
         # RHEL/Linux: ensure a C linker is available (needed by Rust GNU target)
         if [[ "$PLATFORM" == linux ]] && ! command -v cc &>/dev/null && ! command -v gcc &>/dev/null; then
@@ -517,7 +462,7 @@ if command -v cargo &>/dev/null; then
         fi
     fi
 
-    echo " Rust found. Building from vendored sources..."
+    echo " Rust toolchain found — building from vendored sources..."
     # Create the cargo offline config that redirects to vendor/
     mkdir -p "$REPO_ROOT/.cargo"
     cat > "$REPO_ROOT/.cargo/config.toml" <<'EOF'
@@ -544,40 +489,27 @@ EOF
     exit 1
 fi
 
-# ── 4. No binary and no Rust toolchain ──────────────────────────────────────
+# ── 4. No Rust toolchain available ──────────────────────────────────────────
 
 echo ""
-echo " No pre-built binary found and no Rust toolchain detected."
+echo " No Rust toolchain detected and no bundled toolchain archives found."
 echo ""
-echo " The toolchain/rust-toolchain-*.tar.gz.* archives are NOT present."
-echo " A maintainer must generate and commit them before this offline path works:"
+echo " The toolchain/rust-toolchain-*.tar.gz.* archives must be present for"
+echo " offline source builds. A maintainer generates them with:"
 echo ""
 if [[ "$PLATFORM" == windows ]]; then
-    echo "   On any machine with internet access:"
-    echo "     bash scripts/internal/bundle-rust-toolchain.sh windows-x64"
-    echo "     git add toolchain/"
-    echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
-    echo "     git push"
-    echo ""
-    echo " After the toolchain is committed, re-run this script on any fresh clone."
-    echo ""
-    echo " If Rust is already installed (https://rustup.rs), just re-run:"
-    echo "   bash scripts/install.sh"
+    echo "   bash scripts/internal/bundle-rust-toolchain.sh windows-x64"
 else
-    echo "   On any machine with internet access:"
-    echo "     bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64"
-    echo "     git add toolchain/"
-    echo "     git commit -m \"chore: bundle Rust toolchain for offline builds\""
-    echo "     git push"
-    echo ""
-    echo " After the toolchain is committed, re-run this script on any fresh clone."
-    echo ""
-    echo " If Rust is already installed (https://rustup.rs), just re-run:"
-    echo "   bash scripts/install.sh"
-    echo ""
-    echo " If this machine has internet access (curl required):"
-    echo "   bash scripts/install.sh --online"
+    echo "   bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64   # or linux-arm64"
 fi
+echo "   git add toolchain/"
+echo "   git commit -m \"chore: bundle Rust toolchain for offline builds\""
+echo "   git push"
+echo ""
+echo " After the toolchain archives are committed, re-run this script on any fresh clone."
+echo ""
+echo " If Rust is already installed on this machine:"
+echo "   bash scripts/install.sh"
 echo ""
 echo " Full deployment guide: docs/airgap.md"
 echo ""

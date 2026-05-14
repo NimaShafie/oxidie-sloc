@@ -56,9 +56,9 @@ perf.data.old
 *.exe
 *.dll
 
-# dist/ — pre-built signed binaries committed to the repo for air-gapped enterprise
-# deployments.  update-dist.yml populates this after each release via commit-dist job.
-# Bare .exe files are still excluded by the *.exe rule above; only .zip/.tar.gz land here.
+# dist/ — local output directory for CI release artifacts; nothing here is committed.
+# All installs compile from source (toolchain/ + vendor.tar.xz).
+/dist/
 
 # toolchain/ — bundled Rust toolchain archives (7-zip level 9, split into ≤45 MB parts)
 # committed by maintainers via bundle-rust-toolchain.sh. Only ignore temp extraction dirs.
