@@ -47,8 +47,10 @@ pipeline {
                 sh '''
                     mkdir -p "${SLOC_OUT}"
                     ${OXIDESLOC_BIN:-oxidesloc} analyze "${SLOC_TARGET}" \
-                        --json-out "${SLOC_OUT}/result.json" \
-                        --html-out "${SLOC_OUT}/report.html"
+                        --json-out  "${SLOC_OUT}/result.json" \
+                        --csv-out   "${SLOC_OUT}/report.csv" \
+                        --xlsx-out  "${SLOC_OUT}/report.xlsx" \
+                        --html-out  "${SLOC_OUT}/report.html"
                 '''
             }
         }
@@ -94,8 +96,9 @@ PYEOF
 
         stage('Publish') {
             steps {
-                // Archive the raw JSON so it can be downloaded from the build page.
-                archiveArtifacts artifacts: '.sloc-out/result.json', fingerprint: true
+                // Archive JSON, CSV, and XLSX so they can be downloaded from the build page.
+                archiveArtifacts artifacts: '.sloc-out/result.json, .sloc-out/report.csv, .sloc-out/report.xlsx',
+                    fingerprint: true
 
                 // Publish the HTML report via the HTML Publisher plugin.
                 // Users click "SLOC Report" in the left-hand build menu to open it.

@@ -3747,69 +3747,200 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Build a worksheet XML with the given header row and data rows.
-/// String cells use `t="inlineStr"` (no shared-strings table needed).
-/// Numeric cells use plain `<v>`.
-fn build_sheet(headers: &[&str], rows: &[Vec<String>], style_header: bool) -> Vec<u8> {
-    #[allow(clippy::cast_possible_truncation)] // n % 26 is always in 0..=25, fits in u8
-    fn col_name(idx: usize) -> String {
-        // Convert 0-based column index to Excel column letters (A, B, … Z, AA, …)
-        let mut n = idx + 1;
-        let mut s = String::new();
-        while n > 0 {
-            n -= 1;
-            s.insert(0, char::from(b'A' + (n % 26) as u8));
-            n /= 26;
+// ── XLSX style-index constants ──────────────────────────────────────────────
+// Indices into the <cellXfs> table in styles.xml.
+// 0 = default (unused placeholder)
+// 1 = HEADER   bold white text, navy fill (#283790), all-side thin border, centered
+// 2 = BODY     normal text, white fill, thin border
+// 3 = BODY_ALT normal text, cream fill (#F5EFE8), thin border  (alternating rows)
+// 4 = NUM      #,##0, right-aligned, white fill, thin border
+// 5 = NUM_ALT  #,##0, right-aligned, cream fill, thin border   (alternating rows)
+// 6 = KV_KEY   bold navy text (#283790), warm-surface fill (#FBF7F2), thin border
+// 7 = KV_VAL   normal text, white fill, thin border  (key-value sheets: Summary)
+const XLS_HEADER: u8 = 1;
+const XLS_BODY: u8 = 2;
+const XLS_BODY_ALT: u8 = 3;
+const XLS_NUM: u8 = 4;
+const XLS_NUM_ALT: u8 = 5;
+const XLS_KV_KEY: u8 = 6;
+const XLS_KV_VAL: u8 = 7;
+
+struct XlSheet<'a> {
+    name: &'a str,
+    tab_color: &'a str, // AARRGGBB hex without '#', e.g. "FF283790"
+    headers: &'a [&'a str],
+    rows: Vec<Vec<String>>,
+    col_widths: Vec<f64>, // per-column character widths; last entry used for overflow cols
+    is_kv: bool,          // key-value layout (Summary): col A = key style, no autofilter
+}
+
+#[allow(clippy::cast_possible_truncation)] // n % 26 fits in u8 by construction
+fn xl_col_name(idx: usize) -> String {
+    let mut n = idx + 1;
+    let mut s = String::new();
+    while n > 0 {
+        n -= 1;
+        s.insert(0, char::from(b'A' + (n % 26) as u8));
+        n /= 26;
+    }
+    s
+}
+
+fn xl_styles() -> &'static str {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+<numFmts count=\"1\">\
+<numFmt numFmtId=\"164\" formatCode=\"#,##0\"/>\
+</numFmts>\
+<fonts count=\"3\">\
+<font><sz val=\"11\"/><name val=\"Calibri\"/></font>\
+<font><b/><sz val=\"11\"/><color rgb=\"FFFFFFFF\"/><name val=\"Calibri\"/></font>\
+<font><b/><sz val=\"11\"/><color rgb=\"FF283790\"/><name val=\"Calibri\"/></font>\
+</fonts>\
+<fills count=\"5\">\
+<fill><patternFill patternType=\"none\"/></fill>\
+<fill><patternFill patternType=\"gray125\"/></fill>\
+<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF283790\"/><bgColor indexed=\"64\"/></patternFill></fill>\
+<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFF5EFE8\"/><bgColor indexed=\"64\"/></patternFill></fill>\
+<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFFBF7F2\"/><bgColor indexed=\"64\"/></patternFill></fill>\
+</fills>\
+<borders count=\"2\">\
+<border><left/><right/><top/><bottom/><diagonal/></border>\
+<border>\
+<left style=\"thin\"><color rgb=\"FFD0B8A0\"/></left>\
+<right style=\"thin\"><color rgb=\"FFD0B8A0\"/></right>\
+<top style=\"thin\"><color rgb=\"FFD0B8A0\"/></top>\
+<bottom style=\"thin\"><color rgb=\"FFD0B8A0\"/></bottom>\
+<diagonal/>\
+</border>\
+</borders>\
+<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>\
+<cellXfs count=\"8\">\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>\
+<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"1\" xfId=\"0\" \
+applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\">\
+<alignment horizontal=\"center\" vertical=\"center\"/></xf>\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyBorder=\"1\"/>\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"3\" borderId=\"1\" xfId=\"0\" applyFill=\"1\" applyBorder=\"1\"/>\
+<xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" \
+applyNumberFormat=\"1\" applyBorder=\"1\" applyAlignment=\"1\">\
+<alignment horizontal=\"right\"/></xf>\
+<xf numFmtId=\"164\" fontId=\"0\" fillId=\"3\" borderId=\"1\" xfId=\"0\" \
+applyNumberFormat=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\">\
+<alignment horizontal=\"right\"/></xf>\
+<xf numFmtId=\"0\" fontId=\"2\" fillId=\"4\" borderId=\"1\" xfId=\"0\" \
+applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\"/>\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyBorder=\"1\"/>\
+</cellXfs>\
+</styleSheet>"
+}
+
+fn xl_sheet_xml(sheet: &XlSheet<'_>) -> Vec<u8> {
+    let ncols = sheet.headers.len();
+    let ndata = sheet.rows.len();
+    let last_col = xl_col_name(ncols.saturating_sub(1));
+    let last_row = ndata + 1;
+    let range = format!("A1:{last_col}{last_row}");
+
+    let mut xml = String::with_capacity(4096 + ndata * 256);
+    let _ = write!(
+        xml,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\n\
+         <sheetPr><tabColor rgb=\"{tc}\"/></sheetPr>\n\
+         <dimension ref=\"{rng}\"/>\n\
+         <sheetViews><sheetView workbookViewId=\"0\">\
+         <pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>\
+         <selection pane=\"bottomLeft\" activeCell=\"A2\" sqref=\"A2\"/>\
+         </sheetView></sheetViews>\n\
+         <sheetFormatPr defaultRowHeight=\"15\"/>\n",
+        tc = sheet.tab_color,
+        rng = range,
+    );
+
+    // Column widths
+    if !sheet.col_widths.is_empty() {
+        let default_w = *sheet.col_widths.last().unwrap_or(&10.0);
+        xml.push_str("<cols>\n");
+        for ci in 0..ncols {
+            let w = sheet.col_widths.get(ci).copied().unwrap_or(default_w);
+            let _ = writeln!(
+                xml,
+                "  <col min=\"{n}\" max=\"{n}\" width=\"{w:.1}\" customWidth=\"1\"/>",
+                n = ci + 1
+            );
         }
-        s
+        xml.push_str("</cols>\n");
     }
 
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
-    xml.push_str(
-        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\n",
-    );
     xml.push_str("<sheetData>\n");
 
-    // Header row
-    xml.push_str("<row r=\"1\">");
-    for (ci, &h) in headers.iter().enumerate() {
-        let cell_ref = format!("{}1", col_name(ci));
-        let style = if style_header { " s=\"1\"" } else { "" };
+    // Header row (row 1) — taller, navy fill, bold white text
+    let _ = write!(xml, "<row r=\"1\" ht=\"18\" customHeight=\"1\">");
+    for (ci, &h) in sheet.headers.iter().enumerate() {
         let _ = write!(
             xml,
-            "<c r=\"{}\" t=\"inlineStr\"{style}><is><t>{}</t></is></c>",
-            cell_ref,
-            xml_escape(h)
+            "<c r=\"{}1\" t=\"inlineStr\" s=\"{}\"><is><t>{}</t></is></c>",
+            xl_col_name(ci),
+            XLS_HEADER,
+            xml_escape(h),
         );
     }
     xml.push_str("</row>\n");
 
-    // Data rows
-    for (ri, row) in rows.iter().enumerate() {
+    // Data rows — alternating cream/white fill; numbers right-aligned with #,##0
+    for (ri, row) in sheet.rows.iter().enumerate() {
         let row_num = ri + 2;
+        let is_alt = ri % 2 == 1;
         let _ = write!(xml, "<row r=\"{row_num}\">");
         for (ci, cell) in row.iter().enumerate() {
-            let cell_ref = format!("{}{}", col_name(ci), row_num);
-            // Try to detect if the value is purely numeric
-            if cell.parse::<f64>().is_ok() && !cell.is_empty() {
-                let _ = write!(xml, "<c r=\"{cell_ref}\"><v>{}</v></c>", xml_escape(cell));
+            let cell_ref = format!("{}{}", xl_col_name(ci), row_num);
+            let is_num = !cell.is_empty() && cell.parse::<f64>().is_ok();
+            let s = if sheet.is_kv {
+                if ci == 0 {
+                    XLS_KV_KEY
+                } else if is_num {
+                    XLS_NUM
+                } else {
+                    XLS_KV_VAL
+                }
+            } else if is_num {
+                if is_alt {
+                    XLS_NUM_ALT
+                } else {
+                    XLS_NUM
+                }
+            } else if is_alt {
+                XLS_BODY_ALT
+            } else {
+                XLS_BODY
+            };
+            if is_num {
+                let _ = write!(
+                    xml,
+                    "<c r=\"{cell_ref}\" s=\"{s}\"><v>{}</v></c>",
+                    xml_escape(cell)
+                );
             } else {
                 let _ = write!(
                     xml,
-                    "<c r=\"{cell_ref}\" t=\"inlineStr\"><is><t>{}</t></is></c>",
-                    xml_escape(cell)
+                    "<c r=\"{cell_ref}\" t=\"inlineStr\" s=\"{s}\"><is><t>{}</t></is></c>",
+                    xml_escape(cell),
                 );
             }
         }
         xml.push_str("</row>\n");
     }
 
-    xml.push_str("</sheetData>\n</worksheet>");
+    xml.push_str("</sheetData>\n");
+    if !sheet.is_kv && ncols > 0 {
+        let _ = writeln!(xml, "<autoFilter ref=\"{range}\"/>");
+    }
+    xml.push_str("</worksheet>");
     xml.into_bytes()
 }
 
-type SheetDef<'a> = (&'a str, &'a [&'a str], Vec<Vec<String>>);
-
-fn build_xlsx_archive(sheets: &[SheetDef<'_>]) -> Vec<u8> {
+fn build_xlsx(sheets: &[XlSheet<'_>]) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
     let mut entries: Vec<ZipEntry> = Vec::new();
 
@@ -3823,7 +3954,8 @@ fn build_xlsx_archive(sheets: &[SheetDef<'_>]) -> Vec<u8> {
     for (i, _) in sheets.iter().enumerate() {
         let _ = writeln!(
             ct,
-            "  <Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+            "  <Override PartName=\"/xl/worksheets/sheet{}.xml\" \
+             ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
             i + 1
         );
     }
@@ -3838,7 +3970,9 @@ fn build_xlsx_archive(sheets: &[SheetDef<'_>]) -> Vec<u8> {
     // ── _rels/.rels ─────────────────────────────────────────────────────────
     let rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n\
-  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\n\
+  <Relationship Id=\"rId1\" \
+  Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" \
+  Target=\"xl/workbook.xml\"/>\n\
 </Relationships>";
     zip_add(
         &mut entries,
@@ -3849,13 +3983,16 @@ fn build_xlsx_archive(sheets: &[SheetDef<'_>]) -> Vec<u8> {
 
     // ── xl/workbook.xml ──────────────────────────────────────────────────────
     let mut wb = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
-    wb.push_str("<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\n");
+    wb.push_str(
+        "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\n",
+    );
     wb.push_str("  <sheets>\n");
-    for (i, (name, _, _)) in sheets.iter().enumerate() {
+    for (i, sheet) in sheets.iter().enumerate() {
         let _ = writeln!(
             wb,
             "    <sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
-            xml_escape(name),
+            xml_escape(sheet.name),
             i + 1,
             i + 1
         );
@@ -3871,13 +4008,18 @@ fn build_xlsx_archive(sheets: &[SheetDef<'_>]) -> Vec<u8> {
     for (i, _) in sheets.iter().enumerate() {
         let _ = writeln!(
             wbr,
-            "  <Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
-            i + 1, i + 1
+            "  <Relationship Id=\"rId{}\" \
+             Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" \
+             Target=\"worksheets/sheet{}.xml\"/>",
+            i + 1,
+            i + 1
         );
     }
     let _ = writeln!(
         wbr,
-        "  <Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>",
+        "  <Relationship Id=\"rId{}\" \
+         Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" \
+         Target=\"styles.xml\"/>",
         sheets.len() + 1
     );
     wbr.push_str("</Relationships>");
@@ -3888,34 +4030,17 @@ fn build_xlsx_archive(sheets: &[SheetDef<'_>]) -> Vec<u8> {
         wbr.into_bytes(),
     );
 
-    // ── xl/styles.xml (minimal: normal + bold-header) ───────────────────────
-    let styles = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
-<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\n\
-  <fonts count=\"2\">\n\
-    <font><sz val=\"11\"/><name val=\"Calibri\"/></font>\n\
-    <font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font>\n\
-  </fonts>\n\
-  <fills count=\"2\">\n\
-    <fill><patternFill patternType=\"none\"/></fill>\n\
-    <fill><patternFill patternType=\"gray125\"/></fill>\n\
-  </fills>\n\
-  <borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>\n\
-  <cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>\n\
-  <cellXfs count=\"2\">\n\
-    <xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>\n\
-    <xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/>\n\
-  </cellXfs>\n\
-</styleSheet>";
+    // ── xl/styles.xml ───────────────────────────────────────────────────────
     zip_add(
         &mut entries,
         &mut buf,
         "xl/styles.xml",
-        styles.as_bytes().to_vec(),
+        xl_styles().as_bytes().to_vec(),
     );
 
     // ── worksheets ───────────────────────────────────────────────────────────
-    for (i, (_, headers, rows)) in sheets.iter().enumerate() {
-        let sheet_xml = build_sheet(headers, rows, true);
+    for (i, sheet) in sheets.iter().enumerate() {
+        let sheet_xml = xl_sheet_xml(sheet);
         let name = format!("xl/worksheets/sheet{}.xml", i + 1);
         zip_add(&mut entries, &mut buf, &name, sheet_xml);
     }
@@ -4051,14 +4176,42 @@ pub fn write_xlsx(run: &AnalysisRun, path: &Path) -> Result<()> {
     ];
     let skipped_hdrs: &[&str] = &["Path", "Status", "Size (bytes)"];
 
-    let sheets: Vec<SheetDef<'_>> = vec![
-        ("Summary", summary_hdrs, summary_rows),
-        ("By Language", lang_hdrs, lang_rows),
-        ("Per File", file_hdrs, file_rows),
-        ("Skipped", skipped_hdrs, skipped_rows),
+    let sheets = vec![
+        XlSheet {
+            name: "Summary",
+            tab_color: "FF283790",
+            headers: summary_hdrs,
+            rows: summary_rows,
+            col_widths: vec![26.0, 44.0],
+            is_kv: true,
+        },
+        XlSheet {
+            name: "By Language",
+            tab_color: "FFB85D33",
+            headers: lang_hdrs,
+            rows: lang_rows,
+            col_widths: vec![20.0, 9.0, 15.0, 13.0, 13.0, 11.0, 11.0],
+            is_kv: false,
+        },
+        XlSheet {
+            name: "Per File",
+            tab_color: "FF2A6846",
+            headers: file_hdrs,
+            rows: file_rows,
+            col_widths: vec![48.0, 14.0, 13.0, 13.0, 11.0, 11.0, 15.0, 11.0, 11.0, 9.0],
+            is_kv: false,
+        },
+        XlSheet {
+            name: "Skipped",
+            tab_color: "FF7B675B",
+            headers: skipped_hdrs,
+            rows: skipped_rows,
+            col_widths: vec![52.0, 24.0, 13.0],
+            is_kv: false,
+        },
     ];
 
-    let bytes = build_xlsx_archive(&sheets);
+    let bytes = build_xlsx(&sheets);
     fs::write(path, bytes).with_context(|| format!("failed to write XLSX to {}", path.display()))
 }
 
@@ -4122,12 +4275,26 @@ pub fn write_diff_xlsx(cmp: &sloc_core::ScanComparison, path: &Path) -> Result<(
         "Total Δ",
     ];
 
-    let sheets: Vec<SheetDef<'_>> = vec![
-        ("Diff Summary", summary_hdrs, summary_rows),
-        ("File Deltas", delta_hdrs, delta_rows),
+    let sheets = vec![
+        XlSheet {
+            name: "Diff Summary",
+            tab_color: "FF283790",
+            headers: summary_hdrs,
+            rows: summary_rows,
+            col_widths: vec![26.0, 44.0],
+            is_kv: true,
+        },
+        XlSheet {
+            name: "File Deltas",
+            tab_color: "FFB85D33",
+            headers: delta_hdrs,
+            rows: delta_rows,
+            col_widths: vec![12.0, 48.0, 16.0, 14.0, 14.0, 11.0, 14.0, 14.0, 11.0, 11.0],
+            is_kv: false,
+        },
     ];
 
-    let bytes = build_xlsx_archive(&sheets);
+    let bytes = build_xlsx(&sheets);
     fs::write(path, bytes)
         .with_context(|| format!("failed to write diff XLSX to {}", path.display()))
 }

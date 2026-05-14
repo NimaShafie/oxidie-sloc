@@ -47,9 +47,15 @@ Every CI integration follows the same three-step pattern:
 
 ```
 1. acquire the binary  →  decompress vendor.tar.xz, install Rust, build oxide-sloc
-2. run the scan        →  oxide-sloc analyze ./src --json-out result.json --html-out report.html
+2. run the scan        →  oxide-sloc analyze ./src \
+                              --json-out result.json \
+                              --csv-out  report.csv \
+                              --xlsx-out report.xlsx \
+                              --html-out report.html
 3. consume outputs     →  archive, publish, or push to external tools
 ```
+
+> **Note:** `--csv-out` and `--xlsx-out` produce a multi-section CSV and a four-sheet Excel workbook (Summary, By Language, Per File, Skipped Files) from the same analysis result. They work on any `analyze`, `report`, or `diff` command and are available as standalone downloads via the web API at `GET /runs/csv/<run_id>` and `GET /runs/xlsx/<run_id>`.
 
 ### Vendor sources note
 
@@ -544,8 +550,10 @@ stage('Scan') {
     steps {
         sh '''
             ./target/release/oxide-sloc analyze ./src \
-                --json-out out/result.json \
-                --html-out out/report.html \
+                --json-out  out/result.json \
+                --csv-out   out/report.csv \
+                --xlsx-out  out/report.xlsx \
+                --html-out  out/report.html \
                 --report-title "SLOC report — ${BUILD_TAG}"
         '''
     }
@@ -714,15 +722,17 @@ Two workflows ship in `.github/workflows/`:
 - name: Run SLOC scan
   run: |
     oxide-sloc analyze ./src \
-      --json-out out/result.json \
-      --html-out out/report.html \
+      --json-out  out/result.json \
+      --csv-out   out/report.csv \
+      --xlsx-out  out/report.xlsx \
+      --html-out  out/report.html \
       --report-title "SLOC — ${{ github.ref_name }}"
 
 - name: Upload SLOC report
   uses: actions/upload-artifact@v4
   with:
     name: sloc-report
-    path: out/
+    path: out/          # uploads result.json, report.csv, report.xlsx, report.html
     retention-days: 30
 ```
 

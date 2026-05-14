@@ -22,15 +22,9 @@ HOST_MODE="${SLOC_HOST:-0}"
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
     PLATFORM=windows
     EXE="$REPO_ROOT/oxide-sloc.exe"
-    EXE_DIST="$REPO_ROOT/dist/oxide-sloc.exe"
-    EXE_BUILD="$REPO_ROOT/target/release/oxide-sloc.exe"
-    BUNDLE="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
 else
     PLATFORM=linux
     EXE="$REPO_ROOT/oxide-sloc"
-    EXE_DIST="$REPO_ROOT/dist/oxide-sloc"
-    EXE_BUILD="$REPO_ROOT/target/release/oxide-sloc"
-    BUNDLE="$REPO_ROOT/dist/oxide-sloc-linux-x86_64.tar.gz"
 fi
 
 LOG_DIR="$REPO_ROOT/logs"
@@ -155,6 +149,9 @@ launch() {
                 printf '    Other LAN hosts cannot reach this server until you run:\n'
                 printf '      %s\n' "$FIREWALL_FIX"
             fi
+        elif [[ "$PLATFORM" == windows ]]; then
+            printf '  Firewall: Windows Defender may show a network access dialog.\n'
+            printf '    Click "Allow access" to open port %s \xe2\x80\x94 no admin rights required.\n' "$SLOC_PORT"
         fi
         printf '\n'
         [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
@@ -360,6 +357,9 @@ launch_cargo() {
                 printf '    Other LAN hosts cannot reach this server until you run:\n'
                 printf '      %s\n' "$FIREWALL_FIX"
             fi
+        elif [[ "$PLATFORM" == windows ]]; then
+            printf '  Firewall: Windows Defender may show a network access dialog.\n'
+            printf '    Click "Allow access" to open port %s \xe2\x80\x94 no admin rights required.\n' "$SLOC_PORT"
         fi
         printf '\n'
         [[ -z "${SLOC_API_KEY:-}" ]] && \
@@ -369,17 +369,6 @@ launch_cargo() {
     else
         printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT"
         "$bin_path"
-    fi
-}
-
-extract_bundle() {
-    echo "Extracting oxide-sloc..."
-    if [[ "$PLATFORM" == windows ]]; then
-        WIN_BUNDLE="$(cygpath -w "$BUNDLE")"
-        WIN_DEST="$(cygpath -w "$REPO_ROOT")"
-        powershell -NoProfile -Command "Expand-Archive -Path '$WIN_BUNDLE' -DestinationPath '$WIN_DEST' -Force"
-    else
-        tar xzf "$BUNDLE" -C "$REPO_ROOT"
     fi
 }
 
@@ -398,17 +387,9 @@ if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
     exit 0
 fi
 
-if   [[ -f "$EXE" ]];       then launch "$EXE";       exit 0
-elif [[ -f "$EXE_DIST" ]];  then launch "$EXE_DIST";  exit 0
-elif [[ -f "$EXE_BUILD" ]]; then launch "$EXE_BUILD"; exit 0
-elif [[ -f "$BUNDLE" ]]; then
-    extract_bundle
-    if [[ -f "$EXE" ]]; then
-        launch "$EXE"
-        exit 0
-    fi
-    echo "ERROR: extraction completed but binary not found — archive may be corrupt." >&2
-    exit 1
+if [[ -f "$EXE" ]]; then
+    launch "$EXE"
+    exit 0
 fi
 
 printf '\noxide-sloc: no binary found.\n\n' >&2
