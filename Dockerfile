@@ -34,7 +34,7 @@ RUN test -d crates/sloc-config \
          exit 1; \
        }
 
-RUN cargo build --release -p oxide-sloc
+RUN cargo build --release -p oxide-sloc --no-default-features
 
 # Stage 2: minimal runtime image
 # Pin to a specific digest to prevent silent base-image substitution.
