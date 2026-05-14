@@ -181,7 +181,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase --autostash origin main
-          git add dist/oxide-sloc-windows-x64.zip
+          git add -f dist/oxide-sloc-windows-x64.zip
           if git diff --cached --quiet; then
             echo "dist/ unchanged — nothing to commit."
           else
