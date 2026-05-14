@@ -381,14 +381,15 @@ for arg in "$@"; do
     esac
 done
 
-# If cargo is available, always build and run from source so changes are picked up immediately.
-if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
-    launch_cargo
+# Prefer the installed binary built by install.sh (release, no recompile needed).
+# Fall back to cargo build only when no binary exists yet.
+if [[ -f "$EXE" ]]; then
+    launch "$EXE"
     exit 0
 fi
 
-if [[ -f "$EXE" ]]; then
-    launch "$EXE"
+if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
+    launch_cargo
     exit 0
 fi
 
