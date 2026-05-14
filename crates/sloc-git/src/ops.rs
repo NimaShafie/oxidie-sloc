@@ -10,7 +10,13 @@ use crate::{GitCommit, GitRef, GitRefKind, RepoRefs};
 // ── low-level git runner ───────────────────────────────────────────────────────
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
+    let mut cmd = std::process::Command::new("git");
+    // Opt-in SSL bypass for corporate/internal repos with self-signed certificates.
+    // Set SLOC_GIT_SSL_NO_VERIFY=1 in the environment to enable.
+    if std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some() {
+        cmd.args(["-c", "http.sslVerify=false"]);
+    }
+    let out = cmd
         .args(args)
         .current_dir(repo)
         .output()
@@ -20,6 +26,100 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
         bail!("git {}: {}", args.first().unwrap_or(&""), stderr.trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+// ── URL normalization ─────────────────────────────────────────────────────────
+
+/// Convert a repository browse URL into a clonable git URL.
+///
+/// Handles Bitbucket Server/Data Center (`/projects/{PROJ}/repos/{REPO}/...`),
+/// GitLab (`/path/repo/-/tree/...`), GitHub (`github.com/{owner}/{repo}/tree/...`),
+/// and Bitbucket Cloud (`bitbucket.org/{ws}/{repo}/src/...`). SSH URLs and URLs
+/// that already look like clone targets are returned unchanged.
+pub fn normalize_git_url(raw: &str) -> String {
+    let url = raw.trim();
+
+    // SSH URLs are already clonable — git handles `git@host:path` natively.
+    if url.starts_with("git@") || url.starts_with("ssh://") {
+        return url.to_owned();
+    }
+
+    let scheme = if url.starts_with("https://") {
+        "https"
+    } else if url.starts_with("http://") {
+        "http"
+    } else {
+        return url.to_owned();
+    };
+
+    let authority_and_path = &url[scheme.len() + 3..]; // strip "scheme://"
+    let (host, path) = match authority_and_path.find('/') {
+        Some(i) => (&authority_and_path[..i], &authority_and_path[i..]),
+        None => (authority_and_path, "/"),
+    };
+    let path = path.trim_end_matches('/');
+
+    // ── Bitbucket Server / Data Center ────────────────────────────────────────
+    // Browse URL: /{context}/projects/{PROJECT}/repos/{REPO}[/...]
+    // Clone URL:  /{context}/scm/{project_lower}/{repo}.git
+    // The Bitbucket context path defaults to "" (root) but some deployments use
+    // a prefix (e.g. /bitbucket). We preserve whatever prefix precedes /projects/.
+    {
+        let path_lower = path.to_lowercase();
+        if let Some(proj_pos) = path_lower.find("/projects/") {
+            let after = &path[proj_pos + "/projects/".len()..];
+            let parts: Vec<&str> = after.splitn(4, '/').collect();
+            // parts[0] = PROJECT_KEY, parts[1] = "repos", parts[2] = REPO, parts[3] = rest
+            if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("repos") {
+                let context = &path[..proj_pos]; // e.g. "" or "/bitbucket"
+                let project = parts[0].to_lowercase();
+                let repo = parts[2].trim_end_matches(".git");
+                return format!("{scheme}://{host}{context}/scm/{project}/{repo}.git");
+            }
+        }
+    }
+
+    // ── GitLab (any host) ─────────────────────────────────────────────────────
+    // Browse URL: /path/to/repo/-/tree/branch
+    // Clone URL:  /path/to/repo.git
+    if let Some(idx) = path.find("/-/") {
+        let repo_path = &path[..idx];
+        let repo_path = repo_path.trim_end_matches(".git");
+        return format!("{scheme}://{host}{repo_path}.git");
+    }
+
+    // ── GitHub ────────────────────────────────────────────────────────────────
+    // Browse URL: github.com/{owner}/{repo}/{tree|blob|...}/...
+    // Clone URL:  github.com/{owner}/{repo}.git
+    if host == "github.com" || host.ends_with(".github.com") {
+        let p = path.trim_start_matches('/');
+        let parts: Vec<&str> = p.splitn(4, '/').collect();
+        if parts.len() >= 3
+            && matches!(
+                parts[2],
+                "tree" | "blob" | "commits" | "commit" | "releases" | "tags" | "branches"
+            )
+        {
+            let owner = parts[0];
+            let repo = parts[1].trim_end_matches(".git");
+            return format!("{scheme}://{host}/{owner}/{repo}.git");
+        }
+    }
+
+    // ── Bitbucket Cloud ───────────────────────────────────────────────────────
+    // Browse URL: bitbucket.org/{workspace}/{repo}/src/...
+    // Clone URL:  bitbucket.org/{workspace}/{repo}.git
+    if host == "bitbucket.org" {
+        let p = path.trim_start_matches('/');
+        let parts: Vec<&str> = p.splitn(4, '/').collect();
+        if parts.len() >= 3 && parts[2] == "src" {
+            let ws = parts[0];
+            let repo = parts[1].trim_end_matches(".git");
+            return format!("{scheme}://{host}/{ws}/{repo}.git");
+        }
+    }
+
+    url.to_owned()
 }
 
 // ── clone / fetch ─────────────────────────────────────────────────────────────
@@ -38,10 +138,15 @@ fn validate_clone_url(url: &str) -> Result<()> {
 
 /// Clone `url` into `dest`, or fetch all refs if the repo already exists.
 ///
+/// Browse URLs (GitHub, GitLab, Bitbucket web pages) are automatically converted
+/// to their corresponding git clone URLs before cloning.
+///
 /// # Errors
 /// Returns an error if the URL is rejected, the clone directory cannot be created,
 /// or the underlying `git clone` / `git fetch` command fails.
 pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
+    let normalized = normalize_git_url(url);
+    let url = normalized.as_str();
     validate_clone_url(url)?;
     if dest.join(".git").exists() {
         run_git(dest, &["fetch", "--all", "--tags", "--prune"])?;

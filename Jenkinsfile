@@ -57,7 +57,7 @@ pipeline {
             defaultValue: 'ci-out',
             description:  'Output sub-directory for generated artifacts (relative to the workspace root). ' +
                           'The directory is created automatically if it does not exist. ' +
-                          'All artifacts — report.html, result.json, report.pdf, and trend CSVs — ' +
+                          'All artifacts — result.json, report.html, report.csv, report.xlsx, report.pdf, and trend CSVs — ' +
                           'are written here and then archived to Jenkins at the end of each build. ' +
                           'Only safe path characters are allowed (letters, digits, hyphens, underscores, slashes).'
         )
@@ -279,6 +279,18 @@ pipeline {
             defaultValue: false,
             description:  'Include report.pdf in the artifact repository push ' +
                           '(only when GENERATE_PDF is checked).'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_CSV',
+            defaultValue: true,
+            description:  'Include report.csv in the artifact repository push. ' +
+                          'CSV is always generated — no separate output flag required.'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_XLSX',
+            defaultValue: false,
+            description:  'Include report.xlsx (Excel workbook) in the artifact repository push. ' +
+                          'XLSX is always generated — no separate output flag required.'
         )
 
         // ── Test runner & results ──────────────────────────────────────────────
@@ -720,7 +732,7 @@ CARGOEOF
         // Mirrors the web UI configuration flow end-to-end:
         //   Step 1 → target path       (SCAN_PATH)
         //   Step 2 → counting rules    (CI_PRESET, MIXED_LINE_POLICY, DOCSTRINGS_AS_CODE, …)
-        //   Step 3 → output artifacts  (GENERATE_HTML / PDF; JSON is always written)
+        //   Step 3 → output artifacts  (GENERATE_HTML / PDF; JSON + CSV + XLSX always written)
         //   Step 4 → run + validate
         //   Step 5 → mixed-line policy matrix (spot-checks all four policies)
         stage('Analyze') {
@@ -768,8 +780,11 @@ CARGOEOF
                     def configArg   = (params.CI_PRESET != 'none')
                                         ? "--config 'ci/sloc-ci-${params.CI_PRESET}.toml'"
                                         : ''
-                    // JSON is always written — required for trend plots and the send command.
-                    def jsonArg     = "--json-out '${outDir}/result.json'"
+                    // JSON, CSV, and XLSX are always written.
+                    // HTML and PDF are optional (controlled by GENERATE_HTML / GENERATE_PDF).
+                    def jsonArg     = "--json-out  '${outDir}/result.json'"
+                    def csvArg      = "--csv-out   '${outDir}/report.csv'"
+                    def xlsxArg     = "--xlsx-out  '${outDir}/report.xlsx'"
                     def htmlArg     = params.GENERATE_HTML       ? "--html-out '${outDir}/report.html'" : ''
                     def pdfArg      = params.GENERATE_PDF        ? "--pdf-out  '${outDir}/report.pdf'"  : ''
                     def docArg      = params.DOCSTRINGS_AS_CODE  ? '--python-docstrings-as-code'        : ''
@@ -794,7 +809,7 @@ CARGOEOF
                         '''
                     }
 
-                    // b. Main artifact run — JSON always written; HTML and PDF are optional.
+                    // b. Main artifact run — JSON, CSV, XLSX always written; HTML and PDF are optional.
                     withEnv([
                         "SCAN_PATH=${params.SCAN_PATH}",
                         "REPORT_TITLE=${params.REPORT_TITLE}",
@@ -806,11 +821,13 @@ CARGOEOF
                                 --mixed-line-policy "${MIXED_LINE_POLICY}" \
                                 ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg}" + ''' \
                                 ''' + "${langArgs} ${includeArgs} ${excludeArgs}" + ''' \
-                                ''' + "${jsonArg} ${htmlArg} ${pdfArg}" + '''
+                                ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + '''
                         '''
                     }
 
                     sh "test -s '${outDir}/result.json'"
+                    sh "test -s '${outDir}/report.csv'"
+                    sh "test -s '${outDir}/report.xlsx'"
                     if (params.GENERATE_HTML) { sh "test -s '${outDir}/report.html'" }
 
                     // c. Per-file breakdown
@@ -1073,7 +1090,8 @@ else:
 PYEOF"""
 
                     // Archive binary + all output subdirectory contents.
-                    // Includes: reports, result.json, test-results/, coverage/, CSVs.
+                    // Includes: result.json, report.csv, report.xlsx, report.html, report.pdf,
+                    // test-results/, coverage/, and trend CSVs.
                     archiveArtifacts artifacts: "target/release/oxide-sloc, ${params.OUTPUT_SUBDIR}/**",
                         fingerprint: true,
                         allowEmptyArchive: true
@@ -1093,7 +1111,7 @@ PYEOF"""
         }
 
         // ── 8. Push to artifact repository ────────────────────────────────────
-        // Pushes scan artifacts (JSON, HTML, PDF) to an external artifact repository.
+        // Pushes scan artifacts (JSON, CSV, XLSX, HTML, PDF) to an external artifact repository.
         // Only runs when ARTIFACT_REPO_TYPE is not "none" and ARTIFACT_REPO_URL is set.
         //
         // The push is delegated to ci/artifact-push.sh which handles all provider
@@ -1130,6 +1148,8 @@ PYEOF"""
 
                     def filesToPush = []
                     if (params.ARTIFACT_PUSH_JSON)                           filesToPush << 'result.json'
+                    if (params.ARTIFACT_PUSH_CSV)                            filesToPush << 'report.csv'
+                    if (params.ARTIFACT_PUSH_XLSX)                           filesToPush << 'report.xlsx'
                     if (params.ARTIFACT_PUSH_HTML && params.GENERATE_HTML)   filesToPush << 'report.html'
                     if (params.ARTIFACT_PUSH_PDF  && params.GENERATE_PDF)    filesToPush << 'report.pdf'
 

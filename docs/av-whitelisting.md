@@ -1,187 +1,155 @@
 # AV / EDR Whitelisting Guide
 
-This page is for enterprise administrators who see oxide-sloc flagged by Carbon Black
-Cloud, Microsoft Defender, CrowdStrike Falcon, McAfee / Trellix, Malwarebytes, or
-other endpoint security products.
+This page is for enterprise administrators and users who see oxide-sloc flagged by Carbon Black
+Cloud, Microsoft Defender, CrowdStrike Falcon, McAfee / Trellix, Malwarebytes, or other endpoint
+security products during installation or use.
 
 ## Windows vs. RHEL Linux — the detection profile is different
 
-**Windows** detections happen because oxide-sloc ships a bundled Rust toolchain
-(`toolchain/rust-toolchain-windows-x64.tar.gz.*`). `install.sh` extracts this into
-`.tools/` using a shell script. The resulting PE files (`cargo.exe`, `rustup.exe`, etc.)
-are unsigned and appear in a non-standard path — a pattern Carbon Black, McAfee, and
-Trellix associate with PUA/adware droppers. Additionally, building from source on Windows
-causes Cargo to compile 67 small PE executables in `target/release/build/` (one per crate
-that has a `build.rs` file). These cannot be pre-signed; static-AI scanners (Malwarebytes,
-McAfee heuristics) flag small unsigned PEs regardless of origin.
+**RHEL / Linux** — no AV/EDR action needed. The bundled Linux toolchain contains ELF binaries.
+Carbon Black for Linux uses behavioral analytics (process trees, network, file access), not PE
+reputation scoring. The build scripts compiled during `cargo build` are ELF executables that Linux
+AV does not scan with Windows PE heuristics. Source builds on RHEL work without any AV intervention.
 
-**RHEL Linux** has none of these problems. The bundled Linux toolchain contains ELF
-binaries, not PE files. Carbon Black for Linux uses behavioral analytics (process trees,
-network, file access), not PE reputation scoring. Malwarebytes does not run on Linux.
-The build scripts compiled during `cargo build` are ELF executables that Linux AV does
-not scan with the same heuristics applied to Windows PEs. Source builds on RHEL work
-without any AV intervention.
+**Windows** — the bundled Rust toolchain (`toolchain/rust-toolchain-windows-x64.tar.gz.*`) is
+extracted to `.tools/` by `install.sh`. The resulting PE files (`cargo.exe`, `rustup.exe`, etc.)
+may be unsigned, and a shell script extracting unsigned PE files to a non-standard path then
+executing them matches the behavioral signature that Carbon Black, CrowdStrike, and Defender
+heuristics associate with dropper/PUA malware.
 
-**Recommended deployment strategy:**
+## Recommended paths — no admin rights required
 
-| Platform | Recommended install path |
-|----------|--------------------------|
-| RHEL / Linux (air-gapped) | Source build — `bash scripts/install.sh` compiles from vendored Rust sources |
-| Windows (managed enterprise, air-gapped) | Pre-built signed binary in `dist/` — `bash scripts/install.sh` extracts it; no Rust compilation occurs |
-| Windows (developer machine) | Source build works — add `target/` to Malwarebytes exclusions (see below) |
+| Platform | Recommended path | Admin required? |
+|----------|-----------------|----------------|
+| RHEL / Linux | Source build — `bash scripts/install.sh` | No |
+| Windows — signed toolchain | Source build — maintainer sets `WINDOWS_CERTIFICATE` GitHub secret so CI signs all toolchain PE files before archiving. `install.sh` imports the CA cert (no admin) and extracts signed binaries. EDR passes them without any exclusion. | No |
+| Windows — cargo already on PATH | `install.sh` detects `cargo` on PATH and skips `.tools/` extraction entirely — no unsigned PE files are ever written | No |
+| Windows — unsigned toolchain, no system Rust | Build may be blocked by strict EDR. Escalate to IT for option 2 or 3 above. | n/a |
 
-## Why Windows flags happen (detail)
+## How Authenticode signing eliminates the detection (no admin needed on user's machine)
 
-The extracted binaries (`.tools/cargo/bin/cargo.exe`, `.tools/cargo/bin/rustup.exe`,
-etc.) are standard Rust project binaries compiled by the Rust project team, but:
+The signing happens in CI before the toolchain archives are committed to the repository:
 
-- They are extracted by a shell script to a non-standard path, which matches a
-  behavioural pattern common to PUA/adware droppers.
-- Until Authenticode code signing is in place for the bundled toolchain, the PE files
-  carry no digital signature, giving them a low reputation score in EDR databases.
+1. A maintainer sets the `WINDOWS_CERTIFICATE` (base64 PFX) secret in GitHub Actions settings.
+2. The `Bundle Rust toolchain` CI workflow decodes the PFX and passes it to
+   `scripts/internal/bundle-rust-toolchain.sh`, which calls `signtool` to sign every `.exe`
+   inside `cargo/bin/` and `rustup/toolchains/` before compression.
+3. The resulting `toolchain/rust-toolchain-windows-x64.tar.gz.*` parts (committed to the repo)
+   contain Authenticode-signed PE files.
+4. On the user's machine, `install.sh` calls `trust_ca_cert()` — which imports
+   `certs/sloc-ca.crt` (the public Root CA cert, committed to the repo) into the current user's
+   Windows certificate store using the .NET X509Store API. **No administrator rights required**
+   for the CurrentUser store.
+5. When `install.sh` extracts the archive, EDR sees: signed by OxideSLOC Root CA → trusted CA
+   in user store → signature valid → binary allowed. No exclusion, no dialog, no admin needed.
 
-The main `oxide-sloc` binary may also trigger heuristic detections (VirusTotal shows
-2/71 as of v1.5.1 — both are ML-score / behavioural false positives with no signature
-match).
+`install.sh` checks the signature of `cargo.exe` after extraction and prints a clear pass/fail
+message so users know immediately whether the toolchain on their machine is protected.
 
-## Recommended path for Windows managed environments (air-gapped)
+## If the toolchain is unsigned (current state — `WINDOWS_CERTIFICATE` secret not yet set)
 
-**Use the pre-built binary committed to `dist/` in the repository.**
-`install.sh` automatically uses `dist/oxide-sloc-windows-x64.zip` when present,
-extracting the signed `oxide-sloc.exe` and exiting — no Rust toolchain is extracted,
-no build scripts are compiled, no unsigned PE files are created. Carbon Black, McAfee,
-and Trellix have nothing to flag.
+`install.sh` will print a warning with two options when it detects unsigned toolchain binaries.
+Both options work without admin rights on the local machine:
 
-The `dist/` archive is committed to `main` after each release by the CI pipeline. A
-plain `git clone` or `git pull` is all that is needed; no additional download step is
-required on the air-gapped machine.
+**Option 1 — Ask your project maintainer to activate signing**
 
-Verify the extracted binary against the release checksums:
-
-```powershell
-# After install.sh extracts the binary:
-(Get-FileHash .\oxide-sloc.exe -Algorithm SHA256).Hash
-# Compare against SHA256SUMS.txt from the same release tag on GitHub
-```
-
-On internet-connected machines, also verify the GitHub Attestation (requires `gh` CLI):
+The signing infrastructure is already built in the repo — only the GitHub Actions secret is
+missing. The maintainer steps are:
 
 ```bash
-gh attestation verify oxide-sloc.exe --repo NimaShafie/oxide-sloc
+# The base64-encoded PFX already exists (generated by gen-signing-cert.sh):
+cat _signing/sloc-sign.pfx.b64   # value for WINDOWS_CERTIFICATE secret
+
+# In the GitHub repository:
+# Settings → Secrets and variables → Actions → New repository secret
+#   WINDOWS_CERTIFICATE          = (contents of _signing/sloc-sign.pfx.b64)
+#   WINDOWS_CERTIFICATE_PASSWORD = (the PFX password set during cert generation)
+
+# Then trigger:  Actions → "Bundle Rust toolchain" → Run workflow
+# The workflow commits signed toolchain archives to toolchain/ on main.
+# After git pull, future installs extract signed PE files → no EDR alert.
 ```
 
-Or the cosign bundle (from the GitHub Release page):
+**Option 2 — Ask IT to install Rust system-wide**
 
-```bash
-cosign verify-blob --bundle oxide-sloc-windows-x86_64.exe.bundle \
-  oxide-sloc-windows-x86_64.exe
-```
+If `cargo` is on the PATH when `install.sh` runs, the toolchain extraction step is skipped
+entirely. `.tools/` is never created, no unsigned PE files are written, and the EDR has nothing
+to flag. `install.sh` goes directly to `cargo build --release --offline` using the vendor sources.
 
-## Developer machines — Malwarebytes and `target/`
+## For administrators managing multiple endpoints
 
-If you are building from source on a Windows developer machine, Malwarebytes Free may
-flag small PE files in `target/release/build/` (Rust build scripts compiled by Cargo).
-These are not malware — they are intermediate compiler outputs that exist only during
-the build and are never committed to the repo.
+If you are an IT administrator who controls EDR policy, the following options are also available.
+These require console/policy admin access and are not available to end users.
 
-Fix: add a folder exclusion in Malwarebytes (no admin required for Malwarebytes Free):
-
-1. Open Malwarebytes → **Settings** (gear icon) → **Security** tab → **Exclusions**
-2. Click **Add Exclusion** → **Add a Folder Exclusion**
-3. Select: `C:\path\to\oxide-sloc\target`
-4. Click OK
-
-Also recommended for build performance:
+### Windows Defender — folder exclusion
 
 ```powershell
-# Run as Administrator (Windows Defender)
+# Requires Administrator
+Add-MpPreference -ExclusionPath "C:\path\to\oxide-sloc\.tools"
 Add-MpPreference -ExclusionPath "C:\path\to\oxide-sloc\target"
 ```
 
-## Carbon Black Cloud — path exclusions for Windows source builds
-
-If you must build from source on a Windows machine managed by Carbon Black (rather than
-using the pre-built binary from `dist/`), add path-based exclusions in the CBC console
-before running `install.sh`.
-
-1. Open **Carbon Black Cloud** → **Enforce** → **Policies**.
-2. Select the applicable policy → **Prevention** tab → **Permission Rules**.
-3. Add **Allow** rules for the following paths (adjust drive letter as needed):
-
-   | Path | Notes |
-   |------|-------|
-   | `C:\path\to\oxide-sloc\.tools\cargo\bin\*` | cargo.exe, rustup.exe proxy copies |
-   | `C:\path\to\oxide-sloc\.tools\rustup\toolchains\*\bin\*` | rustc.exe, rustdoc.exe, etc. |
-
-4. Alternatively, approve by SHA-256 hash:
-   - Open **Investigate** → **Alerts**, locate the flagged file.
-   - Click the hash → **Actions** → **Add to Approved List**.
-
-The exact SHA-256 hashes for the bundled toolchain parts are in
-`toolchain/checksums.sha256` in the repository.
-
-## Microsoft Defender — adding folder exclusions
-
-```powershell
-# Run as Administrator
-Add-MpPreference -ExclusionPath "C:\path\to\oxide-sloc\.tools"
-```
-
-Remove the exclusion after the build completes (Defender will re-scan once you remove
-the exclusion, but the compiled `oxide-sloc.exe` in the repo root is clean):
+Remove after the build completes (the compiled `oxide-sloc.exe` in the repo root is clean):
 
 ```powershell
 Remove-MpPreference -ExclusionPath "C:\path\to\oxide-sloc\.tools"
+Remove-MpPreference -ExclusionPath "C:\path\to\oxide-sloc\target"
 ```
 
-## CrowdStrike Falcon — adding IOA exclusions
+### Carbon Black Cloud — path-based permission rules
 
-1. **Falcon Console** → **Endpoint Security** → **Prevention Policies** →
-   **Custom IOA Exclusions**.
-2. Add a process path exclusion matching:
+1. Open **Carbon Black Cloud** → **Enforce** → **Policies**.
+2. Select the applicable policy → **Prevention** tab → **Permission Rules**.
+3. Add **Allow** rules for:
+
+   | Path | Notes |
+   |------|-------|
+   | `C:\path\to\oxide-sloc\.tools\cargo\bin\*` | cargo.exe, rustup.exe |
+   | `C:\path\to\oxide-sloc\.tools\rustup\toolchains\*\bin\*` | rustc.exe, rustdoc.exe, etc. |
+
+4. Alternatively, approve by SHA-256: **Investigate** → **Alerts** → locate the flagged file →
+   click the hash → **Actions** → **Add to Approved List**.
+
+Exact SHA-256 hashes for the toolchain parts are in `toolchain/checksums.sha256`.
+
+### CrowdStrike Falcon — custom IOA exclusions
+
+1. **Falcon Console** → **Endpoint Security** → **Prevention Policies** → **Custom IOA Exclusions**.
+2. Add process path exclusions:
    - `*\.tools\cargo\bin\cargo.exe`
    - `*\.tools\cargo\bin\rustup.exe`
 3. Scope the exclusion to the specific host group where oxide-sloc is installed.
 
+### Malwarebytes — folder exclusion for `target/`
+
+During `cargo build`, Malwarebytes Free may flag small PE build scripts in `target/release/build/`
+(Rust compiles one build-script PE per crate). These are intermediate compiler outputs, not malware.
+
+1. Open Malwarebytes → **Settings** (gear icon) → **Security** tab → **Exclusions**
+2. Click **Add Exclusion** → **Add a Folder Exclusion**
+3. Select: `C:\path\to\oxide-sloc\target`
+
 ## Submitting false positives to vendors
 
-The following vendors have been notified of the false positive detection on the
-oxide-sloc binary. If you encounter a detection on a new version, please submit the
-binary hash to the relevant vendor portal:
-
-| Vendor | Submission URL |
-|--------|---------------|
-| McAfee / Trellix (enterprise) | https://www.mcafee.com/enterprise/en-us/threat-intelligence/false-positive.html |
-| Skyhigh Security (SWG) | https://www.mcafee.com/enterprise/en-us/threat-intelligence/false-positive.html |
-| Trapmine | fp@trapmine.com (company acquired — email only; web portal offline) |
-| Carbon Black / VMware | Via CBC console: Investigate → Reputation → Submit for Review |
+| Vendor | Submission |
+|--------|-----------|
 | Microsoft Defender | https://www.microsoft.com/en-us/wdsi/filesubmission |
 | Malwarebytes | https://www.malwarebytes.com/lp/false-positive-submissions |
-
-## Verifying binary authenticity without AV trust
-
-The oxide-sloc release pipeline produces the following verifiable artefacts for
-every release:
-
-| Artefact | What it proves |
-|----------|---------------|
-| `SHA256SUMS.txt` | Integrity — the binary has not been modified |
-| `*.sig` (GPG detached) | Authenticity — signed by the project GPG key |
-| `*.bundle` (cosign) | Provenance — signed by GitHub OIDC, tied to the exact CI run |
-| GitHub Attestation | SLSA provenance — binary was produced by this repo's CI workflow |
-
-The GPG public key is `oxide-sloc-signing-key.asc` in each release.
+| McAfee / Trellix (enterprise) | https://www.mcafee.com/enterprise/en-us/threat-intelligence/false-positive.html |
+| Carbon Black / VMware | CBC console: Investigate → Reputation → Submit for Review |
+| Trapmine | fp@trapmine.com (web portal offline — email only) |
 
 ## Code signing status
 
-| Platform | Status |
-|----------|--------|
-| Windows Authenticode | Pending certificate — planned once project meets CA eligibility |
+| Component | Status |
+|-----------|--------|
+| Rust toolchain PE binaries (Windows) | Pending — set `WINDOWS_CERTIFICATE` GitHub Actions secret to activate; infrastructure is built |
+| `oxide-sloc.exe` (release binary) | Signed when `WINDOWS_CERTIFICATE` secret is set in release CI |
+| GPG detached signature (releases) | Active when `GPG_PRIVATE_KEY` secret is set |
+| Sigstore cosign (keyless, releases) | Active — included in every GitHub Release |
+| SLSA provenance attestation (releases) | Active — verifiable via `gh attestation verify` |
 | macOS Developer ID | Pending Apple Developer account |
-| GPG detached signature | Active (if `GPG_PRIVATE_KEY` secret is set) |
-| Sigstore cosign (keyless) | Active — included in every release |
-| SLSA provenance attestation | Active — verifiable via `gh attestation verify` |
 
-Once Windows Authenticode signing is active, the bundled Rust toolchain binaries
-will also be signed before archiving, eliminating the Carbon Black false positive
-without requiring any exclusion configuration.
+Once `WINDOWS_CERTIFICATE` is set, all Windows PE files (toolchain binaries and the compiled
+`oxide-sloc.exe`) will carry Authenticode signatures — no exclusion configuration needed on
+any endpoint, regardless of admin rights.

@@ -60,9 +60,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 1.95 (matches rust-toolchain.toml)
         with:
-          toolchain: stable
+          toolchain: "1.95"
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
@@ -82,9 +82,6 @@ jobs:
               sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
               ;;
           esac
-
-      - name: Add cross-compilation target
-        run: rustup target add ${{ matrix.target }}
 
       - name: Build release binary
         env:
@@ -248,9 +245,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 1.95 (matches rust-toolchain.toml)
         with:
-          toolchain: stable
+          toolchain: "1.95"
 
       - name: Generate vendor archive
         run: bash scripts/internal/update-vendor.sh
@@ -272,9 +269,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 1.95 (matches rust-toolchain.toml)
         with:
-          toolchain: stable
+          toolchain: "1.95"
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
