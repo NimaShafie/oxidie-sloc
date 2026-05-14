@@ -3,14 +3,16 @@
 #
 # Usage:
 #   bash scripts/install.sh           # build from source (offline, no Rust required)
+#   bash scripts/install.sh --online  # download pre-built binary from GitHub Releases (Linux only)
 #   bash scripts/install.sh --rebuild # force a fresh build even if a binary already exists
 #   bash scripts/install.sh --auto    # auto-install rustup if cargo is absent (interactive prompt)
 #
 # Behavior:
-#   No pre-built oxide-sloc binaries are shipped. Every install compiles from source.
+#   --online: downloads the pre-built binary for the host arch, verifies its SHA-256 checksum,
+#             and installs it.  Falls back to source build if the download or verification fails.
+#   default:  compiles from source using vendor.tar.xz (committed). No network access required.
 #   If cargo (Rust) is on PATH  → extract vendor sources + run cargo build --release --offline.
 #   If no cargo on PATH          → bootstrap Rust from toolchain/ archives, then build.
-#   All dependency sources are in vendor.tar.xz (committed). No network access required.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,10 +20,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 FORCE_REBUILD=false
 AUTO_RUSTUP=false
+ONLINE_MODE=false
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true ;;
         --auto) AUTO_RUSTUP=true ;;
+        --online) ONLINE_MODE=true ;;
     esac
 done
 
@@ -355,7 +359,52 @@ if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == true ]]; then
     rm -f "$EXE"
 fi
 
-# ── 2. Bootstrap Rust from bundled toolchain (if cargo not on PATH) ──────────
+# ── 2. Online binary download (--online, Linux only) ────────────────────────
+# Fetch the pre-built binary for this platform from GitHub Releases, verify its
+# SHA-256 checksum, and install it.  Falls through to source build on any error.
+if [[ "$ONLINE_MODE" == true ]] && [[ "$PLATFORM" == linux ]]; then
+    _OV="$(grep '^version' "$REPO_ROOT/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+    _ASSET="oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
+    _BASE="https://github.com/oxide-sloc/oxide-sloc/releases/download/v${_OV}"
+
+    echo " Downloading oxide-sloc v${_OV} (linux-${LINUX_ARCH})..."
+
+    _TMP="$(mktemp -d)"
+    _OK=false
+
+    if curl -fsSL -o "$_TMP/$_ASSET" "${_BASE}/${_ASSET}" 2>&1; then
+        if curl -fsSL -o "$_TMP/SHA256SUMS.txt" "${_BASE}/SHA256SUMS.txt" 2>&1; then
+            cd "$_TMP"
+            if grep "$_ASSET" SHA256SUMS.txt | sha256sum --check --status 2>/dev/null; then
+                tar -xzf "$_ASSET" -C "$_TMP"
+                if [[ -f "$_TMP/oxide-sloc" ]]; then
+                    cp "$_TMP/oxide-sloc" "$EXE"
+                    chmod +x "$EXE"
+                    _OK=true
+                fi
+            else
+                echo " [WARN] Checksum mismatch — falling back to source build." >&2
+            fi
+            cd "$REPO_ROOT"
+        else
+            echo " [WARN] Could not fetch SHA256SUMS.txt — falling back to source build." >&2
+        fi
+    else
+        echo " [WARN] Download failed — falling back to source build." >&2
+    fi
+
+    rm -rf "$_TMP"
+
+    if [[ "$_OK" == true ]]; then
+        echo " Downloaded and verified."
+        echo " [OK] oxide-sloc v${_OV} installed → $(basename "$EXE")"
+        echo ""
+        echo " Start the web UI:  bash scripts/run.sh"
+        exit 0
+    fi
+fi
+
+# ── 3. Bootstrap Rust from bundled toolchain (if cargo not on PATH) ──────────
 # If cargo is not on PATH but a toolchain archive is committed to toolchain/,
 # extract it locally into .tools/ and export the paths.
 # Archives are gzip-9 .tar.gz files split into ≤45 MB parts by
@@ -479,7 +528,7 @@ if ! command -v cargo &>/dev/null; then
     fi
 fi
 
-# ── 3. Build from vendored sources ──────────────────────────────────────────
+# ── 4. Build from vendored sources ──────────────────────────────────────────
 if command -v cargo &>/dev/null; then
     if [[ ! -d "$VENDOR_DIR" ]]; then
         if [[ -f "$VENDOR_ARCHIVE" ]]; then
@@ -521,7 +570,7 @@ EOF
     exit 1
 fi
 
-# ── 4. No Rust toolchain available ──────────────────────────────────────────
+# ── 5. No Rust toolchain available ──────────────────────────────────────────
 
 echo ""
 echo " No Rust toolchain detected and no bundled toolchain archives found."
