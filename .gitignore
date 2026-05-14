@@ -56,8 +56,9 @@ perf.data.old
 *.exe
 *.dll
 
-# dist/ — local output directory for CI release artifacts; nothing here is committed.
-# All installs compile from source (toolchain/ + vendor.tar.xz).
+# dist/ — ignored for local builds to prevent accidental commits.
+# update-dist.yml uses `git add -f` to intentionally commit the signed
+# Windows zip (oxide-sloc-windows-x64.zip) after each release.
 /dist/
 
 # toolchain/ — bundled Rust toolchain archives (7-zip level 9, split into ≤45 MB parts)
