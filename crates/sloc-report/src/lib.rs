@@ -3913,7 +3913,7 @@ fn xl_write_header_row(xml: &mut String, headers: &[&str]) {
     xml.push_str("</row>\n");
 }
 
-fn xl_cell_style(is_kv: bool, ci: usize, is_num: bool, is_alt: bool) -> u32 {
+const fn xl_cell_style(is_kv: bool, ci: usize, is_num: bool, is_alt: bool) -> u32 {
     if is_kv {
         if ci == 0 {
             XLS_KV_KEY
