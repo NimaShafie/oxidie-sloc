@@ -11,6 +11,7 @@
 3. `set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh` — all checks must pass
 4. Run the `createItem` curl (Step 1 below)
 5. Run the seed-build curl (Step 2 below)
+6. After the job is created, see [Cleanup](#cleanup) to remove the local credentials file.
 
 On a network-connected agent, step 2 is optional.
 
@@ -251,6 +252,150 @@ verify the SHA-256 checksum before extracting.
 
 ---
 
+## Plugin files directory (ci/jenkins/plugins/)
+
+`ci/jenkins/plugins/` is an alternative plugin source to the `jenkins-plugins.tar.xz`
+bundle.  Instead of a single compressed archive, it holds individual `.hpi` files that
+can be inspected, transferred, and installed one at a time — useful when you cannot run
+Docker or when IT needs to review specific files before installation.
+
+### Populate the directory
+
+Run `download.sh` on any machine that has internet access and `curl`:
+
+```bash
+bash ci/jenkins/plugins/download.sh
+```
+
+To re-download even when files already exist:
+
+```bash
+bash ci/jenkins/plugins/download.sh --force
+```
+
+To use an internal mirror instead of the public Update Center:
+
+```bash
+bash ci/jenkins/plugins/download.sh --update-center https://mirrors.example.com/jenkins
+```
+
+### Install from the directory
+
+```bash
+bash ci/jenkins/install-jenkins-plugins.sh --from-dir ci/jenkins/plugins --restart
+```
+
+The install script also auto-detects the directory: if `jenkins-plugins.tar.xz` is not
+present but `ci/jenkins/plugins/*.hpi` files exist, the script switches to the directory
+source automatically with a printed notice.
+
+> **Transitive dependency note:** `download.sh` fetches only the direct plugins listed
+> in `plugins.txt`.  Jenkins resolves their transitive dependencies from the Update
+> Center at startup.  If the Jenkins host has no internet access and no Update Center
+> configured, you need the full `jenkins-plugins.tar.xz` bundle (Path A below) which
+> includes the complete dependency tree.
+
+### Committing the files
+
+If you want to ship the `.hpi` files in the repository for maximum portability:
+
+```bash
+git add ci/jenkins/plugins/*.hpi
+git commit -m "ci: add pre-downloaded plugin files for offline install"
+```
+
+Regenerate and recommit whenever `plugins.txt` changes.
+
+---
+
+## No admin access / corporate Jenkins
+
+If you cannot install plugins through the CLI or rebuild the Docker image, three paths
+are available.
+
+### Path 1 — Request IT installation
+
+Give your IT or ops team the following:
+
+- `ci/jenkins/plugins.txt` — one plugin ID per non-comment line, with descriptions
+- (Optional) the `.hpi` files in `ci/jenkins/plugins/` — so they have no download step
+
+The table below tells them exactly what each plugin does, so they can prioritise or
+raise questions before installing:
+
+| Plugin ID | What it enables |
+|-----------|----------------|
+| `workflow-aggregator` | Declarative Pipeline syntax — `stages {}`, `when {}`, `post {}` |
+| `pipeline-utility-steps` | `readJSON` / `writeJSON` helpers used in the post-success block |
+| `ws-cleanup` | `cleanWs()` in `post { cleanup }` — removes workspace after each build |
+| `git` | `GitSCM` checkout step — clones the repository on the agent |
+| `credentials-binding` | `credentials()` binding in `environment {}` blocks (SMTP, webhook) |
+| `htmlpublisher` | `publishHTML()` — "SLOC Report" and "Build Dashboard" sidebar links |
+| `plot` | `plot()` — SLOC trend charts across builds (code/comment/blank over time) |
+| `junit` | `junit()` — "Test Result" sidebar link and pass/fail trend |
+| `coverage` | `recordCoverage()` — line/branch/function % per build with drill-down |
+| `pipeline-stage-view` | Stage visualization in the job UI (Blue Ocean lite) |
+| `timestamper` | Timestamps on every console output line |
+| `ansicolor` | ANSI colour in Rust compiler and Clippy output |
+| `job-dsl` | Executes `ci/jenkins/seed-job.groovy` to create the pipeline job |
+| `copyartifact` | Copies artifacts to/from downstream jobs in Pipeline-of-Pipelines setups |
+| `bitbucket` | Bitbucket Branch Source — optional, Bitbucket SCM only |
+| `bitbucket-build-status-notifier` | Posts commit statuses to Bitbucket — optional |
+
+### Path 2 — Upload via Jenkins UI
+
+Requires the **"Administer"** permission in Jenkins (not just build permission).
+
+**Manage Jenkins → Plugins → Advanced → Deploy Plugin → Upload .hpi**
+
+Upload one `.hpi` file at a time.  You must also upload every transitive dependency
+that is not already installed.  Run `bundle-jenkins-plugins.sh` on a Docker-capable
+machine to see the full dependency list — the script prints every plugin it downloads.
+
+This approach works in environments where you cannot run CLI commands or SSH into the
+Jenkins host, but where you do have "Administer" in the Jenkins UI.
+
+### Path 3 — Zero-plugin fallback (standalone HTML dashboard)
+
+`ci/jenkins/generate-dashboard.py` generates a complete, self-contained HTML
+dashboard from the CI output artifacts using only:
+
+- Python 3 standard library — no `pip install`
+- `archiveArtifacts` — Jenkins core step, no extra plugins required
+
+No `Plot`, `junit`, `coverage`, or `htmlpublisher` plugins are needed.  The resulting
+HTML file is archived as a build artifact.  Any user with "Read" access to the job can
+download it from the build page and open it in a browser.
+
+```bash
+python3 ci/jenkins/generate-dashboard.py ci-out/
+# Writes: ci-out/dashboard_<project>.html
+# Archive: archiveArtifacts artifacts: 'ci-out/dashboard_*.html'
+```
+
+The Jenkinsfile already runs this script automatically in the Archive & Publish stage.
+No extra pipeline configuration is needed.
+
+**What each section shows and when it appears:**
+
+| Dashboard section | What it shows | Appears when |
+|-------------------|---------------|--------------|
+| SLOC Summary | Code / comment / blank line counts and files analyzed | Always (requires `result_<slug>.json`) |
+| Language Breakdown | Horizontal bar chart of code lines per language | Always (derived from the same JSON) |
+| Test Results | Total / passed / failed / error / skip counts | `test-results/junit.xml` is present |
+| Code Coverage | Line coverage percentage progress bar | `coverage/lcov.info` is present |
+
+### What each plugin adds vs. the fallback
+
+| Feature | With plugin | Without plugin (fallback) |
+|---------|-------------|--------------------------|
+| SLOC trend chart | `plot` plugin → chart on the job page showing history across builds | `dashboard.html` shows current-build data only |
+| Test pass/fail trend | `junit` plugin → sidebar link and trend chart | `dashboard.html` shows current-build test counts |
+| Coverage trend | `coverage` plugin → line/branch/function % with per-file drill-down | `dashboard.html` shows current-build line coverage % |
+| HTML report sidebar | `htmlpublisher` → persistent sidebar link on every build | `archiveArtifacts` → downloadable artifact on each build page |
+
+---
+
 ### Path A — Docker controller image (recommended for Docker setups)
 
 `ci/jenkins/Dockerfile.controller` builds a Jenkins controller with all plugins
@@ -402,8 +547,11 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 
 > **Note:** current Jenkins LTS exempts API-token-authenticated POST requests from CSRF
 > checks, so the crumb is not strictly required on modern instances. It is included here
-> for compatibility with older LTS (≤ 2.176.x) and instances with "Enable proxy
-> compatibility" enabled, where the same `curl` without `-H "${CRUMB}"` returns HTTP 403.
+> for two edge cases where the same `curl` without `-H "${CRUMB}"` returns HTTP 403:
+> older LTS releases predating the API-token CSRF exemption, and any Jenkins instance
+> where an admin has enabled **"Enable proxy compatibility"** under **Manage Jenkins →
+> Security** (that setting re-engages crumb validation for all requests regardless of
+> authentication method).
 
 ### Cleanup
 
