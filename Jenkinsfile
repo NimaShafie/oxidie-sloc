@@ -26,12 +26,11 @@ pipeline {
     // only discovers the parameters{} block after running Jenkinsfile once.
     // Run the first build with no arguments to seed the form; from build #2
     // onward, "Build with Parameters" in the sidebar shows the full form.
+    //
+    // Ordered from most-frequently changed (top) to rarely touched (bottom).
+    // Artifact repo config and pipeline-chaining params are last so the form
+    // stays compact for normal scan runs.
     parameters {
-
-        // ── Pipeline-of-Pipelines chaining ─────────────────────────────────────
-        string(name: 'UPSTREAM_JOB',   defaultValue: '', description: 'Name of the upstream pipeline that triggered this build (for chaining)')
-        string(name: 'UPSTREAM_BUILD', defaultValue: '', description: 'Build number of the upstream job')
-        string(name: 'DOWNSTREAM_JOB', defaultValue: '', description: 'Pipeline job to trigger on success (leave empty to disable)')
 
         // ── Source repository ──────────────────────────────────────────────────
         string(
@@ -62,6 +61,40 @@ pipeline {
                           'Only safe path characters are allowed (letters, digits, hyphens, underscores, slashes).'
         )
 
+        // ── Pipeline switches ──────────────────────────────────────────────────
+        booleanParam(
+            name:         'SKIP_QUALITY_GATES',
+            defaultValue: false,
+            description:  'Skip the Format / Lint / Unit tests stage. ' +
+                          'Useful for scan-only runs where code-quality enforcement is not needed.'
+        )
+        booleanParam(
+            name:         'SKIP_WEB_CHECK',
+            defaultValue: true,
+            description:  'Skip the web UI health-check stage. ' +
+                          'Use on agents without loopback access or where port 4317 is unavailable.'
+        )
+        booleanParam(
+            name:         'SKIP_SONAR',
+            defaultValue: true,
+            description:  'Skip the SonarQube scan stage. Use on agents without Docker access or when the SonarQube server is unavailable.'
+        )
+        string(
+            name:         'SONAR_URL',
+            defaultValue: 'http://localhost:9000',
+            description:  'SonarQube server URL (no trailing slash). ' +
+                          'Example: http://10.0.0.8:9000 for a LAN server. ' +
+                          'Used only when SKIP_SONAR is unchecked.'
+        )
+        booleanParam(
+            name:         'GENERATE_COVERAGE',
+            defaultValue: false,
+            description:  'Run ci/sonar/generate-coverage.sh before the SonarQube scan to include test coverage in the report. ' +
+                          'Requires cargo-llvm-cov (cargo install cargo-llvm-cov; rustup component add llvm-tools-preview) ' +
+                          'or cargo-tarpaulin (cargo install cargo-tarpaulin) pre-installed on the agent. ' +
+                          'Skipped automatically when SKIP_SONAR is checked.'
+        )
+
         // ── CI config preset ───────────────────────────────────────────────────
         choice(
             name:    'CI_PRESET',
@@ -71,6 +104,23 @@ pipeline {
                          '  default     — balanced defaults, mirrors web UI defaults  (ci/sloc-ci-default.toml)\n' +
                          '  strict      — fail the pipeline if binary files are found  (ci/sloc-ci-strict.toml)\n' +
                          '  full-scope  — count everything including vendor and lockfiles  (ci/sloc-ci-full-scope.toml)'
+        )
+
+        // ── Output formats ─────────────────────────────────────────────────────
+        booleanParam(
+            name:         'GENERATE_HTML',
+            defaultValue: true,
+            description:  'Write an HTML report artifact and publish it via the HTML Publisher plugin. ' +
+                          'Appears as "SLOC Report" in the left-hand build menu. ' +
+                          'Requires the "HTML Publisher" plugin — see ci/jenkins/plugins.txt.'
+        )
+        booleanParam(
+            name:         'GENERATE_PDF',
+            defaultValue: false,
+            description:  'Write a PDF report artifact. ' +
+                          'Requires a Chromium-based browser (Chrome, Edge, Brave, Vivaldi, or Opera) ' +
+                          'installed on the agent. Set the SLOC_BROWSER environment variable to ' +
+                          'specify a custom browser path, or SLOC_BROWSER_NOSANDBOX=1 for Docker.'
         )
 
         // ── Analysis rules ─────────────────────────────────────────────────────
@@ -125,58 +175,6 @@ pipeline {
                           'Example: vendor/**,**/*.min.js   (empty = nothing excluded)'
         )
 
-        // ── Output formats ─────────────────────────────────────────────────────
-        booleanParam(
-            name:         'GENERATE_HTML',
-            defaultValue: true,
-            description:  'Write an HTML report artifact and publish it via the HTML Publisher plugin. ' +
-                          'Appears as "SLOC Report" in the left-hand build menu. ' +
-                          'Requires the "HTML Publisher" plugin — see ci/jenkins/plugins.txt.'
-        )
-        booleanParam(
-            name:         'GENERATE_PDF',
-            defaultValue: false,
-            description:  'Write a PDF report artifact. ' +
-                          'Requires a Chromium-based browser (Chrome, Edge, Brave, Vivaldi, or Opera) ' +
-                          'installed on the agent. Set the SLOC_BROWSER environment variable to ' +
-                          'specify a custom browser path, or SLOC_BROWSER_NOSANDBOX=1 for Docker.'
-        )
-
-        // ── Pipeline switches ──────────────────────────────────────────────────
-        booleanParam(
-            name:         'SKIP_QUALITY_GATES',
-            defaultValue: false,
-            description:  'Skip the Format / Lint / Unit tests stage. ' +
-                          'Useful for scan-only runs where code-quality enforcement is not needed.'
-        )
-        booleanParam(
-            name:         'SKIP_WEB_CHECK',
-            defaultValue: true,
-            description:  'Skip the web UI health-check stage. ' +
-                          'Use on agents without loopback access or where port 4317 is unavailable.'
-        )
-
-        booleanParam(
-            name:         'SKIP_SONAR',
-            defaultValue: true,
-            description:  'Skip the SonarQube scan stage. Use on agents without Docker access or when the SonarQube server is unavailable.'
-        )
-        string(
-            name:         'SONAR_URL',
-            defaultValue: 'http://localhost:9000',
-            description:  'SonarQube server URL (no trailing slash). ' +
-                          'Example: http://10.0.0.8:9000 for a LAN server. ' +
-                          'Used only when SKIP_SONAR is unchecked.'
-        )
-        booleanParam(
-            name:         'GENERATE_COVERAGE',
-            defaultValue: false,
-            description:  'Run ci/sonar/generate-coverage.sh before the SonarQube scan to include test coverage in the report. ' +
-                          'Requires cargo-llvm-cov (cargo install cargo-llvm-cov; rustup component add llvm-tools-preview) ' +
-                          'or cargo-tarpaulin (cargo install cargo-tarpaulin) pre-installed on the agent. ' +
-                          'Skipped automatically when SKIP_SONAR is checked.'
-        )
-
         // ── Git-ref comparison ─────────────────────────────────────────────────
         string(
             name:         'GIT_REF',
@@ -198,6 +196,53 @@ pipeline {
             defaultValue: false,
             description:  'Automatically detect the previous release tag (the one before GIT_REF or HEAD) ' +
                           'and use it as the baseline for comparison. Overrides COMPARE_TO_REF when set.'
+        )
+
+        // ── Test runner & results ──────────────────────────────────────────────
+        choice(
+            name:    'TEST_RUNNER',
+            choices: ['cargo-test', 'cargo-nextest'],
+            description: 'Test runner for the Unit tests stage.\n' +
+                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)\n' +
+                         '  cargo-nextest — faster parallel runner with JUnit XML output;\n' +
+                         '                  requires cargo-nextest on the agent:\n' +
+                         '                    cargo install cargo-nextest\n' +
+                         '                  Enables the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.'
+        )
+        booleanParam(
+            name:         'PUBLISH_TEST_RESULTS',
+            defaultValue: true,
+            description:  'Publish JUnit XML test results to Jenkins (requires TEST_RUNNER = cargo-nextest). ' +
+                          'Results appear as a "Test Result" sidebar link, per-build trend chart, and build badge. ' +
+                          'Has no effect when TEST_RUNNER is "cargo-test" (no XML is generated).'
+        )
+        booleanParam(
+            name:         'TEST_FAIL_FAST',
+            defaultValue: false,
+            description:  'Stop on the first test failure instead of running all tests to completion. ' +
+                          'Useful for fast feedback on a known-broken area; leave unchecked to see all failures at once.'
+        )
+
+        // ── Standalone code coverage ───────────────────────────────────────────
+        booleanParam(
+            name:         'COVERAGE_STANDALONE',
+            defaultValue: false,
+            description:  'Run a dedicated Coverage stage independent of the SonarQube scan. ' +
+                          'Generates LCOV, Cobertura XML, and a browsable HTML coverage report. ' +
+                          'The HTML report is published as a "Coverage Report" sidebar link. ' +
+                          'Requires cargo-llvm-cov (preferred) or cargo-tarpaulin on the agent:\n' +
+                          '  cargo install cargo-llvm-cov && rustup component add llvm-tools-preview\n' +
+                          'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.\n' +
+                          'When both COVERAGE_STANDALONE and GENERATE_COVERAGE are enabled, ' +
+                          'coverage runs once (Coverage stage) and is reused by SonarQube.'
+        )
+        string(
+            name:         'COVERAGE_THRESHOLD',
+            defaultValue: '0',
+            description:  'Minimum line-coverage percentage required to pass the build (0 = disabled). ' +
+                          'Only enforced when COVERAGE_STANDALONE is enabled. ' +
+                          'Coverage percentage is derived from the LCOV lcov.info summary lines (LH / LF). ' +
+                          'Example: 60  fails the build if fewer than 60 % of lines are covered.'
         )
 
         // ── Delivery / notifications ───────────────────────────────────────────
@@ -300,52 +345,10 @@ pipeline {
                           'XLSX is always generated — no separate output flag required.'
         )
 
-        // ── Test runner & results ──────────────────────────────────────────────
-        choice(
-            name:    'TEST_RUNNER',
-            choices: ['cargo-test', 'cargo-nextest'],
-            description: 'Test runner for the Unit tests stage.\n' +
-                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)\n' +
-                         '  cargo-nextest — faster parallel runner with JUnit XML output;\n' +
-                         '                  requires cargo-nextest on the agent:\n' +
-                         '                    cargo install cargo-nextest\n' +
-                         '                  Enables the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.'
-        )
-        booleanParam(
-            name:         'PUBLISH_TEST_RESULTS',
-            defaultValue: true,
-            description:  'Publish JUnit XML test results to Jenkins (requires TEST_RUNNER = cargo-nextest). ' +
-                          'Results appear as a "Test Result" sidebar link, per-build trend chart, and build badge. ' +
-                          'Has no effect when TEST_RUNNER is "cargo-test" (no XML is generated).'
-        )
-        booleanParam(
-            name:         'TEST_FAIL_FAST',
-            defaultValue: false,
-            description:  'Stop on the first test failure instead of running all tests to completion. ' +
-                          'Useful for fast feedback on a known-broken area; leave unchecked to see all failures at once.'
-        )
-
-        // ── Standalone code coverage ───────────────────────────────────────────
-        booleanParam(
-            name:         'COVERAGE_STANDALONE',
-            defaultValue: false,
-            description:  'Run a dedicated Coverage stage independent of the SonarQube scan. ' +
-                          'Generates LCOV, Cobertura XML, and a browsable HTML coverage report. ' +
-                          'The HTML report is published as a "Coverage Report" sidebar link. ' +
-                          'Requires cargo-llvm-cov (preferred) or cargo-tarpaulin on the agent:\n' +
-                          '  cargo install cargo-llvm-cov && rustup component add llvm-tools-preview\n' +
-                          'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.\n' +
-                          'When both COVERAGE_STANDALONE and GENERATE_COVERAGE are enabled, ' +
-                          'coverage runs once (Coverage stage) and is reused by SonarQube.'
-        )
-        string(
-            name:         'COVERAGE_THRESHOLD',
-            defaultValue: '0',
-            description:  'Minimum line-coverage percentage required to pass the build (0 = disabled). ' +
-                          'Only enforced when COVERAGE_STANDALONE is enabled. ' +
-                          'Coverage percentage is derived from the LCOV lcov.info summary lines (LH / LF). ' +
-                          'Example: 60  fails the build if fewer than 60 % of lines are covered.'
-        )
+        // ── Pipeline-of-Pipelines chaining ─────────────────────────────────────
+        string(name: 'UPSTREAM_JOB',   defaultValue: '', description: 'Name of the upstream pipeline that triggered this build (for chaining)')
+        string(name: 'UPSTREAM_BUILD', defaultValue: '', description: 'Build number of the upstream job')
+        string(name: 'DOWNSTREAM_JOB', defaultValue: '', description: 'Pipeline job to trigger on success (leave empty to disable)')
     }
 
     environment {
@@ -1063,9 +1066,11 @@ CARGOEOF
                     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
 
                     // Write CSV trend data consumed by the Plot plugin.
-                    def proj = env.SLOC_PROJECT ?: 'project'
+                    def proj     = env.SLOC_PROJECT ?: 'project'
+                    def jobSlug  = (env.JOB_NAME?.replaceAll('[^a-zA-Z0-9_\\-]', '_') ?: 'oxide-sloc')
+                    def histFile = "${env.HOME}/.oxide-sloc-history/${jobSlug}.csv"
                     sh """python3 - <<'PYEOF'
-import json, csv, os, sys, re
+import json, csv, os, sys, re, time
 
 out = "${outDir}"
 
@@ -1114,6 +1119,31 @@ if os.path.exists(lcov_path):
     print(f"Coverage trend CSV: {pct}% line coverage ({hit}/{total} lines hit)")
 else:
     print("lcov.info not found — skipping coverage CSV")
+
+# ── Persistent trend history ─────────────────────────────────────────────
+# Written to agent home (outside workspace) so it survives cleanWs().
+# Read by generate-dashboard.py to render a build-over-build sparkline.
+history_file = "${histFile}"
+if history_file and os.path.exists(result_path):
+    ts        = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    build_num = os.environ.get('BUILD_NUMBER', '0')
+    hist_dir  = os.path.dirname(history_file)
+    if hist_dir:
+        os.makedirs(hist_dir, exist_ok=True)
+    header = 'timestamp,build,code_lines,comment_lines,blank_lines,files_analyzed\n'
+    if not os.path.exists(history_file):
+        open(history_file, 'w').write(header)
+    with open(history_file, 'a') as hf:
+        hf.write(f"{ts},{build_num},{totals['code_lines']},"
+                 f"{totals['comment_lines']},{totals['blank_lines']},"
+                 f"{totals['files_analyzed']}\n")
+    with open(history_file) as hf:
+        lines = hf.readlines()
+    if len(lines) > 51:
+        with open(history_file, 'w') as hf:
+            hf.write(lines[0])
+            hf.writelines(lines[-50:])
+    print(f"Trend history updated: {history_file} ({len(lines)} entries)")
 PYEOF"""
 
                     // Archive binary + all output subdirectory contents.
@@ -1142,7 +1172,7 @@ PYEOF"""
                     // Plot / junit / coverage / htmlpublisher plugins to be useful.
                     // Wrapped in try/catch so a Python error never fails the build.
                     try {
-                        sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}'"
+                        sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}' '${histFile}'"
                         def dashFile = "${outDir}/dashboard_${proj}.html"
                         if (fileExists(dashFile)) {
                             publishHTML(target: [
@@ -1342,23 +1372,46 @@ PYEOF"""
                     def result = readJSON file: "${outDir}/result_${proj}.json"
                     def t      = result.summary_totals
 
-                    // Base description from SLOC totals
-                    def desc = "scan=${params.SCAN_PATH}  code=${t.code_lines}  " +
-                               "files=${t.files_analyzed}  comments=${t.comment_lines}  " +
-                               "blank=${t.blank_lines}"
+                    // Compact number formatter (matches CLAUDE.md canonical spec)
+                    def fmtN = { n ->
+                        long v = n as long
+                        long a = Math.abs(v)
+                        if (a >= 1_000_000L) {
+                            String s = String.format('%.1f', v / 1_000_000.0) + 'M'
+                            return s.replace('.0M', 'M')
+                        }
+                        if (a >= 10_000L) return "${Math.round(v / 1_000.0)}K"
+                        return String.format('%,d', v)
+                    }
+                    // Inline pill badge helper — renders as colored label in Jenkins
+                    // when Manage Jenkins → Security → Markup Formatter is "Safe HTML".
+                    // Falls back to readable plain text otherwise.
+                    def pill = { String txt, String bg ->
+                        "<span style='display:inline-block;background:${bg};color:#fff;" +
+                        "padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;" +
+                        "margin-right:3px'>${txt}</span>"
+                    }
+
+                    def desc = pill("${fmtN(t.code_lines)} code",    '#b04a00') +
+                               pill("${fmtN(t.comment_lines)} cmts", '#5a7848') +
+                               pill("${fmtN(t.blank_lines)} blank",  '#7a6a5a') +
+                               pill("${fmtN(t.files_analyzed)} files",'#486a78') +
+                               " <small style='color:#8a6a5a'>${params.SCAN_PATH}</small>"
 
                     // Append test-result stats (cargo-nextest JUnit XML)
                     def junitPath = "${outDir}/test-results/junit.xml"
                     if (fileExists(junitPath)) {
                         try {
-                            def junit = readFile(junitPath)
-                            def testsMatch   = junit =~ /tests="(\d+)"/
-                            def failMatch    = junit =~ /failures="(\d+)"/
-                            def errMatch     = junit =~ /errors="(\d+)"/
-                            def totalTests   = testsMatch   ? testsMatch[0][1]   : '?'
-                            def failCount    = failMatch    ? failMatch[0][1]    : '0'
-                            def errCount     = errMatch     ? errMatch[0][1]     : '0'
-                            desc += "  tests=${totalTests} fail=${failCount} err=${errCount}"
+                            def junit      = readFile(junitPath)
+                            def tm = junit =~ /tests="(\d+)"/
+                            def fm = junit =~ /failures="(\d+)"/
+                            def em = junit =~ /errors="(\d+)"/
+                            def totalTests = tm ? (tm[0][1] as long) : 0L
+                            def failCount  = fm ? (fm[0][1] as long) : 0L
+                            def errCount   = em ? (em[0][1] as long) : 0L
+                            def passCount  = Math.max(0L, totalTests - failCount - errCount)
+                            def testBg     = (failCount == 0 && errCount == 0) ? '#2a6846' : '#b23030'
+                            desc += ' ' + pill("${fmtN(passCount)}/${fmtN(totalTests)} tests", testBg)
                         } catch (Exception ex) {
                             echo "Could not parse JUnit XML for description: ${ex.message}"
                         }
@@ -1377,7 +1430,11 @@ PYEOF"""
                                 """,
                                 returnStdout: true
                             ).trim()
-                            desc += "  coverage=${pct}%"
+                            if (pct != 'N/A') {
+                                def pv    = pct as double
+                                def covBg = pv >= 70.0 ? '#2a6846' : pv >= 40.0 ? '#d4851c' : '#b23030'
+                                desc += ' ' + pill("${pct}% cov", covBg)
+                            }
                         } catch (Exception ex) {
                             echo "Could not read coverage for description: ${ex.message}"
                         }

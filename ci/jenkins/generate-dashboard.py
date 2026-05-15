@@ -49,6 +49,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from glob import glob
 from typing import Optional
+import csv
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +176,65 @@ def svg_progress(pct: float, w: int = 300, h: int = 22) -> str:
     )
 
 
+def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
+    """SVG line sparkline for build-over-build trend data.
+
+    points: list of (build_number, value) pairs, oldest first.
+    """
+    if len(points) < 2:
+        return ""
+
+    values = [v for _, v in points]
+    builds = [b for b, _ in points]
+    min_v = min(values)
+    max_v = max(values)
+    value_range = max_v - min_v or 1
+
+    pad_l, pad_r, pad_t, pad_b = 12, 12, 10, 20
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    n = len(points)
+
+    def px(i: int, v: int):
+        x = pad_l + int(w * i / (n - 1))
+        y = pad_t + int(h * (1.0 - (v - min_v) / value_range))
+        return x, y
+
+    coords = [px(i, v) for i, v in enumerate(values)]
+    path_d = " ".join(f"{'M' if i == 0 else 'L'}{x},{y}" for i, (x, y) in enumerate(coords))
+    area_d = (
+        path_d
+        + f" L{coords[-1][0]},{pad_t + h} L{coords[0][0]},{pad_t + h} Z"
+    )
+
+    lx, ly = coords[-1]
+    max_i = values.index(max_v)
+    min_i = values.index(min_v)
+    max_x, max_y = coords[max_i]
+    min_x, min_y = coords[min_i]
+
+    extra_dots = ""
+    if max_i != n - 1:
+        extra_dots += f'\n  <circle cx="{max_x}" cy="{max_y}" r="3" fill="#2a6846" opacity="0.85"/>'
+    if min_i != n - 1 and min_i != max_i:
+        extra_dots += f'\n  <circle cx="{min_x}" cy="{min_y}" r="3" fill="#b23030" opacity="0.85"/>'
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"'
+        f' role="img" aria-label="SLOC trend over last {n} builds">'
+        f'\n  <path d="{area_d}" fill="#b04a00" fill-opacity="0.07"/>'
+        f'\n  <path d="{path_d}" fill="none" stroke="#b04a00" stroke-width="2"'
+        f' stroke-linejoin="round" stroke-linecap="round"/>'
+        f'\n  <circle cx="{lx}" cy="{ly}" r="4" fill="#b04a00"/>'
+        f"{extra_dots}"
+        f'\n  <text x="{pad_l}" y="{height - 3}" font-size="10" fill="#8a6a5a"'
+        f' font-family="system-ui,sans-serif">#{html.escape(str(builds[0]))}</text>'
+        f'\n  <text x="{width - pad_r}" y="{height - 3}" font-size="10" fill="#8a6a5a"'
+        f' text-anchor="end" font-family="system-ui,sans-serif">#{html.escape(str(builds[-1]))}</text>'
+        f'\n</svg>'
+    )
+
+
 # ---------------------------------------------------------------------------
 # HTML component helpers
 # ---------------------------------------------------------------------------
@@ -296,6 +356,35 @@ def parse_lcov(path: str) -> tuple:
         return (0, 0)
 
 
+def parse_trend_history(path: str) -> list:
+    """Parse the persistent per-job trend CSV written by the Jenkinsfile.
+
+    Each row: timestamp, build, code_lines, comment_lines, blank_lines, files_analyzed.
+    Returns a list of dicts sorted oldest-first.  Returns [] on any error.
+    """
+    if not os.path.isfile(path):
+        return []
+    try:
+        rows = []
+        with open(path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                try:
+                    rows.append({
+                        "timestamp":      row.get("timestamp", ""),
+                        "build":          int(row.get("build", 0)),
+                        "code_lines":     int(row.get("code_lines", 0)),
+                        "comment_lines":  int(row.get("comment_lines", 0)),
+                        "blank_lines":    int(row.get("blank_lines", 0)),
+                        "files_analyzed": int(row.get("files_analyzed", 0)),
+                    })
+                except (ValueError, KeyError):
+                    pass
+        return rows
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Main dashboard generator
 # ---------------------------------------------------------------------------
@@ -362,6 +451,11 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     lcov_path = os.path.join(out_dir, "coverage", "lcov.info")
     cov_hit, cov_found = parse_lcov(lcov_path)
     cov_pct = round(cov_hit / cov_found * 100, 1) if cov_found > 0 else None
+
+    # ── Load trend history ──────────────────────────────────────────────────
+    # Path supplied as SLOC_HISTORY_FILE env var (set by Jenkinsfile) or 3rd arg.
+    history_file  = os.environ.get("SLOC_HISTORY_FILE", "")
+    trend_history = parse_trend_history(history_file) if history_file else []
 
     # ── Environment ─────────────────────────────────────────────────────────
     build_number = os.environ.get("BUILD_NUMBER", "")
@@ -464,6 +558,34 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
   Enable <code>COVERAGE_STANDALONE = true</code> in the pipeline parameters to
   generate LCOV coverage data.</p>
 </div>"""
+
+    # ── Trend sparkline section ─────────────────────────────────────────────
+    if len(trend_history) >= 2:
+        trend_points = [(r["build"], r["code_lines"]) for r in trend_history]
+        sparkline    = svg_sparkline(trend_points)
+        t_last       = trend_history[-1]
+        t_prev       = trend_history[-2]
+        delta        = t_last["code_lines"] - t_prev["code_lines"]
+        sign         = "+" if delta > 0 else ""
+        delta_col    = "#2a6846" if delta > 0 else "#b23030" if delta < 0 else "#8a6a5a"
+        n_builds     = len(trend_history)
+        trend_section = f"""
+<div class="card">
+  <div class="card-title">Code Lines Trend &mdash; last {n_builds} build{"s" if n_builds != 1 else ""}</div>
+  <div class="sparkline-wrap">
+    {sparkline}
+  </div>
+  <p class="trend-delta" style="color:{delta_col}">
+    {html.escape(f"{sign}{fmt(delta)}")} code lines since build #{t_prev["build"]}
+    &nbsp;&middot;&nbsp;
+    <span style="color:#8a6a5a;font-weight:400">
+      range: {html.escape(fmt(min(v for _,v in trend_points)))}
+      &ndash; {html.escape(fmt(max(v for _,v in trend_points)))}
+    </span>
+  </p>
+</div>"""
+    else:
+        trend_section = ""
 
     # ── Header meta ─────────────────────────────────────────────────────────
     header_meta_parts = []
@@ -674,6 +796,10 @@ body {{
 }}
 .site-footer a:hover {{ text-decoration: underline; }}
 
+/* ── Trend sparkline ────────────────────────────────────────────────────── */
+.sparkline-wrap {{ overflow-x: auto; margin-bottom: 8px; }}
+.trend-delta {{ font-size: 13px; font-weight: 700; margin-top: 4px; line-height: 1.5; }}
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {{
   .summary-strip {{ grid-template-columns: repeat(2, 1fr); }}
@@ -715,6 +841,9 @@ body {{
     <p class="lang-caption">{html.escape(lang_caption)}</p>
   </div>
 
+  <!-- Build Trend -->
+  {trend_section}
+
   <!-- Test Results -->
   {test_section}
 
@@ -751,13 +880,17 @@ body {{
 def main() -> None:
     if len(sys.argv) < 2:
         print(
-            "Usage: python3 ci/jenkins/generate-dashboard.py <output-dir> [project-slug]",
+            "Usage: python3 ci/jenkins/generate-dashboard.py <output-dir> [project-slug] [history-file]",
             file=sys.stderr,
         )
         sys.exit(1)
 
     out_dir = sys.argv[1]
     slug    = sys.argv[2] if len(sys.argv) >= 3 else None
+
+    # 3rd arg overrides SLOC_HISTORY_FILE env var
+    if len(sys.argv) >= 4 and sys.argv[3]:
+        os.environ["SLOC_HISTORY_FILE"] = sys.argv[3]
 
     if not os.path.isdir(out_dir):
         print(f"ERROR: output directory does not exist: {out_dir}", file=sys.stderr)
