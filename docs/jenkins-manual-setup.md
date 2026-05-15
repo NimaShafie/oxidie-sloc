@@ -161,7 +161,7 @@ bash ci/jenkins/install-jenkins-plugins.sh --restart
 The suggested-plugin set from Step 3 installs the basics.  Install the remaining
 oxide-sloc-specific plugins via the Jenkins UI:
 
-### Option 1 — From the bundled archive (air-gapped)
+### Option A — From the bundled archive (air-gapped)
 
 ```bash
 bash ci/jenkins/install-jenkins-plugins.sh --restart
@@ -170,7 +170,7 @@ bash ci/jenkins/install-jenkins-plugins.sh --restart
 This extracts every plugin from `jenkins-plugins.tar.xz`, pins them so the update
 center cannot replace them, and restarts Jenkins.
 
-### Option 2 — Manual install via the Jenkins UI (internet required)
+### Option B — Manual install via the Jenkins UI (internet required)
 
 1. Go to **Manage Jenkins → Plugins → Available plugins**.
 

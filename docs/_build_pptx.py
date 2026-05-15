@@ -1,5 +1,5 @@
 """
-Generate docs/corporate-overview.pptx
+Generate docs/oxide-sloc-overview.pptx
 Run with: python docs/_build_pptx.py
 """
 
@@ -217,7 +217,7 @@ slides_data = [
      "bullets": [
          "All ~328 Rust dependencies are committed to the repository",
          "Bundled Rust toolchain (Windows, Linux x64, Linux arm64) — no rustup needed",
-         "git clone → bash install.sh is the only step required",
+         "git clone → bash scripts/run.sh is the only step required",
          "Supports RHEL 8/9, Windows 10/11 (Git Bash), Ubuntu, Debian",
          "Optional native TLS and API-key authentication for server deployments",
          "Docker image available for persistent server installations",
@@ -252,7 +252,7 @@ def build_cover(prs):
     add_text(slide, "Source-Line Metrics for Engineering Teams",
              Inches(0.55), Inches(3.2), Inches(10), Inches(0.7),
              font_size=Pt(26), bold=False, color=WARM_WHITE, align=PP_ALIGN.LEFT)
-    add_text(slide, "Corporate Overview",
+    add_text(slide, "Product Overview",
              Inches(0.55), Inches(3.9), Inches(8), Inches(0.5),
              font_size=Pt(18), color=RGBColor(0xAA, 0x88, 0x66), align=PP_ALIGN.LEFT)
 
@@ -493,16 +493,15 @@ def build_getting_started(prs, n):
     add_text(slide, "Getting Started",
              Inches(0.5), Inches(0.2), Inches(11), Inches(0.7),
              font_size=Pt(34), bold=True, color=OX)
-    add_text(slide, "From zero to your first report in under 3 minutes",
+    add_text(slide, "From zero to your first report in under 2 minutes",
              Inches(0.5), Inches(0.88), Inches(12), Inches(0.44),
              font_size=Pt(15), color=RGBColor(0xCC, 0xBB, 0xAA))
 
     steps = [
-        ("1",  "Clone the repo",                "git clone https://github.com/oxide-sloc/oxide-sloc"),
-        ("2",  "Run the installer",              "bash scripts/install.sh"),
-        ("3",  "Launch the web UI",              "bash scripts/run.sh   →  opens http://127.0.0.1:4317"),
-        ("4",  "Point at your codebase",         "Enter the path to your project and click Analyze"),
-        ("5",  "Review results",                 "Charts, language breakdown, and per-file table appear instantly"),
+        ("1",  "Clone the repo",        "git clone https://github.com/oxide-sloc/oxide-sloc"),
+        ("2",  "Launch the web UI",     "bash scripts/run.sh   →  installs on first run, opens http://127.0.0.1:4317"),
+        ("3",  "Point at your codebase","Enter the path to your project and click Analyze"),
+        ("4",  "Review results",        "Charts, language breakdown, and per-file table appear instantly"),
     ]
 
     step_h = Inches(0.85)
@@ -572,6 +571,6 @@ for idx, data in enumerate(slides_data):
 # Save
 # ─────────────────────────────────────────────────────────────────────────────
 
-out_path = os.path.join(os.path.dirname(__file__), "corporate-overview.pptx")
+out_path = os.path.join(os.path.dirname(__file__), "oxide-sloc-overview.pptx")
 prs.save(out_path)
 print(f"Saved: {out_path}")
