@@ -17,6 +17,7 @@ SLOC_PORT=4317
 
 # Honour SLOC_HOST env var as well as --host / --lan CLI flag
 HOST_MODE="${SLOC_HOST:-0}"
+REBUILD_MODE=false
 
 # Detect Windows (Git Bash / MSYS2 / Cygwin)
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
@@ -372,17 +373,37 @@ launch_cargo() {
     fi
 }
 
-# Parse flags — none are forwarded to the binary.
+# Parse flags — --rebuild/--force are passed through to install.sh; --host/--lan
+# enable LAN server mode and are not forwarded to install.
 for arg in "$@"; do
     case "$arg" in
-        --rebuild) ;;                   # no-op: cargo handles incremental builds
-        --host|--lan) HOST_MODE=1 ;;   # enable LAN server mode
+        --rebuild|--force|-f) REBUILD_MODE=true ;;
+        --host|--lan) HOST_MODE=1 ;;
         *) ;;
     esac
 done
 
+# ── Auto-install or rebuild if requested ─────────────────────────────────────
+# On Windows this extracts dist/oxide-sloc-windows-x64.zip (no build needed).
+# On Linux this builds from source via vendor + toolchain if needed.
+if [[ ! -f "$EXE" ]] || [[ "$REBUILD_MODE" == true ]]; then
+    if [[ "$REBUILD_MODE" == true ]]; then
+        echo " [--rebuild] Forcing fresh install..."
+    else
+        echo " Binary not found — running install first..."
+    fi
+    echo ""
+    _INSTALL_FLAGS=""
+    [[ "$REBUILD_MODE" == true ]] && _INSTALL_FLAGS="--rebuild"
+    # shellcheck disable=SC2086
+    bash "$SCRIPT_DIR/install.sh" $_INSTALL_FLAGS \
+        || { printf '\n [ERROR] Install failed. See above for details.\n' >&2; exit 1; }
+    echo ""
+fi
+
 # Prefer the installed binary built by install.sh (release, no recompile needed).
-# Fall back to cargo build only when no binary exists yet.
+# Fall back to cargo build only when no binary exists yet (e.g. install.sh failed
+# to produce one but cargo is available for a quick debug build).
 if [[ -f "$EXE" ]]; then
     launch "$EXE"
     exit 0

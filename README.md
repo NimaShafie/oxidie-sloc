@@ -12,27 +12,29 @@
 ## Quick Start
 
 ```bash
-bash scripts/install.sh   # detects bundled binary or builds from vendor sources
-bash scripts/run.sh       # web UI at http://127.0.0.1:4317
+bash scripts/run.sh   # installs on first run, then opens web UI at http://127.0.0.1:4317
 ```
 
-When compiling from source, both scripts display a live animated build indicator with three phases (dependency resolution → compile → install/launch) and a frozen summary on completion.
+On first run `run.sh` automatically invokes `install.sh`, then launches the server. Subsequent runs skip directly to launch. To force a fresh install: `bash scripts/run.sh --rebuild`.
 
-| Platform | Install | Launch | LAN server |
+When compiling from source, the build displays a live animated progress indicator (dependency resolution → compile → install/launch) with a frozen summary on completion.
+
+| Platform | First run | Subsequent runs | LAN server |
 |---|---|---|---|
-| **Windows 10/11** (Git Bash) | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
-| **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/install.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
+| **Windows 10/11** (Git Bash) | `bash scripts/run.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
+| **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/run.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
 
 **Internet requirements by scenario:**
 
 | Scenario | What's needed | What happens |
 |---|---|---|
-| **Rust already installed** | `vendor.tar.xz` (committed, ~35 MB) | builds offline — no internet required |
-| **No Rust, toolchain committed** | `toolchain/` archives + `vendor.tar.xz` | install.sh bootstraps Rust from `toolchain/`, builds offline |
+| **Windows (any)** | `dist/oxide-sloc-windows-x64.zip` (committed, ~9 MB) | run.sh extracts pre-built binary — no Rust, no build, no internet required |
+| **Rust already installed (Linux)** | `vendor.tar.xz` (committed, ~35 MB) | builds offline — no internet required |
+| **No Rust, toolchain committed (Linux)** | `toolchain/` archives + `vendor.tar.xz` | install.sh bootstraps Rust from `toolchain/`, builds offline |
 | **No Rust, Linux, has curl** | `--online` flag | downloads release binary from GitHub Releases |
 | **No Rust, no internet, Linux** | Option C air-gap kit | see [`docs/airgap.md`](./docs/airgap.md) |
 
-No network calls are made by default. The **Rust-already-installed** path works on any fresh clone. The **no-Rust, no-internet** path additionally requires the maintainer to have committed the toolchain archive (`bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine — see [`docs/airgap.md`](./docs/airgap.md)).
+No network calls are made by default. On **Windows**, the pre-built binary is already in `dist/` — just run `bash scripts/run.sh`. On **Linux** without Rust, a fully offline build additionally requires the maintainer to have committed the toolchain archive (`bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine — see [`docs/airgap.md`](./docs/airgap.md)).
 
 ---
 
@@ -97,19 +99,19 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ## Installation
 
-### Path A — Build from source (no internet required)
+### Path A — Pre-built binary or source build (no internet required)
 
 ```bash
-bash scripts/install.sh    # Windows 10/11 (Git Bash) or Linux
-bash scripts/run.sh        # http://127.0.0.1:4317
+bash scripts/run.sh   # Windows 10/11 (Git Bash) or Linux — http://127.0.0.1:4317
 ```
 
-The script tries in order: bundled Rust toolchain (`toolchain/`) → system Rust + vendor sources. **No network calls are made by default.**
+**No network calls are made by default.** `run.sh` calls `install.sh` automatically on first run and selects the best available path:
 
-- **No Rust, no internet (Windows or Linux, toolchain committed):** `install.sh` detects `toolchain/rust-toolchain-*.tar.gz.*` split parts, reassembles them, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires that a maintainer has previously run `bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine and committed the `toolchain/` archives — see [`docs/airgap.md`](./docs/airgap.md).
-- **Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
-- **Linux, no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
-- **Linux, no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
+- **Windows:** extracts `dist/oxide-sloc-windows-x64.zip` (committed, ~9 MB) — no Rust required, no compilation, no `.tools/` directory. The pre-built binary is updated automatically by CI after every release.
+- **Linux — Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
+- **Linux — no Rust, toolchain committed:** `install.sh` detects `toolchain/rust-toolchain-linux-*.tar.gz.*` split parts, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires the maintainer to have run `bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine and committed the archives — see [`docs/airgap.md`](./docs/airgap.md).
+- **Linux — no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
+- **Linux — no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
 
@@ -608,7 +610,7 @@ cargo clean -p oxide-sloc -p sloc-config -p sloc-core -p sloc-languages -p sloc-
   && cargo run -p oxide-sloc -- serve
 ```
 
-> **`scripts/run.sh` vs `cargo run`:** When Rust is available, `scripts/run.sh` uses `cargo build` (incremental) then launches the binary, so source changes are always picked up. During active development either path works; `cargo run -p oxide-sloc -- serve` is the shortest form.
+> **`scripts/run.sh` vs `cargo run`:** `scripts/run.sh` auto-installs on first run (extracts the pre-built binary on Windows, or builds from source on Linux), then launches the server. For active development when Rust is available, `cargo run -p oxide-sloc -- serve` is the shortest iteration loop. Use `bash scripts/run.sh --rebuild` to force a fresh install from `dist/` or source.
 
 **Make targets (Linux/macOS):**
 
@@ -633,7 +635,7 @@ crates/
   sloc-web/         # Axum web server, scan registry, metrics API, badge endpoint
 ci/                 # CI shell scripts (lint.sh, build.sh, test.sh, release.sh, artifact-push.sh) + config presets
 deploy/             # systemd unit + server config template
-dist/               # Release bundles — generated by CI, not tracked in git
+dist/               # Windows pre-built binary (oxide-sloc-windows-x64.zip) — committed by CI after each release
 docs/
   assets/           # Icons, logos (served at /images/* by the web UI)
   airgap.md         # Offline and air-gapped deployment guide

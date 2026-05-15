@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>oxide-sloc — Technical Reference Guide</title>
+<style>
+  /* ── Print / PDF layout ───────────────────────────────────────────── */
+  @page { size: letter; margin: 0.9in 0.8in 0.9in 0.8in; }
+  @media print {
+    .no-print { display: none !important; }
+    h1, h2 { page-break-after: avoid; }
+    pre, table, .card { page-break-inside: avoid; }
+    .page-break { page-break-before: always; }
+    a { text-decoration: none; color: inherit; }
+  }
+
+  /* ── Base typography ──────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --ox: #b85c1a;
+    --ox2: #7a3a0d;
+    --bg: #faf8f5;
+    --surface: #ffffff;
+    --border: #e0d8cc;
+    --text: #2a1f14;
+    --muted: #6b5744;
+    --code-bg: #f3ede4;
+    --code-border: #d4c4b0;
+  }
+  html { font-size: 13px; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 32px 40px;
+  }
+
+  /* ── Cover page ───────────────────────────────────────────────────── */
+  .cover {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    border-bottom: 3px solid var(--ox);
+    margin-bottom: 48px;
+    padding-bottom: 48px;
+  }
+  .cover-logo {
+    font-size: 48px;
+    font-weight: 900;
+    letter-spacing: -2px;
+    color: var(--ox);
+    margin-bottom: 8px;
+  }
+  .cover-logo span { color: var(--text); }
+  .cover-subtitle {
+    font-size: 18px;
+    color: var(--muted);
+    margin-bottom: 32px;
+  }
+  .cover-meta { font-size: 12px; color: var(--muted); line-height: 2; }
+  .cover-badge {
+    display: inline-block;
+    background: var(--ox);
+    color: white;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-right: 8px;
+  }
+
+  /* ── Table of contents ────────────────────────────────────────────── */
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px 28px; margin-bottom: 40px; }
+  .toc-title { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: .1em; color: var(--ox); margin-bottom: 12px; }
+  .toc ol { padding-left: 20px; }
+  .toc li { margin-bottom: 4px; }
+  .toc a { color: var(--ox); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc .sub { padding-left: 16px; list-style: lower-alpha; }
+
+  /* ── Section headings ─────────────────────────────────────────────── */
+  h1 { font-size: 26px; font-weight: 900; color: var(--ox); margin-top: 48px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid var(--border); }
+  h2 { font-size: 18px; font-weight: 800; color: var(--ox2); margin-top: 32px; margin-bottom: 8px; }
+  h3 { font-size: 14px; font-weight: 700; color: var(--text); margin-top: 20px; margin-bottom: 6px; }
+  h4 { font-size: 13px; font-weight: 700; color: var(--muted); margin-top: 14px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .06em; }
+
+  /* ── Body text ────────────────────────────────────────────────────── */
+  p { margin-bottom: 10px; }
+  ul, ol { margin-left: 22px; margin-bottom: 10px; }
+  li { margin-bottom: 3px; }
+  strong { font-weight: 700; }
+  em { font-style: italic; }
+
+  /* ── Code ─────────────────────────────────────────────────────────── */
+  code {
+    font-family: 'Consolas', 'Cascadia Code', monospace;
+    font-size: 12px;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  pre {
+    font-family: 'Consolas', 'Cascadia Code', monospace;
+    font-size: 11.5px;
+    background: #1e1a14;
+    color: #d4c9bb;
+    border: 1px solid #3a3028;
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    line-height: 1.55;
+    margin: 10px 0 14px;
+  }
+  pre .comment { color: #7a6e62; }
+  pre .flag { color: #f0a060; }
+  pre .val { color: #80c8a0; }
+
+  /* ── Tables ───────────────────────────────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 16px; font-size: 12px; }
+  th { background: #f0e8dc; color: var(--ox2); font-weight: 700; text-align: left; padding: 7px 10px; border: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  td { padding: 6px 10px; border: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: #faf6f0; }
+  td code { font-size: 11px; }
+
+  /* ── Cards / callouts ─────────────────────────────────────────────── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin: 12px 0 16px; }
+  .note { background: #fff8e8; border-left: 4px solid #f0a030; border-radius: 4px; padding: 10px 14px; margin: 10px 0; font-size: 12px; }
+  .warning { background: #fff0f0; border-left: 4px solid #e04040; border-radius: 4px; padding: 10px 14px; margin: 10px 0; font-size: 12px; }
+  .tip { background: #edf8f0; border-left: 4px solid #30a060; border-radius: 4px; padding: 10px 14px; margin: 10px 0; font-size: 12px; }
+
+  /* ── Method badges ────────────────────────────────────────────────── */
+  .method {
+    display: inline-block;
+    font-family: monospace;
+    font-size: 10px;
+    font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .get { background: #dbeafe; color: #1e40af; }
+  .post { background: #d1fae5; color: #065f46; }
+
+  /* ── Route rows ───────────────────────────────────────────────────── */
+  .route-row { display: flex; align-items: flex-start; gap: 12px; margin: 6px 0; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+  .route-path { font-family: monospace; font-size: 12px; font-weight: 600; min-width: 260px; color: var(--ox2); }
+  .route-desc { color: var(--muted); flex: 1; }
+
+  /* ── Footer ───────────────────────────────────────────────────────── */
+  .doc-footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════ COVER ═══════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-logo">oxide<span>-sloc</span></div>
+  <div class="cover-subtitle">Technical Reference Guide</div>
+  <p style="max-width:540px;color:var(--muted);margin-bottom:28px;">
+    Complete developer documentation for oxide-sloc: installation, CLI reference, REST API,
+    configuration schema, security, and integration options.
+  </p>
+  <div class="cover-meta">
+    <div><span class="cover-badge">Version</span> 1.5.3</div>
+    <div><span class="cover-badge">License</span> AGPL-3.0-or-later</div>
+    <div><span class="cover-badge">Author</span> Nima Shafie &lt;nimzshafie@gmail.com&gt;</div>
+    <div><span class="cover-badge">Repo</span> https://github.com/oxide-sloc/oxide-sloc</div>
+    <div><span class="cover-badge">Binary</span> oxide-sloc</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ TOC ══════════════════════════════════════════ -->
+<div class="toc">
+  <div class="toc-title">Table of Contents</div>
+  <ol>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#install">Installation</a>
+      <ol class="sub">
+        <li><a href="#install-quickstart">Quick start</a></li>
+        <li><a href="#install-airgap">Air-gapped / offline</a></li>
+        <li><a href="#install-docker">Docker</a></li>
+        <li><a href="#install-systemd">systemd (Linux)</a></li>
+      </ol>
+    </li>
+    <li><a href="#cli">CLI Reference</a>
+      <ol class="sub">
+        <li><a href="#cmd-analyze">analyze</a></li>
+        <li><a href="#cmd-report">report</a></li>
+        <li><a href="#cmd-diff">diff</a></li>
+        <li><a href="#cmd-serve">serve</a></li>
+        <li><a href="#cmd-init">init</a></li>
+        <li><a href="#cmd-validate">validate</a></li>
+        <li><a href="#cmd-send">send</a></li>
+        <li><a href="#cmd-git-scan">git-scan</a></li>
+        <li><a href="#cmd-git-compare">git-compare</a></li>
+        <li><a href="#cmd-watch">watch</a></li>
+        <li><a href="#cmd-pr-comment">pr-comment</a></li>
+      </ol>
+    </li>
+    <li><a href="#webui">Web UI Pages</a></li>
+    <li><a href="#api">REST API Reference</a></li>
+    <li><a href="#config">Configuration Reference</a></li>
+    <li><a href="#env">Environment Variables</a></li>
+    <li><a href="#security">Security</a></li>
+    <li><a href="#outputs">Output Formats</a></li>
+    <li><a href="#languages">Supported Languages</a></li>
+    <li><a href="#integrations">Integrations</a></li>
+    <li><a href="#exit-codes">Exit Codes</a></li>
+  </ol>
+</div>
+
+<!-- ════════════════════════════════════ OVERVIEW ═══════════════════════════════════════ -->
+<h1 id="overview">1. Overview</h1>
+
+<p>
+  <strong>oxide-sloc</strong> is a cross-platform source-line-of-code (SLOC) analysis workbench
+  built in Rust. It counts code, comment, and blank lines across 41 programming languages,
+  detects unit tests, tracks SLOC trends over time, and exports results in JSON, HTML, PDF,
+  CSV, and Excel formats.
+</p>
+
+<h3>Architecture</h3>
+<p>oxide-sloc is a 7-crate Rust workspace with a shared analysis core and multiple delivery surfaces:</p>
+<table>
+  <tr><th>Crate</th><th>Role</th></tr>
+  <tr><td><code>sloc-cli</code></td><td>Clap CLI, binary entry point (<code>oxide-sloc</code>)</td></tr>
+  <tr><td><code>sloc-config</code></td><td>AppConfig schema, TOML parsing, enums</td></tr>
+  <tr><td><code>sloc-core</code></td><td>File discovery, decoding, aggregation, JSON model</td></tr>
+  <tr><td><code>sloc-git</code></td><td>Git CLI wrappers, webhook parsing, schedule store</td></tr>
+  <tr><td><code>sloc-languages</code></td><td>Language detection and lexical line analyzers</td></tr>
+  <tr><td><code>sloc-report</code></td><td>HTML rendering (Askama) and PDF export (headless Chrome)</td></tr>
+  <tr><td><code>sloc-web</code></td><td>Axum HTTP server, form handlers, artifact storage</td></tr>
+</table>
+
+<h3>Data Flow</h3>
+<pre>CLI / Web form
+  → AppConfig (TOML + CLI flag overrides)
+  → sloc_core::analyze()
+      → file discovery (ignore-aware, glob filters)
+      → byte decoding  (UTF-8 → UTF-16 → Windows-1252 fallback)
+      → language detection (extension, shebang, override map)
+      → sloc_languages::analyze_text()  [lexical state machine]
+      → AnalysisRun { per_file_records, totals_by_language, warnings }
+  → render_html() / write_pdf_from_html()
+  → JSON, HTML, PDF, CSV, or XLSX artifact</pre>
+
+<!-- ═══════════════════════════════════ INSTALLATION ════════════════════════════════════ -->
+<h1 id="install" class="page-break">2. Installation</h1>
+
+<h2 id="install-quickstart">2a. Quick Start (run.sh)</h2>
+<p>
+  The simplest path on any machine with Git Bash (Windows) or Bash (Linux/macOS). This script
+  automatically installs oxide-sloc on first run, then opens the web UI.
+</p>
+<pre>bash scripts/run.sh</pre>
+<p>On subsequent runs it skips the install step and goes straight to serving on <code>http://127.0.0.1:4317</code>.</p>
+
+<h2 id="install-airgap">2b. Air-Gapped / Offline Install</h2>
+<p>
+  oxide-sloc is designed for environments with no internet access and no pre-installed Rust.
+  Every dependency is committed to the repository:
+</p>
+<table>
+  <tr><th>Asset</th><th>File</th><th>Purpose</th></tr>
+  <tr><td>Rust crate sources</td><td><code>vendor.tar.xz</code> (~35 MB)</td><td>~328 crates for <code>cargo build --offline</code></td></tr>
+  <tr><td>Rust toolchain</td><td><code>toolchain/rust-toolchain-*.tar.gz.aa</code>, <code>.ab</code></td><td>rustc + cargo, split ≤45 MB/part</td></tr>
+  <tr><td>Toolchain checksums</td><td><code>toolchain/checksums.sha256</code></td><td>Verified before extraction</td></tr>
+</table>
+<pre><span class="comment"># On any machine — clone the repo (USB / network share), then run:</span>
+bash scripts/install.sh</pre>
+
+<p><strong>install.sh decision tree:</strong></p>
+<ol>
+  <li>Binary already present → exit (nothing to do)</li>
+  <li><code>dist/</code> pre-built archive → extract</li>
+  <li><code>--online</code> flag + no cargo → download from GitHub Releases (opt-in, Linux)</li>
+  <li>Bundled toolchain present + no cargo → extract into <code>.tools/</code>, bootstrap Rust</li>
+  <li>cargo on PATH → decompress vendor, write <code>.cargo/config.toml</code>, build from source</li>
+  <li>Nothing available → print instructions and exit 1</li>
+</ol>
+
+<h2 id="install-docker">2c. Docker</h2>
+<pre>docker compose up -d      <span class="comment"># build and start</span>
+docker compose logs -f    <span class="comment"># tail logs</span>
+docker compose down       <span class="comment"># stop</span></pre>
+<p>The container binds to <code>0.0.0.0:4317</code>, suppresses browser auto-open, and disables file-picker routes.
+Set <code>SLOC_BROWSER_NOSANDBOX=1</code> for PDF generation inside Docker.</p>
+
+<h2 id="install-systemd">2d. systemd (Linux Bare-Metal / VPS)</h2>
+<pre><span class="comment"># Install binary</span>
+sudo install -m 755 target/release/oxide-sloc /usr/local/bin/oxide-sloc
+
+<span class="comment"># Create dedicated user</span>
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin oxide-sloc
+sudo mkdir -p /opt/oxide-sloc/out
+sudo chown -R oxide-sloc:oxide-sloc /opt/oxide-sloc
+
+<span class="comment"># Install and enable service</span>
+sudo cp deploy/oxide-sloc.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now oxide-sloc</pre>
+
+<!-- ══════════════════════════════════ CLI REFERENCE ════════════════════════════════════ -->
+<h1 id="cli" class="page-break">3. CLI Reference</h1>
+
+<p>The binary is <code>oxide-sloc</code>. Running with no subcommand starts the web UI (same as <code>serve</code>).</p>
+<pre>oxide-sloc [SUBCOMMAND] [OPTIONS]</pre>
+
+<!-- analyze -->
+<h2 id="cmd-analyze">3a. analyze</h2>
+<p>Scan one or more directories and count source lines.</p>
+<pre>oxide-sloc analyze &lt;PATH&gt;... [OPTIONS]</pre>
+
+<h4>Output flags</h4>
+<table>
+  <tr><th>Flag</th><th>Short</th><th>Description</th></tr>
+  <tr><td><code>--json-out &lt;PATH&gt;</code></td><td><code>-j</code></td><td>Write JSON result (re-use with <code>report</code> / <code>diff</code>)</td></tr>
+  <tr><td><code>--html-out &lt;PATH&gt;</code></td><td><code>-H</code></td><td>Write standalone HTML report</td></tr>
+  <tr><td><code>--pdf-out &lt;PATH&gt;</code></td><td></td><td>Write PDF (requires Chrome/Edge/Brave/Vivaldi/Opera)</td></tr>
+  <tr><td><code>--csv-out &lt;PATH&gt;</code></td><td><code>-c</code></td><td>Write CSV summary</td></tr>
+  <tr><td><code>--xlsx-out &lt;PATH&gt;</code></td><td><code>-x</code></td><td>Write Excel workbook</td></tr>
+  <tr><td><code>--open</code></td><td></td><td>Open generated HTML in default browser</td></tr>
+</table>
+
+<h4>Discovery flags</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--include-glob &lt;PATTERN&gt;</code></td><td>Include only matching files (repeatable)</td></tr>
+  <tr><td><code>--exclude-glob &lt;PATTERN&gt;</code></td><td>Exclude matching files (repeatable)</td></tr>
+  <tr><td><code>--enabled-language &lt;LANG&gt;</code></td><td>Restrict to these languages (repeatable)</td></tr>
+  <tr><td><code>--no-ignore-files</code></td><td>Ignore <code>.gitignore</code> / <code>.ignore</code> files</td></tr>
+  <tr><td><code>--follow-symlinks</code></td><td>Follow symbolic links during discovery</td></tr>
+  <tr><td><code>--submodule-breakdown</code></td><td>Detect <code>.gitmodules</code>; emit per-submodule summary</td></tr>
+</table>
+
+<h4>Analysis flags</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--mixed-line-policy &lt;POLICY&gt;</code></td><td><code>code-only</code> | <code>code-and-comment</code> | <code>comment-only</code> | <code>separate-mixed-category</code></td></tr>
+  <tr><td><code>--python-docstrings-as-code</code></td><td>Count Python docstrings as code instead of comments</td></tr>
+  <tr><td><code>--continuation-line-policy</code></td><td>IEEE 1045-1992: <code>each-physical-line</code> | <code>collapse-to-logical</code></td></tr>
+  <tr><td><code>--blank-in-block-comment-policy</code></td><td>IEEE 1045-1992: <code>count-as-comment</code> | <code>count-as-blank</code></td></tr>
+  <tr><td><code>--no-count-compiler-directives</code></td><td>Exclude <code>#include</code>/<code>#define</code> from code SLOC (C/C++/ObjC)</td></tr>
+  <tr><td><code>--coverage-file &lt;FILE&gt;</code></td><td>Attach LCOV <code>.info</code> coverage data to analysis output</td></tr>
+</table>
+
+<h4>CI / gate flags</h4>
+<table>
+  <tr><th>Flag</th><th>Exit code</th><th>Description</th></tr>
+  <tr><td><code>--fail-on-warnings</code></td><td>2</td><td>Exit 2 if any analysis warnings are emitted</td></tr>
+  <tr><td><code>--fail-below &lt;N&gt;</code></td><td>3</td><td>Exit 3 if code lines fall below N</td></tr>
+  <tr><td><code>--fail-on-budget</code></td><td>4</td><td>Exit 4 if budget thresholds (in TOML) are exceeded</td></tr>
+  <tr><td><code>--set-baseline &lt;NAME&gt;</code></td><td>—</td><td>Save scan as named baseline in <code>out/baselines.json</code></td></tr>
+  <tr><td><code>--fail-above-baseline &lt;NAME&gt;</code></td><td>5</td><td>Exit 5 if code growth exceeds allowed %</td></tr>
+  <tr><td><code>--max-delta-pct &lt;PCT&gt;</code></td><td>—</td><td>Allowed growth % for <code>--fail-above-baseline</code></td></tr>
+</table>
+
+<h4>Display flags</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--per-file</code></td><td>Include per-file breakdown in terminal output</td></tr>
+  <tr><td><code>--plain</code></td><td>Machine-readable <code>key=value</code> terminal output</td></tr>
+  <tr><td><code>--quiet</code>, <code>-q</code></td><td>Suppress all output except errors</td></tr>
+  <tr><td><code>--report-title &lt;TITLE&gt;</code></td><td>Title shown in HTML/PDF/XLSX reports</td></tr>
+  <tr><td><code>--profile &lt;NAME&gt;</code></td><td>Apply a named profile from the TOML config</td></tr>
+  <tr><td><code>--config &lt;PATH&gt;</code></td><td>Load configuration from a TOML file</td></tr>
+</table>
+
+<h4>Examples</h4>
+<pre>oxide-sloc analyze ./src --json-out out/result.json --html-out out/result.html
+oxide-sloc analyze ./src --pdf-out out/report.pdf --report-title "Q4 Audit"
+oxide-sloc analyze ./src --plain --quiet
+oxide-sloc analyze ./src --enabled-language Rust --enabled-language Python
+oxide-sloc analyze ./src --profile frontend --fail-on-budget</pre>
+
+<!-- report -->
+<h2 id="cmd-report">3b. report</h2>
+<p>Re-render a report from a saved JSON result without re-scanning.</p>
+<pre>oxide-sloc report &lt;RESULT_JSON&gt; [--html-out PATH] [--pdf-out PATH] [--csv-out PATH] [--xlsx-out PATH] [--open]</pre>
+<pre>oxide-sloc report out/result.json --html-out out/report.html --open
+oxide-sloc report out/result.json --pdf-out out/report.pdf</pre>
+
+<!-- diff -->
+<h2 id="cmd-diff">3c. diff</h2>
+<p>Compare two saved JSON results and show the delta.</p>
+<pre>oxide-sloc diff &lt;BASELINE_JSON&gt; &lt;CURRENT_JSON&gt; [OPTIONS]</pre>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--json-out</code>, <code>-j</code></td><td>Write delta JSON</td></tr>
+  <tr><td><code>--csv-out</code>, <code>-c</code></td><td>Write delta CSV</td></tr>
+  <tr><td><code>--xlsx-out</code>, <code>-x</code></td><td>Write delta Excel workbook</td></tr>
+  <tr><td><code>--plain</code></td><td>Machine-readable key=value output</td></tr>
+  <tr><td><code>--quiet</code>, <code>-q</code></td><td>Suppress all non-error output</td></tr>
+</table>
+
+<!-- serve -->
+<h2 id="cmd-serve">3d. serve</h2>
+<p>Start the localhost web UI on port 4317 (default when no subcommand given).</p>
+<pre>oxide-sloc serve [--config PATH] [--bind ADDR] [--server]</pre>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--bind &lt;ADDR&gt;</code></td><td>Override bind address (e.g. <code>0.0.0.0:8080</code>). Higher priority than <code>SLOC_BIND</code>.</td></tr>
+  <tr><td><code>--server</code></td><td>Bind to <code>0.0.0.0</code>, disable browser auto-open, disable desktop-only routes (file picker, path opener)</td></tr>
+  <tr><td><code>--config</code></td><td>Load a TOML config file</td></tr>
+</table>
+
+<!-- init -->
+<h2 id="cmd-init">3e. init</h2>
+<p>Generate a fully commented starter <code>.oxide-sloc.toml</code> config file.</p>
+<pre>oxide-sloc init [PATH] [--force]</pre>
+<p>Default output path: <code>.oxide-sloc.toml</code> in the current directory. Use <code>--force</code> to overwrite.</p>
+
+<!-- validate -->
+<h2 id="cmd-validate">3f. validate</h2>
+<p>Validate a <code>.oxide-sloc.toml</code> config file without running a scan. Checks path existence,
+glob syntax, and field constraints.</p>
+<pre>oxide-sloc validate [--config PATH]</pre>
+
+<!-- send -->
+<h2 id="cmd-send">3g. send</h2>
+<p>Deliver a saved JSON report via one or more channels: SMTP email, generic webhook, Microsoft Teams, or Atlassian Confluence.</p>
+<pre>oxide-sloc send &lt;RESULT_JSON&gt; [OPTIONS]</pre>
+
+<h4>SMTP</h4>
+<table>
+  <tr><th>Flag</th><th>Env var</th><th>Description</th></tr>
+  <tr><td><code>--smtp-to &lt;EMAIL,...&gt;</code></td><td></td><td>Comma-separated recipient list</td></tr>
+  <tr><td><code>--smtp-from &lt;EMAIL&gt;</code></td><td></td><td>Sender address</td></tr>
+  <tr><td><code>--smtp-host &lt;HOST&gt;</code></td><td><code>SLOC_SMTP_HOST</code></td><td>SMTP server hostname</td></tr>
+  <tr><td><code>--smtp-port &lt;PORT&gt;</code></td><td></td><td>SMTP port (default: 587)</td></tr>
+  <tr><td><code>--smtp-user &lt;USER&gt;</code></td><td><code>SLOC_SMTP_USER</code></td><td>SMTP username</td></tr>
+  <tr><td><code>--smtp-pass &lt;PASS&gt;</code></td><td><code>SLOC_SMTP_PASS</code></td><td>SMTP password (<strong>prefer env var</strong>)</td></tr>
+</table>
+
+<h4>Webhook</h4>
+<table>
+  <tr><th>Flag</th><th>Env var</th><th>Description</th></tr>
+  <tr><td><code>--webhook-url &lt;URL&gt;</code></td><td></td><td>POST JSON result to this HTTPS URL (repeatable)</td></tr>
+  <tr><td><code>--webhook-token &lt;TOKEN&gt;</code></td><td><code>SLOC_WEBHOOK_TOKEN</code></td><td>Bearer token for webhook auth</td></tr>
+</table>
+
+<h4>Microsoft Teams</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--notify-teams &lt;URL&gt;</code></td><td>Post an Adaptive Card to a Teams Incoming Webhook URL (repeatable)</td></tr>
+  <tr><td><code>--report-url &lt;URL&gt;</code></td><td>URL linking to the full HTML report, embedded in the card</td></tr>
+</table>
+
+<h4>Confluence</h4>
+<table>
+  <tr><th>Flag</th><th>Env var</th><th>Description</th></tr>
+  <tr><td><code>--confluence-url &lt;URL&gt;</code></td><td><code>SLOC_CONFLUENCE_URL</code></td><td>Base URL (Cloud or Server)</td></tr>
+  <tr><td><code>--confluence-username &lt;USER&gt;</code></td><td><code>SLOC_CONFLUENCE_USER</code></td><td>Account email (Cloud) or username (Server)</td></tr>
+  <tr><td><code>--confluence-token &lt;TOKEN&gt;</code></td><td><code>SLOC_CONFLUENCE_TOKEN</code></td><td>API token or PAT (<strong>prefer env var</strong>)</td></tr>
+  <tr><td><code>--confluence-space &lt;KEY&gt;</code></td><td><code>SLOC_CONFLUENCE_SPACE</code></td><td>Space key (e.g. <code>ENG</code>)</td></tr>
+  <tr><td><code>--confluence-page-title &lt;TITLE&gt;</code></td><td></td><td>Page to create or update</td></tr>
+  <tr><td><code>--confluence-parent-id &lt;ID&gt;</code></td><td></td><td>Parent page numeric ID</td></tr>
+</table>
+
+<!-- git-scan -->
+<h2 id="cmd-git-scan">3h. git-scan</h2>
+<p>Clone (or fetch) a repository and scan it at a specific branch, tag, or commit SHA.</p>
+<pre>oxide-sloc git-scan &lt;REPO&gt; [--git-ref &lt;REF&gt;] [--json-out PATH] [--html-out PATH] [--csv-out PATH]</pre>
+<pre>oxide-sloc git-scan https://github.com/myorg/myrepo --git-ref main --json-out scan.json</pre>
+
+<!-- git-compare -->
+<h2 id="cmd-git-compare">3i. git-compare</h2>
+<p>Scan two git refs and produce a delta comparison report.</p>
+<pre>oxide-sloc git-compare &lt;REPO&gt; &lt;BASELINE_REF&gt; &lt;CURRENT_REF&gt; [OPTIONS]</pre>
+<pre>oxide-sloc git-compare /path/to/repo v1.0.0 v1.1.0 --csv-out delta.csv</pre>
+
+<!-- watch -->
+<h2 id="cmd-watch">3j. watch</h2>
+<p>Poll a repository branch on a configurable interval and scan on every new commit.</p>
+<pre>oxide-sloc watch &lt;REPO&gt; [--branch BRANCH] [--interval SECS] [--output-dir DIR]</pre>
+<p>Minimum poll interval: 60 seconds. Default: 300 seconds. Scans are written to <code>OUTPUT_DIR/&lt;sha8&gt;.json</code> when <code>--output-dir</code> is set.</p>
+
+<!-- pr-comment -->
+<h2 id="cmd-pr-comment">3k. pr-comment</h2>
+<p>Post an SLOC diff comment to a GitHub or GitLab pull/merge request. Designed for Jenkins / CI post-build steps.</p>
+<pre>oxide-sloc pr-comment &lt;CURRENT_JSON&gt; \
+  --provider github \
+  --repo owner/repo \
+  --pr-number 42 \
+  --token $SLOC_VCS_TOKEN \
+  [--baseline BASELINE_JSON] \
+  [--report-url https://...]</pre>
+<table>
+  <tr><th>Flag / Env</th><th>Description</th></tr>
+  <tr><td><code>--provider</code></td><td><code>github</code> (default) or <code>gitlab</code></td></tr>
+  <tr><td><code>--api-url</code> / <code>SLOC_VCS_API_URL</code></td><td>Override API base URL (self-hosted instances)</td></tr>
+  <tr><td><code>--repo</code> / <code>SLOC_VCS_REPO</code></td><td><code>owner/repo</code> or GitLab project path</td></tr>
+  <tr><td><code>--pr-number</code> / <code>SLOC_PR_NUMBER</code></td><td>PR / MR number</td></tr>
+  <tr><td><code>--token</code> / <code>SLOC_VCS_TOKEN</code></td><td>API token (<code>repo</code> scope for GitHub, <code>api</code> for GitLab)</td></tr>
+  <tr><td><code>--baseline</code></td><td>Baseline JSON (optional) — shows delta section if provided</td></tr>
+</table>
+
+<!-- ══════════════════════════════════ WEB UI ════════════════════════════════════════════ -->
+<h1 id="webui" class="page-break">4. Web UI Pages</h1>
+
+<p>The web UI is served on <code>http://127.0.0.1:4317</code> by default. Every page includes dark/light theme toggle, colour scheme picker, and background particle animations.</p>
+
+<table>
+  <tr><th>Route</th><th>Page Name</th><th>Description</th></tr>
+  <tr><td><code>/</code></td><td>Home / Splash</td><td>Landing page with navigation to all features</td></tr>
+  <tr><td><code>/scan-setup</code></td><td>Scan Setup</td><td>Step 1: enter scan path, config options, and profile selection</td></tr>
+  <tr><td><code>/scan</code></td><td>Scan</td><td>Scan form (legacy / direct access)</td></tr>
+  <tr><td><code>/preview</code></td><td>Results Preview</td><td>Full analysis results with charts, language breakdown, per-file table</td></tr>
+  <tr><td><code>/view-reports</code></td><td>View Reports</td><td>Scan history registry with all past runs</td></tr>
+  <tr><td><code>/compare-scans</code></td><td>Compare Scans</td><td>Select two past scans to compare</td></tr>
+  <tr><td><code>/compare</code></td><td>Delta Report</td><td>Side-by-side diff of two scans with per-file change table</td></tr>
+  <tr><td><code>/trend-reports</code></td><td>Trend Reports</td><td>SLOC trend charts over time for watched directories</td></tr>
+  <tr><td><code>/test-metrics</code></td><td>Test Metrics</td><td>Unit test file detection, coverage integration, and test-to-code ratio</td></tr>
+  <tr><td><code>/git-browser</code></td><td>Git Browser</td><td>Browse refs of a local repo; scan or compare any two refs</td></tr>
+  <tr><td><code>/integrations</code></td><td>Integrations</td><td>Configure git webhooks, scheduled scans, and notification targets</td></tr>
+  <tr><td><code>/export-config</code></td><td>Export Config</td><td>Download the current effective <code>.oxide-sloc.toml</code></td></tr>
+  <tr><td><code>/embed/summary</code></td><td>Embed Widget</td><td>Minimal summary widget for embedding in external dashboards</td></tr>
+  <tr><td><code>/api-docs</code></td><td>API Docs</td><td>Interactive REST API documentation page</td></tr>
+  <tr><td><code>/healthz</code></td><td>Health Check</td><td>Returns <code>200 OK</code> with body <code>ok</code></td></tr>
+</table>
+
+<h3>Navigation Bar Structure</h3>
+<p>Home · View Reports (dropdown → Trend Reports) · Compare Scans · Test Metrics · Git Tools (dropdown → Git Browser · Integrations) · [server-status pill] · Settings cogwheel · Theme toggle</p>
+
+<!-- ══════════════════════════════════ REST API ═══════════════════════════════════════════ -->
+<h1 id="api" class="page-break">5. REST API Reference</h1>
+
+<p>All endpoints are served from the same Axum process. Authentication is via <code>Authorization: Bearer &lt;key&gt;</code> or <code>X-API-Key: &lt;key&gt;</code> header when <code>SLOC_API_KEY</code> is set.</p>
+
+<h2>Analysis &amp; Scan</h2>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/analyze</span><span class="route-desc">Submit a scan job (form data). Returns run ID; results are fetched asynchronously via <code>/api/runs/{id}/status</code>.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/runs/{wait_id}/status</span><span class="route-desc">Poll async run status: <code>pending</code>, <code>running</code>, <code>complete</code>, <code>error</code>.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/runs/{wait_id}/cancel</span><span class="route-desc">Cancel a running analysis.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/runs/result/{run_id}</span><span class="route-desc">Retrieve the final HTML result page for a completed run.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/runs/{run_id}/pdf-status</span><span class="route-desc">Poll PDF generation progress.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/runs/{artifact}/{run_id}</span><span class="route-desc">Download a specific artifact (<code>json</code>, <code>html</code>, <code>pdf</code>, <code>csv</code>, <code>xlsx</code>) for a run.</span></div>
+
+<h2>Metrics API</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/metrics/latest</span><span class="route-desc">JSON summary of the most recent completed scan.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/metrics/{run_id}</span><span class="route-desc">JSON summary for a specific run ID.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/metrics/history</span><span class="route-desc">JSON array of all completed scan summaries (newest first).</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/ingest</span><span class="route-desc">Ingest a pre-computed JSON analysis result (for CI-driven scans).</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/project-history</span><span class="route-desc">Historical scan registry for a specific project path.</span></div>
+
+<h2>Coverage</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/suggest-coverage</span><span class="route-desc">Suggest LCOV files auto-detected from the most recent scan's paths.</span></div>
+
+<h2>Scan Profiles</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/scan-profiles</span><span class="route-desc">List saved scan profiles.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/scan-profiles</span><span class="route-desc">Create or update a scan profile.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/scan-profiles/{name}/delete</span><span class="route-desc">Delete a named scan profile.</span></div>
+
+<h2>Git API</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/git/refs</span><span class="route-desc">List branches and tags in a local repository.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/git/scan-ref</span><span class="route-desc">Scan a repo at a specific ref; returns run JSON.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/git/compare-refs</span><span class="route-desc">Compare two refs; returns delta JSON.</span></div>
+
+<h2>Schedules</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/api/schedules</span><span class="route-desc">List all scheduled scans.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/schedules</span><span class="route-desc">Create a new scheduled scan.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/schedules/{id}/trigger</span><span class="route-desc">Trigger a scheduled scan immediately.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/api/schedules/{id}/delete</span><span class="route-desc">Delete a scheduled scan.</span></div>
+
+<h2>Webhooks</h2>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/webhooks/github</span><span class="route-desc">Receive GitHub <code>push</code> webhook events to trigger auto-scans.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/webhooks/gitlab</span><span class="route-desc">Receive GitLab push hook events to trigger auto-scans.</span></div>
+
+<h2>Utilities</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/healthz</span><span class="route-desc">Health check — returns <code>200 ok</code>. Used by Docker HEALTHCHECK, load balancers.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/badge/{metric}</span><span class="route-desc">SVG badge for embedding in README files. Metrics: <code>sloc</code>, <code>files</code>, <code>languages</code>.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/embed/summary</span><span class="route-desc">Minimal HTML summary widget (iframeable).</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/pick-directory</span><span class="route-desc">Open native OS folder picker dialog (local mode only).</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/pick-file</span><span class="route-desc">Open native OS file picker dialog (local mode only).</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/import-config</span><span class="route-desc">Upload a <code>.oxide-sloc.toml</code> to apply as the server config.</span></div>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/export-config</span><span class="route-desc">Download the current effective TOML config.</span></div>
+
+<h2>Authentication (when SLOC_API_KEY is set)</h2>
+<div class="route-row"><span class="method get">GET</span><span class="route-path">/auth/login</span><span class="route-desc">Show the API key login form.</span></div>
+<div class="route-row"><span class="method post">POST</span><span class="route-path">/auth/login</span><span class="route-desc">Submit API key; sets a session cookie on success.</span></div>
+
+<h3>Response Format</h3>
+<p>All <code>/api/metrics/*</code> endpoints return JSON in the <code>AnalysisRun</code> schema:</p>
+<pre>{
+  "tool": {
+    "name": "oxide-sloc",
+    "version": "1.5.3",
+    "run_id": "a1b2c3d4-...",
+    "source": "analyze",
+    "timestamp": "2026-05-14T..."
+  },
+  "summary_totals": {
+    "files_analyzed": 142,
+    "files_skipped": 8,
+    "code_lines": 28450,
+    "comment_lines": 4120,
+    "blank_lines": 6200,
+    "total_physical_lines": 38770
+  },
+  "totals_by_language": [ ... ],
+  "per_file_records": [ ... ],
+  "warnings": [ ... ],
+  "effective_configuration": { ... }
+}</pre>
+
+<!-- ══════════════════════════════════ CONFIG ════════════════════════════════════════════ -->
+<h1 id="config" class="page-break">6. Configuration Reference</h1>
+
+<p>Generate a starter config file with <code>oxide-sloc init</code>. The TOML file is divided into four sections.</p>
+
+<h2>[discovery]</h2>
+<table>
+  <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>root_paths</code></td><td>Array&lt;Path&gt;</td><td><code>[]</code></td><td>Directories to scan</td></tr>
+  <tr><td><code>include_globs</code></td><td>Array&lt;String&gt;</td><td><code>[]</code></td><td>Include only matching files (glob patterns)</td></tr>
+  <tr><td><code>exclude_globs</code></td><td>Array&lt;String&gt;</td><td><code>[]</code></td><td>Exclude matching files (glob patterns)</td></tr>
+  <tr><td><code>excluded_directories</code></td><td>Array&lt;String&gt;</td><td><code>[".git","node_modules","target"]</code></td><td>Directory names to skip</td></tr>
+  <tr><td><code>honor_ignore_files</code></td><td>bool</td><td><code>true</code></td><td>Respect <code>.gitignore</code> and <code>.ignore</code></td></tr>
+  <tr><td><code>ignore_hidden_files</code></td><td>bool</td><td><code>true</code></td><td>Skip files and directories starting with <code>.</code></td></tr>
+  <tr><td><code>follow_symlinks</code></td><td>bool</td><td><code>false</code></td><td>Follow symbolic links</td></tr>
+  <tr><td><code>max_file_size_bytes</code></td><td>u64</td><td><code>2097152</code></td><td>Skip files larger than this (2 MB default)</td></tr>
+  <tr><td><code>submodule_breakdown</code></td><td>bool</td><td><code>true</code></td><td>Detect <code>.gitmodules</code> and emit per-submodule summary</td></tr>
+  <tr><td><code>allowed_scan_roots</code></td><td>Array&lt;Path&gt;</td><td><code>[]</code></td><td>Restrict web UI scanning to these directories (empty = no restriction)</td></tr>
+</table>
+
+<h2>[analysis]</h2>
+<table>
+  <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>enabled_languages</code></td><td>Array&lt;String&gt;</td><td><code>[]</code></td><td>Empty = all 41 languages. Names are case-insensitive.</td></tr>
+  <tr><td><code>extension_overrides</code></td><td>Map&lt;String,String&gt;</td><td><code>{}</code></td><td>Override extension → language (e.g. <code>"h" = "cpp"</code>)</td></tr>
+  <tr><td><code>mixed_line_policy</code></td><td>Enum</td><td><code>code-only</code></td><td><code>code-only</code> | <code>code-and-comment</code> | <code>comment-only</code> | <code>separate-mixed-category</code></td></tr>
+  <tr><td><code>python_docstrings_as_comments</code></td><td>bool</td><td><code>true</code></td><td>Count Python triple-quote docstrings as comments</td></tr>
+  <tr><td><code>generated_file_detection</code></td><td>bool</td><td><code>true</code></td><td>Skip auto-generated files</td></tr>
+  <tr><td><code>minified_file_detection</code></td><td>bool</td><td><code>true</code></td><td>Skip minified JS/CSS</td></tr>
+  <tr><td><code>vendor_directory_detection</code></td><td>bool</td><td><code>true</code></td><td>Skip <code>vendor/</code> directories</td></tr>
+  <tr><td><code>include_lockfiles</code></td><td>bool</td><td><code>false</code></td><td>Include <code>Cargo.lock</code>, <code>package-lock.json</code>, etc.</td></tr>
+  <tr><td><code>continuation_line_policy</code></td><td>Enum</td><td><code>each-physical-line</code></td><td>IEEE 1045-1992: <code>each-physical-line</code> | <code>collapse-to-logical</code></td></tr>
+  <tr><td><code>blank_in_block_comment_policy</code></td><td>Enum</td><td><code>count-as-comment</code></td><td>IEEE 1045-1992: <code>count-as-comment</code> | <code>count-as-blank</code></td></tr>
+  <tr><td><code>count_compiler_directives</code></td><td>bool</td><td><code>true</code></td><td>Include <code>#include</code>/<code>#define</code> in code SLOC (C/C++/ObjC)</td></tr>
+  <tr><td><code>coverage_file</code></td><td>Path</td><td>—</td><td>LCOV <code>.info</code> file to attach coverage data</td></tr>
+</table>
+
+<h2>[analysis.budget]</h2>
+<pre>[analysis.budget]
+total_max = 100000   <span class="comment"># 0 = unlimited</span>
+rust      = 60000    <span class="comment"># per-language ceiling; key = lowercase display name</span>
+typescript = 30000</pre>
+
+<h2>[reporting]</h2>
+<table>
+  <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>report_title</code></td><td>String</td><td><code>"OxideSLOC Report"</code></td><td>Title shown in HTML/PDF/XLSX reports</td></tr>
+  <tr><td><code>theme</code></td><td>Enum</td><td><code>auto</code></td><td><code>auto</code> | <code>light</code> | <code>dark</code></td></tr>
+  <tr><td><code>include_summary_charts</code></td><td>bool</td><td><code>true</code></td><td>Include Chart.js donut / bar charts in HTML reports</td></tr>
+  <tr><td><code>company_name</code></td><td>String</td><td>—</td><td>Replaces "OxideSLOC" in report header (branding)</td></tr>
+  <tr><td><code>logo_path</code></td><td>Path</td><td>—</td><td>PNG or SVG to embed in place of the default logo</td></tr>
+  <tr><td><code>accent_color</code></td><td>String</td><td>—</td><td>Primary accent colour (<code>#RGB</code> or <code>#RRGGBB</code>)</td></tr>
+</table>
+
+<h2>[web]</h2>
+<table>
+  <tr><th>Key</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>bind_address</code></td><td><code>"127.0.0.1:4317"</code></td><td>Listen address. Overridden by <code>SLOC_BIND</code> env var or <code>--bind</code> flag.</td></tr>
+  <tr><td><code>server_mode</code></td><td><code>false</code></td><td>Enable server mode (same as <code>--server</code>)</td></tr>
+</table>
+
+<h2>[profile.NAME]</h2>
+<p>Named profiles override their entire config section when selected with <code>--profile NAME</code>.</p>
+<pre>[profile.frontend]
+[profile.frontend.discovery]
+root_paths = ["frontend"]
+exclude_globs = ["**/node_modules/**"]
+[profile.frontend.analysis]
+enabled_languages = ["TypeScript", "JavaScript", "CSS"]</pre>
+
+<!-- ══════════════════════════════════ ENV VARS ══════════════════════════════════════════ -->
+<h1 id="env" class="page-break">7. Environment Variables</h1>
+
+<table>
+  <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  <tr><td><code>SLOC_BIND</code></td><td>Override bind address. Lower priority than <code>--bind</code>, higher than config file.</td><td>—</td></tr>
+  <tr><td><code>SLOC_API_KEY</code></td><td>Enable bearer-token authentication. All requests must supply this key.</td><td>unset</td></tr>
+  <tr><td><code>SLOC_TLS_CERT</code></td><td>PEM certificate file path for native TLS termination.</td><td>unset</td></tr>
+  <tr><td><code>SLOC_TLS_KEY</code></td><td>PEM private key file path for native TLS termination.</td><td>unset</td></tr>
+  <tr><td><code>SLOC_ALLOWED_ROOTS</code></td><td>Colon-separated list of directories the web UI may scan. Empty = no restriction.</td><td>unset</td></tr>
+  <tr><td><code>SLOC_BROWSER</code></td><td>Override auto-detected browser path for PDF generation.</td><td>auto</td></tr>
+  <tr><td><code>SLOC_BROWSER_NOSANDBOX</code></td><td>Set to <code>1</code> to pass <code>--no-sandbox</code> to Chromium (required in Docker).</td><td>unset</td></tr>
+  <tr><td><code>SLOC_REGISTRY_PATH</code></td><td>Override path for <code>registry.json</code> (scan history store).</td><td><code>&lt;out-dir&gt;/registry.json</code></td></tr>
+  <tr><td><code>SLOC_GIT_CLONES_DIR</code></td><td>Directory for caching cloned repositories (git-scan / watch).</td><td><code>$TEMP/sloc-git-clones</code></td></tr>
+  <tr><td><code>SLOC_COVERAGE_FILE</code></td><td>LCOV <code>.info</code> file (alternative to <code>--coverage-file</code>).</td><td>—</td></tr>
+  <tr><td><code>SLOC_SMTP_HOST</code></td><td>SMTP server hostname.</td><td>—</td></tr>
+  <tr><td><code>SLOC_SMTP_USER</code></td><td>SMTP username.</td><td>—</td></tr>
+  <tr><td><code>SLOC_SMTP_PASS</code></td><td>SMTP password (<strong>preferred</strong> over <code>--smtp-pass</code>).</td><td>—</td></tr>
+  <tr><td><code>SLOC_WEBHOOK_TOKEN</code></td><td>Default bearer token for outbound webhook calls.</td><td>—</td></tr>
+  <tr><td><code>SLOC_CONFLUENCE_URL</code></td><td>Confluence base URL.</td><td>—</td></tr>
+  <tr><td><code>SLOC_CONFLUENCE_USER</code></td><td>Confluence username / email.</td><td>—</td></tr>
+  <tr><td><code>SLOC_CONFLUENCE_TOKEN</code></td><td>Confluence API token / PAT (<strong>preferred</strong>).</td><td>—</td></tr>
+  <tr><td><code>SLOC_CONFLUENCE_SPACE</code></td><td>Confluence space key.</td><td>—</td></tr>
+  <tr><td><code>SLOC_VCS_API_URL</code></td><td>GitHub/GitLab API base URL for <code>pr-comment</code>.</td><td>—</td></tr>
+  <tr><td><code>SLOC_VCS_REPO</code></td><td>Repository path for <code>pr-comment</code>.</td><td>—</td></tr>
+  <tr><td><code>SLOC_PR_NUMBER</code></td><td>PR number for <code>pr-comment</code>.</td><td>—</td></tr>
+  <tr><td><code>SLOC_VCS_TOKEN</code></td><td>VCS API token for <code>pr-comment</code>.</td><td>—</td></tr>
+  <tr><td><code>OXIDE_SLOC_ROOT</code></td><td>Working directory for output files and relative path resolution.</td><td>current dir</td></tr>
+  <tr><td><code>RUST_LOG</code></td><td>Tracing log level (<code>info</code>, <code>debug</code>, <code>warn</code>).</td><td><code>warn</code></td></tr>
+</table>
+
+<!-- ════════════════════════════════════ SECURITY ═══════════════════════════════════════ -->
+<h1 id="security" class="page-break">8. Security</h1>
+
+<h2>Authentication</h2>
+<p>Set <code>SLOC_API_KEY</code> to require a bearer token on every request. When set, clients must supply one of:</p>
+<ul>
+  <li><code>Authorization: Bearer &lt;key&gt;</code> header</li>
+  <li><code>X-API-Key: &lt;key&gt;</code> header</li>
+  <li>Session cookie set by the <code>/auth/login</code> form</li>
+</ul>
+<div class="warning"><strong>Warning:</strong> Running in <code>--server</code> mode without <code>SLOC_API_KEY</code> logs a startup warning. In local mode the warning is suppressed.</div>
+
+<h2>TLS</h2>
+<p>oxide-sloc can terminate TLS directly using PEM-encoded certificate and key files:</p>
+<pre>SLOC_TLS_CERT=/etc/oxide-sloc/server.crt \
+SLOC_TLS_KEY=/etc/oxide-sloc/server.key \
+oxide-sloc serve --server</pre>
+<div class="tip"><strong>Recommended for production:</strong> Use a reverse proxy (Nginx, Caddy) with <code>bind_address = "127.0.0.1:4317"</code>. TLS termination at the proxy layer avoids certificate management in the binary.</div>
+
+<h2>Rate Limiting</h2>
+<p>A sliding-window rate limiter enforces <strong>60 requests per 60-second window per client IP</strong> across all routes. Requests over the limit receive <code>HTTP 429 Too Many Requests</code>. Failed authentication attempts trigger an IP lockout.</p>
+
+<h2>Path Restrictions</h2>
+<p>Set <code>SLOC_ALLOWED_ROOTS</code> to a colon-separated list to restrict which paths the web UI may scan. Any scan request targeting a path outside this list is rejected with <code>403 Forbidden</code>.</p>
+<pre>SLOC_ALLOWED_ROOTS=/repos:/projects oxide-sloc serve --server</pre>
+
+<h2>CORS</h2>
+<p>CORS is configured via tower-http. In local mode, origins are restricted to localhost. In server mode, configure CORS headers through your reverse proxy.</p>
+
+<h2>Webhook Security</h2>
+<p>Outbound webhook URLs are validated before any request is sent:</p>
+<ul>
+  <li>Must use HTTPS</li>
+  <li>Cloud metadata endpoints (<code>169.254.169.254</code>, <code>metadata.google.internal</code>) are blocked</li>
+  <li>RFC-1918 private IPs, loopback, link-local, and multicast addresses are blocked</li>
+</ul>
+<p>Incoming GitHub/GitLab webhooks validate the HMAC-SHA256 signature before processing.</p>
+
+<h2>Security Headers</h2>
+<p>All responses include: <code>X-Content-Type-Options: nosniff</code>, <code>X-Frame-Options: SAMEORIGIN</code>, <code>Referrer-Policy: strict-origin-when-cross-origin</code>, and a Content-Security-Policy nonce.</p>
+
+<h2>Nginx Reverse Proxy Example</h2>
+<pre>server {
+    listen 443 ssl;
+    server_name sloc.example.com;
+    ssl_certificate     /etc/ssl/certs/server.crt;
+    ssl_certificate_key /etc/ssl/private/server.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:4317;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}</pre>
+
+<!-- ══════════════════════════════════ OUTPUTS ═══════════════════════════════════════════ -->
+<h1 id="outputs" class="page-break">9. Output Formats</h1>
+
+<table>
+  <tr><th>Format</th><th>Flag</th><th>Description</th></tr>
+  <tr><td>JSON</td><td><code>--json-out</code></td><td>Complete <code>AnalysisRun</code> schema. Machine-readable; required input for <code>report</code>, <code>diff</code>, <code>send</code>, <code>pr-comment</code>.</td></tr>
+  <tr><td>HTML</td><td><code>--html-out</code></td><td>Standalone single-file HTML report with embedded CSS, charts (Chart.js), dark/light theme, per-file table.</td></tr>
+  <tr><td>PDF</td><td><code>--pdf-out</code></td><td>PDF generated via headless Chromium. Requires Chrome, Edge, Brave, Vivaldi, or Opera installed. Override browser with <code>SLOC_BROWSER</code>.</td></tr>
+  <tr><td>CSV</td><td><code>--csv-out</code></td><td>Language-level summary in comma-separated format. Compatible with Excel, pandas, etc.</td></tr>
+  <tr><td>Excel</td><td><code>--xlsx-out</code></td><td>Multi-sheet Excel workbook: Summary, By Language, Per File, Warnings.</td></tr>
+  <tr><td>Plain text</td><td><code>--plain</code></td><td>Machine-readable <code>key=value</code> terminal output for shell scripting.</td></tr>
+</table>
+
+<h3>Badge Embedding</h3>
+<p>Use the <code>/badge/{metric}</code> endpoint to embed live SLOC badges in your README:</p>
+<pre>![SLOC](http://localhost:4317/badge/sloc)
+![Files](http://localhost:4317/badge/files)
+![Languages](http://localhost:4317/badge/languages)</pre>
+
+<!-- ═══════════════════════════════════ LANGUAGES ════════════════════════════════════════ -->
+<h1 id="languages" class="page-break">10. Supported Languages (41)</h1>
+
+<p>TOML, Markdown, and YAML are intentionally not supported — no meaningful SLOC metric applies.</p>
+
+<table>
+  <tr>
+    <td>Assembly</td><td>C</td><td>C++</td><td>C#</td><td>Clojure</td><td>CSS</td>
+  </tr>
+  <tr>
+    <td>Dart</td><td>Dockerfile</td><td>Elixir</td><td>Erlang</td><td>F#</td><td>Go</td>
+  </tr>
+  <tr>
+    <td>Groovy</td><td>Haskell</td><td>HTML</td><td>Java</td><td>JavaScript</td><td>Julia</td>
+  </tr>
+  <tr>
+    <td>Kotlin</td><td>Lua</td><td>Makefile</td><td>Nim</td><td>Objective-C</td><td>OCaml</td>
+  </tr>
+  <tr>
+    <td>Perl</td><td>PHP</td><td>PowerShell</td><td>Python</td><td>R</td><td>Ruby</td>
+  </tr>
+  <tr>
+    <td>Rust</td><td>Scala</td><td>SCSS/Sass</td><td>Shell</td><td>SQL</td><td>Svelte</td>
+  </tr>
+  <tr>
+    <td>Swift</td><td>TypeScript</td><td>Vue</td><td>XML/SVG</td><td>Zig</td><td></td>
+  </tr>
+</table>
+
+<p><strong>Python note:</strong> Triple-quote docstrings are classified as comments by default. Use <code>--python-docstrings-as-code</code> or <code>python_docstrings_as_comments = false</code> to count them as code lines.</p>
+<p><strong>C/C++ note:</strong> Compiler directives (<code>#include</code>, <code>#define</code>, etc.) are counted as code by default. Use <code>--no-count-compiler-directives</code> to exclude them per IEEE 1045-1992 §4.2.</p>
+
+<!-- ═══════════════════════════════════ INTEGRATIONS ════════════════════════════════════ -->
+<h1 id="integrations" class="page-break">11. Integrations</h1>
+
+<h2>CI / CD</h2>
+<p>oxide-sloc ships with pre-built CI integration files:</p>
+<ul>
+  <li><code>.github/workflows/ci.yml</code> — GitHub Actions CI/CD pipeline</li>
+  <li><code>Jenkinsfile</code> — Jenkins declarative pipeline</li>
+  <li><code>ci/sloc-ci-*.toml</code> — named CI preset configs</li>
+  <li><code>docs/ci-integrations.md</code> — Jenkins manual setup guide</li>
+</ul>
+
+<h2>GitHub / GitLab</h2>
+<p>Use <code>pr-comment</code> to post SLOC diff summaries automatically on every pull request. Set up a Jenkins post-build step or a GitHub Actions job step:</p>
+<pre><span class="comment"># GitHub Actions example</span>
+- run: |
+    oxide-sloc pr-comment current.json \
+      --baseline baseline.json \
+      --provider github \
+      --repo ${{ github.repository }} \
+      --pr-number ${{ github.event.pull_request.number }} \
+      --token ${{ secrets.GITHUB_TOKEN }}</pre>
+
+<h2>Git Webhooks</h2>
+<p>Configure your GitHub or GitLab repository to send <code>push</code> events to the running oxide-sloc server:</p>
+<ul>
+  <li>GitHub: <code>POST /webhooks/github</code> with a secret configured in <code>SLOC_WEBHOOK_SECRET</code></li>
+  <li>GitLab: <code>POST /webhooks/gitlab</code></li>
+</ul>
+<p>Each push event triggers a fresh scan of the configured root paths and stores the result in the scan registry.</p>
+
+<h2>Microsoft Teams</h2>
+<pre>oxide-sloc send result.json \
+  --notify-teams https://your-org.webhook.office.com/... \
+  --report-url https://sloc.internal/runs/result/abc123</pre>
+
+<h2>Atlassian Confluence</h2>
+<pre>oxide-sloc send result.json \
+  --confluence-url https://myco.atlassian.net \
+  --confluence-space ENG \
+  --confluence-page-title "Weekly SLOC Report"</pre>
+
+<h2>SMTP Email</h2>
+<pre>SLOC_SMTP_PASS=mysecret oxide-sloc send result.json \
+  --smtp-to engineering@myco.com \
+  --smtp-from reports@myco.com \
+  --smtp-host smtp.myco.com</pre>
+
+<!-- ══════════════════════════════════ EXIT CODES ════════════════════════════════════════ -->
+<h1 id="exit-codes" class="page-break">12. Exit Codes</h1>
+
+<table>
+  <tr><th>Code</th><th>Trigger</th></tr>
+  <tr><td><code>0</code></td><td>Success</td></tr>
+  <tr><td><code>1</code></td><td>Error (I/O, config, argument, or network failure)</td></tr>
+  <tr><td><code>2</code></td><td><code>--fail-on-warnings</code> triggered (analysis warnings found)</td></tr>
+  <tr><td><code>3</code></td><td><code>--fail-below &lt;N&gt;</code> triggered (code lines below threshold)</td></tr>
+  <tr><td><code>4</code></td><td><code>--fail-on-budget</code> triggered (budget threshold exceeded)</td></tr>
+  <tr><td><code>5</code></td><td><code>--fail-above-baseline</code> triggered (code growth exceeds allowed %)</td></tr>
+</table>
+
+<div class="doc-footer">
+  oxide-sloc v1.5.3 &nbsp;·&nbsp; AGPL-3.0-or-later &nbsp;·&nbsp;
+  Author: Nima Shafie &lt;nimzshafie@gmail.com&gt; &nbsp;·&nbsp;
+  https://github.com/oxide-sloc/oxide-sloc<br>
+  <em>To export as PDF: open this file in Chrome/Edge, press Ctrl+P, select "Save as PDF".</em>
+</div>
+
+</body>
+</html>
