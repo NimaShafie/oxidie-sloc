@@ -1,6 +1,7 @@
 # Server deployment (alternative install)
 
-> **Default install:** run `bash scripts/run.sh` (or `cargo run`) for personal local use.
+> **Default install:** run `bash scripts/run.sh` for personal local use — it installs on first
+> run automatically, then opens the web UI at `http://127.0.0.1:4317`.
 > This guide is for hosting oxide-sloc persistently so **other users** can reach it.
 
 ---

@@ -74,43 +74,6 @@ print_log_link() {
     printf '  \033]8;;%s\033\\Click to open log\033]8;;\033\\\n' "$url"
 }
 
-# After toolchain extraction: check whether the bundled cargo.exe is Authenticode-signed.
-# Uses Get-AuthenticodeSignature (read-only, no admin needed). Prints a clear pass/fail
-# so the user knows immediately if EDR on a corporate device will block the binary.
-# When unsigned, explains the two non-admin paths (signing or IT-managed Rust install).
-check_toolchain_signing() {
-    [[ "$PLATFORM" != windows ]] && return 0
-    local cargo_bin="$TOOLS_DIR/cargo/bin/cargo.exe"
-    [[ -f "$cargo_bin" ]] || return 0
-    local cargo_win
-    cargo_win="$(cygpath -w "$cargo_bin" 2>/dev/null || echo "$cargo_bin")"
-    local status
-    status="$(powershell.exe -NoProfile -NonInteractive -Command \
-        "(Get-AuthenticodeSignature '$cargo_win').Status" 2>/dev/null || echo "Unknown")"
-    if [[ "$status" == "Valid" ]]; then
-        echo " [OK] Toolchain binaries are Authenticode-signed — EDR will not flag them."
-    else
-        echo ""
-        echo " WARNING: The extracted Rust toolchain binaries are unsigned."
-        echo " On a corporate device managed by Carbon Black, CrowdStrike, or Defender"
-        echo " with strict policy, cargo.exe / rustup.exe may be blocked — and without"
-        echo " admin rights there is nothing a local user can do to un-block them."
-        echo ""
-        echo " Two solutions (neither requires admin rights on your machine):"
-        echo ""
-        echo "  1) Ask your project maintainer to activate Authenticode signing:"
-        echo "     Set WINDOWS_CERTIFICATE in GitHub Actions secrets, then re-run"
-        echo "     the 'Bundle Rust toolchain' workflow. The resulting toolchain"
-        echo "     archives will contain signed PE files. No exclusions needed."
-        echo ""
-        echo "  2) Ask your IT team to install Rust (rustup) system-wide."
-        echo "     When cargo is already on PATH, this installer skips .tools/"
-        echo "     extraction entirely — no unsigned PE files are written at all."
-        echo ""
-        echo " See docs/av-whitelisting.md for details."
-        echo ""
-    fi
-}
 
 # Offer to import sloc-ca.crt into the current user's Windows trust store.
 # Uses PowerShell X509Store API — no Administrator rights required, no GUI dialog.
@@ -359,7 +322,40 @@ if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == true ]]; then
     rm -f "$EXE"
 fi
 
-# ── 2. Online binary download (--online, Linux only) ────────────────────────
+# ── 2. Pre-built binary from dist/ (Windows) ────────────────────────────────
+# oxide-sloc-windows-x64.zip is committed to dist/ by update-dist.yml after
+# every release.  Extracting it here skips the toolchain bootstrap entirely —
+# no unsigned PE files are written to disk, so EDR software won't block the install.
+if [[ "$PLATFORM" == windows ]]; then
+    DIST_WIN="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
+    if [[ -f "$DIST_WIN" ]]; then
+        echo " Pre-built Windows binary found in dist/ — extracting..."
+        _DIST_TMP="$(mktemp -d)"
+        _DIST_OK=false
+        if command -v unzip &>/dev/null; then
+            unzip -q "$DIST_WIN" -d "$_DIST_TMP" && _DIST_OK=true
+        else
+            _DIST_WIN_W="$(cygpath -w "$DIST_WIN" 2>/dev/null || echo "$DIST_WIN")"
+            _DIST_TMP_W="$(cygpath -w "$_DIST_TMP" 2>/dev/null || echo "$_DIST_TMP")"
+            powershell.exe -NoProfile -NonInteractive -Command \
+                "Expand-Archive -Path '$_DIST_WIN_W' -DestinationPath '$_DIST_TMP_W' -Force" \
+                && _DIST_OK=true
+        fi
+        if [[ "$_DIST_OK" == true ]] && [[ -f "$_DIST_TMP/oxide-sloc.exe" ]]; then
+            cp "$_DIST_TMP/oxide-sloc.exe" "$EXE"
+            rm -rf "$_DIST_TMP"
+            echo " [OK] oxide-sloc.exe installed from dist/"
+            trust_ca_cert
+            echo ""
+            echo " Start the web UI:  bash scripts/run.sh"
+            exit 0
+        fi
+        rm -rf "$_DIST_TMP"
+        echo " [WARN] dist/ extraction failed — falling back to source build." >&2
+    fi
+fi
+
+# ── 3. Online binary download (--online, Linux only) ────────────────────────
 # Fetch the pre-built binary for this platform from GitHub Releases, verify its
 # SHA-256 checksum, and install it.  Falls through to source build on any error.
 if [[ "$ONLINE_MODE" == true ]] && [[ "$PLATFORM" == linux ]]; then
@@ -404,7 +400,7 @@ if [[ "$ONLINE_MODE" == true ]] && [[ "$PLATFORM" == linux ]]; then
     fi
 fi
 
-# ── 3. Bootstrap Rust from bundled toolchain (if cargo not on PATH) ──────────
+# ── 4. Bootstrap Rust from bundled toolchain (if cargo not on PATH) ──────────
 # If cargo is not on PATH but a toolchain archive is committed to toolchain/,
 # extract it locally into .tools/ and export the paths.
 # Archives are gzip-9 .tar.gz files split into ≤45 MB parts by
@@ -512,7 +508,6 @@ if ! command -v cargo &>/dev/null; then
             exit 1
         fi
         echo " [OK] Rust toolchain bootstrapped at .tools/"
-        check_toolchain_signing
 
         # RHEL/Linux: ensure a C linker is available (needed by Rust GNU target)
         if [[ "$PLATFORM" == linux ]] && ! command -v cc &>/dev/null && ! command -v gcc &>/dev/null; then
@@ -528,7 +523,7 @@ if ! command -v cargo &>/dev/null; then
     fi
 fi
 
-# ── 4. Build from vendored sources ──────────────────────────────────────────
+# ── 5. Build from vendored sources ──────────────────────────────────────────
 if command -v cargo &>/dev/null; then
     if [[ ! -d "$VENDOR_DIR" ]]; then
         if [[ -f "$VENDOR_ARCHIVE" ]]; then
@@ -570,7 +565,7 @@ EOF
     exit 1
 fi
 
-# ── 5. No Rust toolchain available ──────────────────────────────────────────
+# ── 6. No Rust toolchain available ──────────────────────────────────────────
 
 echo ""
 echo " No Rust toolchain detected and no bundled toolchain archives found."

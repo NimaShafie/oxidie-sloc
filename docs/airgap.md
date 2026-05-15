@@ -2,24 +2,27 @@
 
 ## TL;DR — what ships inside the repository
 
-Every `git clone` includes the vendor crate sources. The Rust toolchain archives
-require a separate maintainer step before they are present in the repo.
+Every `git clone` includes everything needed to install and run oxide-sloc offline.
 
 | What | File | Size | Status |
 |---|---|---|---|
+| **Windows pre-built binary** | `dist/oxide-sloc-windows-x64.zip` | ~9 MB | **Always committed** — updated by CI after every release |
 | All Rust crate sources | `vendor.tar.xz` | 35 MB | **Always committed** |
 | Rust version pin | `rust-toolchain.toml` | — | **Always committed** |
 | Cargo offline config | `.cargo/config.toml` | — | Written by install.sh / CI at build time |
-| **Rust compiler + cargo** | `toolchain/rust-toolchain-*.tar.gz.aa` + `.ab` … | ≤45 MB per part | **Maintainer step** — only present after running `bundle-rust-toolchain.sh` and committing |
+| **Rust compiler + cargo (Linux)** | `toolchain/rust-toolchain-linux-*.tar.gz.aa` + `.ab` … | ≤45 MB per part | **Maintainer step** — only present after running `bundle-rust-toolchain.sh` and committing |
 
-`bash scripts/install.sh` detects which of these apply and picks the right build path
+`bash scripts/run.sh` auto-invokes `install.sh` on first run and picks the right path
 automatically. No network calls are made by default.
 
-**If Rust is already installed on the target machine:** a plain `git clone` +
-`bash scripts/install.sh` builds offline with no extra steps.
+**Windows:** a plain `git clone` + `bash scripts/run.sh` extracts the pre-built binary from
+`dist/` and launches the web UI. No Rust toolchain required, no compilation.
 
-**If Rust is NOT installed:** a fully offline build additionally requires the
-maintainer to have committed the `toolchain/` archives (see
+**Linux — Rust already installed:** a plain `git clone` + `bash scripts/run.sh` builds
+offline from `vendor.tar.xz` with no extra steps.
+
+**Linux — Rust NOT installed:** a fully offline build additionally requires the maintainer to
+have committed the `toolchain/` archives (see
 [Populating the toolchain archive](#populating-the-toolchain-archive-maintainer-workflow)
 below). Without them, use [`--online`](#option-d--auto-download-linux-no-rust-has-internet)
 (Linux + curl) or [Option C](#option-c--airgap-kit-linux-no-rust).
@@ -28,67 +31,95 @@ below). Without them, use [`--online`](#option-d--auto-download-linux-no-rust-ha
 
 ## Installation paths
 
-| Path | Prereqs on target machine | When to use |
-|---|---|---|
-| **[Option A — Bundled toolchain build](#option-a--build-from-bundled-rust-toolchain)** | Git Bash / `bash`, `tar` | No Rust, no internet — requires toolchain committed to git by maintainer |
-| **[Option B — Vendor source build](#option-b--vendor-only-source-build)** | Rust ≥1.95 already installed | Rust is already on the machine |
-| **[Option C — Airgap kit (Linux, no Rust)](#option-c--airgap-kit-linux-no-rust)** | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust — full self-contained kit |
-| **[Option D — Download from GitHub](#option-d--auto-download-linux-no-rust-has-internet)** | `bash`, `tar`, `curl` | Linux, no Rust, has internet |
+| Path | Platform | Prereqs on target machine | When to use |
+|---|---|---|---|
+| **[Option W — Pre-built Windows binary](#option-w--pre-built-windows-binary)** | Windows | Git Bash / `bash`, `unzip` | Default Windows path — no Rust required |
+| **[Option A — Bundled toolchain build](#option-a--build-from-bundled-rust-toolchain-linux)** | Linux | `bash`, `tar` | No Rust, no internet — requires toolchain committed to git by maintainer |
+| **[Option B — Vendor source build](#option-b--vendor-only-source-build)** | Linux / Windows | Rust ≥1.95 already installed | Rust is already on the machine |
+| **[Option C — Airgap kit (Linux, no Rust)](#option-c--airgap-kit-linux-no-rust)** | Linux | `bash`, `tar` (xz), `sha256sum` | Linux, no Rust — full self-contained kit |
+| **[Option D — Download from GitHub](#option-d--auto-download-linux-no-rust-has-internet)** | Linux | `bash`, `tar`, `curl` | Linux, no Rust, has internet |
 
-In all cases:
+In all cases, a single command does everything:
 
 ```bash
-bash scripts/install.sh   # auto-detects the best available path
-bash scripts/run.sh       # web UI at http://127.0.0.1:4317
+bash scripts/run.sh   # auto-installs on first run, then opens web UI at http://127.0.0.1:4317
 ```
 
-`install.sh` makes no network calls by default. Pass `--online` to opt into GitHub
-downloads (Option D only).
+`run.sh` calls `install.sh` automatically when the binary is absent and makes no network
+calls by default. Pass `--online` to opt into GitHub downloads (Option D only).
+Use `--rebuild` or `--force` to force a fresh install even if a binary already exists.
 
 ---
 
-## Option A — Build from bundled Rust toolchain
+## Option W — Pre-built Windows binary
 
-**No Rust installed. No internet required — provided the maintainer has committed the
+**Windows 10/11 only.** No Rust required. No compilation. No `.tools/` directory written.
+
+`dist/oxide-sloc-windows-x64.zip` is committed directly to the repository and updated
+automatically by the `update-dist.yml` CI workflow after every release. `install.sh` extracts
+it on the first run — no network call, no build step.
+
+```bash
+# On the air-gapped Windows machine — after git clone:
+bash scripts/run.sh   # extracts dist/oxide-sloc-windows-x64.zip → oxide-sloc.exe → launches
+```
+
+**System requirements:**
+
+| | Windows 10/11 |
+|---|---|
+| Shell | Git Bash (ships with Git for Windows) |
+| Extract tool | `unzip` (bundled with Git Bash) or PowerShell `Expand-Archive` |
+| Root / sudo | Not required |
+| Internet | Not required |
+| Rust | Not required |
+
+The `dist/` zip contains the release-mode binary built by `x86_64-pc-windows-msvc` in GitHub
+Actions. When the `WINDOWS_CERTIFICATE` GitHub Actions secret is set, the binary inside is
+Authenticode-signed — EDR software (Carbon Black, CrowdStrike, Defender) passes it without any
+exclusion configuration. See [`docs/av-whitelisting.md`](./av-whitelisting.md) for details.
+
+> **Force re-extraction:** `bash scripts/run.sh --rebuild` re-extracts the zip even if the
+> binary already exists — useful after a `git pull` that updates `dist/`.
+
+---
+
+## Option A — Build from bundled Rust toolchain (Linux)
+
+**Linux only. No Rust installed. No internet required — provided the maintainer has committed the
 toolchain archive** (see [Populating the toolchain archive](#populating-the-toolchain-archive-maintainer-workflow) below).
 
 When `toolchain/` archives are present, `install.sh` detects them automatically,
 installs Rust locally into `.tools/` (inside the repo, no system-wide changes, no root
 required), and then compiles oxide-sloc from the vendored crate sources.
 
-If `toolchain/` is absent on a fresh clone (git ls-files toolchain/ returns nothing),
+If `toolchain/` is absent on a fresh clone (`git ls-files toolchain/` returns nothing),
 the maintainer must run `bundle-rust-toolchain.sh` on a networked machine first.
 
 ```bash
-# On the air-gapped machine — after git clone (toolchain/ must already be committed):
-bash scripts/install.sh   # bootstraps Rust, builds from vendor.tar.xz
-bash scripts/run.sh       # web UI at http://127.0.0.1:4317
+# On the air-gapped Linux machine — after git clone (toolchain/ must already be committed):
+bash scripts/run.sh   # bootstraps Rust, builds from vendor.tar.xz, launches web UI
 ```
 
 **What install.sh does under the hood:**
 1. Detects no `cargo` on PATH.
-2. Finds `toolchain/rust-toolchain-{platform}.tar.gz`.
+2. Finds `toolchain/rust-toolchain-linux-{arch}.tar.gz`.
 3. Verifies the SHA-256 checksum (from `toolchain/checksums.sha256`).
-4. Extracts to `.tools/` and runs the bundled `install.sh` with `--prefix=.tools/rust`.
-5. Exports `.tools/rust/bin` onto PATH for the rest of the session.
-6. Decompresses `vendor.tar.xz` (one-time, ~35 MB → ~362 MB).
-7. Runs `cargo build --release --offline -p oxide-sloc` with the animated progress display.
-8. Copies the result to `oxide-sloc` (Linux) / `oxide-sloc.exe` (Windows) in the repo root.
+4. Extracts to `.tools/` and exports `RUSTUP_HOME`/`CARGO_HOME`/`PATH` for the session.
+5. Decompresses `vendor.tar.xz` (one-time, ~35 MB → ~362 MB).
+6. Runs `cargo build --release --offline -p oxide-sloc` with the animated progress display.
+7. Copies the result to `oxide-sloc` in the repo root.
 
 **System requirements:**
 
-| | Windows 10/11 | Linux x86_64 / arm64 |
-|---|---|---|
-| Shell | Git Bash (ships with Git for Windows) | `bash` |
-| Extract tools | `tar` (bundled with Git Bash) | `tar` (with xz flag) |
-| C linker | `gcc` (bundled with Git Bash's MinGW-w64) | `gcc` (system package) |
-| Root / sudo | Not required | Not required |
-| Internet | Not required | Not required |
-| Rust | Not required — bootstrapped from `toolchain/` | Not required |
-
-> **Windows linker note:** The Rust `x86_64-pc-windows-gnu` toolchain uses `gcc` as the
-> linker. Git for Windows includes MinGW-w64 GCC at `/mingw64/bin/gcc.exe` — available
-> automatically in every Git Bash session. No separate installation needed.
+| | Linux x86_64 / arm64 |
+|---|---|
+| Shell | `bash` |
+| Extract tools | `tar` (with xz flag) |
+| C linker | `gcc` (system package) |
+| Root / sudo | Not required |
+| Internet | Not required |
+| Rust | Not required — bootstrapped from `toolchain/` |
 
 > **GUI system libraries:** The default build is headless and requires no GUI system
 > libraries (`libwayland`, `libgtk`, `libxdo`). To enable native file-dialog support
@@ -106,12 +137,12 @@ bash scripts/run.sh       # web UI at http://127.0.0.1:4317
 
 ### Populating the toolchain archive (maintainer workflow)
 
-The toolchain archive must be generated on a machine with internet access and committed
-to the repository:
+The Linux toolchain archive must be generated on a machine with internet access and committed
+to the repository. (Windows users use `dist/oxide-sloc-windows-x64.zip` instead — no toolchain
+archive needed.)
 
 ```bash
 # On any machine with internet access:
-bash scripts/internal/bundle-rust-toolchain.sh windows-x64   # Windows (produces ≤45 MB parts)
 bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64  # Linux x64
 bash scripts/internal/bundle-rust-toolchain.sh linux-arm64   # Linux arm64
 
@@ -135,8 +166,7 @@ Use this when the Rust toolchain (≥1.95) is already installed on the target ma
 `git clone` includes them. No separate download is needed.
 
 ```bash
-bash scripts/install.sh   # detects cargo, decompresses vendor.tar.xz, builds offline
-bash scripts/run.sh
+bash scripts/run.sh   # detects cargo, decompresses vendor.tar.xz, builds offline, launches
 ```
 
 Or manually via the internal helper:
@@ -164,7 +194,7 @@ When `curl` is available and no Rust toolchain is detected, pass `--online` to h
 
 ```bash
 bash scripts/install.sh --online   # downloads release binary, extracts
-bash scripts/run.sh
+bash scripts/run.sh                # launches web UI
 ```
 
 The downloaded archive is verified against `SHA256SUMS.txt` from the same release when
@@ -232,11 +262,11 @@ bash install.sh
 Users interact with three scripts only. Internal scripts under `scripts/internal/` are
 called automatically and should not be invoked directly.
 
-| Script | Purpose | Build progress display |
+| Script | Purpose | Notes |
 |---|---|---|
-| `bash scripts/install.sh` | Install oxide-sloc (auto-detects best path) | Yes — Verify sources → Compile release build → Install binary |
-| `bash scripts/run.sh` | Launch web UI (localhost) | Yes — Resolve dependencies → Compile workspace → Launch server |
-| `bash scripts/serve-server.sh` | Launch web UI as LAN server | Yes — Resolve dependencies → Compile workspace → Launch server |
+| `bash scripts/run.sh` | **Primary entry point** — installs on first run, then launches web UI (localhost) | Accepts `--rebuild` / `--force` / `-f` to force a fresh install before launching |
+| `bash scripts/install.sh` | Install oxide-sloc (auto-detects best path, called by run.sh automatically) | Can be invoked directly; accepts `--rebuild`, `--online`, `--auto` |
+| `bash scripts/serve-server.sh` | Launch web UI as LAN server with API key setup | Does not auto-install — run `scripts/run.sh` at least once first |
 
 | Internal script | Called by | Purpose |
 |---|---|---|
