@@ -962,6 +962,22 @@ fn run_init(args: &InitArgs) -> Result<()> {
 
 // ── validate handler ──────────────────────────────────────────────────────────
 
+fn validate_path_list(paths: &[std::path::PathBuf], prefix: &str) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| format!("{prefix}: '{}' does not exist", p.display()))
+        .collect()
+}
+
+fn validate_glob_list(patterns: &[String], prefix: &str) -> Vec<String> {
+    patterns
+        .iter()
+        .filter(|p| globset::Glob::new(p).is_err())
+        .map(|p| format!("{prefix}: invalid glob pattern '{p}'"))
+        .collect()
+}
+
 fn run_validate(args: &ValidateArgs) -> Result<()> {
     let config_path = args
         .config
@@ -980,43 +996,23 @@ fn run_validate(args: &ValidateArgs) -> Result<()> {
 
     let mut errors: Vec<String> = Vec::new();
 
-    // Check discovery.root_paths exist
-    for path in &config.discovery.root_paths {
-        if !path.exists() {
-            errors.push(format!(
-                "discovery.root_paths: '{}' does not exist",
-                path.display()
-            ));
-        }
-    }
+    errors.extend(validate_path_list(
+        &config.discovery.root_paths,
+        "discovery.root_paths",
+    ));
+    errors.extend(validate_path_list(
+        &config.discovery.allowed_scan_roots,
+        "discovery.allowed_scan_roots",
+    ));
+    errors.extend(validate_glob_list(
+        &config.discovery.include_globs,
+        "discovery.include_globs",
+    ));
+    errors.extend(validate_glob_list(
+        &config.discovery.exclude_globs,
+        "discovery.exclude_globs",
+    ));
 
-    // Check allowed_scan_roots exist
-    for path in &config.discovery.allowed_scan_roots {
-        if !path.exists() {
-            errors.push(format!(
-                "discovery.allowed_scan_roots: '{}' does not exist",
-                path.display()
-            ));
-        }
-    }
-
-    // Check globs are parseable
-    for pattern in &config.discovery.include_globs {
-        if globset::Glob::new(pattern).is_err() {
-            errors.push(format!(
-                "discovery.include_globs: invalid glob pattern '{pattern}'"
-            ));
-        }
-    }
-    for pattern in &config.discovery.exclude_globs {
-        if globset::Glob::new(pattern).is_err() {
-            errors.push(format!(
-                "discovery.exclude_globs: invalid glob pattern '{pattern}'"
-            ));
-        }
-    }
-
-    // Check reporting.logo_path exists if set
     if let Some(logo) = &config.reporting.logo_path {
         if !logo.exists() {
             errors.push(format!(
@@ -1026,7 +1022,6 @@ fn run_validate(args: &ValidateArgs) -> Result<()> {
         }
     }
 
-    // Check accent_color is valid (already validated in AppConfig::validate but report nicely)
     if let Some(color) = &config.reporting.accent_color {
         if sloc_config::validate_hex_color(color).is_err() {
             errors.push(format!(
@@ -1035,7 +1030,6 @@ fn run_validate(args: &ValidateArgs) -> Result<()> {
         }
     }
 
-    // Check profiles
     for name in config.profiles.keys() {
         if name.trim().is_empty() {
             errors.push("profiles: profile name must not be empty".into());

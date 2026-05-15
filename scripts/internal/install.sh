@@ -326,7 +326,7 @@ fi
 # oxide-sloc-windows-x64.zip is committed to dist/ by update-dist.yml after
 # every release.  Extracting it here skips the toolchain bootstrap entirely —
 # no unsigned PE files are written to disk, so EDR software won't block the install.
-if [[ "$PLATFORM" == windows ]]; then
+if [[ "$PLATFORM" == windows ]] && [[ "$FORCE_REBUILD" == false ]]; then
     DIST_WIN="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
     if [[ -f "$DIST_WIN" ]]; then
         echo " Pre-built Windows binary found in dist/ — extracting..."
