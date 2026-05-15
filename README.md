@@ -105,12 +105,12 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 bash scripts/run.sh   # Windows 10/11 (Git Bash) or Linux — http://127.0.0.1:4317
 ```
 
-**No network calls are made by default.** `run.sh` calls `install.sh` automatically on first run and selects the best available path:
+**No network calls are made by default.** `run.sh` calls `scripts/internal/install.sh` automatically on first run and selects the best available path:
 
 - **Windows:** extracts `dist/oxide-sloc-windows-x64.zip` (committed, ~9 MB) — no Rust required, no compilation, no `.tools/` directory. The pre-built binary is updated automatically by CI after every release.
 - **Linux — Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
 - **Linux — no Rust, toolchain committed:** `install.sh` detects `toolchain/rust-toolchain-linux-*.tar.gz.*` split parts, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires the maintainer to have run `bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine and committed the archives — see [`docs/airgap.md`](./docs/airgap.md).
-- **Linux — no Rust, download from GitHub:** run `bash scripts/install.sh --online` (requires `curl`) to fetch the release binary automatically.
+- **Linux — no Rust, download from GitHub:** run `bash scripts/internal/install.sh --online` (requires `curl`) to fetch the release binary automatically.
 - **Linux — no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
 ### Path B — Docker
@@ -642,8 +642,8 @@ docs/
   ci-integrations.md
   server-deployment.md
 examples/           # Runnable examples + sloc.example.toml config template
-scripts/            # install.sh, run.sh, serve-server.sh  (user-facing entry points)
-scripts/internal/   # airgap-build.sh, make-airgap-kit.sh, update-vendor.sh, install-hooks.sh
+scripts/            # run.sh, serve-server.sh  (user-facing entry points)
+scripts/internal/   # install.sh, airgap-build.sh, make-airgap-kit.sh, update-vendor.sh, install-hooks.sh
 tests/
   fixtures/basic/   # Sample source files used by smoke tests
 ```
