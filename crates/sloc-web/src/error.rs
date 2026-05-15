@@ -17,7 +17,7 @@ struct ErrorBody<'a> {
     error: &'a str,
 }
 
-pub(crate) fn not_found(message: &str) -> Response {
+pub fn not_found(message: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
         axum::Json(ErrorBody { error: message }),
@@ -25,7 +25,7 @@ pub(crate) fn not_found(message: &str) -> Response {
         .into_response()
 }
 
-pub(crate) fn bad_request(message: &str) -> Response {
+pub fn bad_request(message: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         axum::Json(ErrorBody { error: message }),
@@ -33,7 +33,7 @@ pub(crate) fn bad_request(message: &str) -> Response {
         .into_response()
 }
 
-pub(crate) fn internal(message: &str) -> Response {
+pub fn internal(message: &str) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         axum::Json(ErrorBody { error: message }),
@@ -41,7 +41,7 @@ pub(crate) fn internal(message: &str) -> Response {
         .into_response()
 }
 
-pub(crate) fn unprocessable_entity(message: &str) -> Response {
+pub fn unprocessable_entity(message: &str) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
         axum::Json(ErrorBody { error: message }),

@@ -24,7 +24,7 @@ use askama::Template as _;
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
-pub(crate) async fn require_api_key(
+pub async fn require_api_key(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
@@ -112,7 +112,7 @@ pub(crate) async fn require_api_key(
 
 // ── Session helpers ───────────────────────────────────────────────────────────
 
-pub(crate) fn check_session_valid(token: Option<&str>, state: &AppState) -> bool {
+fn check_session_valid(token: Option<&str>, state: &AppState) -> bool {
     let Some(tok) = token else { return false };
     let now = Instant::now();
     let mut sessions = state
@@ -173,7 +173,7 @@ fn ct_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
-pub(crate) fn extract_session_cookie(cookie_header: &str) -> Option<&str> {
+fn extract_session_cookie(cookie_header: &str) -> Option<&str> {
     cookie_header.split(';').find_map(|pair| {
         let pair = pair.trim();
         let (k, v) = pair.split_once('=')?;
@@ -185,14 +185,14 @@ pub(crate) fn extract_session_cookie(cookie_header: &str) -> Option<&str> {
     })
 }
 
-pub(crate) fn is_browser_request(req: &Request<Body>) -> bool {
+fn is_browser_request(req: &Request<Body>) -> bool {
     req.headers()
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|a| a.contains("text/html"))
 }
 
-pub(crate) fn urlencode_path(s: &str) -> String {
+fn urlencode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -222,18 +222,18 @@ pub(crate) fn urlencode_path(s: &str) -> String {
 // ── Login form handlers ────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
-pub(crate) struct LoginQuery {
-    pub(crate) next: Option<String>,
-    pub(crate) error: Option<String>,
+struct LoginQuery {
+    next: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
-pub(crate) struct LoginFormData {
-    pub(crate) key: String,
-    pub(crate) next: Option<String>,
+struct LoginFormData {
+    key: String,
+    next: Option<String>,
 }
 
-pub(crate) async fn auth_login_get(
+pub async fn auth_login_get(
     State(state): State<AppState>,
     Query(query): Query<LoginQuery>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -260,7 +260,7 @@ pub(crate) async fn auth_login_get(
     .into_response()
 }
 
-pub(crate) async fn auth_login_post(
+pub async fn auth_login_post(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
     Form(form): Form<LoginFormData>,
