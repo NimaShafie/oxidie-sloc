@@ -2528,10 +2528,10 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     let fn_pp = if patterns.functions_prefix_paren.is_empty() {
         0
     } else if let Some(paren_pos) = trimmed.find('(') {
-        if !trimmed[..paren_pos].contains('=') {
-            hit(patterns.functions_prefix_paren)
-        } else {
+        if trimmed[..paren_pos].contains('=') {
             0
+        } else {
+            hit(patterns.functions_prefix_paren)
         }
     } else {
         0
@@ -2945,7 +2945,6 @@ pub mod ts {
 
     #[allow(clippy::too_many_lines)]
     fn visit(node: Node, ctx: &mut VisitCtx<'_>) {
-        // NOSONAR
         let kind = node.kind();
 
         // Comment node — mark rows as comment, detect block vs. line comment.

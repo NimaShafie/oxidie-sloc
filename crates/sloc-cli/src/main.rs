@@ -962,10 +962,7 @@ fn run_init(args: &InitArgs) -> Result<()> {
 
 // ── validate handler ──────────────────────────────────────────────────────────
 
-fn run_validate(
-    // NOSONAR(rust:S3776)
-    args: &ValidateArgs,
-) -> Result<()> {
+fn run_validate(args: &ValidateArgs) -> Result<()> {
     let config_path = args
         .config
         .as_deref()

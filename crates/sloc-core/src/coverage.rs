@@ -283,10 +283,7 @@ fn cobertura_scan_methods(class_block: &str) -> (u32, u32) {
 /// `JaCoCo` is produced by the Gradle `jacocoTestReport` task and the Maven `JaCoCo` plugin.
 /// Paths are reconstructed as `package/sourcefile` (e.g. `com/example/Main.java`).
 #[must_use]
-pub fn parse_jacoco(
-    // NOSONAR(rust:S3776)
-    content: &str,
-) -> HashMap<PathBuf, FileCoverage> {
+pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
     let mut result: HashMap<PathBuf, FileCoverage> = HashMap::new();
 
     let mut scan = content;

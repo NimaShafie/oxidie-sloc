@@ -68,7 +68,7 @@ fn make_manifest(ver_dots: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="{v}" name="NimaShafie.oxide-sloc" type="win32"/>
+  <assemblyIdentity version="{ver_dots}" name="NimaShafie.oxide-sloc" type="win32"/>
   <description>oxide-sloc local code metrics workbench</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security><requestedPrivileges>
@@ -88,8 +88,7 @@ fn make_manifest(ver_dots: &str) -> String {
     </windowsSettings>
   </application>
 </assembly>
-"#,
-        v = ver_dots
+"#
     )
 }
 
@@ -100,8 +99,8 @@ fn make_rc(ver_commas: &str, ver_dots: &str, manifest_path: &str) -> String {
     format!(
         r#"
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION {vc}
-PRODUCTVERSION {vc}
+FILEVERSION {ver_commas}
+PRODUCTVERSION {ver_commas}
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x00040004L
@@ -114,12 +113,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "Nima Shafie"
       VALUE "FileDescription",  "oxide-sloc -- local code metrics workbench"
-      VALUE "FileVersion",      "{vd}"
+      VALUE "FileVersion",      "{ver_dots}"
       VALUE "InternalName",     "oxide-sloc"
       VALUE "LegalCopyright",   "Copyright 2024 Nima Shafie. AGPL-3.0-or-later."
       VALUE "OriginalFilename", "oxide-sloc.exe"
       VALUE "ProductName",      "oxide-sloc"
-      VALUE "ProductVersion",   "{vd}"
+      VALUE "ProductVersion",   "{ver_dots}"
       VALUE "URL",              "https://github.com/NimaShafie/oxide-sloc"
     END
   END
@@ -129,11 +128,8 @@ BEGIN
   END
 END
 
-1 24 "{mp}"
+1 24 "{manifest_path}"
 "#,
-        vc = ver_commas,
-        vd = ver_dots,
-        mp = manifest_path,
     )
 }
 
@@ -152,8 +148,7 @@ fn try_rc_exe(rc: &std::path::Path, res: &std::path::Path) -> bool {
                 rc.to_str().unwrap_or(""),
             ])
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok_and(|s| s.success())
         {
             return true;
         }
@@ -171,8 +166,7 @@ fn try_windres_coff(rc: &std::path::Path, obj: &std::path::Path) -> bool {
             obj.to_str().unwrap_or(""),
         ])
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 fn find_winsdk_rc() -> Option<String> {
@@ -182,8 +176,8 @@ fn find_winsdk_rc() -> Option<String> {
     }
     let mut versions: Vec<_> = std::fs::read_dir(kits)
         .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
         .collect();
     versions.sort();
