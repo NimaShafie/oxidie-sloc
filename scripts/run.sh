@@ -396,7 +396,7 @@ if [[ ! -f "$EXE" ]] || [[ "$REBUILD_MODE" == true ]]; then
     _INSTALL_FLAGS=""
     [[ "$REBUILD_MODE" == true ]] && _INSTALL_FLAGS="--rebuild"
     # shellcheck disable=SC2086
-    bash "$SCRIPT_DIR/install.sh" $_INSTALL_FLAGS \
+    bash "$SCRIPT_DIR/internal/install.sh" $_INSTALL_FLAGS \
         || { printf '\n [ERROR] Install failed. See above for details.\n' >&2; exit 1; }
     echo ""
 fi
@@ -415,6 +415,6 @@ if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
 fi
 
 printf '\noxide-sloc: no binary found.\n\n' >&2
-printf '  Run the installer first: bash scripts/install.sh\n' >&2
+printf '  Run the installer first: bash scripts/internal/install.sh\n' >&2
 printf '  See docs/airgap.md for all deployment paths (no internet required).\n\n' >&2
 exit 1

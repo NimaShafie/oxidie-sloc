@@ -193,8 +193,8 @@ When `curl` is available and no Rust toolchain is detected, pass `--online` to h
 `install.sh` fetch the matching release binary from GitHub Releases:
 
 ```bash
-bash scripts/install.sh --online   # downloads release binary, extracts
-bash scripts/run.sh                # launches web UI
+bash scripts/internal/install.sh --online   # downloads release binary, extracts
+bash scripts/run.sh                         # launches web UI
 ```
 
 The downloaded archive is verified against `SHA256SUMS.txt` from the same release when
@@ -265,11 +265,11 @@ called automatically and should not be invoked directly.
 | Script | Purpose | Notes |
 |---|---|---|
 | `bash scripts/run.sh` | **Primary entry point** — installs on first run, then launches web UI (localhost) | Accepts `--rebuild` / `--force` / `-f` to force a fresh install before launching |
-| `bash scripts/install.sh` | Install oxide-sloc (auto-detects best path, called by run.sh automatically) | Can be invoked directly; accepts `--rebuild`, `--online`, `--auto` |
 | `bash scripts/serve-server.sh` | Launch web UI as LAN server with API key setup | Does not auto-install — run `scripts/run.sh` at least once first |
 
 | Internal script | Called by | Purpose |
 |---|---|---|
+| `scripts/internal/install.sh` | `run.sh` automatically | Install oxide-sloc (auto-detects best path); accepts `--rebuild`, `--online`, `--auto` |
 | `scripts/internal/airgap-build.sh` | Manually (Option B manual path) | Plain offline build from vendor sources |
 | `scripts/internal/bundle-rust-toolchain.sh` | Maintainers — run on networked machine | Downloads Rust toolchain, stages into `toolchain/` for commit |
 | `scripts/internal/make-airgap-kit.sh` | Maintainers — run on networked machine | Builds Option C self-contained kit for Linux |

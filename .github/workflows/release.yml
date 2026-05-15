@@ -750,7 +750,7 @@ jobs:
             ```
 
   smoke-install:
-    name: Smoke test — install.sh --online
+    name: Smoke test — install.sh --online (internal)
     needs: [publish]
     runs-on: ubuntu-latest
     permissions:
@@ -766,7 +766,7 @@ jobs:
           apt-get install -y --no-install-recommends curl openssl ca-certificates
 
       - name: Install via install.sh --online
-        run: bash scripts/install.sh --online
+        run: bash scripts/internal/install.sh --online
 
       - name: Verify binary is executable and reports a version
         run: |
