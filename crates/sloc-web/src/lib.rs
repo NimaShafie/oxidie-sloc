@@ -2227,7 +2227,7 @@ fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
         git_author: run.git_commit_author.clone(),
         git_tags: run.git_tags.clone(),
         git_nearest_tag: run.git_nearest_tag.clone(),
-        git_commit_date: run.git_commit_date.clone(),
+        git_commit_date: run.git_commit_date,
     })
 }
 
@@ -2908,8 +2908,8 @@ fn build_submodule_row(
 
 // Immediately returns a wait page and runs the analysis in a background tokio task.
 // The semaphore permit is moved into the spawned task so concurrency limiting is maintained.
-#[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)]
+#[allow(clippy::significant_drop_tightening)] // task is moved into spawn; drop(task) would not compile
 async fn analyze_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2963,19 +2963,10 @@ async fn analyze_handler(
 
     // Cancel token: set to true by the cancel endpoint to abort the running analysis.
     let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_cancel = Arc::clone(&cancel_token);
 
-    // Clone everything the background task needs before moving into the spawn.
-    let project_path_bg = form.path.clone();
-    let output_dir_bg = form.output_dir.clone();
-    let git_repo_bg = form.git_repo.clone().filter(|s| !s.is_empty());
-    let git_ref_bg = form.git_ref.clone().filter(|s| !s.is_empty());
-    let generate_html_bg = form.generate_html.is_some();
-    let generate_pdf_bg = form.generate_pdf.is_some();
-    let clones_dir = state.git_clones_dir.clone();
-    let wait_id_bg = wait_id.clone();
-    let state_bg = state.clone();
-    let cancel_bg = Arc::clone(&cancel_token);
-
+    // Register Running state before building the task struct so the semaphore permit
+    // (which has a significant Drop) isn't held across the async_runs lock acquisition.
     {
         let mut runs = state.async_runs.lock().await;
         runs.insert(
@@ -2987,205 +2978,22 @@ async fn analyze_handler(
         );
     }
 
-    tokio::spawn(async move {
-        let _permit = sem_permit;
+    let task = AnalysisTask {
+        sem_permit,
+        state: state.clone(),
+        wait_id: wait_id.clone(),
+        config,
+        cancel: task_cancel,
+        git_repo: form.git_repo.clone().filter(|s| !s.is_empty()),
+        git_ref: form.git_ref.clone().filter(|s| !s.is_empty()),
+        generate_html: form.generate_html.is_some(),
+        generate_pdf: form.generate_pdf.is_some(),
+        project_path: form.path.clone(),
+        output_dir: form.output_dir.clone(),
+        clones_dir: state.git_clones_dir.clone(),
+    };
 
-        let cancel_sb = Arc::clone(&cancel_bg);
-        let (git_repo_sb, git_ref_sb) = (git_repo_bg.clone(), git_ref_bg.clone());
-        let analysis_result = tokio::task::spawn_blocking(move || {
-            run_analysis_blocking(config, git_repo_sb, git_ref_sb, clones_dir, cancel_sb)
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!(err.to_string()))
-        .and_then(|result| result);
-
-        // If cancelled while running, discard results and mark as cancelled.
-        if cancel_bg.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut runs = state_bg.async_runs.lock().await;
-            // Only overwrite if still Running (don't clobber a Complete that snuck in).
-            if matches!(
-                runs.get(&wait_id_bg),
-                Some(AsyncRunState::Running { .. } | AsyncRunState::Cancelled)
-            ) {
-                runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
-            }
-            drop(runs);
-            return;
-        }
-
-        let (run, report_html) = match analysis_result {
-            Ok(v) => v,
-            Err(err) => {
-                // Distinguish user-cancelled from real failure.
-                let message = if err.to_string().contains("analysis cancelled") {
-                    let mut runs = state_bg.async_runs.lock().await;
-                    runs.insert(wait_id_bg.clone(), AsyncRunState::Cancelled);
-                    drop(runs);
-                    return;
-                } else {
-                    "Analysis failed. Check that the path exists and is readable.".to_string()
-                };
-                eprintln!("[oxide-sloc][analyze] analysis failed: {err:#}");
-                let mut runs = state_bg.async_runs.lock().await;
-                runs.insert(wait_id_bg.clone(), AsyncRunState::Failed { message });
-                drop(runs);
-                return;
-            }
-        };
-
-        let run_id = run.tool.run_id.clone();
-        tracing::info!(event = "scan_complete", run_id = %run_id,
-            path = %project_path_bg, files = run.summary_totals.files_analyzed,
-            "Analysis finished");
-
-        let prev_entry: Option<RegistryEntry> = {
-            let reg = state_bg.registry.lock().await;
-            reg.entries_for_roots(&run.input_roots)
-                .into_iter()
-                .find(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
-                .cloned()
-        };
-
-        let scan_delta = prev_entry.as_ref().and_then(|prev| {
-            prev.json_path
-                .as_ref()
-                .and_then(|p| read_json(p).ok())
-                .map(|prev_run| compute_delta(&prev_run, &run))
-        });
-        let prev_scan_count: usize = {
-            let reg = state_bg.registry.lock().await;
-            reg.entries_for_roots(&run.input_roots)
-                .iter()
-                .filter(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
-                .count()
-        };
-
-        let output_root = resolve_output_root(output_dir_bg.as_deref());
-
-        let project_label = derive_project_label(
-            git_repo_bg.as_deref(),
-            git_ref_bg.as_deref(),
-            &project_path_bg,
-        );
-        let run_dir = output_root.join(format!("{project_label}_{run_id}"));
-        let file_stem = derive_file_stem(&project_label, run.git_commit_short.as_deref());
-
-        let result_context = RunResultContext {
-            prev_entry: prev_entry.clone(),
-            prev_scan_count,
-            project_path: project_path_bg.clone(),
-        };
-
-        let artifact_result = persist_run_artifacts(
-            &run,
-            &report_html,
-            &run_dir,
-            true,
-            generate_html_bg,
-            generate_pdf_bg,
-            &run.effective_configuration.reporting.report_title,
-            &file_stem,
-            result_context,
-        );
-
-        let (artifacts, pending_pdf) = match artifact_result {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("[oxide-sloc][analyze] artifact write failed: {err:#}");
-                let mut runs = state_bg.async_runs.lock().await;
-                runs.insert(
-                    wait_id_bg.clone(),
-                    AsyncRunState::Failed {
-                        message: "Failed to save report artifacts. Check available disk space."
-                            .to_string(),
-                    },
-                );
-                drop(runs);
-                return;
-            }
-        };
-
-        {
-            let mut map = state_bg.artifacts.lock().await;
-            map.insert(run_id.clone(), artifacts.clone());
-        }
-
-        {
-            let entry = build_run_registry_entry(&run, &run_id, &project_label, &artifacts);
-            let mut reg = state_bg.registry.lock().await;
-            reg.add_entry(entry);
-            let _ = reg.save(&state_bg.registry_path);
-        }
-
-        if let Some(ref cfg_path) = artifacts.scan_config_path {
-            let policy_str =
-                serde_json::to_value(run.effective_configuration.analysis.mixed_line_policy)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| "code_only".to_string());
-            let behavior_str =
-                serde_json::to_value(run.effective_configuration.analysis.binary_file_behavior)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| "skip".to_string());
-            let scan_cfg = ScanConfig {
-                oxide_sloc_version: env!("CARGO_PKG_VERSION").to_string(),
-                path: project_path_bg.clone(),
-                include_globs: run
-                    .effective_configuration
-                    .discovery
-                    .include_globs
-                    .join("\n"),
-                exclude_globs: run
-                    .effective_configuration
-                    .discovery
-                    .exclude_globs
-                    .join("\n"),
-                submodule_breakdown: run.effective_configuration.discovery.submodule_breakdown,
-                mixed_line_policy: policy_str,
-                python_docstrings_as_comments: run
-                    .effective_configuration
-                    .analysis
-                    .python_docstrings_as_comments,
-                generated_file_detection: run
-                    .effective_configuration
-                    .analysis
-                    .generated_file_detection,
-                minified_file_detection: run
-                    .effective_configuration
-                    .analysis
-                    .minified_file_detection,
-                vendor_directory_detection: run
-                    .effective_configuration
-                    .analysis
-                    .vendor_directory_detection,
-                include_lockfiles: run.effective_configuration.analysis.include_lockfiles,
-                binary_file_behavior: behavior_str,
-                output_dir: output_dir_bg.clone().unwrap_or_default(),
-                report_title: run.effective_configuration.reporting.report_title.clone(),
-                generate_html: generate_html_bg,
-                generate_pdf: generate_pdf_bg,
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
-                let _ = std::fs::write(cfg_path, json);
-            }
-        }
-
-        spawn_pdf_background(pending_pdf, run_id.clone(), state_bg.artifacts.clone());
-
-        // Mark complete — client is now polling and will be redirected to /runs/result/{run_id}.
-        let mut runs = state_bg.async_runs.lock().await;
-        runs.insert(
-            wait_id_bg.clone(),
-            AsyncRunState::Complete {
-                run_id: run_id.clone(),
-            },
-        );
-        drop(runs);
-
-        // Submodule sub-reports are rendered synchronously above inside background task.
-        let _ = scan_delta;
-    });
+    tokio::spawn(run_analysis_task(task));
 
     let template = ScanWaitTemplate {
         version: env!("CARGO_PKG_VERSION"),
@@ -3205,6 +3013,241 @@ async fn analyze_handler(
     response
 }
 
+struct AnalysisTask {
+    sem_permit: tokio::sync::OwnedSemaphorePermit,
+    state: AppState,
+    wait_id: String,
+    config: AppConfig,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    git_repo: Option<String>,
+    git_ref: Option<String>,
+    generate_html: bool,
+    generate_pdf: bool,
+    project_path: String,
+    output_dir: Option<String>,
+    clones_dir: PathBuf,
+}
+
+#[allow(clippy::too_many_lines)] // sequential async workflow; extracting more helpers adds no clarity
+async fn run_analysis_task(task: AnalysisTask) {
+    let _permit = task.sem_permit;
+
+    let cancel_sb = Arc::clone(&task.cancel);
+    let (git_repo_sb, git_ref_sb) = (task.git_repo.clone(), task.git_ref.clone());
+    let clones_dir_sb = task.clones_dir;
+    let config_sb = task.config;
+    let analysis_result = tokio::task::spawn_blocking(move || {
+        run_analysis_blocking(config_sb, git_repo_sb, git_ref_sb, clones_dir_sb, cancel_sb)
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!(err.to_string()))
+    .and_then(|result| result);
+
+    // If cancelled while running, discard results and mark as cancelled.
+    if task.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut runs = task.state.async_runs.lock().await;
+        // Only overwrite if still Running (don't clobber a Complete that snuck in).
+        if matches!(
+            runs.get(&task.wait_id),
+            Some(AsyncRunState::Running { .. } | AsyncRunState::Cancelled)
+        ) {
+            runs.insert(task.wait_id.clone(), AsyncRunState::Cancelled);
+        }
+        drop(runs);
+        return;
+    }
+
+    let (run, report_html) = match analysis_result {
+        Ok(v) => v,
+        Err(err) => {
+            // Distinguish user-cancelled from real failure.
+            if err.to_string().contains("analysis cancelled") {
+                let mut runs = task.state.async_runs.lock().await;
+                runs.insert(task.wait_id.clone(), AsyncRunState::Cancelled);
+                drop(runs);
+                return;
+            }
+            eprintln!("[oxide-sloc][analyze] analysis failed: {err:#}");
+            let mut runs = task.state.async_runs.lock().await;
+            runs.insert(
+                task.wait_id.clone(),
+                AsyncRunState::Failed {
+                    message: "Analysis failed. Check that the path exists and is readable."
+                        .to_string(),
+                },
+            );
+            drop(runs);
+            return;
+        }
+    };
+
+    let run_id = run.tool.run_id.clone();
+    tracing::info!(event = "scan_complete", run_id = %run_id,
+        path = %task.project_path, files = run.summary_totals.files_analyzed,
+        "Analysis finished");
+
+    let prev_entry: Option<RegistryEntry> = {
+        let reg = task.state.registry.lock().await;
+        reg.entries_for_roots(&run.input_roots)
+            .into_iter()
+            .find(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
+            .cloned()
+    };
+
+    let scan_delta = prev_entry.as_ref().and_then(|prev| {
+        prev.json_path
+            .as_ref()
+            .and_then(|p| read_json(p).ok())
+            .map(|prev_run| compute_delta(&prev_run, &run))
+    });
+    let prev_scan_count: usize = {
+        let reg = task.state.registry.lock().await;
+        reg.entries_for_roots(&run.input_roots)
+            .iter()
+            .filter(|e| e.json_path.as_ref().is_some_and(|p| p.exists()))
+            .count()
+    };
+
+    let output_root = resolve_output_root(task.output_dir.as_deref());
+    let project_label = derive_project_label(
+        task.git_repo.as_deref(),
+        task.git_ref.as_deref(),
+        &task.project_path,
+    );
+    let run_dir = output_root.join(format!("{project_label}_{run_id}"));
+    let file_stem = derive_file_stem(&project_label, run.git_commit_short.as_deref());
+
+    let result_context = RunResultContext {
+        prev_entry: prev_entry.clone(),
+        prev_scan_count,
+        project_path: task.project_path.clone(),
+    };
+
+    let artifact_result = persist_run_artifacts(
+        &run,
+        &report_html,
+        &run_dir,
+        true,
+        task.generate_html,
+        task.generate_pdf,
+        &run.effective_configuration.reporting.report_title,
+        &file_stem,
+        result_context,
+    );
+
+    let (artifacts, pending_pdf) = match artifact_result {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("[oxide-sloc][analyze] artifact write failed: {err:#}");
+            let mut runs = task.state.async_runs.lock().await;
+            runs.insert(
+                task.wait_id.clone(),
+                AsyncRunState::Failed {
+                    message: "Failed to save report artifacts. Check available disk space."
+                        .to_string(),
+                },
+            );
+            drop(runs);
+            return;
+        }
+    };
+
+    {
+        let mut map = task.state.artifacts.lock().await;
+        map.insert(run_id.clone(), artifacts.clone());
+    }
+
+    {
+        let entry = build_run_registry_entry(&run, &run_id, &project_label, &artifacts);
+        let mut reg = task.state.registry.lock().await;
+        reg.add_entry(entry);
+        let _ = reg.save(&task.state.registry_path);
+    }
+
+    if let Some(ref cfg_path) = artifacts.scan_config_path {
+        save_scan_config_json(
+            cfg_path,
+            &run,
+            &task.project_path,
+            task.output_dir.as_deref(),
+            task.generate_html,
+            task.generate_pdf,
+        );
+    }
+
+    spawn_pdf_background(pending_pdf, run_id.clone(), task.state.artifacts.clone());
+
+    // Mark complete — client is now polling and will be redirected to /runs/result/{run_id}.
+    let mut runs = task.state.async_runs.lock().await;
+    runs.insert(
+        task.wait_id.clone(),
+        AsyncRunState::Complete {
+            run_id: run_id.clone(),
+        },
+    );
+    drop(runs);
+
+    let _ = scan_delta;
+}
+
+fn save_scan_config_json(
+    cfg_path: &std::path::Path,
+    run: &sloc_core::AnalysisRun,
+    project_path: &str,
+    output_dir: Option<&str>,
+    generate_html: bool,
+    generate_pdf: bool,
+) {
+    let policy_str = serde_json::to_value(run.effective_configuration.analysis.mixed_line_policy)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "code_only".to_string());
+    let behavior_str =
+        serde_json::to_value(run.effective_configuration.analysis.binary_file_behavior)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "skip".to_string());
+    let scan_cfg = ScanConfig {
+        oxide_sloc_version: env!("CARGO_PKG_VERSION").to_string(),
+        path: project_path.to_string(),
+        include_globs: run
+            .effective_configuration
+            .discovery
+            .include_globs
+            .join("\n"),
+        exclude_globs: run
+            .effective_configuration
+            .discovery
+            .exclude_globs
+            .join("\n"),
+        submodule_breakdown: run.effective_configuration.discovery.submodule_breakdown,
+        mixed_line_policy: policy_str,
+        python_docstrings_as_comments: run
+            .effective_configuration
+            .analysis
+            .python_docstrings_as_comments,
+        generated_file_detection: run
+            .effective_configuration
+            .analysis
+            .generated_file_detection,
+        minified_file_detection: run.effective_configuration.analysis.minified_file_detection,
+        vendor_directory_detection: run
+            .effective_configuration
+            .analysis
+            .vendor_directory_detection,
+        include_lockfiles: run.effective_configuration.analysis.include_lockfiles,
+        binary_file_behavior: behavior_str,
+        output_dir: output_dir.unwrap_or("").to_string(),
+        report_title: run.effective_configuration.reporting.report_title.clone(),
+        generate_html,
+        generate_pdf,
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
+        let _ = std::fs::write(cfg_path, json);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // owned params required for spawn_blocking 'static bound
 fn run_analysis_blocking(
     mut config: AppConfig,
     git_repo: Option<String>,
@@ -4006,13 +4049,15 @@ async fn resolve_artifact_set(
     run_id: &str,
     csp_nonce: &str,
 ) -> Result<RunArtifacts, Response> {
-    if let Some(a) = state.artifacts.lock().await.get(run_id).cloned() {
+    let cached = state.artifacts.lock().await.get(run_id).cloned();
+    if let Some(a) = cached {
         return Ok(a);
     }
     let reg = state.registry.lock().await;
     if let Some(entry) = reg.find_by_run_id(run_id) {
         return Ok(recover_artifacts_from_registry(entry));
     }
+    drop(reg);
     let short_id = &run_id[..run_id.len().min(8)];
     let hint = if matches!(
         run_id,
@@ -4039,6 +4084,7 @@ async fn resolve_artifact_set(
     Err((StatusCode::NOT_FOUND, Html(error_html)).into_response())
 }
 
+#[allow(clippy::too_many_lines)] // bulk is an inline HTML string for the PDF-waiting page
 async fn artifact_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -6817,6 +6863,7 @@ fn compute_cov_pct_arr(per_file_records: &[sloc_core::FileRecord]) -> Vec<serde_
             e.1 += u64::from(cov.lines_hit);
         }
     }
+    #[allow(clippy::cast_precision_loss)] // hit/found are line counts bounded by file size
     let mut pairs: Vec<(String, f64)> = totals
         .into_iter()
         .filter(|(_, (found, _))| *found > 0)
@@ -7043,6 +7090,7 @@ fn compute_cov_json_str(run: &AnalysisRun) -> String {
             e.1 += u64::from(cov.lines_hit);
         }
     }
+    #[allow(clippy::cast_precision_loss)] // hit/found are line counts bounded by file size
     let mut pairs: Vec<(String, f64)> = totals
         .into_iter()
         .filter(|(_, (found, _))| *found > 0)
