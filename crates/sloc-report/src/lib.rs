@@ -206,7 +206,6 @@ fn format_test_density(code_lines: u64, test_count: u64) -> String {
 
 #[allow(clippy::too_many_lines)] // large HTML renderer; splitting would obscure the template structure
 fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
-    // NOSONAR(rust:S3776)
     let config_json = serde_json::to_string_pretty(&run.effective_configuration)
         .context("failed to serialize effective configuration")?;
 
@@ -3799,7 +3798,7 @@ fn xl_col_name(idx: usize) -> String {
     s
 }
 
-fn xl_styles() -> &'static str {
+const fn xl_styles() -> &'static str {
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
 <numFmts count=\"1\">\
@@ -4068,7 +4067,6 @@ fn build_xlsx(sheets: &[XlSheet<'_>]) -> Vec<u8> {
 /// Returns an error if the file cannot be written.
 #[allow(clippy::too_many_lines)]
 pub fn write_xlsx(run: &AnalysisRun, path: &Path) -> Result<()> {
-    // NOSONAR(rust:S3776)
     // Sheet 1 — Summary
     let summary_rows: Vec<Vec<String>> = vec![
         vec!["Run ID".into(), run.tool.run_id.clone()],

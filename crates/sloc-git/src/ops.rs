@@ -36,6 +36,7 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
 /// GitLab (`/path/repo/-/tree/...`), GitHub (`github.com/{owner}/{repo}/tree/...`),
 /// and Bitbucket Cloud (`bitbucket.org/{ws}/{repo}/src/...`). SSH URLs and URLs
 /// that already look like clone targets are returned unchanged.
+#[must_use]
 pub fn normalize_git_url(raw: &str) -> String {
     let url = raw.trim();
 
@@ -53,10 +54,11 @@ pub fn normalize_git_url(raw: &str) -> String {
     };
 
     let authority_and_path = &url[scheme.len() + 3..]; // strip "scheme://"
-    let (host, path) = match authority_and_path.find('/') {
-        Some(i) => (&authority_and_path[..i], &authority_and_path[i..]),
-        None => (authority_and_path, "/"),
-    };
+    let (host, path) = authority_and_path
+        .find('/')
+        .map_or((authority_and_path, "/"), |i| {
+            (&authority_and_path[..i], &authority_and_path[i..])
+        });
     let path = path.trim_end_matches('/');
 
     // ── Bitbucket Server / Data Center ────────────────────────────────────────
