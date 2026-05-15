@@ -322,7 +322,7 @@ fn walk_root(
         .git_global(config.discovery.honor_ignore_files)
         .git_exclude(config.discovery.honor_ignore_files);
 
-    let paths = collect_walk_paths(&mut builder, seen_paths, warnings);
+    let paths = collect_walk_paths(&builder, seen_paths, warnings);
     if paths.is_empty() {
         return Ok(());
     }
@@ -340,7 +340,7 @@ fn walk_root(
 }
 
 fn collect_walk_paths(
-    builder: &mut WalkBuilder,
+    builder: &WalkBuilder,
     seen_paths: &mut HashSet<PathBuf>,
     warnings: &mut Vec<String>,
 ) -> Vec<PathBuf> {
