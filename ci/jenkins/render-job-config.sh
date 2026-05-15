@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Renders job-config.xml.tmpl → /tmp/job-config.xml with REPO_URL substituted.
+# Renders job-config.xml.tmpl with REPO_URL substituted and writes to a temp file.
+# Prints the temp file path on stdout so callers can capture it:
+#   JOB_XML=$(bash ci/jenkins/render-job-config.sh)
 set -euo pipefail
 
 # Allow operators to keep credentials outside the working tree (e.g. ~/.config/oxide-sloc/jenkins.env).
@@ -14,5 +16,7 @@ if [ -z "${REPO_URL:-}" ]; then
     echo "warning: REPO_URL was not set; defaulting to ${REPO_URL}" >&2
     echo "         source ci/jenkins/.env first if you intended a fork." >&2
 fi
-sed "s|__REPO_URL__|${REPO_URL}|g" "$(dirname "$0")/job-config.xml.tmpl" > /tmp/job-config.xml
-echo "Written: /tmp/job-config.xml (REPO_URL=${REPO_URL})"
+OUT="$(mktemp -t oxide-sloc-job.XXXXXX.xml)"
+sed "s|__REPO_URL__|${REPO_URL}|g" "$(dirname "$0")/job-config.xml.tmpl" > "$OUT"
+echo "Written: $OUT (REPO_URL=${REPO_URL})" >&2
+echo "$OUT"

@@ -125,6 +125,68 @@ curl -sS -b "$cookies" -u "$JENKINS_USER:$JENKINS_PASS" -H "$crumb" \
 rm -f "$cookies"
 ```
 
+#### Path C — mint via Groovy init (host-root path, no password needed)
+
+Use this when you have shell (or Docker exec) access to the Jenkins host but have lost both the admin password and the `initialAdminPassword` file. It requires no UI session and takes ~30 seconds.
+
+**Step 1 — write the init script**
+
+```bash
+# Docker:
+docker exec <container-name> mkdir -p /var/jenkins_home/init.groovy.d
+docker exec -i <container-name> tee /var/jenkins_home/init.groovy.d/mint-token.groovy <<'EOF'
+import jenkins.model.Jenkins
+import jenkins.security.ApiTokenProperty
+
+def admin = Jenkins.instance.getUser('admin')
+def tokenProp = admin.getProperty(ApiTokenProperty.class)
+def result = tokenProp.tokenStore.generateNewToken('bootstrap-token')
+new File('/var/jenkins_home/bootstrap-token.txt').text = result.plainValue
+EOF
+
+# Native (adjust JENKINS_HOME if different):
+sudo tee $JENKINS_HOME/init.groovy.d/mint-token.groovy <<'EOF'
+import jenkins.model.Jenkins
+import jenkins.security.ApiTokenProperty
+
+def admin = Jenkins.instance.getUser('admin')
+def tokenProp = admin.getProperty(ApiTokenProperty.class)
+def result = tokenProp.tokenStore.generateNewToken('bootstrap-token')
+new File('/var/jenkins_home/bootstrap-token.txt').text = result.plainValue
+EOF
+```
+
+**Step 2 — restart Jenkins**
+
+```bash
+# Docker:
+docker restart <container-name>
+# Native:
+sudo systemctl restart jenkins
+```
+
+**Step 3 — read the token and clean up**
+
+```bash
+# Docker:
+TOKEN=$(docker exec <container-name> cat /var/jenkins_home/bootstrap-token.txt)
+docker exec <container-name> rm /var/jenkins_home/bootstrap-token.txt \
+    /var/jenkins_home/init.groovy.d/mint-token.groovy
+echo "Token: $TOKEN"
+
+# Native:
+TOKEN=$(sudo cat $JENKINS_HOME/bootstrap-token.txt)
+sudo rm $JENKINS_HOME/bootstrap-token.txt \
+    $JENKINS_HOME/init.groovy.d/mint-token.groovy
+echo "Token: $TOKEN"
+```
+
+**Step 4 — store it**
+
+Copy the printed token value into `JENKINS_TOKEN` in `ci/jenkins/.env`.
+
+> **Important:** delete `mint-token.groovy` immediately after reading the token. Init scripts in `init.groovy.d/` run on every Jenkins restart — leaving the file in place regenerates and overwrites the token file on the next reboot.
+
 ### Storing credentials locally
 
 ```bash
@@ -149,6 +211,12 @@ set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh
 ```
 
 All lines must print `[ok]`. Fix any `[fail]` before continuing.
+
+If a `[info]` line reports that `hudson.model.DirectoryBrowserSupport.CSP` is at the default value, re-run with `--install-csp` to copy `relax-csp.groovy` into the running Jenkins container and restart it (requires Docker on the same host as Jenkins):
+
+```bash
+set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh --install-csp
+```
 
 ---
 
@@ -305,15 +373,15 @@ See `ci/jenkins/seed-job.groovy`.
 ```bash
 set -a; source ci/jenkins/.env; set +a
 
-# Render the job XML with your REPO_URL substituted
-bash ci/jenkins/render-job-config.sh   # writes /tmp/job-config.xml
+# Render the job XML with your REPO_URL substituted (path printed to stderr)
+JOB_XML=$(bash ci/jenkins/render-job-config.sh)
 
 CRUMB=$(curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     "${JENKINS_URL}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,\":\",//crumb)")
 
 curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     -H "${CRUMB}" -H "Content-Type: application/xml" \
-    --data-binary @/tmp/job-config.xml \
+    --data-binary @"${JOB_XML}" \
     "${JENKINS_URL}/createItem?name=${JOB_NAME}"
 ```
 
