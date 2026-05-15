@@ -14,7 +14,7 @@ fi
 if [ -z "${REPO_URL:-}" ]; then
     REPO_URL=https://github.com/oxide-sloc/oxide-sloc.git
     echo "warning: REPO_URL was not set; defaulting to ${REPO_URL}" >&2
-    echo "         source ci/jenkins/.env first if you intended a fork." >&2
+    echo "         source ci/jenkins/.env (or set OXIDE_SLOC_ENV_FILE) first if you intended a fork." >&2
 fi
 OUT="$(mktemp -t oxide-sloc-job.XXXXXX.xml)"
 sed "s|__REPO_URL__|${REPO_URL}|g" "$(dirname "$0")/job-config.xml.tmpl" > "$OUT"
