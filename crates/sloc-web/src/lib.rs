@@ -22,7 +22,9 @@ static IMG_ICON_DOCKERFILE: &[u8] = include_bytes!("../assets/icons/docker.png")
 static IMG_ICON_MAKEFILE: &[u8] = include_bytes!("../assets/icons/makefile.svg");
 static IMG_ICON_PERL: &[u8] = include_bytes!("../assets/icons/perl.svg");
 
+pub(crate) mod auth;
 pub(crate) mod confluence;
+pub(crate) mod error;
 pub(crate) mod git_browser;
 pub(crate) mod git_webhook;
 pub(crate) mod integrations;
@@ -57,7 +59,7 @@ use sloc_config::{AppConfig, BinaryFileBehavior, MixedLinePolicy};
 use sloc_git::ScheduleStore;
 
 #[derive(Clone)]
-struct CspNonce(String);
+pub(crate) struct CspNonce(pub(crate) String);
 
 static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
 
@@ -181,17 +183,17 @@ mod win_dialog_focus {
 
 /// Sliding-window rate limiter keyed by client IP.
 /// Uses only std primitives — no external crate required.
-struct IpRateLimiter {
+pub(crate) struct IpRateLimiter {
     window: Duration,
     max_requests: usize,
-    auth_lockout_threshold: u32,
+    pub(crate) auth_lockout_threshold: u32,
     auth_lockout_window: Duration,
     state: std::sync::Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     auth_failures: std::sync::Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
 
 impl IpRateLimiter {
-    fn new(
+    pub(crate) fn new(
         window: Duration,
         max_requests: usize,
         auth_lockout_threshold: u32,
@@ -210,7 +212,7 @@ impl IpRateLimiter {
     // The MutexGuard `state` must live as long as `bucket` borrows from it,
     // so it cannot be dropped any earlier than the end of the inner block.
     #[allow(clippy::significant_drop_tightening)]
-    fn is_allowed(&self, ip: IpAddr) -> bool {
+    pub(crate) fn is_allowed(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let cutoff = now.checked_sub(self.window).unwrap_or(now);
         let mut state = self
@@ -237,7 +239,7 @@ impl IpRateLimiter {
         }
     }
 
-    fn record_auth_failure(&self, ip: IpAddr) {
+    pub(crate) fn record_auth_failure(&self, ip: IpAddr) {
         let now = Instant::now();
         let mut map = self
             .auth_failures
@@ -251,7 +253,7 @@ impl IpRateLimiter {
             .or_insert_with(|| (1, now));
     }
 
-    fn is_auth_locked_out(&self, ip: IpAddr) -> bool {
+    pub(crate) fn is_auth_locked_out(&self, ip: IpAddr) -> bool {
         let mut map = self
             .auth_failures
             .lock()
@@ -267,7 +269,7 @@ impl IpRateLimiter {
             .is_some_and(|e| e.0 >= self.auth_lockout_threshold)
     }
 
-    fn auth_lockout_remaining_secs(&self, ip: IpAddr) -> u64 {
+    pub(crate) fn auth_lockout_remaining_secs(&self, ip: IpAddr) -> u64 {
         let map = self
             .auth_failures
             .lock()
@@ -279,7 +281,7 @@ impl IpRateLimiter {
         })
     }
 
-    fn spawn_pruning_task(limiter: Arc<Self>) {
+    pub(crate) fn spawn_pruning_task(limiter: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_mins(1));
             interval.tick().await; // consume the immediate first tick
@@ -371,33 +373,33 @@ impl ScanProfileStore {
 }
 
 #[derive(Clone)]
-struct AppState {
-    base_config: AppConfig,
-    artifacts: Arc<Mutex<HashMap<String, RunArtifacts>>>,
-    async_runs: Arc<Mutex<HashMap<String, AsyncRunState>>>,
-    registry: Arc<Mutex<ScanRegistry>>,
-    registry_path: PathBuf,
-    analyze_semaphore: Arc<tokio::sync::Semaphore>,
-    server_mode: bool,
-    tls_enabled: bool,
-    api_keys: Vec<secrecy::Secret<String>>,
-    rate_limiter: Arc<IpRateLimiter>,
-    trust_proxy: bool,
+pub(crate) struct AppState {
+    pub(crate) base_config: AppConfig,
+    pub(crate) artifacts: Arc<Mutex<HashMap<String, RunArtifacts>>>,
+    pub(crate) async_runs: Arc<Mutex<HashMap<String, AsyncRunState>>>,
+    pub(crate) registry: Arc<Mutex<ScanRegistry>>,
+    pub(crate) registry_path: PathBuf,
+    pub(crate) analyze_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) server_mode: bool,
+    pub(crate) tls_enabled: bool,
+    pub(crate) api_keys: Vec<secrecy::Secret<String>>,
+    pub(crate) rate_limiter: Arc<IpRateLimiter>,
+    pub(crate) trust_proxy: bool,
     /// Directory where remote repositories are cloned for git-browser scans.
-    git_clones_dir: PathBuf,
+    pub(crate) git_clones_dir: PathBuf,
     /// Persisted list of webhook / poll schedules.
-    schedules: Arc<Mutex<ScheduleStore>>,
-    schedules_path: PathBuf,
+    pub(crate) schedules: Arc<Mutex<ScheduleStore>>,
+    pub(crate) schedules_path: PathBuf,
     /// Named scan profiles saved by the user via the web UI.
-    scan_profiles: Arc<Mutex<ScanProfileStore>>,
-    scan_profiles_path: PathBuf,
-    sessions: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    pub(crate) scan_profiles: Arc<Mutex<ScanProfileStore>>,
+    pub(crate) scan_profiles_path: PathBuf,
+    pub(crate) sessions: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
     /// Persisted Confluence integration settings.
-    confluence: Arc<Mutex<confluence::ConfluenceConfigStore>>,
-    confluence_path: PathBuf,
+    pub(crate) confluence: Arc<Mutex<confluence::ConfluenceConfigStore>>,
+    pub(crate) confluence_path: PathBuf,
     /// Directories the user has pinned for auto-scanning of external reports.
-    watched_dirs: Arc<Mutex<WatchedDirsStore>>,
-    watched_dirs_path: PathBuf,
+    pub(crate) watched_dirs: Arc<Mutex<WatchedDirsStore>>,
+    pub(crate) watched_dirs_path: PathBuf,
 }
 
 type PendingPdf = Option<(PathBuf, PathBuf, bool)>;
@@ -511,15 +513,15 @@ fn build_router(state: AppState) -> Router {
         .route("/api-docs", get(api_docs_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            require_api_key,
+            auth::require_api_key,
         ));
 
     protected
         .route("/healthz", get(healthz))
         .route("/badge/{metric}", get(badge_handler))
         .route("/static/chart.js", get(chart_js_handler))
-        .route("/auth/login", get(auth_login_get))
-        .route("/auth/login", post(auth_login_post))
+        .route("/auth/login", get(auth::auth_login_get))
+        .route("/auth/login", post(auth::auth_login_post))
         // Webhook receivers are public (no API-key auth) — they use per-schedule HMAC secrets.
         .route("/webhooks/github", post(git_webhook::handle_github_webhook))
         .route("/webhooks/gitlab", post(git_webhook::handle_gitlab_webhook))
@@ -903,295 +905,7 @@ async fn serve_tls(
     }
 }
 
-async fn require_api_key(
-    State(state): State<AppState>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    if state.api_keys.is_empty() {
-        return next.run(req).await;
-    }
-
-    let keys = &state.api_keys;
-    let peer_ip = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |c| c.0.ip());
-
-    let auth_header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_owned);
-    let x_api_key = req
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    let session_cookie = req
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_session_cookie)
-        .map(str::to_owned);
-
-    let session_valid = check_session_valid(session_cookie.as_deref(), &state);
-    let any_credential_provided =
-        auth_header.is_some() || x_api_key.is_some() || session_cookie.is_some();
-    let valid = session_valid
-        || [&auth_header, &x_api_key]
-            .iter()
-            .filter_map(|o| o.as_deref())
-            .any(|k| {
-                keys.iter().any(|expected| {
-                    use secrecy::ExposeSecret;
-                    ct_eq(k, expected.expose_secret())
-                })
-            });
-
-    if valid {
-        return next.run(req).await;
-    }
-
-    if state.rate_limiter.is_auth_locked_out(peer_ip) {
-        return auth_lockout_response(&req, &state.rate_limiter, peer_ip);
-    }
-
-    if any_credential_provided {
-        state.rate_limiter.record_auth_failure(peer_ip);
-        let path = req.uri().path().to_owned();
-        tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = %path,
-            "API key authentication failed");
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
-            "401 Unauthorized\n",
-        )
-            .into_response();
-    }
-
-    // No credential — redirect browsers, plain 401 for API clients.
-    if is_browser_request(&req) {
-        let next_path = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
-        let login_url = format!("/auth/login?next={}", urlencode_path(next_path));
-        let location = HeaderValue::from_str(&login_url)
-            .unwrap_or_else(|_| HeaderValue::from_static("/auth/login"));
-        let mut resp = StatusCode::FOUND.into_response();
-        resp.headers_mut().insert(header::LOCATION, location);
-        return resp;
-    }
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
-        "401 Unauthorized\n",
-    )
-        .into_response()
-}
-
-fn check_session_valid(token: Option<&str>, state: &AppState) -> bool {
-    let Some(tok) = token else { return false };
-    let now = Instant::now();
-    let mut sessions = state
-        .sessions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(&expiry) = sessions.get(tok) {
-        if now < expiry {
-            return true;
-        }
-        sessions.remove(tok);
-    }
-    false
-}
-
-fn auth_lockout_response(
-    req: &Request<Body>,
-    rate_limiter: &IpRateLimiter,
-    peer_ip: IpAddr,
-) -> Response {
-    tracing::warn!(event = "auth_lockout", peer_addr = %peer_ip,
-        "Authentication locked out after repeated failures");
-    let remaining = rate_limiter.auth_lockout_remaining_secs(peer_ip);
-    let retry_after =
-        HeaderValue::from_str(&remaining.to_string()).unwrap_or(HeaderValue::from_static("3600"));
-    if is_browser_request(req) {
-        let minutes = remaining.div_ceil(60).max(1);
-        let s = if minutes == 1 { "" } else { "s" };
-        let body = format!(
-            r#"<!doctype html><html><head><meta charset="utf-8">
-<title>Locked Out — OxideSLOC</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}}
-h1{{color:#b85d33}}p{{line-height:1.6}}code{{background:#f3e9e0;padding:2px 6px;border-radius:4px}}</style>
-</head><body>
-<h1>Too many failed sign-in attempts</h1>
-<p>Access from your IP is temporarily locked. Lockout expires in approximately
-<strong>{minutes} minute{s}</strong>.</p>
-<p>To clear immediately, restart the server.</p>
-<p>For trusted LAN testing, leave <code>SLOC_API_KEY</code> unset, or raise the
-threshold via <code>SLOC_AUTH_LOCKOUT_FAILS</code> / <code>SLOC_AUTH_LOCKOUT_SECS</code>.</p>
-</body></html>"#
-        );
-        let mut resp = (StatusCode::TOO_MANY_REQUESTS, Html(body)).into_response();
-        resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
-        return resp;
-    }
-    let mut resp = (
-        StatusCode::TOO_MANY_REQUESTS,
-        format!("429 Too Many Requests — locked out, retry in {remaining}s\n"),
-    )
-        .into_response();
-    resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
-    resp
-}
-
-fn ct_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-fn extract_session_cookie(cookie_header: &str) -> Option<&str> {
-    cookie_header.split(';').find_map(|pair| {
-        let pair = pair.trim();
-        let (k, v) = pair.split_once('=')?;
-        if k.trim() == "sloc_session" {
-            Some(v.trim())
-        } else {
-            None
-        }
-    })
-}
-
-fn is_browser_request(req: &Request<Body>) -> bool {
-    req.headers()
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains("text/html"))
-}
-
-fn urlencode_path(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b'/'
-            | b'?'
-            | b'='
-            | b'&'
-            | b'#' => {
-                out.push(b as char);
-            }
-            _ => {
-                use std::fmt::Write as _;
-                write!(&mut out, "%{b:02X}").ok();
-            }
-        }
-    }
-    out
-}
-
-// ── Login form handlers ────────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct LoginQuery {
-    next: Option<String>,
-    error: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct LoginFormData {
-    key: String,
-    next: Option<String>,
-}
-
-async fn auth_login_get(
-    State(state): State<AppState>,
-    Query(query): Query<LoginQuery>,
-    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
-) -> Response {
-    if state.api_keys.is_empty() {
-        let mut resp = StatusCode::FOUND.into_response();
-        resp.headers_mut()
-            .insert(header::LOCATION, HeaderValue::from_static("/"));
-        return resp;
-    }
-    let has_error = query.error.as_deref() == Some("1");
-    let next_url = query.next.unwrap_or_default();
-    let lockout_threshold = state.rate_limiter.auth_lockout_threshold;
-    Html(
-        LoginTemplate {
-            csp_nonce,
-            has_error,
-            next_url,
-            lockout_threshold,
-        }
-        .render()
-        .unwrap_or_else(|e| format!("<pre>Template error: {e}</pre>")),
-    )
-    .into_response()
-}
-
-async fn auth_login_post(
-    State(state): State<AppState>,
-    axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
-    Form(form): Form<LoginFormData>,
-) -> Response {
-    let peer_ip = peer_addr.ip();
-    let next_url = form
-        .next
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("/");
-    let safe_next = if next_url.starts_with('/') && !next_url.starts_with("//") {
-        next_url
-    } else {
-        "/"
-    };
-
-    let valid = state.api_keys.iter().any(|expected| {
-        use secrecy::ExposeSecret;
-        ct_eq(&form.key, expected.expose_secret())
-    });
-
-    if valid {
-        const SESSION_SECS: u64 = 8 * 3600;
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let expiry = Instant::now() + Duration::from_secs(SESSION_SECS);
-        state
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.clone(), expiry);
-        let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
-        let cookie_value = format!(
-            "sloc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}{secure_flag}",
-        );
-        let location =
-            HeaderValue::from_str(safe_next).unwrap_or_else(|_| HeaderValue::from_static("/"));
-        let cookie_hv = HeaderValue::from_str(&cookie_value)
-            .unwrap_or_else(|_| HeaderValue::from_static("sloc_session=; Path=/; HttpOnly"));
-        let mut resp = StatusCode::FOUND.into_response();
-        resp.headers_mut().insert(header::LOCATION, location);
-        resp.headers_mut().insert(header::SET_COOKIE, cookie_hv);
-        resp
-    } else {
-        state.rate_limiter.record_auth_failure(peer_ip);
-        tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = "/auth/login",
-            "Login form authentication failed");
-        let error_url = format!("/auth/login?next={}&error=1", urlencode_path(safe_next));
-        let location = HeaderValue::from_str(&error_url)
-            .unwrap_or_else(|_| HeaderValue::from_static("/auth/login?error=1"));
-        let mut resp = StatusCode::FOUND.into_response();
-        resp.headers_mut().insert(header::LOCATION, location);
-        resp
-    }
-}
+// auth moved to auth.rs
 
 fn build_cors_layer(server_mode: bool) -> CorsLayer {
     if server_mode {
@@ -2575,6 +2289,13 @@ struct SuggestCoverageQuery {
     path: Option<String>,
 }
 
+#[derive(Serialize)]
+struct SuggestCoverageResponse {
+    found: Option<String>,
+    tool: Option<&'static str>,
+    hint: Option<&'static str>,
+}
+
 async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl IntoResponse {
     const CANDIDATES: &[&str] = &[
         // LCOV — cargo-llvm-cov, gcov, lcov
@@ -2605,7 +2326,7 @@ async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl
         .map(|p| display_path(&p));
 
     let (tool, hint) = detect_coverage_tool(&root);
-    Json(serde_json::json!({ "found": found, "tool": tool, "hint": hint }))
+    Json(SuggestCoverageResponse { found, tool, hint })
 }
 
 /// Inspect the project root for known build/package files and return the most likely coverage
@@ -3323,14 +3044,14 @@ async fn async_run_status_handler(
 ) -> Response {
     // wait_id comes from our own UUID generator; reject any structurally malformed value.
     if wait_id.len() > 128 || wait_id.contains('/') || wait_id.contains('\\') {
-        return StatusCode::BAD_REQUEST.into_response();
+        return error::bad_request("invalid wait_id");
     }
     let run_state = {
         let runs = state.async_runs.lock().await;
         runs.get(&wait_id).cloned()
     };
     match run_state {
-        None => StatusCode::NOT_FOUND.into_response(),
+        None => error::not_found("run not found"),
         Some(AsyncRunState::Running { started_at, .. }) => {
             // Treat runs older than 2 h as timed out (analysis should finish well under that).
             if started_at.elapsed() > std::time::Duration::from_hours(2) {
@@ -3367,7 +3088,7 @@ async fn cancel_run_handler(
     AxumPath(wait_id): AxumPath<String>,
 ) -> Response {
     if wait_id.len() > 128 || wait_id.contains('/') || wait_id.contains('\\') {
-        return StatusCode::BAD_REQUEST.into_response();
+        return error::bad_request("invalid wait_id");
     }
     let mut runs = state.async_runs.lock().await;
     let resp = match runs.get(&wait_id) {
@@ -3377,7 +3098,7 @@ async fn cancel_run_handler(
             StatusCode::OK.into_response()
         }
         Some(AsyncRunState::Cancelled) => StatusCode::OK.into_response(),
-        _ => StatusCode::NOT_FOUND.into_response(),
+        _ => error::not_found("run not found"),
     };
     drop(runs);
     resp
@@ -3798,6 +3519,11 @@ fn build_pdf_filename(report_title: &str, run_id: &str) -> String {
     }
 }
 
+#[derive(Serialize)]
+struct PdfStatusResponse {
+    ready: bool,
+}
+
 /// Return `{"ready": true}` once the PDF file exists on disk for a given run.
 /// Clients poll this to update the button state without page reloads.
 async fn pdf_status_handler(
@@ -3817,7 +3543,7 @@ async fn pdf_status_handler(
             .and_then(|a| a.pdf_path)
     };
     let ready = pdf_path.is_some_and(|p| p.exists());
-    Json(serde_json::json!({"ready": ready})).into_response()
+    Json(PdfStatusResponse { ready }).into_response()
 }
 
 /// Serve the HTML artifact for a run — view or download.
@@ -5248,13 +4974,7 @@ async fn api_metrics_latest_handler(State(state): State<AppState>) -> Response {
         reg.entries.first().cloned()
     };
     entry.map_or_else(
-        || {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "no scans recorded yet"})),
-            )
-                .into_response()
-        },
+        || error::not_found("no scans recorded yet"),
         |e| build_metrics_response(&e),
     )
 }
@@ -5268,13 +4988,7 @@ async fn api_metrics_run_handler(
         reg.find_by_run_id(&run_id).cloned()
     };
     entry.map_or_else(
-        || {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "run not found"})),
-            )
-                .into_response()
-        },
+        || error::not_found("run not found"),
         |e| build_metrics_response(&e),
     )
 }
@@ -5642,6 +5356,12 @@ struct IngestQuery {
     label: Option<String>,
 }
 
+#[derive(Serialize)]
+struct IngestResponse {
+    run_id: String,
+    view_url: String,
+}
+
 async fn api_ingest_handler(
     State(state): State<AppState>,
     Query(q): Query<IngestQuery>,
@@ -5693,23 +5413,15 @@ async fn api_ingest_handler(
             register_artifacts_in_registry(&state, &label, &run, &artifacts).await;
             (
                 StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "run_id": run_id,
-                    "view_url": format!("/view-reports?run_id={run_id}"),
-                })),
+                Json(IngestResponse {
+                    view_url: format!("/view-reports?run_id={run_id}"),
+                    run_id,
+                }),
             )
                 .into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        )
-            .into_response(),
+        Ok(Err(e)) => error::internal(&format!("{e:#}")),
+        Err(e) => error::internal(&format!("{e}")),
     }
 }
 
@@ -8459,6 +8171,28 @@ async fn export_config_handler(State(state): State<AppState>) -> impl IntoRespon
         .into_response()
 }
 
+#[derive(Serialize)]
+struct OkResponse {
+    ok: bool,
+}
+
+#[derive(Serialize)]
+struct SaveProfileResponse {
+    ok: bool,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct ProfileListResponse {
+    profiles: Vec<ScanProfile>,
+}
+
+#[derive(Serialize)]
+struct ImportConfigResponse {
+    ok: bool,
+    config: sloc_config::AppConfig,
+}
+
 #[derive(Deserialize)]
 struct ImportConfigBody {
     toml: String,
@@ -8468,19 +8202,11 @@ async fn import_config_handler(Json(body): Json<ImportConfigBody>) -> impl IntoR
     match toml::from_str::<sloc_config::AppConfig>(&body.toml) {
         Ok(config) => {
             if let Err(e) = config.validate() {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
+                return error::unprocessable_entity(&e.to_string());
             }
-            Json(serde_json::json!({ "ok": true, "config": config })).into_response()
+            Json(ImportConfigResponse { ok: true, config }).into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("TOML parse error: {e}") })),
-        )
-            .into_response(),
+        Err(e) => error::bad_request(&format!("TOML parse error: {e}")),
     }
 }
 
@@ -8488,7 +8214,9 @@ async fn import_config_handler(Json(body): Json<ImportConfigBody>) -> impl IntoR
 
 async fn api_list_scan_profiles(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.scan_profiles.lock().await;
-    Json(serde_json::json!({ "profiles": store.profiles }))
+    Json(ProfileListResponse {
+        profiles: store.profiles.clone(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -8502,11 +8230,7 @@ async fn api_save_scan_profile(
     Json(body): Json<SaveScanProfileBody>,
 ) -> impl IntoResponse {
     if body.name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "name must not be empty" })),
-        )
-            .into_response();
+        return error::bad_request("name must not be empty");
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -8526,7 +8250,7 @@ async fn api_save_scan_profile(
 
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({ "ok": true, "id": id })),
+        Json(SaveProfileResponse { ok: true, id }),
     )
         .into_response()
 }
@@ -8540,17 +8264,13 @@ async fn api_delete_scan_profile(
     store.profiles.retain(|p| p.id != id);
     if store.profiles.len() == before {
         drop(store);
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "profile not found" })),
-        )
-            .into_response();
+        return error::not_found("profile not found");
     }
     if let Err(e) = store.save(&state.scan_profiles_path) {
         tracing::warn!("failed to persist scan profiles: {e}");
     }
     drop(store);
-    Json(serde_json::json!({ "ok": true })).into_response()
+    Json(OkResponse { ok: true }).into_response()
 }
 
 fn resolve_output_root(raw: Option<&str>) -> PathBuf {
@@ -18712,11 +18432,11 @@ struct CompareTemplate {
 "##,
     ext = "html"
 )]
-struct LoginTemplate {
-    csp_nonce: String,
-    has_error: bool,
-    next_url: String,
-    lockout_threshold: u32,
+pub(crate) struct LoginTemplate {
+    pub(crate) csp_nonce: String,
+    pub(crate) has_error: bool,
+    pub(crate) next_url: String,
+    pub(crate) lockout_threshold: u32,
 }
 
 // ── REST API reference page ────────────────────────────────────────────────────
