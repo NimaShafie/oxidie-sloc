@@ -1,4 +1,4 @@
-# Server deployment (alternative install)
+# Server Deployment
 
 > **Default install:** run `bash scripts/run.sh` for personal local use — it installs on first
 > run automatically, then opens the web UI at `http://127.0.0.1:4317`.
