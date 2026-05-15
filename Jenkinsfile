@@ -1130,13 +1130,13 @@ if history_file and os.path.exists(result_path):
     hist_dir  = os.path.dirname(history_file)
     if hist_dir:
         os.makedirs(hist_dir, exist_ok=True)
-    header = 'timestamp,build,code_lines,comment_lines,blank_lines,files_analyzed\n'
+    header = 'timestamp,build,code_lines,comment_lines,blank_lines,files_analyzed\\n'
     if not os.path.exists(history_file):
         open(history_file, 'w').write(header)
     with open(history_file, 'a') as hf:
         hf.write(f"{ts},{build_num},{totals['code_lines']},"
                  f"{totals['comment_lines']},{totals['blank_lines']},"
-                 f"{totals['files_analyzed']}\n")
+                 f"{totals['files_analyzed']}\\n")
     with open(history_file) as hf:
         lines = hf.readlines()
     if len(lines) > 51:
