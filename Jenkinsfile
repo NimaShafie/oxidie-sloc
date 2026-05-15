@@ -481,26 +481,10 @@ replace-with = "vendored-sources"
 directory = "vendor"
 CARGOEOF
                 '''
-                // Relax Jenkins' default Content-Security-Policy so that the published
-                // Build Dashboard and SLOC Report HTML files can use inline <style>
-                // blocks and inline SVG presentation attributes.  Without this, all
-                // inline styles are blocked and the pages render as unstyled plain HTML
-                // with no visible charts or layout.
-                //
-                // This call persists for the Jenkins process lifetime, so it is safe
-                // to run on every build (it is idempotent).  If an admin has already
-                // set a stricter policy via the global security configuration, this call
-                // will override it for the duration of this process — review your site's
-                // security requirements before relaxing CSP in production.
-                script {
-                    System.setProperty(
-                        'hudson.model.DirectoryBrowserSupport.CSP',
-                        "sandbox allow-scripts; default-src 'none'; " +
-                        "img-src 'self' data:; " +
-                        "style-src 'self' 'unsafe-inline'; " +
-                        "script-src 'self' 'unsafe-inline';"
-                    )
-                }
+                // NOTE: artifact-viewer CSP is set via
+                // ci/jenkins/init.groovy.d/relax-csp.groovy (runs at Jenkins startup,
+                // outside the Pipeline sandbox).  Run `bash ci/jenkins/preflight.sh
+                // --install-csp` to install it into a running Docker container.
             }
         }
 
