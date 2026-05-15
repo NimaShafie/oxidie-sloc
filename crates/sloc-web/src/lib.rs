@@ -4769,6 +4769,51 @@ fn load_scan_for_compare(
     }
 }
 
+struct ChurnStats {
+    new_scope: bool,
+    scope_flag: bool,
+    churn_rate_str: String,
+    churn_rate_class: String,
+}
+
+fn compute_churn_stats(
+    baseline_code: u64,
+    current_code: u64,
+    lines_added: i64,
+    lines_removed: i64,
+) -> ChurnStats {
+    let new_scope = baseline_code == 0 && current_code > 0;
+    #[allow(clippy::cast_precision_loss)]
+    let churn_pct = if baseline_code > 0 {
+        (lines_added + lines_removed) as f64 / baseline_code as f64 * 100.0
+    } else {
+        0.0
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let scope_flag =
+        new_scope || (baseline_code > 0 && lines_added as f64 / baseline_code as f64 > 0.20);
+    let churn_rate_str = if new_scope {
+        "New".to_string()
+    } else if baseline_code > 0 {
+        format!("{churn_pct:.1}%")
+    } else {
+        "—".to_string()
+    };
+    let churn_rate_class = if new_scope || churn_pct > 20.0 {
+        "high".to_string()
+    } else if churn_pct > 5.0 {
+        "med".to_string()
+    } else {
+        "low".to_string()
+    };
+    ChurnStats {
+        new_scope,
+        scope_flag,
+        churn_rate_str,
+        churn_rate_class,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn compare_handler(
     State(state): State<AppState>,
@@ -4936,20 +4981,12 @@ async fn compare_handler(
         .unwrap_or_default();
     let lines_added = sum_added_code_lines(&comparison);
     let lines_removed = sum_removed_code_lines(&comparison);
-    // True when the selected scope had no files in the baseline — e.g. comparing a submodule
-    // that only exists in the current scan or using Super-repo only on an older scan.
-    let new_scope = comparison.summary.baseline_code == 0 && comparison.summary.current_code > 0;
-    // ratio/percentage display, precision loss acceptable
-    #[allow(clippy::cast_precision_loss)]
-    let churn_pct = if comparison.summary.baseline_code > 0 {
-        (lines_added + lines_removed) as f64 / comparison.summary.baseline_code as f64 * 100.0
-    } else {
-        0.0
-    };
-    #[allow(clippy::cast_precision_loss)]
-    let scope_flag = new_scope
-        || (comparison.summary.baseline_code > 0
-            && lines_added as f64 / comparison.summary.baseline_code as f64 > 0.20);
+    let churn = compute_churn_stats(
+        comparison.summary.baseline_code,
+        comparison.summary.current_code,
+        lines_added,
+        lines_removed,
+    );
     let s = &comparison.summary;
     let template = CompareTemplate {
         version: env!("CARGO_PKG_VERSION"),
@@ -4996,22 +5033,10 @@ async fn compare_handler(
         comment_lines_pct_str: fmt_pct(s.comment_lines_delta, s.baseline_comments),
         code_lines_added: lines_added,
         code_lines_removed: lines_removed,
-        new_scope,
-        churn_rate_str: if new_scope {
-            "New".to_string()
-        } else if s.baseline_code > 0 {
-            format!("{churn_pct:.1}%")
-        } else {
-            "—".to_string()
-        },
-        churn_rate_class: if new_scope || churn_pct > 20.0 {
-            "high".into()
-        } else if churn_pct > 5.0 {
-            "med".into()
-        } else {
-            "low".into()
-        },
-        scope_flag,
+        new_scope: churn.new_scope,
+        churn_rate_str: churn.churn_rate_str,
+        churn_rate_class: churn.churn_rate_class,
+        scope_flag: churn.scope_flag,
         files_added: comparison.files_added,
         files_removed: comparison.files_removed,
         files_modified: comparison.files_modified,

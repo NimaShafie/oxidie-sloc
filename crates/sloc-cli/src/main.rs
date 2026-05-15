@@ -1036,28 +1036,27 @@ fn run_validate(args: &ValidateArgs) -> Result<()> {
         }
     }
 
-    if errors.is_empty() {
-        println!("config valid: {}", config_path.display());
-        let profile_count = config.profiles.len();
-        if profile_count > 0 {
-            println!(
-                "  {} profile(s): {}",
-                profile_count,
-                config
-                    .profiles
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        Ok(())
-    } else {
+    if !errors.is_empty() {
         for e in &errors {
             eprintln!("error: {e}");
         }
         anyhow::bail!("{} validation error(s) found", errors.len())
     }
+    println!("config valid: {}", config_path.display());
+    let profile_count = config.profiles.len();
+    if profile_count > 0 {
+        println!(
+            "  {} profile(s): {}",
+            profile_count,
+            config
+                .profiles
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
 }
 
 // ── send handler ──────────────────────────────────────────────────────────────
