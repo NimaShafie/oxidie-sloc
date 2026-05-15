@@ -1142,7 +1142,6 @@ PYEOF"""
                     // Plot / junit / coverage / htmlpublisher plugins to be useful.
                     // Wrapped in try/catch so a Python error never fails the build.
                     try {
-                        def proj = env.SLOC_PROJECT ?: 'project'
                         sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}'"
                         def dashFile = "${outDir}/dashboard_${proj}.html"
                         if (fileExists(dashFile)) {

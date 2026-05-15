@@ -3769,13 +3769,13 @@ fn xml_escape(s: &str) -> String {
 // 5 = NUM_ALT  #,##0, right-aligned, cream fill, thin border   (alternating rows)
 // 6 = KV_KEY   bold navy text (#283790), warm-surface fill (#FBF7F2), thin border
 // 7 = KV_VAL   normal text, white fill, thin border  (key-value sheets: Summary)
-const XLS_HEADER: u8 = 1;
-const XLS_BODY: u8 = 2;
-const XLS_BODY_ALT: u8 = 3;
-const XLS_NUM: u8 = 4;
-const XLS_NUM_ALT: u8 = 5;
-const XLS_KV_KEY: u8 = 6;
-const XLS_KV_VAL: u8 = 7;
+const XLS_HEADER: u32 = 1;
+const XLS_BODY: u32 = 2;
+const XLS_BODY_ALT: u32 = 3;
+const XLS_NUM: u32 = 4;
+const XLS_NUM_ALT: u32 = 5;
+const XLS_KV_KEY: u32 = 6;
+const XLS_KV_VAL: u32 = 7;
 
 struct XlSheet<'a> {
     name: &'a str,
@@ -3870,26 +3870,38 @@ fn xl_sheet_xml(sheet: &XlSheet<'_>) -> Vec<u8> {
         rng = range,
     );
 
-    // Column widths
-    if !sheet.col_widths.is_empty() {
-        let default_w = *sheet.col_widths.last().unwrap_or(&10.0);
-        xml.push_str("<cols>\n");
-        for ci in 0..ncols {
-            let w = sheet.col_widths.get(ci).copied().unwrap_or(default_w);
-            let _ = writeln!(
-                xml,
-                "  <col min=\"{n}\" max=\"{n}\" width=\"{w:.1}\" customWidth=\"1\"/>",
-                n = ci + 1
-            );
-        }
-        xml.push_str("</cols>\n");
-    }
-
+    xl_write_col_widths(&mut xml, &sheet.col_widths, ncols);
     xml.push_str("<sheetData>\n");
+    xl_write_header_row(&mut xml, sheet.headers);
+    xl_write_data_rows(&mut xml, &sheet.rows, sheet.is_kv);
+    xml.push_str("</sheetData>\n");
+    if !sheet.is_kv && ncols > 0 {
+        let _ = writeln!(xml, "<autoFilter ref=\"{range}\"/>");
+    }
+    xml.push_str("</worksheet>");
+    xml.into_bytes()
+}
 
-    // Header row (row 1) — taller, navy fill, bold white text
+fn xl_write_col_widths(xml: &mut String, col_widths: &[f64], ncols: usize) {
+    if col_widths.is_empty() {
+        return;
+    }
+    let default_w = *col_widths.last().unwrap_or(&10.0);
+    xml.push_str("<cols>\n");
+    for ci in 0..ncols {
+        let w = col_widths.get(ci).copied().unwrap_or(default_w);
+        let _ = writeln!(
+            xml,
+            "  <col min=\"{n}\" max=\"{n}\" width=\"{w:.1}\" customWidth=\"1\"/>",
+            n = ci + 1
+        );
+    }
+    xml.push_str("</cols>\n");
+}
+
+fn xl_write_header_row(xml: &mut String, headers: &[&str]) {
     let _ = write!(xml, "<row r=\"1\" ht=\"18\" customHeight=\"1\">");
-    for (ci, &h) in sheet.headers.iter().enumerate() {
+    for (ci, &h) in headers.iter().enumerate() {
         let _ = write!(
             xml,
             "<c r=\"{}1\" t=\"inlineStr\" s=\"{}\"><is><t>{}</t></is></c>",
@@ -3899,34 +3911,39 @@ fn xl_sheet_xml(sheet: &XlSheet<'_>) -> Vec<u8> {
         );
     }
     xml.push_str("</row>\n");
+}
 
-    // Data rows — alternating cream/white fill; numbers right-aligned with #,##0
-    for (ri, row) in sheet.rows.iter().enumerate() {
+fn xl_cell_style(is_kv: bool, ci: usize, is_num: bool, is_alt: bool) -> u32 {
+    if is_kv {
+        if ci == 0 {
+            XLS_KV_KEY
+        } else if is_num {
+            XLS_NUM
+        } else {
+            XLS_KV_VAL
+        }
+    } else if is_num {
+        if is_alt {
+            XLS_NUM_ALT
+        } else {
+            XLS_NUM
+        }
+    } else if is_alt {
+        XLS_BODY_ALT
+    } else {
+        XLS_BODY
+    }
+}
+
+fn xl_write_data_rows(xml: &mut String, rows: &[Vec<String>], is_kv: bool) {
+    for (ri, row) in rows.iter().enumerate() {
         let row_num = ri + 2;
         let is_alt = ri % 2 == 1;
         let _ = write!(xml, "<row r=\"{row_num}\">");
         for (ci, cell) in row.iter().enumerate() {
             let cell_ref = format!("{}{}", xl_col_name(ci), row_num);
             let is_num = !cell.is_empty() && cell.parse::<f64>().is_ok();
-            let s = if sheet.is_kv {
-                if ci == 0 {
-                    XLS_KV_KEY
-                } else if is_num {
-                    XLS_NUM
-                } else {
-                    XLS_KV_VAL
-                }
-            } else if is_num {
-                if is_alt {
-                    XLS_NUM_ALT
-                } else {
-                    XLS_NUM
-                }
-            } else if is_alt {
-                XLS_BODY_ALT
-            } else {
-                XLS_BODY
-            };
+            let s = xl_cell_style(is_kv, ci, is_num, is_alt);
             if is_num {
                 let _ = write!(
                     xml,
@@ -3943,13 +3960,6 @@ fn xl_sheet_xml(sheet: &XlSheet<'_>) -> Vec<u8> {
         }
         xml.push_str("</row>\n");
     }
-
-    xml.push_str("</sheetData>\n");
-    if !sheet.is_kv && ncols > 0 {
-        let _ = writeln!(xml, "<autoFilter ref=\"{range}\"/>");
-    }
-    xml.push_str("</worksheet>");
-    xml.into_bytes()
 }
 
 fn build_xlsx(sheets: &[XlSheet<'_>]) -> Vec<u8> {

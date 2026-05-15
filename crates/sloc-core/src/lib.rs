@@ -322,11 +322,32 @@ fn walk_root(
         .git_global(config.discovery.honor_ignore_files)
         .git_exclude(config.discovery.honor_ignore_files);
 
-    // Phase 1: collect candidate paths (sequential dir walk is cheap).
+    let paths = collect_walk_paths(&mut builder, seen_paths, warnings);
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let chunk_results = run_parallel_analysis(
+        &paths,
+        root,
+        config,
+        include_globs,
+        exclude_globs,
+        enabled_languages,
+        cancel,
+    )?;
+    merge_chunk_results(chunk_results, analyzed, skipped, warnings)
+}
+
+fn collect_walk_paths(
+    builder: &mut WalkBuilder,
+    seen_paths: &mut HashSet<PathBuf>,
+    warnings: &mut Vec<String>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for entry in builder.build() {
         let entry = match entry {
-            Ok(entry) => entry,
+            Ok(e) => e,
             Err(err) => {
                 warnings.push(format!("discovery warning: {err}"));
                 continue;
@@ -338,49 +359,60 @@ fn walk_root(
         }
         paths.push(path);
     }
+    paths
+}
 
-    if paths.is_empty() {
-        return Ok(());
-    }
-
-    // Phase 2: analyze files in parallel using scoped threads.
-    // Each thread gets a contiguous slice; results are merged afterwards.
+#[allow(clippy::too_many_arguments)]
+fn run_parallel_analysis(
+    paths: &[PathBuf],
+    root: &Path,
+    config: &AppConfig,
+    include_globs: Option<&GlobSet>,
+    exclude_globs: Option<&GlobSet>,
+    enabled_languages: Option<&BTreeSet<Language>>,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
     let thread_count = std::thread::available_parallelism().map_or(DEFAULT_ANALYSIS_THREADS, |n| {
         n.get().min(MAX_ANALYSIS_THREADS)
     });
     let chunk_size = paths.len().div_ceil(thread_count);
-
-    let chunk_results: Vec<Vec<Result<Option<FileRecord>>>> =
-        std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
-            paths
-                .chunks(chunk_size)
-                .map(|chunk| {
-                    s.spawn(move || -> Vec<Result<Option<FileRecord>>> {
-                        let mut results = Vec::with_capacity(chunk.len());
-                        for path in chunk {
-                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                                results.push(Err(anyhow::anyhow!("analysis cancelled")));
-                                break;
-                            }
-                            results.push(analyze_candidate_file(
-                                path,
-                                root,
-                                config,
-                                include_globs,
-                                exclude_globs,
-                                enabled_languages,
-                            ));
+    std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
+        paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                s.spawn(move || -> Vec<Result<Option<FileRecord>>> {
+                    let mut results = Vec::with_capacity(chunk.len());
+                    for path in chunk {
+                        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                            results.push(Err(anyhow::anyhow!("analysis cancelled")));
+                            break;
                         }
-                        results
-                    })
+                        results.push(analyze_candidate_file(
+                            path,
+                            root,
+                            config,
+                            include_globs,
+                            exclude_globs,
+                            enabled_languages,
+                        ));
+                    }
+                    results
                 })
-                .map(|h| {
-                    h.join()
-                        .map_err(|_| anyhow::anyhow!("analysis thread panicked"))
-                })
-                .collect()
-        })?;
+            })
+            .map(|h| {
+                h.join()
+                    .map_err(|_| anyhow::anyhow!("analysis thread panicked"))
+            })
+            .collect()
+    })
+}
 
+fn merge_chunk_results(
+    chunk_results: Vec<Vec<Result<Option<FileRecord>>>>,
+    analyzed: &mut Vec<FileRecord>,
+    skipped: &mut Vec<FileRecord>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     for chunk in chunk_results {
         for result in chunk {
             if let Some(record) = result? {
@@ -388,7 +420,6 @@ fn walk_root(
             }
         }
     }
-
     Ok(())
 }
 
@@ -551,27 +582,7 @@ pub fn analyze(
         Vec::new()
     };
 
-    // Coverage attachment: if a coverage file is configured, parse it once and attach
-    // per-file metrics to each analyzed FileRecord.
-    if let Some(cov_path) =
-        coverage::resolve_coverage_file(config.analysis.coverage_file.as_deref())
-    {
-        match fs::read_to_string(&cov_path) {
-            Ok(content) => {
-                let cov_map = coverage::parse_coverage_auto(&cov_path, &content);
-                for record in &mut analyzed {
-                    record.coverage =
-                        coverage::lookup_coverage(&cov_map, &record.relative_path).cloned();
-                }
-            }
-            Err(e) => {
-                warnings.push(format!(
-                    "coverage file '{}' could not be read: {e}",
-                    cov_path.display()
-                ));
-            }
-        }
-    }
+    attach_coverage(config, &mut analyzed, &mut warnings);
 
     Ok(assemble_run(
         config,
@@ -581,6 +592,28 @@ pub fn analyze(
         warnings,
         submodule_summaries,
     ))
+}
+
+fn attach_coverage(config: &AppConfig, analyzed: &mut [FileRecord], warnings: &mut Vec<String>) {
+    let Some(cov_path) = coverage::resolve_coverage_file(config.analysis.coverage_file.as_deref())
+    else {
+        return;
+    };
+    match fs::read_to_string(&cov_path) {
+        Ok(content) => {
+            let cov_map = coverage::parse_coverage_auto(&cov_path, &content);
+            for record in analyzed.iter_mut() {
+                record.coverage =
+                    coverage::lookup_coverage(&cov_map, &record.relative_path).cloned();
+            }
+        }
+        Err(e) => {
+            warnings.push(format!(
+                "coverage file '{}' could not be read: {e}",
+                cov_path.display()
+            ));
+        }
+    }
 }
 
 fn push_record(
