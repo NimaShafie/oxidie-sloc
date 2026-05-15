@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
+#![allow(clippy::redundant_pub_crate)]
 
 //! Authentication middleware and login form handlers.
 //!
@@ -24,7 +25,7 @@ use askama::Template as _;
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
-pub async fn require_api_key(
+pub(crate) async fn require_api_key(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
@@ -222,18 +223,18 @@ fn urlencode_path(s: &str) -> String {
 // ── Login form handlers ────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
-struct LoginQuery {
+pub(crate) struct LoginQuery {
     next: Option<String>,
     error: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
-struct LoginFormData {
+pub(crate) struct LoginFormData {
     key: String,
     next: Option<String>,
 }
 
-pub async fn auth_login_get(
+pub(crate) async fn auth_login_get(
     State(state): State<AppState>,
     Query(query): Query<LoginQuery>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -260,7 +261,7 @@ pub async fn auth_login_get(
     .into_response()
 }
 
-pub async fn auth_login_post(
+pub(crate) async fn auth_login_post(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
     Form(form): Form<LoginFormData>,
