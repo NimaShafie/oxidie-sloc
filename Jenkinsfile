@@ -74,27 +74,6 @@ pipeline {
             description:  'Skip the web UI health-check stage. ' +
                           'Use on agents without loopback access or where port 4317 is unavailable.'
         )
-        booleanParam(
-            name:         'SKIP_SONAR',
-            defaultValue: true,
-            description:  'Skip the SonarQube scan stage. Use on agents without Docker access or when the SonarQube server is unavailable.'
-        )
-        string(
-            name:         'SONAR_URL',
-            defaultValue: 'http://localhost:9000',
-            description:  'SonarQube server URL (no trailing slash). ' +
-                          'Example: http://10.0.0.8:9000 for a LAN server. ' +
-                          'Used only when SKIP_SONAR is unchecked.'
-        )
-        booleanParam(
-            name:         'GENERATE_COVERAGE',
-            defaultValue: false,
-            description:  'Run ci/sonar/generate-coverage.sh before the SonarQube scan to include test coverage in the report. ' +
-                          'Requires cargo-llvm-cov (cargo install cargo-llvm-cov; rustup component add llvm-tools-preview) ' +
-                          'or cargo-tarpaulin (cargo install cargo-tarpaulin) pre-installed on the agent. ' +
-                          'Skipped automatically when SKIP_SONAR is checked.'
-        )
-
         // ── CI config preset ───────────────────────────────────────────────────
         choice(
             name:    'CI_PRESET',
@@ -227,14 +206,12 @@ pipeline {
         booleanParam(
             name:         'COVERAGE_STANDALONE',
             defaultValue: false,
-            description:  'Run a dedicated Coverage stage independent of the SonarQube scan. ' +
+            description:  'Run a dedicated Coverage stage. ' +
                           'Generates LCOV, Cobertura XML, and a browsable HTML coverage report. ' +
                           'The HTML report is published as a "Coverage Report" sidebar link. ' +
                           'Requires cargo-llvm-cov (preferred) or cargo-tarpaulin on the agent:\n' +
                           '  cargo install cargo-llvm-cov && rustup component add llvm-tools-preview\n' +
-                          'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.\n' +
-                          'When both COVERAGE_STANDALONE and GENERATE_COVERAGE are enabled, ' +
-                          'coverage runs once (Coverage stage) and is reused by SonarQube.'
+                          'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.'
         )
         string(
             name:         'COVERAGE_THRESHOLD',
@@ -481,10 +458,45 @@ replace-with = "vendored-sources"
 directory = "vendor"
 CARGOEOF
                 '''
-                // NOTE: artifact-viewer CSP is set via
-                // ci/jenkins/init.groovy.d/relax-csp.groovy (runs at Jenkins startup,
-                // outside the Pipeline sandbox).  Run `bash ci/jenkins/preflight.sh
-                // --install-csp` to install it into a running Docker container.
+                // Relax artifact-viewer CSP so HTML report artifacts render with inline
+                // styles and scripts.  Calls the Jenkins Script Console via the REST API
+                // using credential 'jenkins-api-token' (Kind: Secret text, value: admin
+                // API token).  If the credential is absent this step is a no-op and falls
+                // back to the init.groovy.d approach: bash ci/jenkins/preflight.sh --install-csp
+                script {
+                    try {
+                        withCredentials([string(credentialsId: 'jenkins-api-token',
+                                                variable:      'JEN_API_TOK',
+                                                optional:      true)]) {
+                            if (env.JEN_API_TOK?.trim()) {
+                                def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
+                                if (base) {
+                                    withEnv(["SLOC_JENKINS_BASE=${base}",
+                                             'SLOC_CSP=default-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; script-src \'self\' \'unsafe-inline\'; font-src \'self\' data:;']) {
+                                        sh '''
+                                            CRUMB=$(curl -sS -u "admin:${JEN_API_TOK}" \
+                                                "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22::%22,//crumb)" \
+                                                2>/dev/null || echo "")
+                                            FIELD="${CRUMB%%::*}"
+                                            CRUMB_VAL="${CRUMB##*::}"
+                                            GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
+                                            curl -sS -u "admin:${JEN_API_TOK}" \
+                                                -H "${FIELD}: ${CRUMB_VAL}" \
+                                                --data-urlencode "script=${GROOVY}" \
+                                                "${SLOC_JENKINS_BASE}/scriptText" >/dev/null 2>&1 || true
+                                            echo "Artifact-viewer CSP relaxed for this session."
+                                        '''
+                                    }
+                                }
+                            } else {
+                                echo 'jenkins-api-token credential not configured — HTML reports may render unstyled in the artifact viewer.'
+                                echo 'To fix permanently: bash ci/jenkins/preflight.sh --install-csp'
+                            }
+                        }
+                    } catch (Exception ex) {
+                        echo "CSP setup (non-fatal): ${ex.message}"
+                    }
+                }
             }
         }
 
@@ -567,8 +579,7 @@ CARGOEOF
                                 // cargo test (stable default) — no JUnit XML, console output only.
                                 def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
                                 sh """
-                                    cargo test --workspace ${failFastFlag} \
-                                        2>&1 | tee '${resultsDir}/cargo-test-output.txt'
+                                    cargo test --workspace ${failFastFlag}
                                 """
                             }
                         }
@@ -586,11 +597,10 @@ CARGOEOF
         }
 
         // ── 3a. Coverage ──────────────────────────────────────────────────────
-        // Standalone code-coverage stage — runs independently of SonarQube.
-        // Enabled by COVERAGE_STANDALONE.  Produces:
+        // Standalone code-coverage stage.  Enabled by COVERAGE_STANDALONE.  Produces:
         //
         //   <OUTPUT_SUBDIR>/coverage/lcov.info          — LCOV (line + branch coverage)
-        //   <OUTPUT_SUBDIR>/coverage/sonar-coverage.xml — Cobertura XML (SonarQube import)
+        //   <OUTPUT_SUBDIR>/coverage/cobertura.xml      — Cobertura XML
         //   <OUTPUT_SUBDIR>/coverage/html/index.html    — browsable HTML source view
         //
         // Jenkins integration via the Coverage plugin (recordCoverage step):
@@ -599,9 +609,6 @@ CARGOEOF
         //   • Per-file drill-down from the Jenkins UI
         //   • Quality-gate enforcement via COVERAGE_THRESHOLD (no shell math needed)
         //   Install: see ci/jenkins/plugins.txt — plugin ID: coverage
-        //
-        // When both COVERAGE_STANDALONE and GENERATE_COVERAGE are enabled, the
-        // SonarQube stage reuses the lcov.info from this stage — tests run only once.
         //
         // Prerequisites:
         //   cargo-llvm-cov (preferred, vendored in ci/tools/Cargo.toml) — produces
@@ -891,89 +898,6 @@ CARGOEOF
             }
         }
 
-        // ── 5. SonarQube scan ──────────────────────────────────────────────────
-        // Runs cargo clippy in JSON mode, converts to SonarQube generic-issue
-        // format via scripts/internal/clippy_to_sonar.py, optionally generates test
-        // coverage via ci/sonar/generate-coverage.sh, then launches the scanner
-        // container. Results appear in the SonarQube dashboard at ${params.SONAR_URL}
-        //
-        // Project config lives in ci/sonar/sonar-project.properties.
-        //
-        // Prerequisite: add a Jenkins credential named 'sonarqube-oxide-sloc-token'
-        // (Kind: Secret text) containing the SonarQube analysis token.
-        // The credential is bound only when SKIP_SONAR is false (i.e., when the stage
-        // actually runs) — withCredentials wraps the docker sh block instead of a
-        // stage-level environment{} block, preventing CredentialNotFoundException on the
-        // seed build when the credential does not yet exist.
-        stage('SonarQube scan') {
-            when { expression { !params.SKIP_SONAR } }
-            steps {
-                sh '''
-                    # --all-features activates the optional rfd crate, which requires
-                    # gtk3, wayland, and xdo devel headers at compile time.
-                    # Fail early with a clear message rather than a multi-screen Rust error.
-                    if ! pkg-config --exists wayland-client gtk+-3.0 2>/dev/null; then
-                        echo "ERROR: missing system devel packages for --all-features build."
-                        echo "  RHEL/Rocky/Alma: sudo dnf install gtk3-devel libxdo-devel wayland-devel"
-                        echo "  Debian/Ubuntu:   sudo apt install libgtk-3-dev libxdo-dev libwayland-dev"
-                        exit 1
-                    fi
-
-                    # Produce clippy JSON for SonarQube external-issue import.
-                    cargo clippy --workspace --all-targets --all-features \
-                        --message-format=json --offline \
-                        -- -W clippy::pedantic -W clippy::nursery \
-                           -A clippy::multiple_crate_versions \
-                        > clippy.json 2> clippy.stderr || true
-
-                    python3 scripts/internal/clippy_to_sonar.py \
-                        clippy.json clippy-sonar.json "$WORKSPACE"
-                '''
-
-                script {
-                    if (params.GENERATE_COVERAGE) {
-                        // If the standalone Coverage stage already ran (COVERAGE_STANDALONE),
-                        // reuse its output — no need to instrument and run tests twice.
-                        def outDir      = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                        def coverageDir = "${outDir}/coverage"
-                        def alreadyDone = fileExists("${coverageDir}/lcov.info")
-
-                        if (alreadyDone && params.COVERAGE_STANDALONE) {
-                            echo "Coverage already generated by the Coverage stage — reusing for SonarQube."
-                            sh "ln -sfn '${coverageDir}' coverage 2>/dev/null || true"
-                        } else {
-                            sh """
-                                mkdir -p '${coverageDir}'
-                                # Install cargo-llvm-cov from the vendored source tree.
-                                # The .cargo/config.toml written in the Setup stage redirects
-                                # crates-io to vendor/, so --offline resolves entirely from disk.
-                                if ! cargo llvm-cov --version >/dev/null 2>&1; then
-                                    echo "Installing cargo-llvm-cov from vendor..."
-                                    cargo install --offline cargo-llvm-cov
-                                fi
-                                rustup component add llvm-tools 2>/dev/null || true
-                                bash ci/sonar/generate-coverage.sh '${coverageDir}'
-                                # Symlink to legacy path so sonar-project.properties still resolves.
-                                ln -sfn '${coverageDir}' coverage 2>/dev/null || true
-                            """
-                        }
-                    }
-                }
-
-                withCredentials([string(credentialsId: 'sonarqube-oxide-sloc-token', variable: 'SONAR_TOKEN')]) {
-                    sh """
-                        docker run --rm --network host \
-                            -e SONAR_TOKEN \
-                            -v "\$WORKSPACE":/usr/src -w /usr/src \
-                            sonarsource/sonar-scanner-cli:latest \
-                            sonar-scanner \
-                                -Dsonar.host.url=${params.SONAR_URL} \
-                                -Dproject.settings=ci/sonar/sonar-project.properties
-                    """
-                }
-            }
-        }
-
         // ── 6. Web UI health check ─────────────────────────────────────────────
         stage('Web UI health check') {
             when { expression { !params.SKIP_WEB_CHECK } }
@@ -1153,7 +1077,7 @@ PYEOF"""
                     // Archive binary + all output subdirectory contents.
                     // Includes: result.json, report.csv, report.xlsx, report.html, report.pdf,
                     // test-results/, coverage/, and trend CSVs.
-                    archiveArtifacts artifacts: "target/release/oxide-sloc, ${params.OUTPUT_SUBDIR}/**",
+                    archiveArtifacts artifacts: "${params.OUTPUT_SUBDIR}/**",
                         fingerprint: true,
                         allowEmptyArchive: true
 

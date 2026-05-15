@@ -466,6 +466,20 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
 
     # ── Build chip sections ─────────────────────────────────────────────────
 
+    # Delta from previous build (requires trend history with >= 2 entries)
+    delta_chip_html = ""
+    if len(trend_history) >= 2:
+        t_prev_build = trend_history[-2]
+        delta = code_lines - t_prev_build["code_lines"]
+        sign = "+" if delta > 0 else ""
+        delta_col = "#2a6846" if delta > 0 else "#b23030" if delta < 0 else "#8a6a5a"
+        delta_chip_html = chip(
+            f'<span style="color:{delta_col}" title="vs build #{t_prev_build["build"]}">'
+            f"{sign}{fmt(delta)}</span>",
+            "Code Lines Δ",
+            f"vs build #{t_prev_build['build']}",
+        )
+
     # SLOC summary chips
     sloc_chips = "".join([
         chip(
@@ -488,7 +502,9 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
             "Files Analyzed",
             f"top: {top_lang}" if top_lang else None,
         ),
+        delta_chip_html,
     ])
+    sloc_strip_class = "summary-strip summary-strip-5" if delta_chip_html else "summary-strip"
 
     # Language chart
     lang_chart = svg_hbar(lang_rows[:20])
@@ -563,11 +579,11 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     if len(trend_history) >= 2:
         trend_points = [(r["build"], r["code_lines"]) for r in trend_history]
         sparkline    = svg_sparkline(trend_points)
-        t_last       = trend_history[-1]
-        t_prev       = trend_history[-2]
-        delta        = t_last["code_lines"] - t_prev["code_lines"]
-        sign         = "+" if delta > 0 else ""
-        delta_col    = "#2a6846" if delta > 0 else "#b23030" if delta < 0 else "#8a6a5a"
+        t_last_h     = trend_history[-1]
+        t_prev_h     = trend_history[-2]
+        tr_delta     = t_last_h["code_lines"] - t_prev_h["code_lines"]
+        tr_sign      = "+" if tr_delta > 0 else ""
+        tr_col       = "#2a6846" if tr_delta > 0 else "#b23030" if tr_delta < 0 else "#8a6a5a"
         n_builds     = len(trend_history)
         trend_section = f"""
 <div class="card">
@@ -575,8 +591,8 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
   <div class="sparkline-wrap">
     {sparkline}
   </div>
-  <p class="trend-delta" style="color:{delta_col}">
-    {html.escape(f"{sign}{fmt(delta)}")} code lines since build #{t_prev["build"]}
+  <p class="trend-delta" style="color:{tr_col}">
+    {html.escape(f"{tr_sign}{fmt(tr_delta)}")} code lines since build #{t_prev_h["build"]}
     &nbsp;&middot;&nbsp;
     <span style="color:#8a6a5a;font-weight:400">
       range: {html.escape(fmt(min(v for _,v in trend_points)))}
@@ -824,13 +840,16 @@ body {{
 <!-- ── Main content ────────────────────────────────────────────────────── -->
 <main class="main">
 
-  <!-- SLOC Summary -->
+  <!-- SLOC Summary (code lines + delta when trend history available) -->
   <div class="card">
     <div class="card-title">SLOC Summary</div>
-    <div class="summary-strip">
+    <div class="{sloc_strip_class}">
       {sloc_chips}
     </div>
   </div>
+
+  <!-- Build Trend (shown before language breakdown so the delta is prominent) -->
+  {trend_section}
 
   <!-- Language Breakdown -->
   <div class="card">
@@ -840,9 +859,6 @@ body {{
     </div>
     <p class="lang-caption">{html.escape(lang_caption)}</p>
   </div>
-
-  <!-- Build Trend -->
-  {trend_section}
 
   <!-- Test Results -->
   {test_section}
