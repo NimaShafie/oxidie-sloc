@@ -166,10 +166,7 @@ fi
 CSP=$(curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     "${JENKINS_URL}/scriptText" --data-urlencode 'script=println(System.getProperty("hudson.model.DirectoryBrowserSupport.CSP"))' 2>/dev/null || true)
 if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
-    info "hudson.model.DirectoryBrowserSupport.CSP is at default — HTML reports may render unstyled."
-    info "Fix (Docker): docker cp ci/jenkins/init.groovy.d/relax-csp.groovy <container>:/var/jenkins_home/init.groovy.d/relax-csp.groovy && docker restart <container>"
-    info "Fix (native): cp ci/jenkins/init.groovy.d/relax-csp.groovy \$JENKINS_HOME/init.groovy.d/ && systemctl restart jenkins"
-    info "See docs/ci-integrations.md § Setting the artifact-viewer CSP."
+    info "CSP at default — HTML report may render unstyled. Re-run with --install-csp to fix (Docker only), or see docs/ci-integrations.md § Setting the artifact-viewer CSP."
 
     if [ "$INSTALL_CSP" -eq 1 ]; then
         CSP_GROOVY="$(cd "$(dirname "$0")" && pwd)/init.groovy.d/relax-csp.groovy"

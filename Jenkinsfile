@@ -161,6 +161,13 @@ pipeline {
             defaultValue: true,
             description:  'Skip the SonarQube scan stage. Use on agents without Docker access or when the SonarQube server is unavailable.'
         )
+        string(
+            name:         'SONAR_URL',
+            defaultValue: 'http://localhost:9000',
+            description:  'SonarQube server URL (no trailing slash). ' +
+                          'Example: http://10.0.0.8:9000 for a LAN server. ' +
+                          'Used only when SKIP_SONAR is unchecked.'
+        )
         booleanParam(
             name:         'GENERATE_COVERAGE',
             defaultValue: false,
@@ -777,16 +784,25 @@ CARGOEOF
                     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
                     sh "mkdir -p '${outDir}'"
 
+                    // Derive a URL-safe slug from the scan-path basename for named artifacts.
+                    // e.g. "tests/fixtures/basic" → "basic", "src/my repo" → "my-repo"
+                    def scanParts   = params.SCAN_PATH.trim().split('[/\\\\]') as List
+                    def projectSlug = (scanParts ? scanParts[-1] : params.SCAN_PATH.trim())
+                                        .replaceAll(/[^a-zA-Z0-9_\-]/, '-')
+                                        .replaceAll(/-+/, '-')
+                                        .replaceAll(/^-|-$/, '') ?: 'project'
+                    env.SLOC_PROJECT = projectSlug
+
                     def configArg   = (params.CI_PRESET != 'none')
                                         ? "--config 'ci/sloc-ci-${params.CI_PRESET}.toml'"
                                         : ''
                     // JSON, CSV, and XLSX are always written.
                     // HTML and PDF are optional (controlled by GENERATE_HTML / GENERATE_PDF).
-                    def jsonArg     = "--json-out  '${outDir}/result.json'"
-                    def csvArg      = "--csv-out   '${outDir}/report.csv'"
-                    def xlsxArg     = "--xlsx-out  '${outDir}/report.xlsx'"
-                    def htmlArg     = params.GENERATE_HTML       ? "--html-out '${outDir}/report.html'" : ''
-                    def pdfArg      = params.GENERATE_PDF        ? "--pdf-out  '${outDir}/report.pdf'"  : ''
+                    def jsonArg     = "--json-out  '${outDir}/result_${projectSlug}.json'"
+                    def csvArg      = "--csv-out   '${outDir}/report_${projectSlug}.csv'"
+                    def xlsxArg     = "--xlsx-out  '${outDir}/report_${projectSlug}.xlsx'"
+                    def htmlArg     = params.GENERATE_HTML       ? "--html-out '${outDir}/report_${projectSlug}.html'" : ''
+                    def pdfArg      = params.GENERATE_PDF        ? "--pdf-out  '${outDir}/report_${projectSlug}.pdf'"  : ''
                     def docArg      = params.DOCSTRINGS_AS_CODE  ? '--python-docstrings-as-code'        : ''
                     def symlinkArg  = params.FOLLOW_SYMLINKS     ? '--follow-symlinks'                  : ''
                     def noIgnoreArg = params.NO_IGNORE_FILES     ? '--no-ignore-files'                  : ''
@@ -825,10 +841,10 @@ CARGOEOF
                         '''
                     }
 
-                    sh "test -s '${outDir}/result.json'"
-                    sh "test -s '${outDir}/report.csv'"
-                    sh "test -s '${outDir}/report.xlsx'"
-                    if (params.GENERATE_HTML) { sh "test -s '${outDir}/report.html'" }
+                    sh "test -s '${outDir}/result_${projectSlug}.json'"
+                    sh "test -s '${outDir}/report_${projectSlug}.csv'"
+                    sh "test -s '${outDir}/report_${projectSlug}.xlsx'"
+                    if (params.GENERATE_HTML) { sh "test -s '${outDir}/report_${projectSlug}.html'" }
 
                     // c. Per-file breakdown
                     withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
@@ -840,9 +856,9 @@ CARGOEOF
                     // d. Re-render stored JSON — verifies the report roundtrip
                     if (params.GENERATE_HTML) {
                         sh """
-                            '${env.BINARY}' report '${outDir}/result.json' \\
-                                --html-out '${outDir}/re-rendered.html'
-                            test -s '${outDir}/re-rendered.html'
+                            '${env.BINARY}' report '${outDir}/result_${projectSlug}.json' \\
+                                --html-out '${outDir}/re-rendered_${projectSlug}.html'
+                            test -s '${outDir}/re-rendered_${projectSlug}.html'
                         """
                     }
 
@@ -850,8 +866,8 @@ CARGOEOF
                     if (params.GENERATE_HTML) {
                         withEnv(["REPORT_TITLE=${params.REPORT_TITLE}"]) {
                             sh '''
-                                grep -q 'OxideSLOC' "''' + outDir + '''/report.html"
-                                grep -qF "${REPORT_TITLE}" "''' + outDir + '''/report.html"
+                                grep -q 'OxideSLOC' "''' + outDir + '''/report_''' + projectSlug + '''.html"
+                                grep -qF "${REPORT_TITLE}" "''' + outDir + '''/report_''' + projectSlug + '''.html"
                             '''
                         }
                     }
@@ -872,7 +888,7 @@ CARGOEOF
         // Runs cargo clippy in JSON mode, converts to SonarQube generic-issue
         // format via scripts/internal/clippy_to_sonar.py, optionally generates test
         // coverage via ci/sonar/generate-coverage.sh, then launches the scanner
-        // container. Results appear in the SonarQube dashboard at http://10.0.0.8:9000
+        // container. Results appear in the SonarQube dashboard at ${params.SONAR_URL}
         //
         // Project config lives in ci/sonar/sonar-project.properties.
         //
@@ -886,6 +902,16 @@ CARGOEOF
             when { expression { !params.SKIP_SONAR } }
             steps {
                 sh '''
+                    # --all-features activates the optional rfd crate, which requires
+                    # gtk3, wayland, and xdo devel headers at compile time.
+                    # Fail early with a clear message rather than a multi-screen Rust error.
+                    if ! pkg-config --exists wayland-client gtk+-3.0 2>/dev/null; then
+                        echo "ERROR: missing system devel packages for --all-features build."
+                        echo "  RHEL/Rocky/Alma: sudo dnf install gtk3-devel libxdo-devel wayland-devel"
+                        echo "  Debian/Ubuntu:   sudo apt install libgtk-3-dev libxdo-dev libwayland-dev"
+                        exit 1
+                    fi
+
                     # Produce clippy JSON for SonarQube external-issue import.
                     cargo clippy --workspace --all-targets --all-features \
                         --message-format=json --offline \
@@ -928,15 +954,15 @@ CARGOEOF
                 }
 
                 withCredentials([string(credentialsId: 'sonarqube-oxide-sloc-token', variable: 'SONAR_TOKEN')]) {
-                    sh '''
+                    sh """
                         docker run --rm --network host \
                             -e SONAR_TOKEN \
-                            -v "$WORKSPACE":/usr/src -w /usr/src \
+                            -v "\$WORKSPACE":/usr/src -w /usr/src \
                             sonarsource/sonar-scanner-cli:latest \
                             sonar-scanner \
-                                -Dsonar.host.url=http://10.0.0.8:9000 \
+                                -Dsonar.host.url=${params.SONAR_URL} \
                                 -Dproject.settings=ci/sonar/sonar-project.properties
-                    '''
+                    """
                 }
             }
         }
@@ -1037,13 +1063,14 @@ CARGOEOF
                     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
 
                     // Write CSV trend data consumed by the Plot plugin.
+                    def proj = env.SLOC_PROJECT ?: 'project'
                     sh """python3 - <<'PYEOF'
 import json, csv, os, sys, re
 
 out = "${outDir}"
 
 # ── SLOC summary CSV ─────────────────────────────────────────────────────
-result_path = out + "/result.json"
+result_path = out + "/result_${proj}.json"
 if os.path.exists(result_path):
     data   = json.load(open(result_path))
     totals = data["summary_totals"]
@@ -1097,14 +1124,39 @@ PYEOF"""
                         allowEmptyArchive: true
 
                     if (params.GENERATE_HTML) {
+                        def rptName = "SLOC Report — ${env.SLOC_PROJECT ?: 'project'}"
                         publishHTML(target: [
                             allowMissing         : false,
                             alwaysLinkToLastBuild: true,
                             keepAll              : true,
                             reportDir            : params.OUTPUT_SUBDIR,
-                            reportFiles          : 'report.html',
-                            reportName           : 'SLOC Report',
+                            reportFiles          : "report_${env.SLOC_PROJECT ?: 'project'}.html",
+                            reportName           : rptName,
                         ])
+                    }
+
+                    // ── Standalone HTML dashboard (zero-plugin fallback) ──────
+                    // generate-dashboard.py reads result_<slug>.json and, when
+                    // present, test-results/junit.xml and coverage/lcov.info.
+                    // The output is a self-contained HTML file that requires no
+                    // Plot / junit / coverage / htmlpublisher plugins to be useful.
+                    // Wrapped in try/catch so a Python error never fails the build.
+                    try {
+                        def proj = env.SLOC_PROJECT ?: 'project'
+                        sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}'"
+                        def dashFile = "${outDir}/dashboard_${proj}.html"
+                        if (fileExists(dashFile)) {
+                            publishHTML(target: [
+                                allowMissing         : true,
+                                alwaysLinkToLastBuild: true,
+                                keepAll              : true,
+                                reportDir            : params.OUTPUT_SUBDIR,
+                                reportFiles          : "dashboard_${env.SLOC_PROJECT ?: 'project'}.html",
+                                reportName           : "Build Dashboard — ${env.SLOC_PROJECT ?: 'project'}",
+                            ])
+                        }
+                    } catch (Exception ex) {
+                        echo "generate-dashboard.py did not run (Python 3 unavailable or script error): ${ex.message}"
                     }
                 }
             }
@@ -1285,7 +1337,10 @@ PYEOF"""
                 // files are still on disk.
                 try {
                     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                    def result = readJSON file: "${outDir}/result.json"
+                    def proj   = env.SLOC_PROJECT
+                                    ?: (params.SCAN_PATH?.trim()?.split('[/\\\\]') as List)?.last()
+                                    ?: 'project'
+                    def result = readJSON file: "${outDir}/result_${proj}.json"
                     def t      = result.summary_totals
 
                     // Base description from SLOC totals
@@ -1401,7 +1456,7 @@ PYEOF"""
                     plot csvFileName    : 'sloc-per-language.csv',
                          csvSeries      : [[file: "${outDir}/per_language.csv",
                                             inclusionFlag: 'INCLUDE_BY_STRING',
-                                            url: '', displayTableFlag: false]],
+                                            url: '', displayTableFlag: true]],
                          group          : 'SLOC Trends',
                          title          : 'Per-language code lines',
                          style          : 'bar',
