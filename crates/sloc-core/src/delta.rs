@@ -66,7 +66,6 @@ pub struct ScanComparison {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanComparison {
-    // NOSONAR(rust:S3776)
     let baseline_map: HashMap<&str, &EffectiveCounts> = baseline
         .per_file_records
         .iter()

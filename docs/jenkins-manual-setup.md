@@ -603,11 +603,12 @@ or uncheck `COVERAGE_STANDALONE`.
 ### SonarQube stage fails with "Unable to connect to sonar host"
 
 Either:
-- The SonarQube server at `http://10.0.0.8:9000` is not reachable from the agent.
+- The SonarQube server at the URL in the `SONAR_URL` build parameter is not reachable from the agent.
 - The `sonarqube-oxide-sloc-token` credential is missing or incorrect.
 
 Check the token under **Manage Jenkins → Credentials** and verify connectivity from
-the agent: `curl -s http://10.0.0.8:9000/api/system/status`.
+the agent: `curl -s "$SONAR_URL/api/system/status"` (where `SONAR_URL` is the
+Jenkins build parameter, e.g. `http://10.x.x.x:9000`).
 
 To skip SonarQube on builds where it's not needed, set `SKIP_SONAR = true`.
 

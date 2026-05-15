@@ -57,6 +57,18 @@ print_lcov_summary() {
     } | tee "$OUTPUT_DIR/coverage-summary.txt"
 }
 
+# ── System library check (Linux only) ────────────────────────────────────────
+# --all-features activates the optional rfd crate (via native-dialog), which
+# requires libwayland, libgtk-3, and libxdo devel headers at compile time.
+# Detect missing packages early so the error is actionable rather than a
+# multi-screen Rust build failure deep inside cargo.
+if [[ "$(uname -s)" == "Linux" ]] && ! pkg-config --exists wayland-client gtk+-3.0 2>/dev/null; then
+    echo "ERROR: missing system devel packages required for --all-features:" >&2
+    echo "  RHEL/Rocky/Alma: sudo dnf install gtk3-devel libxdo-devel wayland-devel" >&2
+    echo "  Debian/Ubuntu:   sudo apt install libgtk-3-dev libxdo-dev libwayland-dev" >&2
+    exit 1
+fi
+
 # ── cargo-llvm-cov ────────────────────────────────────────────────────────────
 if has_cargo_subcommand llvm-cov; then
     echo "==> Generating coverage with cargo-llvm-cov"
@@ -73,6 +85,10 @@ if has_cargo_subcommand llvm-cov; then
         --all-features \
         --lcov \
         --output-path "${OUTPUT_DIR}/lcov.info"
+
+    # Rewrite absolute build paths to workspace-relative so SF: records resolve
+    # under any mount point (host path or /usr/src inside sonar-scanner-cli).
+    sed -i "s|^SF:$(pwd)/|SF:|" "${OUTPUT_DIR}/lcov.info"
 
     # Cobertura XML — provides function-level hit counts in addition to line
     # coverage; consumed by recordCoverage(parser: 'COBERTURA') and SonarQube.

@@ -419,7 +419,6 @@ pub(crate) struct RunArtifacts {
 
 #[allow(clippy::too_many_lines)] // route registration table; splitting would obscure router structure
 fn build_router(state: AppState) -> Router {
-    // NOSONAR(rust:S3776)
     let protected = Router::new()
         .route("/", get(splash))
         .route("/scan-setup", get(scan_setup_handler))
@@ -584,7 +583,6 @@ pub fn make_test_router() -> Router {
 // place; splitting it further would require passing many state values across function boundaries.
 #[allow(clippy::too_many_lines)]
 pub async fn serve(config: AppConfig) -> Result<()> {
-    // NOSONAR(rust:S3776)
     let bind_address = config.web.bind_address.clone();
     let server_mode = config.web.server_mode;
     let output_root = resolve_output_root(None);
@@ -907,7 +905,6 @@ async fn serve_tls(
 
 #[allow(clippy::too_many_lines)] // middleware with multi-path auth logic; extraction is impractical
 async fn require_api_key(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
@@ -1924,7 +1921,6 @@ struct LocateReportsDirForm {
 
 #[allow(clippy::too_many_lines)] // report discovery handler with complex search and rendering logic
 async fn locate_reports_dir_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     Form(form): Form<LocateReportsDirForm>,
 ) -> impl IntoResponse {
@@ -2064,7 +2060,6 @@ struct RelocateScanForm {
 
 #[allow(clippy::too_many_lines)] // scan relocation handler with inline HTML rendering
 async fn relocate_scan_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Form(form): Form<RelocateScanForm>,
@@ -2995,7 +2990,6 @@ fn build_submodule_row(
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)]
 async fn analyze_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Form(form): Form<AnalyzeForm>,
@@ -3484,7 +3478,6 @@ async fn async_run_result_handler(
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)] // abbreviated names (fa=files_analyzed, cl=code_lines, etc.) are intentional
 fn render_result_page(
-    // NOSONAR(rust:S3776)
     run: &AnalysisRun,
     artifacts: &RunArtifacts,
     run_id: &str,
@@ -4068,7 +4061,6 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
 
 #[allow(clippy::too_many_lines)]
 async fn artifact_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     AxumPath((artifact, run_id)): AxumPath<(String, String)>,
@@ -4291,10 +4283,10 @@ async fn artifact_handler(
             fs::read(&path).map_or_else(
                 |_| StatusCode::NOT_FOUND.into_response(),
                 |bytes| {
-                    let filename = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "report.csv".to_string());
+                    let filename = path.file_name().map_or_else(
+                        || "report.csv".to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
                     (
                         [
                             (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
@@ -4327,10 +4319,10 @@ async fn artifact_handler(
             fs::read(&path).map_or_else(
                 |_| StatusCode::NOT_FOUND.into_response(),
                 |bytes| {
-                    let filename = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "report.xlsx".to_string());
+                    let filename = path.file_name().map_or_else(
+                        || "report.xlsx".to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
                     (
                         [
                             (
@@ -4745,7 +4737,6 @@ fn summary_delta(curr: u64, prev: Option<u64>) -> (String, &'static str) {
 
 #[allow(clippy::too_many_lines)]
 async fn compare_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Query(query): Query<CompareQuery>,
@@ -5427,7 +5418,6 @@ struct MetricsHistoryEntry {
 
 #[allow(clippy::too_many_lines)] // history aggregation with per-run metric computation and JSON building
 async fn api_metrics_history_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     Query(query): Query<MetricsHistoryQuery>,
 ) -> Response {
@@ -5714,7 +5704,6 @@ async fn api_ingest_handler(
 
 #[allow(clippy::too_many_lines)] // trend report page with inline HTML; splitting would fragment the template
 async fn trend_report_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
 ) -> Response {
@@ -6872,7 +6861,6 @@ async fn trend_report_handler(
 #[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
 #[allow(clippy::too_many_lines)] // JSON data builder for test-metrics scope; splitting would scatter related fields
 fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
-    // NOSONAR(rust:S3776)
     use std::collections::HashMap;
     let mut langs: Vec<&sloc_core::LanguageSummary> = run
         .totals_by_language
@@ -7093,7 +7081,6 @@ fn build_test_scope_sub_entry(sub: &sloc_core::SubmoduleSummary) -> serde_json::
 #[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
 #[allow(clippy::too_many_lines)] // test-metrics page with inline HTML; splitting would fragment the template
 async fn test_metrics_handler(
-    // NOSONAR(rust:S3776)
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
 ) -> Response {
@@ -8876,7 +8863,6 @@ fn format_dir_size(bytes: u64) -> String {
 
 #[allow(clippy::too_many_lines)]
 fn build_preview_html(
-    // NOSONAR(rust:S3776)
     root: &Path,
     include_patterns: &[String],
     exclude_patterns: &[String],
@@ -9249,7 +9235,6 @@ fn handle_preview_file_entry(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 fn collect_preview_rows(
-    // NOSONAR(rust:S3776)
     root: &Path,
     dir: &Path,
     depth: usize,
