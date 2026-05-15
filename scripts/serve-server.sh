@@ -112,11 +112,18 @@ maybe_open_firewall() {
 
 check_firewall() {
     [[ "$PLATFORM" != linux ]] && return
-    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+    # Detect firewalld via reliable signals; avoid firewall-cmd --state which
+    # exits 253 ("Authorization failed") for unprivileged users on RHEL/polkit.
+    if command -v firewall-cmd &>/dev/null \
+       && { systemctl is-active --quiet firewalld 2>/dev/null \
+            || [ -S /run/firewalld/private ] \
+            || pgrep -x firewalld >/dev/null 2>&1; }; then
         if firewall-cmd --query-port="${SLOC_PORT}/tcp" &>/dev/null 2>&1; then
             FIREWALL_STATUS="open (firewalld)"
+        elif sudo -n firewall-cmd --query-port="${SLOC_PORT}/tcp" &>/dev/null 2>&1; then
+            FIREWALL_STATUS="open (firewalld)"
         else
-            FIREWALL_STATUS="BLOCKED (firewalld active, port not permitted)"
+            FIREWALL_STATUS="firewalld active — port status unknown (needs root to query)"
             FIREWALL_FIX="sudo firewall-cmd --add-port=${SLOC_PORT}/tcp --permanent && sudo firewall-cmd --reload"
         fi
     elif command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
