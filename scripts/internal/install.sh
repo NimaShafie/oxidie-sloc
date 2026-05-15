@@ -2,10 +2,10 @@
 # oxide-sloc installer
 #
 # Usage:
-#   bash scripts/install.sh           # build from source (offline, no Rust required)
-#   bash scripts/install.sh --online  # download pre-built binary from GitHub Releases (Linux only)
-#   bash scripts/install.sh --rebuild # force a fresh build even if a binary already exists
-#   bash scripts/install.sh --auto    # auto-install rustup if cargo is absent (interactive prompt)
+#   bash scripts/internal/install.sh           # build from source (offline, no Rust required)
+#   bash scripts/internal/install.sh --online  # download pre-built binary from GitHub Releases (Linux only)
+#   bash scripts/internal/install.sh --rebuild # force a fresh build even if a binary already exists
+#   bash scripts/internal/install.sh --auto    # auto-install rustup if cargo is absent (interactive prompt)
 #
 # Behavior:
 #   --online: downloads the pre-built binary for the host arch, verifies its SHA-256 checksum,
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 FORCE_REBUILD=false
 AUTO_RUSTUP=false
@@ -313,7 +313,7 @@ if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == false ]]; then
     echo " [OK] $(basename "$EXE") already present."
     trust_ca_cert
     echo " Run: bash scripts/run.sh"
-    echo " To rebuild from source:  bash scripts/install.sh --rebuild"
+    echo " To rebuild from source:  bash scripts/internal/install.sh --rebuild"
     exit 0
 fi
 
@@ -517,7 +517,7 @@ if ! command -v cargo &>/dev/null; then
             echo "        Install with:" >&2
             echo "          RHEL/CentOS:  sudo dnf install gcc" >&2
             echo "          Debian/Ubuntu: sudo apt install gcc" >&2
-            echo "        Then re-run: bash scripts/install.sh" >&2
+            echo "        Then re-run: bash scripts/internal/install.sh" >&2
             exit 1
         fi
     fi
@@ -585,7 +585,7 @@ echo ""
 echo " After the toolchain archives are committed, re-run this script on any fresh clone."
 echo ""
 echo " If Rust is already installed on this machine:"
-echo "   bash scripts/install.sh"
+echo "   bash scripts/internal/install.sh"
 echo ""
 echo " Full deployment guide: docs/airgap.md"
 echo ""

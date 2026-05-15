@@ -484,17 +484,17 @@ do_launch_cargo() {
     "$bin" serve --server
 }
 
-if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
-    do_launch_cargo
-    exit 0
-fi
-
 if [[ -f "$EXE" ]]; then
     do_launch_binary "$EXE"
     exit 0
 fi
 
+if command -v cargo &>/dev/null && [[ -f "$REPO_ROOT/Cargo.toml" ]]; then
+    do_launch_cargo
+    exit 0
+fi
+
 printf '\noxide-sloc: no binary found.\n\n' >&2
-printf '  Run the installer first: bash scripts/install.sh\n' >&2
+printf '  Run the installer first: bash scripts/run.sh\n' >&2
 printf '  See docs/airgap.md for all deployment paths (no internet required).\n\n' >&2
 exit 1
