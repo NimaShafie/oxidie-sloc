@@ -2536,12 +2536,29 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     } else {
         0
     };
+    let test_hit = hit(patterns.tests);
+    // Lines matching a test pattern count as tests, not as plain functions or classes.
+    // This prevents double-counting in Python (`def test_` / `class Test`) and Go
+    // (`func Test` / `func Benchmark` / `func Fuzz`) where the same line satisfies both
+    // a function/class prefix and a test pattern. Rust is unaffected: `#[test]` is a
+    // standalone attribute line; the `fn` declaration on the next line does not match any
+    // test pattern and still increments functions correctly.
+    let fn_hit = if test_hit == 0 {
+        hit(patterns.functions) | fn_pp
+    } else {
+        0
+    };
+    let class_hit = if test_hit == 0 {
+        hit(patterns.classes)
+    } else {
+        0
+    };
     (
-        hit(patterns.functions) | fn_pp,
-        hit(patterns.classes),
+        fn_hit,
+        class_hit,
         hit(patterns.variables),
         hit(patterns.imports),
-        hit(patterns.tests),
+        test_hit,
         hit(patterns.assertions),
         hit(patterns.test_suites),
     )
@@ -3026,5 +3043,109 @@ def fn_a():
             true,
         );
         assert_eq!(language, Some(Language::Shell));
+    }
+
+    // ── count_symbols: no double-counting of test functions ──────────────────
+
+    fn sym(lang: Language, line: &str) -> (u64, u64, u64, u64, u64, u64, u64) {
+        let result = analyze_text(lang, &format!("{line}\n"), AnalysisOptions::default());
+        let r = &result.raw;
+        (
+            r.functions,
+            r.classes,
+            r.variables,
+            r.imports,
+            r.test_count,
+            r.test_assertion_count,
+            r.test_suite_count,
+        )
+    }
+
+    #[test]
+    fn python_test_fn_not_double_counted() {
+        // def test_ lines count as tests only, NOT as functions
+        let (f, c, _, _, t, _, _) = sym(Language::Python, "def test_foo():");
+        assert_eq!(f, 0, "test fn must not also increment functions");
+        assert_eq!(t, 1, "must be counted as a test");
+        assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn python_test_class_not_double_counted() {
+        // class Test* lines count as tests only, NOT as classes
+        let (f, c, _, _, t, _, _) = sym(Language::Python, "class TestFoo:");
+        assert_eq!(c, 0, "test class must not also increment classes");
+        assert_eq!(t, 1, "must be counted as a test");
+        assert_eq!(f, 0);
+    }
+
+    #[test]
+    fn python_regular_fn_counts_as_function() {
+        let (f, c, _, _, t, _, _) = sym(Language::Python, "def regular():");
+        assert_eq!(f, 1, "regular function must be counted");
+        assert_eq!(t, 0);
+        assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn python_regular_class_counts_as_class() {
+        let (f, c, _, _, t, _, _) = sym(Language::Python, "class Regular:");
+        assert_eq!(c, 1, "regular class must be counted");
+        assert_eq!(t, 0);
+        assert_eq!(f, 0);
+    }
+
+    #[test]
+    fn go_test_fn_not_double_counted() {
+        let (f, _, _, _, t, _, _) = sym(Language::Go, "func TestFoo(t *testing.T) {");
+        assert_eq!(f, 0, "Go test func must not also increment functions");
+        assert_eq!(t, 1, "must be counted as a test");
+    }
+
+    #[test]
+    fn go_benchmark_fn_not_double_counted() {
+        let (f, _, _, _, t, _, _) = sym(Language::Go, "func BenchmarkBar(b *testing.B) {");
+        assert_eq!(f, 0, "Go benchmark func must not also increment functions");
+        assert_eq!(t, 1, "must be counted as a test");
+    }
+
+    #[test]
+    fn go_regular_fn_counts_as_function() {
+        let (f, _, _, _, t, _, _) = sym(Language::Go, "func doSomething() {");
+        assert_eq!(f, 1, "regular Go func must be counted");
+        assert_eq!(t, 0);
+    }
+
+    #[test]
+    fn rust_test_attr_counts_as_test_not_function() {
+        // #[test] is a standalone attribute line — counted as a test, never as a function
+        let (f, _, _, _, t, _, _) = sym(Language::Rust, "#[test]");
+        assert_eq!(t, 1, "#[test] must be counted as a test");
+        assert_eq!(f, 0, "#[test] attribute must not be counted as a function");
+    }
+
+    #[test]
+    fn rust_fn_line_counts_as_function_not_test() {
+        // The fn declaration after #[test] does NOT match any test pattern
+        let (f, _, _, _, t, _, _) = sym(Language::Rust, "fn test_something() {");
+        assert_eq!(f, 1, "fn declaration must count as a function");
+        assert_eq!(
+            t, 0,
+            "fn declaration line must not be double-counted as a test"
+        );
+    }
+
+    #[test]
+    fn js_describe_counts_as_test_not_function() {
+        let (f, _, _, _, t, _, _) = sym(Language::JavaScript, "describe('suite', () => {");
+        assert_eq!(t, 1, "describe must be counted as a test");
+        assert_eq!(f, 0, "describe must not be counted as a function");
+    }
+
+    #[test]
+    fn js_regular_fn_counts_as_function() {
+        let (f, _, _, _, t, _, _) = sym(Language::JavaScript, "function doWork() {");
+        assert_eq!(f, 1, "JS function declaration must be counted");
+        assert_eq!(t, 0);
     }
 }
