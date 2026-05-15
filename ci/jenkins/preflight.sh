@@ -146,13 +146,6 @@ else
     fail "Unexpected HTTP ${JOB_STATUS} checking for existing job '${JOB_NAME}'."
 fi
 
-ALT_NAME=$([ "$JOB_NAME" = "oxide-sloc" ] && echo "oxide-sloc-manual" || echo "oxide-sloc")
-ALT_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
-    -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
-    "${JENKINS_URL}/job/${ALT_NAME}/api/json" 2>&1) || true
-if [ "$ALT_STATUS" = "200" ]; then
-    info "Alternate job name \"${ALT_NAME}\" also exists on this Jenkins. Decide whether to keep, delete, or rename it before proceeding."
-fi
 
 # ── Check e: CSRF crumb endpoint responds ────────────────────────────────────
 
