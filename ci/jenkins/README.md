@@ -390,11 +390,30 @@ A 200 response with an empty body means the job was created successfully. A 400 
 ### Step 2 — Trigger the first (seed) build
 
 ```bash
+CRUMB=$(curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
+    "${JENKINS_URL}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,\":\",//crumb)")
+
 curl -sS -X POST -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
+    -H "${CRUMB}" \
     "${JENKINS_URL}/job/${JOB_NAME}/build"
 ```
 
 The first build runs with no parameters — Jenkins uses it to discover the `parameters {}` block in the Jenkinsfile. From build #2 onward, **Build with Parameters** in the left-hand sidebar shows the full configurable form.
+
+> **Note:** current Jenkins LTS exempts API-token-authenticated POST requests from CSRF
+> checks, so the crumb is not strictly required on modern instances. It is included here
+> for compatibility with older LTS (≤ 2.176.x) and instances with "Enable proxy
+> compatibility" enabled, where the same `curl` without `-H "${CRUMB}"` returns HTTP 403.
+
+### Cleanup
+
+Once the job is created and you do not plan to re-run the bootstrap, remove the credentials file:
+
+```bash
+shred -u ci/jenkins/.env
+```
+
+The file is `.gitignore`d and will never be committed, but a long-lived API token sitting in a world-readable path is still an unnecessary risk. If you do need to re-run the bootstrap later, recreate `.env` from `.env.example`.
 
 ---
 
