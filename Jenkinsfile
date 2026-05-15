@@ -481,6 +481,26 @@ replace-with = "vendored-sources"
 directory = "vendor"
 CARGOEOF
                 '''
+                // Relax Jenkins' default Content-Security-Policy so that the published
+                // Build Dashboard and SLOC Report HTML files can use inline <style>
+                // blocks and inline SVG presentation attributes.  Without this, all
+                // inline styles are blocked and the pages render as unstyled plain HTML
+                // with no visible charts or layout.
+                //
+                // This call persists for the Jenkins process lifetime, so it is safe
+                // to run on every build (it is idempotent).  If an admin has already
+                // set a stricter policy via the global security configuration, this call
+                // will override it for the duration of this process — review your site's
+                // security requirements before relaxing CSP in production.
+                script {
+                    System.setProperty(
+                        'hudson.model.DirectoryBrowserSupport.CSP',
+                        "sandbox allow-scripts; default-src 'none'; " +
+                        "img-src 'self' data:; " +
+                        "style-src 'self' 'unsafe-inline'; " +
+                        "script-src 'self' 'unsafe-inline';"
+                    )
+                }
             }
         }
 
@@ -1383,20 +1403,12 @@ PYEOF"""
                         if (a >= 10_000L) return "${Math.round(v / 1_000.0)}K"
                         return String.format('%,d', v)
                     }
-                    // Inline pill badge helper — renders as colored label in Jenkins
-                    // when Manage Jenkins → Security → Markup Formatter is "Safe HTML".
-                    // Falls back to readable plain text otherwise.
-                    def pill = { String txt, String bg ->
-                        "<span style='display:inline-block;background:${bg};color:#fff;" +
-                        "padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;" +
-                        "margin-right:3px'>${txt}</span>"
-                    }
-
-                    def desc = pill("${fmtN(t.code_lines)} code",    '#b04a00') +
-                               pill("${fmtN(t.comment_lines)} cmts", '#5a7848') +
-                               pill("${fmtN(t.blank_lines)} blank",  '#7a6a5a') +
-                               pill("${fmtN(t.files_analyzed)} files",'#486a78') +
-                               " <small style='color:#8a6a5a'>${params.SCAN_PATH}</small>"
+                    // Build description uses plain text so it renders correctly under
+                    // any Jenkins markup formatter (Escaped HTML is the default).
+                    def desc = "${fmtN(t.code_lines)} code · " +
+                               "${fmtN(t.comment_lines)} cmts · " +
+                               "${fmtN(t.blank_lines)} blank · " +
+                               "${fmtN(t.files_analyzed)} files | ${params.SCAN_PATH}"
 
                     // Append test-result stats (cargo-nextest JUnit XML)
                     def junitPath = "${outDir}/test-results/junit.xml"
@@ -1410,8 +1422,8 @@ PYEOF"""
                             def failCount  = fm ? (fm[0][1] as long) : 0L
                             def errCount   = em ? (em[0][1] as long) : 0L
                             def passCount  = Math.max(0L, totalTests - failCount - errCount)
-                            def testBg     = (failCount == 0 && errCount == 0) ? '#2a6846' : '#b23030'
-                            desc += ' ' + pill("${fmtN(passCount)}/${fmtN(totalTests)} tests", testBg)
+                            def testStatus = (failCount == 0 && errCount == 0) ? 'OK' : "FAIL(${fmtN(failCount)})"
+                            desc += " · ${fmtN(passCount)}/${fmtN(totalTests)} tests ${testStatus}"
                         } catch (Exception ex) {
                             echo "Could not parse JUnit XML for description: ${ex.message}"
                         }
@@ -1431,9 +1443,7 @@ PYEOF"""
                                 returnStdout: true
                             ).trim()
                             if (pct != 'N/A') {
-                                def pv    = pct as double
-                                def covBg = pv >= 70.0 ? '#2a6846' : pv >= 40.0 ? '#d4851c' : '#b23030'
-                                desc += ' ' + pill("${pct}% cov", covBg)
+                                desc += " · ${pct}% cov"
                             }
                         } catch (Exception ex) {
                             echo "Could not read coverage for description: ${ex.message}"
