@@ -179,7 +179,7 @@ center cannot replace them, and restarts Jenkins.
    | Plugin (search term) | Purpose |
    |---------------------|---------|
    | `Pipeline: Stage View` | Stage visualization in the job UI |
-   | `HTML Publisher` | "SLOC Report" / "Coverage Source" sidebar links |
+   | `HTML Publisher` | "SLOC Report — &lt;slug&gt;" / "Build Dashboard — &lt;slug&gt;" / "Coverage Report" sidebar links |
    | `Plot` | Build-over-build SLOC trend charts |
    | `JUnit` | "Test Result" sidebar link (cargo-nextest builds) |
    | `Coverage` | Native LCOV/Cobertura integration — line/branch % on build pages |
@@ -409,9 +409,21 @@ From this point on, all 40+ configuration parameters are visible in the build fo
 After a successful build, confirm each feature is wired correctly:
 
 ### SLOC Report (HTML Publisher)
-- The left sidebar shows a **"SLOC Report"** link.
+- The left sidebar shows a **"SLOC Report — &lt;SLOC_PROJECT&gt;"** link.
+  The slug is derived from `SCAN_PATH` basename (e.g. `"SLOC Report — basic"` for the
+  default `tests/fixtures/basic`). If `SLOC_PROJECT` is set explicitly, that exact string
+  is used as the slug.
 - Clicking it opens the HTML report in the browser.
 - If it shows unstyled content, revisit [Step 6](#6-configure-the-csp-header-html-report-viewer).
+
+### Build Dashboard (standalone, no-plugin fallback)
+- A second sidebar link, **"Build Dashboard — &lt;SLOC_PROJECT&gt;"**, is published from
+  `ci/jenkins/generate-dashboard.py`. This is a self-contained HTML file that works even
+  on Jenkins instances where the Plot/JUnit/Coverage plugins are absent.
+- Both sidebar links use Jenkins' em-dash URL encoding: the `—` character becomes
+  `_e28094_` in the path (e.g. `/job/<JOB>/<N>/SLOC_20Report_20_e28094_20basic/`).
+  Bookmarks from a pre-15b0a27e installation (which used `/SLOC_20Report/`) will return
+  404 — update them once after upgrading.
 
 ### Trend charts (Plot plugin)
 - The job page shows **"SLOC Trends"** charts below the build history.
