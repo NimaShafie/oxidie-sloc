@@ -46,8 +46,6 @@ def _extract_finding(d, project_root, seen):
     }
     issue = {
         "ruleId": code,
-        "engineId": "clippy",
-        "type": "CODE_SMELL",
         "primaryLocation": {
             "message": msg.get("message", ""),
             "filePath": path,

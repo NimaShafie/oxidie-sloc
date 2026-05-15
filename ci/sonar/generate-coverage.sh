@@ -18,11 +18,12 @@
 # Output files written to OUTPUT_DIR:
 #   lcov.info            — LCOV format; consumed by:
 #                            • recordCoverage(parser: 'LCOV') in Jenkinsfile
-#                            • sonar.lcov.reportPaths in sonar-project.properties
+#                            • sonar.rust.lcov.reportPaths in sonar-project.properties
 #                            • genhtml for HTML fallback report
 #   sonar-coverage.xml   — Cobertura XML; consumed by:
 #                            • recordCoverage(parser: 'COBERTURA') in Jenkinsfile
-#                            • sonar.coverageReportPaths in sonar-project.properties
+#                            (sonar.coverageReportPaths is intentionally disabled —
+#                            it expects Generic Coverage format, not Cobertura)
 #   coverage-summary.txt — human-readable line/branch coverage summary
 
 set -euo pipefail
