@@ -110,6 +110,82 @@ fn typescript_mixed() {
     assert!(r.code_only_lines >= 3, "pure code lines");
 }
 
+// ─── Entity counts ────────────────────────────────────────────────────────────
+
+#[test]
+fn rust_entities() {
+    let text = corpus("rust/entities.rs");
+    let result = analyze_text(Language::Rust, &text, AnalysisOptions::default());
+    let r = &result.raw;
+    // fn area, fn new, fn distance, fn helper, fn test_new, fn test_color
+    assert_eq!(r.functions, 6, "function definitions");
+    // struct Point, enum Color, trait Shape, impl Point
+    assert_eq!(r.classes, 4, "class/struct/trait/impl definitions");
+    // let pt, let sq, let _tmp, let p, let c
+    assert_eq!(r.variables, 5, "variable declarations");
+    // use std::io, use std::fmt, use super::*
+    assert_eq!(r.imports, 3, "import statements");
+    // two #[test] attributes
+    assert_eq!(r.test_count, 2, "test annotations");
+    // assert_eq! and assert!
+    assert_eq!(r.test_assertion_count, 2, "assertion calls");
+    assert_eq!(r.test_suite_count, 0, "no test suites");
+}
+
+#[test]
+fn python_entities() {
+    let text = corpus("python/entities.py");
+    let result = analyze_text(Language::Python, &text, AnalysisOptions::default());
+    let r = &result.raw;
+    // def __init__, def speak, def helper — test methods excluded
+    assert_eq!(r.functions, 3, "plain function definitions");
+    // class Animal only — class TestAnimal excluded (matched test pattern)
+    assert_eq!(r.classes, 1, "plain class definitions");
+    // import os, from sys import argv
+    assert_eq!(r.imports, 2, "import statements");
+    // class TestAnimal, def test_speak, def test_helper
+    assert_eq!(r.test_count, 3, "test definitions");
+    // self.assertEqual x2
+    assert_eq!(r.test_assertion_count, 2, "assertion calls");
+}
+
+#[test]
+fn go_entities() {
+    let text = corpus("go/entities.go");
+    let result = analyze_text(Language::Go, &text, AnalysisOptions::default());
+    let r = &result.raw;
+    // func Area, func helper — test funcs excluded
+    assert_eq!(r.functions, 2, "plain function definitions");
+    // type Point struct
+    assert_eq!(r.classes, 1, "type definitions");
+    // var result, var x
+    assert_eq!(r.variables, 2, "variable declarations");
+    // import "fmt"
+    assert_eq!(r.imports, 1, "import statements");
+    // func TestPoint, func BenchmarkHelper
+    assert_eq!(r.test_count, 2, "test function definitions");
+    assert_eq!(r.test_assertion_count, 0, "no assertions");
+}
+
+#[test]
+fn javascript_entities() {
+    let text = corpus("javascript/entities.js");
+    let result = analyze_text(Language::JavaScript, &text, AnalysisOptions::default());
+    let r = &result.raw;
+    // function multiply only — arrow function and class methods not counted
+    assert_eq!(r.functions, 1, "function declarations");
+    // class Calculator
+    assert_eq!(r.classes, 1, "class definitions");
+    // let result, const divide
+    assert_eq!(r.variables, 2, "variable declarations");
+    // import { foo } from './foo'
+    assert_eq!(r.imports, 1, "import statements");
+    // describe, it, test
+    assert_eq!(r.test_count, 3, "test block openers");
+    // expect x2
+    assert_eq!(r.test_assertion_count, 2, "assertion calls");
+}
+
 // ─── Empty file ───────────────────────────────────────────────────────────────
 
 #[test]
