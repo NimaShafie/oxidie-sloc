@@ -903,7 +903,6 @@ async fn serve_tls(
     }
 }
 
-#[allow(clippy::too_many_lines)] // middleware with multi-path auth logic; extraction is impractical
 async fn require_api_key(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -919,7 +918,6 @@ async fn require_api_key(
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |c| c.0.ip());
 
-    // Collect credentials from all three sources: Bearer header, X-API-Key, session cookie.
     let auth_header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -938,24 +936,9 @@ async fn require_api_key(
         .and_then(extract_session_cookie)
         .map(str::to_owned);
 
-    let session_valid = session_cookie.as_deref().is_some_and(|tok| {
-        let now = Instant::now();
-        let mut sessions = state
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(&expiry) = sessions.get(tok) {
-            if now < expiry {
-                return true;
-            }
-            sessions.remove(tok);
-        }
-        false
-    });
-
+    let session_valid = check_session_valid(session_cookie.as_deref(), &state);
     let any_credential_provided =
         auth_header.is_some() || x_api_key.is_some() || session_cookie.is_some();
-
     let valid = session_valid
         || [&auth_header, &x_api_key]
             .iter()
@@ -972,43 +955,10 @@ async fn require_api_key(
     }
 
     if state.rate_limiter.is_auth_locked_out(peer_ip) {
-        tracing::warn!(event = "auth_lockout", peer_addr = %peer_ip,
-            "Authentication locked out after repeated failures");
-        let remaining = state.rate_limiter.auth_lockout_remaining_secs(peer_ip);
-        let retry_after = HeaderValue::from_str(&remaining.to_string())
-            .unwrap_or(HeaderValue::from_static("3600"));
-        if is_browser_request(&req) {
-            let minutes = remaining.div_ceil(60).max(1);
-            let s = if minutes == 1 { "" } else { "s" };
-            let body = format!(
-                r#"<!doctype html><html><head><meta charset="utf-8">
-<title>Locked Out — OxideSLOC</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}}
-h1{{color:#b85d33}}p{{line-height:1.6}}code{{background:#f3e9e0;padding:2px 6px;border-radius:4px}}</style>
-</head><body>
-<h1>Too many failed sign-in attempts</h1>
-<p>Access from your IP is temporarily locked. Lockout expires in approximately
-<strong>{minutes} minute{s}</strong>.</p>
-<p>To clear immediately, restart the server.</p>
-<p>For trusted LAN testing, leave <code>SLOC_API_KEY</code> unset, or raise the
-threshold via <code>SLOC_AUTH_LOCKOUT_FAILS</code> / <code>SLOC_AUTH_LOCKOUT_SECS</code>.</p>
-</body></html>"#
-            );
-            let mut resp = (StatusCode::TOO_MANY_REQUESTS, Html(body)).into_response();
-            resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
-            return resp;
-        }
-        let mut resp = (
-            StatusCode::TOO_MANY_REQUESTS,
-            format!("429 Too Many Requests — locked out, retry in {remaining}s\n"),
-        )
-            .into_response();
-        resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
-        return resp;
+        return auth_lockout_response(&req, &state.rate_limiter, peer_ip);
     }
 
     if any_credential_provided {
-        // A credential was supplied but didn't match — record the failure.
         state.rate_limiter.record_auth_failure(peer_ip);
         let path = req.uri().path().to_owned();
         tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = %path,
@@ -1021,9 +971,7 @@ threshold via <code>SLOC_AUTH_LOCKOUT_FAILS</code> / <code>SLOC_AUTH_LOCKOUT_SEC
             .into_response();
     }
 
-    // No credential supplied at all.  Redirect browsers to the login form; return
-    // a plain 401 for API clients (without recording a failure — unauthenticated
-    // browser page loads should not burn the lockout counter).
+    // No credential — redirect browsers, plain 401 for API clients.
     if is_browser_request(&req) {
         let next_path = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
         let login_url = format!("/auth/login?next={}", urlencode_path(next_path));
@@ -1033,13 +981,68 @@ threshold via <code>SLOC_AUTH_LOCKOUT_FAILS</code> / <code>SLOC_AUTH_LOCKOUT_SEC
         resp.headers_mut().insert(header::LOCATION, location);
         return resp;
     }
-
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
         "401 Unauthorized\n",
     )
         .into_response()
+}
+
+fn check_session_valid(token: Option<&str>, state: &AppState) -> bool {
+    let Some(tok) = token else { return false };
+    let now = Instant::now();
+    let mut sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&expiry) = sessions.get(tok) {
+        if now < expiry {
+            return true;
+        }
+        sessions.remove(tok);
+    }
+    false
+}
+
+fn auth_lockout_response(
+    req: &Request<Body>,
+    rate_limiter: &IpRateLimiter,
+    peer_ip: IpAddr,
+) -> Response {
+    tracing::warn!(event = "auth_lockout", peer_addr = %peer_ip,
+        "Authentication locked out after repeated failures");
+    let remaining = rate_limiter.auth_lockout_remaining_secs(peer_ip);
+    let retry_after =
+        HeaderValue::from_str(&remaining.to_string()).unwrap_or(HeaderValue::from_static("3600"));
+    if is_browser_request(req) {
+        let minutes = remaining.div_ceil(60).max(1);
+        let s = if minutes == 1 { "" } else { "s" };
+        let body = format!(
+            r#"<!doctype html><html><head><meta charset="utf-8">
+<title>Locked Out — OxideSLOC</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}}
+h1{{color:#b85d33}}p{{line-height:1.6}}code{{background:#f3e9e0;padding:2px 6px;border-radius:4px}}</style>
+</head><body>
+<h1>Too many failed sign-in attempts</h1>
+<p>Access from your IP is temporarily locked. Lockout expires in approximately
+<strong>{minutes} minute{s}</strong>.</p>
+<p>To clear immediately, restart the server.</p>
+<p>For trusted LAN testing, leave <code>SLOC_API_KEY</code> unset, or raise the
+threshold via <code>SLOC_AUTH_LOCKOUT_FAILS</code> / <code>SLOC_AUTH_LOCKOUT_SECS</code>.</p>
+</body></html>"#
+        );
+        let mut resp = (StatusCode::TOO_MANY_REQUESTS, Html(body)).into_response();
+        resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
+        return resp;
+    }
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("429 Too Many Requests — locked out, retry in {remaining}s\n"),
+    )
+        .into_response();
+    resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
+    resp
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
@@ -1943,22 +1946,7 @@ async fn locate_reports_dir_handler(
         .into_response();
     }
 
-    // Collect result*.json candidates: the folder itself and one level of subdirectories.
-    // Filenames use the pattern result_<project>_<commit>.json — match by prefix/suffix.
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(j) = find_result_json_in_dir(&folder) {
-        candidates.push(j);
-    }
-    if let Ok(dir_entries) = fs::read_dir(&folder) {
-        for entry in dir_entries.flatten() {
-            let sub = entry.path();
-            if sub.is_dir() {
-                if let Some(j) = find_result_json_in_dir(&sub) {
-                    candidates.push(j);
-                }
-            }
-        }
-    }
+    let candidates = collect_result_json_candidates(&folder);
 
     if candidates.is_empty() {
         return axum::response::Redirect::to(
@@ -1970,71 +1958,14 @@ async fn locate_reports_dir_handler(
     let mut linked_count: usize = 0;
     let mut reg = state.registry.lock().await;
     for json_path in candidates {
-        let parent = match json_path.parent() {
-            Some(p) => p.to_path_buf(),
-            None => continue,
+        let Some(parent) = json_path.parent().map(PathBuf::from) else {
+            continue;
         };
-        // Skip if this directory is already registered AND the artifact still exists on disk.
-        // A stale entry (file moved/deleted) must not block re-scanning the same directory.
-        let already = reg.entries.iter().any(|e| {
-            let dir_match = e
-                .json_path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .is_some_and(|p| p == parent)
-                || e.html_path
-                    .as_ref()
-                    .and_then(|p| p.parent())
-                    .is_some_and(|p| p == parent);
-            dir_match
-                && (e.json_path.as_ref().is_some_and(|p| p.exists())
-                    || e.html_path.as_ref().is_some_and(|p| p.exists()))
-        });
-        if already {
+        if is_dir_already_registered(&reg, &parent) {
             continue;
         }
-        // Find the first .html file in the same directory.
-        let html_path = fs::read_dir(&parent).ok().and_then(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
-        });
-        let Ok(run) = read_json(&json_path) else {
+        let Some(entry) = build_registry_entry_from_json(json_path) else {
             continue;
-        };
-        let project_label = run.input_roots.first().map_or_else(
-            || "Unknown Project".to_string(),
-            |r| sanitize_project_label(r),
-        );
-        let entry = RegistryEntry {
-            run_id: run.tool.run_id.clone(),
-            timestamp_utc: run.tool.timestamp_utc,
-            project_label,
-            input_roots: run.input_roots.clone(),
-            json_path: Some(json_path),
-            html_path,
-            pdf_path: None,
-            csv_path: None,
-            xlsx_path: None,
-            summary: ScanSummarySnapshot {
-                files_analyzed: run.summary_totals.files_analyzed,
-                files_skipped: run.summary_totals.files_skipped,
-                total_physical_lines: run.summary_totals.total_physical_lines,
-                code_lines: run.summary_totals.code_lines,
-                comment_lines: run.summary_totals.comment_lines,
-                blank_lines: run.summary_totals.blank_lines,
-                functions: run.summary_totals.functions,
-                classes: run.summary_totals.classes,
-                variables: run.summary_totals.variables,
-                imports: run.summary_totals.imports,
-                test_count: run.summary_totals.test_count,
-            },
-            git_branch: run.git_branch.clone(),
-            git_commit: run.git_commit_short.clone(),
-            git_author: run.git_commit_author.clone(),
-            git_tags: run.git_tags.clone(),
-            git_nearest_tag: run.git_nearest_tag.clone(),
-            git_commit_date: run.git_commit_date.clone(),
         };
         reg.add_entry(entry);
         linked_count += 1;
@@ -2058,7 +1989,6 @@ struct RelocateScanForm {
     redirect_url: String,
 }
 
-#[allow(clippy::too_many_lines)] // scan relocation handler with inline HTML rendering
 async fn relocate_scan_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2100,7 +2030,6 @@ async fn relocate_scan_handler(
             );
         }
     };
-
     if !folder.is_dir() {
         return missing_scan_relocate_response(
             "Selected path is not a directory.",
@@ -2112,22 +2041,7 @@ async fn relocate_scan_handler(
         );
     }
 
-    let json_candidates: Vec<PathBuf> = fs::read_dir(&folder)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.file_stem()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result"))
-                && p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
-        })
-        .collect();
-
+    let json_candidates = find_result_files_by_ext(&folder, "json");
     if json_candidates.is_empty() {
         return missing_scan_relocate_response(
             &format!(
@@ -2142,17 +2056,7 @@ async fn relocate_scan_handler(
         );
     }
 
-    let mut matched_json: Option<PathBuf> = None;
-    for candidate in &json_candidates {
-        if let Ok(run) = read_json(candidate) {
-            if run.tool.run_id == run_id {
-                matched_json = Some(candidate.clone());
-                break;
-            }
-        }
-    }
-
-    let Some(json_path) = matched_json else {
+    let Some(json_path) = find_matching_run_json(&json_candidates, &run_id) else {
         return missing_scan_relocate_response(
             &format!(
                 "No matching scan found in the selected folder.\n\
@@ -2168,47 +2072,9 @@ async fn relocate_scan_handler(
         );
     };
 
-    let html_path = fs::read_dir(&folder)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.is_file()
-                && p.file_stem()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result"))
-                && p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("html"))
-        });
-    let pdf_path = fs::read_dir(&folder)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.is_file()
-                && p.file_stem()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result"))
-                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-        });
-
-    {
-        let mut reg = state.registry.lock().await;
-        if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
-            entry.json_path = Some(json_path);
-            if let Some(hp) = html_path {
-                entry.html_path = Some(hp);
-            }
-            if let Some(pp) = pdf_path {
-                entry.pdf_path = Some(pp);
-            }
-        }
-        let _ = reg.save(&state.registry_path);
-    }
+    let html_path = find_result_files_by_ext(&folder, "html").into_iter().next();
+    let pdf_path = find_result_files_by_ext(&folder, "pdf").into_iter().next();
+    update_run_file_paths(&state, &run_id, json_path, html_path, pdf_path).await;
 
     let safe_redirect = if redirect_url.starts_with('/') && !redirect_url.starts_with("//") {
         redirect_url
@@ -2216,6 +2082,50 @@ async fn relocate_scan_handler(
         "/compare-scans".to_string()
     };
     axum::response::Redirect::to(&safe_redirect).into_response()
+}
+
+fn find_result_files_by_ext(folder: &std::path::Path, ext: &str) -> Vec<PathBuf> {
+    fs::read_dir(folder)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_stem()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("result"))
+                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        })
+        .collect()
+}
+
+fn find_matching_run_json(candidates: &[PathBuf], run_id: &str) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|c| read_json(c).ok().is_some_and(|r| r.tool.run_id == run_id))
+        .cloned()
+}
+
+async fn update_run_file_paths(
+    state: &AppState,
+    run_id: &str,
+    json_path: PathBuf,
+    html_path: Option<PathBuf>,
+    pdf_path: Option<PathBuf>,
+) {
+    let mut reg = state.registry.lock().await;
+    if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
+        entry.json_path = Some(json_path);
+        if let Some(hp) = html_path {
+            entry.html_path = Some(hp);
+        }
+        if let Some(pp) = pdf_path {
+            entry.pdf_path = Some(pp);
+        }
+    }
+    let _ = reg.save(&state.registry_path);
 }
 
 fn missing_scan_relocate_response(
@@ -2241,10 +2151,9 @@ fn missing_scan_relocate_response(
 
 // ── Watched-directory helpers ─────────────────────────────────────────────────
 
-/// Scan `folder` (and one level of subdirs) for `result*.json` files and add any new ones to `reg`.
-/// Returns the number of newly linked entries.
-fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -> usize {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+/// Collect `result*.json` candidates from `folder` and one level of subdirectories.
+fn collect_result_json_candidates(folder: &std::path::Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     if let Some(j) = find_result_json_in_dir(folder) {
         candidates.push(j);
     }
@@ -2258,71 +2167,83 @@ fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -
             }
         }
     }
+    candidates
+}
 
-    let mut linked = 0usize;
-    for json_path in candidates {
-        let parent = match json_path.parent() {
-            Some(p) => p.to_path_buf(),
-            None => continue,
-        };
-        let already = reg.entries.iter().any(|e| {
-            let dir_match = e
-                .json_path
+fn is_dir_already_registered(reg: &ScanRegistry, parent: &std::path::Path) -> bool {
+    reg.entries.iter().any(|e| {
+        let dir_match = e
+            .json_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .is_some_and(|p| p == parent)
+            || e.html_path
                 .as_ref()
                 .and_then(|p| p.parent())
-                .is_some_and(|p| p == parent)
-                || e.html_path
-                    .as_ref()
-                    .and_then(|p| p.parent())
-                    .is_some_and(|p| p == parent);
-            dir_match
-                && (e.json_path.as_ref().is_some_and(|p| p.exists())
-                    || e.html_path.as_ref().is_some_and(|p| p.exists()))
-        });
-        if already {
-            continue;
-        }
-        let html_path = fs::read_dir(&parent).ok().and_then(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
-        });
-        let Ok(run) = read_json(&json_path) else {
+                .is_some_and(|p| p == parent);
+        dir_match
+            && (e.json_path.as_ref().is_some_and(|p| p.exists())
+                || e.html_path.as_ref().is_some_and(|p| p.exists()))
+    })
+}
+
+fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
+    let parent = json_path.parent()?.to_path_buf();
+    let html_path = fs::read_dir(&parent).ok().and_then(|rd| {
+        rd.flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
+    });
+    let run = read_json(&json_path).ok()?;
+    let project_label = run.input_roots.first().map_or_else(
+        || "Unknown Project".to_string(),
+        |r| sanitize_project_label(r),
+    );
+    Some(RegistryEntry {
+        run_id: run.tool.run_id.clone(),
+        timestamp_utc: run.tool.timestamp_utc,
+        project_label,
+        input_roots: run.input_roots.clone(),
+        json_path: Some(json_path),
+        html_path,
+        pdf_path: None,
+        csv_path: None,
+        xlsx_path: None,
+        summary: ScanSummarySnapshot {
+            files_analyzed: run.summary_totals.files_analyzed,
+            files_skipped: run.summary_totals.files_skipped,
+            total_physical_lines: run.summary_totals.total_physical_lines,
+            code_lines: run.summary_totals.code_lines,
+            comment_lines: run.summary_totals.comment_lines,
+            blank_lines: run.summary_totals.blank_lines,
+            functions: run.summary_totals.functions,
+            classes: run.summary_totals.classes,
+            variables: run.summary_totals.variables,
+            imports: run.summary_totals.imports,
+            test_count: run.summary_totals.test_count,
+        },
+        git_branch: run.git_branch.clone(),
+        git_commit: run.git_commit_short.clone(),
+        git_author: run.git_commit_author.clone(),
+        git_tags: run.git_tags.clone(),
+        git_nearest_tag: run.git_nearest_tag.clone(),
+        git_commit_date: run.git_commit_date.clone(),
+    })
+}
+
+/// Scan `folder` (and one level of subdirs) for `result*.json` files and add any new ones to `reg`.
+/// Returns the number of newly linked entries.
+fn scan_folder_into_registry(folder: &std::path::Path, reg: &mut ScanRegistry) -> usize {
+    let mut linked = 0usize;
+    for json_path in collect_result_json_candidates(folder) {
+        let Some(parent) = json_path.parent().map(PathBuf::from) else {
             continue;
         };
-        let project_label = run.input_roots.first().map_or_else(
-            || "Unknown Project".to_string(),
-            |r| sanitize_project_label(r),
-        );
-        let entry = RegistryEntry {
-            run_id: run.tool.run_id.clone(),
-            timestamp_utc: run.tool.timestamp_utc,
-            project_label,
-            input_roots: run.input_roots.clone(),
-            json_path: Some(json_path),
-            html_path,
-            pdf_path: None,
-            csv_path: None,
-            xlsx_path: None,
-            summary: ScanSummarySnapshot {
-                files_analyzed: run.summary_totals.files_analyzed,
-                files_skipped: run.summary_totals.files_skipped,
-                total_physical_lines: run.summary_totals.total_physical_lines,
-                code_lines: run.summary_totals.code_lines,
-                comment_lines: run.summary_totals.comment_lines,
-                blank_lines: run.summary_totals.blank_lines,
-                functions: run.summary_totals.functions,
-                classes: run.summary_totals.classes,
-                variables: run.summary_totals.variables,
-                imports: run.summary_totals.imports,
-                test_count: run.summary_totals.test_count,
-            },
-            git_branch: run.git_branch.clone(),
-            git_commit: run.git_commit_short.clone(),
-            git_author: run.git_commit_author.clone(),
-            git_tags: run.git_tags.clone(),
-            git_nearest_tag: run.git_nearest_tag.clone(),
-            git_commit_date: run.git_commit_date.clone(),
+        if is_dir_already_registered(reg, &parent) {
+            continue;
+        }
+        let Some(entry) = build_registry_entry_from_json(json_path) else {
+            continue;
         };
         reg.add_entry(entry);
         linked += 1;
@@ -3067,37 +2988,16 @@ async fn analyze_handler(
     }
 
     tokio::spawn(async move {
-        // Hold the permit for the lifetime of the background task.
         let _permit = sem_permit;
 
-        // Clone before moving into spawn_blocking so we can use them again afterwards.
-        let git_repo_sb = git_repo_bg.clone();
-        let git_ref_sb = git_ref_bg.clone();
         let cancel_sb = Arc::clone(&cancel_bg);
-        let analysis_result =
-            tokio::task::spawn_blocking(move || -> Result<(sloc_core::AnalysisRun, String)> {
-                if let (Some(repo), Some(refname)) = (&git_repo_sb, &git_ref_sb) {
-                    let dest = git_clone_dest(repo, &clones_dir);
-                    sloc_git::clone_or_fetch(repo, &dest)?;
-                    let wt = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
-                    sloc_git::create_worktree(&dest, refname, &wt)?;
-                    config.discovery.root_paths = vec![wt.clone()];
-                    let run = analyze(&config, "serve", Some(&cancel_sb));
-                    let _ = sloc_git::destroy_worktree(&dest, &wt);
-                    let mut run = run?;
-                    if run.git_branch.is_none() {
-                        run.git_branch = Some(refname.clone());
-                    }
-                    let html = render_html(&run)?;
-                    return Ok((run, html));
-                }
-                let run = analyze(&config, "serve", Some(&cancel_sb))?;
-                let html = render_html(&run)?;
-                Ok((run, html))
-            })
-            .await
-            .map_err(|err| anyhow::anyhow!(err.to_string()))
-            .and_then(|result| result);
+        let (git_repo_sb, git_ref_sb) = (git_repo_bg.clone(), git_ref_bg.clone());
+        let analysis_result = tokio::task::spawn_blocking(move || {
+            run_analysis_blocking(config, git_repo_sb, git_ref_sb, clones_dir, cancel_sb)
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+        .and_then(|result| result);
 
         // If cancelled while running, discard results and mark as cancelled.
         if cancel_bg.load(std::sync::atomic::Ordering::Relaxed) {
@@ -3162,29 +3062,13 @@ async fn analyze_handler(
 
         let output_root = resolve_output_root(output_dir_bg.as_deref());
 
-        let project_label = if let (Some(repo), Some(refname)) = (
-            git_repo_bg.as_deref().filter(|s| !s.is_empty()),
-            git_ref_bg.as_deref().filter(|s| !s.is_empty()),
-        ) {
-            let repo_name = repo
-                .trim_end_matches('/')
-                .trim_end_matches(".git")
-                .rsplit('/')
-                .next()
-                .unwrap_or("repo");
-            sanitize_project_label(&format!("{repo_name}_{refname}"))
-        } else {
-            sanitize_project_label(&project_path_bg)
-        };
+        let project_label = derive_project_label(
+            git_repo_bg.as_deref(),
+            git_ref_bg.as_deref(),
+            &project_path_bg,
+        );
         let run_dir = output_root.join(format!("{project_label}_{run_id}"));
-        let file_stem = {
-            let commit = run.git_commit_short.as_deref().unwrap_or("").trim();
-            if commit.is_empty() {
-                project_label.clone()
-            } else {
-                format!("{project_label}_{commit}")
-            }
-        };
+        let file_stem = derive_file_stem(&project_label, run.git_commit_short.as_deref());
 
         let result_context = RunResultContext {
             prev_entry: prev_entry.clone(),
@@ -3319,6 +3203,64 @@ async fn analyze_handler(
         }
     }
     response
+}
+
+fn run_analysis_blocking(
+    mut config: AppConfig,
+    git_repo: Option<String>,
+    git_ref: Option<String>,
+    clones_dir: PathBuf,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(sloc_core::AnalysisRun, String)> {
+    if let (Some(repo), Some(refname)) = (git_repo, git_ref) {
+        let dest = git_clone_dest(&repo, &clones_dir);
+        sloc_git::clone_or_fetch(&repo, &dest)?;
+        let wt = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
+        sloc_git::create_worktree(&dest, &refname, &wt)?;
+        config.discovery.root_paths = vec![wt.clone()];
+        let run = analyze(&config, "serve", Some(&cancel));
+        let _ = sloc_git::destroy_worktree(&dest, &wt);
+        let mut run = run?;
+        if run.git_branch.is_none() {
+            run.git_branch = Some(refname);
+        }
+        let html = render_html(&run)?;
+        return Ok((run, html));
+    }
+    let run = analyze(&config, "serve", Some(&cancel))?;
+    let html = render_html(&run)?;
+    Ok((run, html))
+}
+
+fn derive_project_label(
+    git_repo: Option<&str>,
+    git_ref: Option<&str>,
+    fallback_path: &str,
+) -> String {
+    match (
+        git_repo.filter(|s| !s.is_empty()),
+        git_ref.filter(|s| !s.is_empty()),
+    ) {
+        (Some(repo), Some(refname)) => {
+            let repo_name = repo
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .rsplit('/')
+                .next()
+                .unwrap_or("repo");
+            sanitize_project_label(&format!("{repo_name}_{refname}"))
+        }
+        _ => sanitize_project_label(fallback_path),
+    }
+}
+
+fn derive_file_stem(project_label: &str, commit_short: Option<&str>) -> String {
+    let commit = commit_short.unwrap_or("").trim();
+    if commit.is_empty() {
+        project_label.to_string()
+    } else {
+        format!("{project_label}_{commit}")
+    }
 }
 
 // ── Async scan status + result handlers ──────────────────────────────────────
@@ -4059,54 +4001,53 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+async fn resolve_artifact_set(
+    state: &AppState,
+    run_id: &str,
+    csp_nonce: &str,
+) -> Result<RunArtifacts, Response> {
+    if let Some(a) = state.artifacts.lock().await.get(run_id).cloned() {
+        return Ok(a);
+    }
+    let reg = state.registry.lock().await;
+    if let Some(entry) = reg.find_by_run_id(run_id) {
+        return Ok(recover_artifacts_from_registry(entry));
+    }
+    let short_id = &run_id[..run_id.len().min(8)];
+    let hint = if matches!(
+        run_id,
+        "pdf" | "html" | "json" | "csv" | "xlsx" | "scan-config"
+    ) {
+        format!(
+            " The URL format appears to be reversed — \
+             the server expects /runs/{run_id}/{{run_id}}, not /runs/{{run_id}}/{run_id}. \
+             Use the View Reports page to navigate to your scan."
+        )
+    } else {
+        " The report may have been deleted or the report directory moved. \
+         Use View Reports to browse your scan history."
+            .to_string()
+    };
+    let error_html = ErrorTemplate {
+        message: format!("Report not found. \"{short_id}\" is not a recognized run ID.{hint}"),
+        last_report_url: Some("/view-reports".to_string()),
+        last_report_label: Some("View Reports".to_string()),
+        csp_nonce: csp_nonce.to_owned(),
+    }
+    .render()
+    .unwrap_or_else(|_| "<pre>Report not found.</pre>".to_string());
+    Err((StatusCode::NOT_FOUND, Html(error_html)).into_response())
+}
+
 async fn artifact_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     AxumPath((artifact, run_id)): AxumPath<(String, String)>,
     Query(query): Query<ArtifactQuery>,
 ) -> Response {
-    let artifact_set = {
-        let registry = state.artifacts.lock().await;
-        registry.get(&run_id).cloned()
-    };
-
-    // Fall back to the persisted registry when the server was restarted and the
-    // in-memory artifact map no longer holds the entry.
-    let artifact_set = if let Some(a) = artifact_set {
-        a
-    } else {
-        let reg = state.registry.lock().await;
-        if let Some(entry) = reg.find_by_run_id(&run_id) {
-            recover_artifacts_from_registry(entry)
-        } else {
-            let short_id = &run_id[..run_id.len().min(8)];
-            let hint = if matches!(
-                run_id.as_str(),
-                "pdf" | "html" | "json" | "csv" | "xlsx" | "scan-config"
-            ) {
-                format!(
-                    " The URL format appears to be reversed — \
-                     the server expects /runs/{run_id}/{{run_id}}, not /runs/{{run_id}}/{run_id}. \
-                     Use the View Reports page to navigate to your scan."
-                )
-            } else {
-                " The report may have been deleted or the report directory moved. \
-                 Use View Reports to browse your scan history."
-                    .to_string()
-            };
-            let error_html = ErrorTemplate {
-                message: format!(
-                    "Report not found. \"{short_id}\" is not a recognized run ID.{hint}"
-                ),
-                last_report_url: Some("/view-reports".to_string()),
-                last_report_label: Some("View Reports".to_string()),
-                csp_nonce: csp_nonce.clone(),
-            }
-            .render()
-            .unwrap_or_else(|_| "<pre>Report not found.</pre>".to_string());
-            return (StatusCode::NOT_FOUND, Html(error_html)).into_response();
-        }
+    let artifact_set = match resolve_artifact_set(&state, &run_id, &csp_nonce).await {
+        Ok(a) => a,
+        Err(r) => return r,
     };
 
     let wants_download = matches!(query.download.as_deref(), Some("1" | "true" | "yes"));
@@ -4735,6 +4676,53 @@ fn summary_delta(curr: u64, prev: Option<u64>) -> (String, &'static str) {
     )
 }
 
+#[allow(clippy::result_large_err)] // axum::Response is large by design; boxing would change the call pattern
+fn load_scan_for_compare(
+    json_path: &std::path::Path,
+    scan_label: &str,
+    run_id: &str,
+    server_mode: bool,
+    compare_url: &str,
+    csp_nonce: &str,
+) -> Result<sloc_core::AnalysisRun, axum::response::Response> {
+    match read_json(json_path) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            if server_mode {
+                let html = ErrorTemplate {
+                    message: format!(
+                        "Could not load {scan_label} scan data. The scan output folder may have \
+                         been moved, renamed, or deleted. Re-running the analysis will create \
+                         fresh comparison data."
+                    ),
+                    last_report_url: Some("/compare-scans".to_string()),
+                    last_report_label: Some("Compare Scans".to_string()),
+                    csp_nonce: csp_nonce.to_owned(),
+                }
+                .render()
+                .unwrap_or_else(|_| format!("<pre>{scan_label} load failed.</pre>"));
+                return Err((StatusCode::NOT_FOUND, Html(html)).into_response());
+            }
+            let msg = format!(
+                "Could not load {scan_label} scan data.\n\nExpected path: {}\n\nError: {e}",
+                json_path.display()
+            );
+            let folder_hint = json_path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            Err(missing_scan_relocate_response(
+                &msg,
+                run_id,
+                &folder_hint,
+                compare_url,
+                false,
+                csp_nonce,
+            ))
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn compare_handler(
     State(state): State<AppState>,
@@ -4811,92 +4799,40 @@ async fn compare_handler(
         baseline_entry.run_id, current_entry.run_id
     );
 
-    let baseline_run = match read_json(base_json) {
+    let baseline_run = match load_scan_for_compare(
+        base_json,
+        "baseline",
+        &baseline_entry.run_id,
+        state.server_mode,
+        &compare_url,
+        &csp_nonce,
+    ) {
         Ok(r) => r,
-        Err(e) => {
-            if state.server_mode {
-                let html = ErrorTemplate {
-                    message: "Could not load baseline scan data. The scan output folder may \
-                              have been moved, renamed, or deleted. Re-running the analysis \
-                              will create fresh comparison data."
-                        .to_string(),
-                    last_report_url: Some("/compare-scans".to_string()),
-                    last_report_label: Some("Compare Scans".to_string()),
-                    csp_nonce: csp_nonce.clone(),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>Baseline load failed.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
-            }
-            let msg = format!(
-                "Could not load baseline scan data.\n\nExpected path: {}\n\nError: {e}",
-                base_json.display()
-            );
-            let folder_hint = base_json
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            return missing_scan_relocate_response(
-                &msg,
-                &baseline_entry.run_id,
-                &folder_hint,
-                &compare_url,
-                false,
-                &csp_nonce,
-            );
-        }
+        Err(resp) => return resp,
     };
-    let current_run = match read_json(curr_json) {
+    let current_run = match load_scan_for_compare(
+        curr_json,
+        "current",
+        &current_entry.run_id,
+        state.server_mode,
+        &compare_url,
+        &csp_nonce,
+    ) {
         Ok(r) => r,
-        Err(e) => {
-            if state.server_mode {
-                let html = ErrorTemplate {
-                    message: "Could not load current scan data. The scan output folder may \
-                              have been moved, renamed, or deleted. Re-running the analysis \
-                              will create fresh comparison data."
-                        .to_string(),
-                    last_report_url: Some("/compare-scans".to_string()),
-                    last_report_label: Some("Compare Scans".to_string()),
-                    csp_nonce: csp_nonce.clone(),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>Current load failed.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
-            }
-            let msg = format!(
-                "Could not load current scan data.\n\nExpected path: {}\n\nError: {e}",
-                curr_json.display()
-            );
-            let folder_hint = curr_json
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            return missing_scan_relocate_response(
-                &msg,
-                &current_entry.run_id,
-                &folder_hint,
-                &compare_url,
-                false,
-                &csp_nonce,
-            );
-        }
+        Err(resp) => return resp,
     };
 
     let active_submodule = query.sub.clone();
     let super_scope_active = query.scope.as_deref() == Some("super");
 
-    // Build the union of submodule names present in either run so users can
-    // scope to a submodule even when it only exists in one of the two scans.
-    let submodule_options = {
-        let mut names = std::collections::BTreeSet::new();
-        for s in &baseline_run.submodule_summaries {
-            names.insert(s.name.clone());
-        }
-        for s in &current_run.submodule_summaries {
-            names.insert(s.name.clone());
-        }
-        names.into_iter().collect::<Vec<_>>()
-    };
+    let submodule_options = baseline_run
+        .submodule_summaries
+        .iter()
+        .chain(current_run.submodule_summaries.iter())
+        .map(|s| s.name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let has_any_submodule_data = !submodule_options.is_empty();
 
     // Narrow per_file_records when a scope is active, then recompute totals.
@@ -5416,6 +5352,71 @@ struct MetricsHistoryEntry {
     submodule_links: Vec<MetricsSubmoduleLink>,
 }
 
+fn build_entry_submodule_links(e: &sloc_core::history::RegistryEntry) -> Vec<MetricsSubmoduleLink> {
+    let mut links: Vec<MetricsSubmoduleLink> = vec![];
+    let sub_dir = e
+        .html_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .or_else(|| e.json_path.as_ref().and_then(|p| p.parent()));
+    let Some(dir) = sub_dir else { return links };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return links;
+    };
+    for entry_res in rd.flatten() {
+        let fname = entry_res.file_name();
+        let fname_str = fname.to_string_lossy();
+        if fname_str.starts_with("sub_") && fname_str.ends_with(".html") {
+            let stem = &fname_str[..fname_str.len() - 5];
+            let display = stem[4..].replace('-', " ");
+            links.push(MetricsSubmoduleLink {
+                name: display,
+                url: format!("/runs/{stem}/{}", e.run_id),
+            });
+        }
+    }
+    links.sort_by(|a, b| a.name.cmp(&b.name));
+    links
+}
+
+fn apply_submodule_filter(
+    base: MetricsHistoryEntry,
+    filter: &str,
+    e: &sloc_core::history::RegistryEntry,
+) -> Option<MetricsHistoryEntry> {
+    let json_path = e.json_path.as_ref()?;
+    let json_str = std::fs::read_to_string(json_path).ok()?;
+    let run: sloc_core::AnalysisRun = serde_json::from_str(&json_str).ok()?;
+    let sub = run
+        .submodule_summaries
+        .iter()
+        .find(|s| s.name.to_lowercase() == filter || s.relative_path.to_lowercase() == filter)?;
+    let safe = sanitize_project_label(&sub.name);
+    let artifact_key = format!("sub_{safe}");
+    let sub_html_url = std::path::Path::new(json_path).parent().map_or_else(
+        || base.html_url.clone(),
+        |run_dir| {
+            let sub_path = run_dir.join(format!("{artifact_key}.html"));
+            if sub_path.exists() {
+                Some(format!("/runs/{artifact_key}/{}", e.run_id))
+            } else {
+                base.html_url.clone()
+            }
+        },
+    );
+    Some(MetricsHistoryEntry {
+        code_lines: sub.code_lines,
+        comment_lines: sub.comment_lines,
+        blank_lines: sub.blank_lines,
+        physical_lines: sub.total_physical_lines,
+        files_analyzed: sub.files_analyzed,
+        html_url: sub_html_url,
+        has_pdf: false,
+        submodule_links: vec![],
+        ..base
+    })
+}
+
 #[allow(clippy::too_many_lines)] // history aggregation with per-run metric computation and JSON building
 async fn api_metrics_history_handler(
     State(state): State<AppState>,
@@ -5468,32 +5469,7 @@ async fn api_metrics_history_handler(
                 .chars()
                 .take(7)
                 .collect();
-            let submodule_links: Vec<MetricsSubmoduleLink> = {
-                let mut links: Vec<MetricsSubmoduleLink> = vec![];
-                let sub_dir = e
-                    .html_path
-                    .as_ref()
-                    .and_then(|p| p.parent())
-                    .or_else(|| e.json_path.as_ref().and_then(|p| p.parent()));
-                if let Some(dir) = sub_dir {
-                    if let Ok(rd) = std::fs::read_dir(dir) {
-                        for entry_res in rd.flatten() {
-                            let fname = entry_res.file_name();
-                            let fname_str = fname.to_string_lossy();
-                            if fname_str.starts_with("sub_") && fname_str.ends_with(".html") {
-                                let stem = &fname_str[..fname_str.len() - 5];
-                                let display = stem[4..].replace('-', " ");
-                                links.push(MetricsSubmoduleLink {
-                                    name: display,
-                                    url: format!("/runs/{stem}/{}", e.run_id),
-                                });
-                            }
-                        }
-                    }
-                }
-                links.sort_by(|a, b| a.name.cmp(&b.name));
-                links
-            };
+            let submodule_links = build_entry_submodule_links(&e);
             let base = MetricsHistoryEntry {
                 run_id: e.run_id.clone(),
                 run_id_short,
@@ -5515,37 +5491,7 @@ async fn api_metrics_history_handler(
                 submodule_links,
             };
             if let Some(ref filter) = submodule_filter {
-                // Read the full JSON artifact to get per-submodule metrics.
-                let json_path = e.json_path.as_ref()?;
-                let json_str = std::fs::read_to_string(json_path).ok()?;
-                let run: sloc_core::AnalysisRun = serde_json::from_str(&json_str).ok()?;
-                let sub = run.submodule_summaries.iter().find(|s| {
-                    s.name.to_lowercase() == *filter || s.relative_path.to_lowercase() == *filter
-                })?;
-                // Point the report link to the submodule sub-report if it was generated.
-                let safe = sanitize_project_label(&sub.name);
-                let artifact_key = format!("sub_{safe}");
-                let sub_html_url = if let Some(run_dir) = std::path::Path::new(json_path).parent() {
-                    let sub_path = run_dir.join(format!("{artifact_key}.html"));
-                    if sub_path.exists() {
-                        Some(format!("/runs/{artifact_key}/{}", e.run_id))
-                    } else {
-                        base.html_url.clone()
-                    }
-                } else {
-                    base.html_url.clone()
-                };
-                Some(MetricsHistoryEntry {
-                    code_lines: sub.code_lines,
-                    comment_lines: sub.comment_lines,
-                    blank_lines: sub.blank_lines,
-                    physical_lines: sub.total_physical_lines,
-                    files_analyzed: sub.files_analyzed,
-                    html_url: sub_html_url,
-                    has_pdf: false,
-                    submodule_links: vec![],
-                    ..base
-                })
+                apply_submodule_filter(base, filter, &e)
             } else {
                 Some(base)
             }
@@ -6858,10 +6804,94 @@ async fn trend_report_handler(
     Html(html).into_response()
 }
 
-#[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
-#[allow(clippy::too_many_lines)] // JSON data builder for test-metrics scope; splitting would scatter related fields
-fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
+fn compute_cov_pct_arr(per_file_records: &[sloc_core::FileRecord]) -> Vec<serde_json::Value> {
     use std::collections::HashMap;
+    if !per_file_records.iter().any(|f| f.coverage.is_some()) {
+        return vec![];
+    }
+    let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+    for rec in per_file_records {
+        if let (Some(lang), Some(cov)) = (rec.language, &rec.coverage) {
+            let e = totals.entry(lang.display_name().to_string()).or_default();
+            e.0 += u64::from(cov.lines_found);
+            e.1 += u64::from(cov.lines_hit);
+        }
+    }
+    let mut pairs: Vec<(String, f64)> = totals
+        .into_iter()
+        .filter(|(_, (found, _))| *found > 0)
+        .map(|(lang, (found, hit))| (lang, hit as f64 / found as f64 * 100.0))
+        .collect();
+    pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    pairs
+        .iter()
+        .map(|(lang, pct)| serde_json::json!({"lang": lang, "pct": (pct * 10.0).round() / 10.0}))
+        .collect()
+}
+
+fn compute_cov_tiers(per_file_records: &[sloc_core::FileRecord]) -> (u64, u64, u64) {
+    let mut high = 0u64;
+    let mut mid = 0u64;
+    let mut low = 0u64;
+    for rec in per_file_records {
+        if let Some(cov) = &rec.coverage {
+            if cov.lines_found == 0 {
+                continue;
+            }
+            let pct = f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0;
+            if pct >= 80.0 {
+                high += 1;
+            } else if pct >= 50.0 {
+                mid += 1;
+            } else {
+                low += 1;
+            }
+        }
+    }
+    (high, mid, low)
+}
+
+fn compute_file_cov_arr(per_file_records: &[sloc_core::FileRecord]) -> Vec<serde_json::Value> {
+    let mut arr: Vec<serde_json::Value> = per_file_records
+        .iter()
+        .filter_map(|rec| {
+            rec.coverage.as_ref().map(|cov| {
+                let line_pct = if cov.lines_found > 0 {
+                    (f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0 * 10.0).round()
+                        / 10.0
+                } else {
+                    0.0
+                };
+                let fn_pct = if cov.functions_found > 0 {
+                    (f64::from(cov.functions_hit) / f64::from(cov.functions_found) * 100.0 * 10.0)
+                        .round()
+                        / 10.0
+                } else {
+                    -1.0
+                };
+                serde_json::json!({
+                    "rel": rec.relative_path,
+                    "lang": rec.language.map_or("?", |l| l.display_name()),
+                    "line_pct": line_pct,
+                    "fn_pct": fn_pct,
+                    "lhit": cov.lines_hit,
+                    "lfound": cov.lines_found,
+                    "fhit": cov.functions_hit,
+                    "ffound": cov.functions_found,
+                })
+            })
+        })
+        .collect();
+    arr.sort_by(|a, b| {
+        let pa = a["line_pct"].as_f64().unwrap_or(0.0);
+        let pb = b["line_pct"].as_f64().unwrap_or(0.0);
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    arr
+}
+
+#[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
+fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
     let mut langs: Vec<&sloc_core::LanguageSummary> = run
         .totals_by_language
         .iter()
@@ -6881,47 +6911,8 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
                 "code": l.code_lines, "density": (d * 100.0).round() / 100.0, "files": l.files})
         })
         .collect();
-    let has_file_cov = run.per_file_records.iter().any(|f| f.coverage.is_some());
-    let cov_arr: Vec<serde_json::Value> = if has_file_cov {
-        let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
-        for rec in &run.per_file_records {
-            if let (Some(lang), Some(cov)) = (rec.language, &rec.coverage) {
-                let e = totals.entry(lang.display_name().to_string()).or_default();
-                e.0 += u64::from(cov.lines_found);
-                e.1 += u64::from(cov.lines_hit);
-            }
-        }
-        let mut pairs: Vec<(String, f64)> = totals
-            .into_iter()
-            .filter(|(_, (found, _))| *found > 0)
-            .map(|(lang, (found, hit))| (lang, hit as f64 / found as f64 * 100.0))
-            .collect();
-        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        pairs
-            .iter()
-            .map(
-                |(lang, pct)| serde_json::json!({"lang": lang, "pct": (pct * 10.0).round() / 10.0}),
-            )
-            .collect()
-    } else {
-        vec![]
-    };
-    let (mut high, mut mid, mut low) = (0u64, 0u64, 0u64);
-    for rec in &run.per_file_records {
-        if let Some(cov) = &rec.coverage {
-            if cov.lines_found == 0 {
-                continue;
-            }
-            let pct = f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0;
-            if pct >= 80.0 {
-                high += 1;
-            } else if pct >= 50.0 {
-                mid += 1;
-            } else {
-                low += 1;
-            }
-        }
-    }
+    let cov_arr = compute_cov_pct_arr(&run.per_file_records);
+    let (high, mid, low) = compute_cov_tiers(&run.per_file_records);
     let t = &run.summary_totals;
     let total_tests = t.test_count;
     let density = if t.code_lines > 0 {
@@ -6963,42 +6954,7 @@ fn build_test_scope_entry(run: &AnalysisRun) -> serde_json::Value {
         "0".to_string()
     };
     let has_cov = !cov_arr.is_empty();
-    let mut file_cov_arr: Vec<serde_json::Value> = run
-        .per_file_records
-        .iter()
-        .filter_map(|rec| {
-            rec.coverage.as_ref().map(|cov| {
-                let line_pct = if cov.lines_found > 0 {
-                    (f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0 * 10.0).round()
-                        / 10.0
-                } else {
-                    0.0
-                };
-                let fn_pct = if cov.functions_found > 0 {
-                    (f64::from(cov.functions_hit) / f64::from(cov.functions_found) * 100.0 * 10.0)
-                        .round()
-                        / 10.0
-                } else {
-                    -1.0
-                };
-                serde_json::json!({
-                    "rel": rec.relative_path,
-                    "lang": rec.language.map_or("?", |l| l.display_name()),
-                    "line_pct": line_pct,
-                    "fn_pct": fn_pct,
-                    "lhit": cov.lines_hit,
-                    "lfound": cov.lines_found,
-                    "fhit": cov.functions_hit,
-                    "ffound": cov.functions_found,
-                })
-            })
-        })
-        .collect();
-    file_cov_arr.sort_by(|a, b| {
-        let pa = a["line_pct"].as_f64().unwrap_or(0.0);
-        let pb = b["line_pct"].as_f64().unwrap_or(0.0);
-        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let file_cov_arr = compute_file_cov_arr(&run.per_file_records);
     serde_json::json!({
         "totals": {
             "test_count": total_tests,
@@ -7077,6 +7033,50 @@ fn build_test_scope_sub_entry(sub: &sloc_core::SubmoduleSummary) -> serde_json::
     })
 }
 
+fn compute_cov_json_str(run: &AnalysisRun) -> String {
+    use std::collections::HashMap;
+    let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+    for rec in &run.per_file_records {
+        if let (Some(lang), Some(cov)) = (rec.language, &rec.coverage) {
+            let e = totals.entry(lang.display_name().to_string()).or_default();
+            e.0 += u64::from(cov.lines_found);
+            e.1 += u64::from(cov.lines_hit);
+        }
+    }
+    let mut pairs: Vec<(String, f64)> = totals
+        .into_iter()
+        .filter(|(_, (found, _))| *found > 0)
+        .map(|(lang, (found, hit))| (lang, hit as f64 / found as f64 * 100.0))
+        .collect();
+    pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let parts: Vec<String> = pairs
+        .iter()
+        .map(|(lang, pct)| {
+            let name = lang.replace('"', "\\\"");
+            format!(r#"{{"lang":"{name}","pct":{pct:.1}}}"#)
+        })
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn compute_cov_tier_json_str(run: &AnalysisRun) -> String {
+    let (high, mid, low) = compute_cov_tiers(&run.per_file_records);
+    format!(r#"{{"high":{high},"mid":{mid},"low":{low}}}"#)
+}
+
+fn build_scope_entry_for_run(run: &AnalysisRun) -> serde_json::Value {
+    let mut entry = build_test_scope_entry(run);
+    if !run.submodule_summaries.is_empty() {
+        let subs: serde_json::Map<String, serde_json::Value> = run
+            .submodule_summaries
+            .iter()
+            .map(|sub| (sub.name.clone(), build_test_scope_sub_entry(sub)))
+            .collect();
+        entry["submodules"] = serde_json::Value::Object(subs);
+    }
+    entry
+}
+
 // GET /test-metrics
 #[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
 #[allow(clippy::too_many_lines)] // test-metrics page with inline HTML; splitting would fragment the template
@@ -7140,60 +7140,19 @@ async fn test_metrics_handler(
     );
 
     // Build coverage chart JSON (per-language avg line coverage %).
-    let cov_json: String = match &latest_run {
-        Some(r) if r.per_file_records.iter().any(|f| f.coverage.is_some()) => {
-            use std::collections::HashMap;
-            let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
-            for rec in &r.per_file_records {
-                if let (Some(lang), Some(cov)) = (rec.language, &rec.coverage) {
-                    let e = totals.entry(lang.display_name().to_string()).or_default();
-                    e.0 += u64::from(cov.lines_found);
-                    e.1 += u64::from(cov.lines_hit);
-                }
-            }
-            let mut pairs: Vec<(String, f64)> = totals
-                .into_iter()
-                .filter(|(_, (found, _))| *found > 0)
-                .map(|(lang, (found, hit))| (lang, hit as f64 / found as f64 * 100.0))
-                .collect();
-            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let parts: Vec<String> = pairs
-                .iter()
-                .map(|(lang, pct)| {
-                    let name = lang.replace('"', "\\\"");
-                    format!(r#"{{"lang":"{name}","pct":{pct:.1}}}"#)
-                })
-                .collect();
-            format!("[{}]", parts.join(","))
-        }
-        _ => "[]".to_string(),
-    };
+    let cov_json: String = latest_run
+        .as_ref()
+        .filter(|r| r.per_file_records.iter().any(|f| f.coverage.is_some()))
+        .map_or_else(|| "[]".to_string(), compute_cov_json_str);
 
     // Coverage tier distribution (pre-computed into SCOPE_DATA; unused as format arg).
-    let _cov_tier_json: String = match &latest_run {
-        Some(r) if r.per_file_records.iter().any(|f| f.coverage.is_some()) => {
-            let mut high = 0u64; // >= 80%
-            let mut mid = 0u64; // 50-79%
-            let mut low = 0u64; // < 50%
-            for rec in &r.per_file_records {
-                if let Some(cov) = &rec.coverage {
-                    if cov.lines_found == 0 {
-                        continue;
-                    }
-                    let pct = f64::from(cov.lines_hit) / f64::from(cov.lines_found) * 100.0;
-                    if pct >= 80.0 {
-                        high += 1;
-                    } else if pct >= 50.0 {
-                        mid += 1;
-                    } else {
-                        low += 1;
-                    }
-                }
-            }
-            format!(r#"{{"high":{high},"mid":{mid},"low":{low}}}"#)
-        }
-        _ => r#"{"high":0,"mid":0,"low":0}"#.to_string(),
-    };
+    let _cov_tier_json: String = latest_run
+        .as_ref()
+        .filter(|r| r.per_file_records.iter().any(|f| f.coverage.is_some()))
+        .map_or_else(
+            || r#"{"high":0,"mid":0,"low":0}"#.to_string(),
+            compute_cov_tier_json_str,
+        );
 
     let total_tests: u64 = latest_run
         .as_ref()
@@ -7369,16 +7328,7 @@ async fn test_metrics_handler(
                     .and_then(|s| serde_json::from_str(s).ok())
             };
             if let Some(ref run) = run_for_root {
-                let mut root_entry = build_test_scope_entry(run);
-                if !run.submodule_summaries.is_empty() {
-                    let subs: serde_json::Map<String, serde_json::Value> = run
-                        .submodule_summaries
-                        .iter()
-                        .map(|sub| (sub.name.clone(), build_test_scope_sub_entry(sub)))
-                        .collect();
-                    root_entry["submodules"] = serde_json::Value::Object(subs);
-                }
-                scope_map.insert(root.clone(), root_entry);
+                scope_map.insert(root.clone(), build_scope_entry_for_run(run));
             }
         }
         serde_json::to_string(&scope_map).unwrap_or_else(|_| "{}".to_string())
@@ -8861,6 +8811,98 @@ fn format_dir_size(bytes: u64) -> String {
     }
 }
 
+fn render_submodule_chips(
+    root: &Path,
+    submodules: &[(String, std::path::PathBuf)],
+    out: &mut String,
+) {
+    use std::fmt::Write as _;
+    let count = submodules.len();
+    out.push_str(r#"<div class="submodule-preview-strip">"#);
+    write!(
+        out,
+        r#"<div class="submodule-preview-label"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="6" cy="6" r="3"/></svg><strong>{count}</strong>&nbsp;git&nbsp;submodule{}&nbsp;detected</div>"#,
+        if count == 1 { "" } else { "s" }
+    )
+    .ok();
+    out.push_str(r#"<div class="submodule-preview-chips">"#);
+    for (sub_name, sub_rel_path) in submodules {
+        let sub_abs = root.join(sub_rel_path);
+        let sub_size = format_dir_size(dir_size_bytes(&sub_abs));
+        let mut sub_stats = PreviewStats::default();
+        let mut sub_rows: Vec<PreviewRow> = Vec::new();
+        let mut sub_langs: Vec<&'static str> = Vec::new();
+        let mut sub_budget = PreviewBudget {
+            shown: 0,
+            max_entries: 2000,
+            max_depth: 9,
+        };
+        let mut sub_next_id = 1usize;
+        let _ = collect_preview_rows(
+            &sub_abs,
+            &sub_abs,
+            0,
+            None,
+            &mut sub_next_id,
+            &mut sub_budget,
+            &mut sub_stats,
+            &mut sub_rows,
+            &mut sub_langs,
+            &[],
+            &[],
+        );
+        let stats_json = format!(
+            r#"{{"dirs":{},"files":{},"supported":{},"skipped":{},"unsupported":{}}}"#,
+            sub_stats.directories,
+            sub_stats.files,
+            sub_stats.supported,
+            sub_stats.skipped,
+            sub_stats.unsupported
+        );
+        write!(
+            out,
+            r#"<button type="button" class="submodule-preview-chip" data-sub-name="{}" data-sub-path="{}" data-size="{}" data-sub-stats="{}">{}<span class="submodule-chip-tooltip">Size: {}</span></button>"#,
+            escape_html(sub_name),
+            escape_html(&sub_rel_path.to_string_lossy()),
+            escape_html(&sub_size),
+            escape_html(&stats_json),
+            escape_html(sub_name),
+            escape_html(&sub_size),
+        )
+        .ok();
+    }
+    out.push_str(
+        r#"</div><button type="button" class="submodule-base-repo-btn" style="display:none">&#8593; Base repo</button>"#,
+    );
+    out.push_str(r"</div>");
+}
+
+fn render_language_pills_row(languages: &[&str], out: &mut String) {
+    use std::fmt::Write as _;
+    if languages.is_empty() {
+        out.push_str(
+            r#"<span class="language-pill muted-pill">No supported languages detected yet</span>"#,
+        );
+        return;
+    }
+    out.push_str(r#"<button type="button" class="language-pill detected-language-chip active" data-language-filter=""><span>All languages</span></button>"#);
+    for language in languages {
+        if let Some(icon) = language_icon_file(language) {
+            write!(out, r#"<button type="button" class="language-pill has-icon detected-language-chip" data-language-filter="{}"><img src="/images/icons/{}" alt="{} icon" /><span>{}</span></button>"#, escape_html(&language.to_ascii_lowercase()), icon, escape_html(language), escape_html(language)).ok();
+        } else if let Some(svg) = language_inline_svg(language) {
+            write!(out, r#"<button type="button" class="language-pill has-icon detected-language-chip" data-language-filter="{}">{}<span>{}</span></button>"#, escape_html(&language.to_ascii_lowercase()), svg, escape_html(language)).ok();
+        } else {
+            write!(
+                out,
+                r#"<button type="button" class="language-pill detected-language-chip" data-language-filter="{}">{}</button>"#,
+                escape_html(&language.to_ascii_lowercase()),
+                escape_html(language)
+            )
+            .ok();
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_preview_html(
     root: &Path,
@@ -8946,89 +8988,12 @@ fn build_preview_html(
 
     let submodules = sloc_core::detect_submodules(root);
     if !submodules.is_empty() {
-        let count = submodules.len();
-        out.push_str(r#"<div class="submodule-preview-strip">"#);
-        write!(
-            out,
-            r#"<div class="submodule-preview-label"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="6" cy="6" r="3"/></svg><strong>{}</strong>&nbsp;git&nbsp;submodule{}&nbsp;detected</div>"#,
-            count,
-            if count == 1 { "" } else { "s" }
-        )
-        .ok();
-        out.push_str(r#"<div class="submodule-preview-chips">"#);
-        for (sub_name, sub_rel_path) in &submodules {
-            let sub_abs = root.join(sub_rel_path);
-            let sub_size = format_dir_size(dir_size_bytes(&sub_abs));
-            let mut sub_stats = PreviewStats::default();
-            let mut sub_rows: Vec<PreviewRow> = Vec::new();
-            let mut sub_langs: Vec<&'static str> = Vec::new();
-            let mut sub_budget = PreviewBudget {
-                shown: 0,
-                max_entries: 2000,
-                max_depth: 9,
-            };
-            let mut sub_next_id = 1usize;
-            let _ = collect_preview_rows(
-                &sub_abs,
-                &sub_abs,
-                0,
-                None,
-                &mut sub_next_id,
-                &mut sub_budget,
-                &mut sub_stats,
-                &mut sub_rows,
-                &mut sub_langs,
-                &[],
-                &[],
-            );
-            let stats_json = format!(
-                r#"{{"dirs":{},"files":{},"supported":{},"skipped":{},"unsupported":{}}}"#,
-                sub_stats.directories,
-                sub_stats.files,
-                sub_stats.supported,
-                sub_stats.skipped,
-                sub_stats.unsupported
-            );
-            write!(
-                out,
-                r#"<button type="button" class="submodule-preview-chip" data-sub-name="{}" data-sub-path="{}" data-size="{}" data-sub-stats="{}">{}<span class="submodule-chip-tooltip">Size: {}</span></button>"#,
-                escape_html(sub_name),
-                escape_html(&sub_rel_path.to_string_lossy()),
-                escape_html(&sub_size),
-                escape_html(&stats_json),
-                escape_html(sub_name),
-                escape_html(&sub_size),
-            )
-            .ok();
-        }
-        out.push_str(r#"</div><button type="button" class="submodule-base-repo-btn" style="display:none">&#8593; Base repo</button>"#);
-        out.push_str(r"</div>");
+        render_submodule_chips(root, &submodules, &mut out);
     }
 
     out.push_str(r#"<div class="scope-info-row">"#);
     out.push_str(r#"<div class="explorer-language-strip"><div class="meta-label">Detected languages</div><div class="language-pill-row iconified">"#);
-    if languages.is_empty() {
-        out.push_str(
-            r#"<span class="language-pill muted-pill">No supported languages detected yet</span>"#,
-        );
-    } else {
-        out.push_str(r#"<button type="button" class="language-pill detected-language-chip active" data-language-filter=""><span>All languages</span></button>"#);
-        for language in &languages {
-            if let Some(icon) = language_icon_file(language) {
-                write!(out, r#"<button type="button" class="language-pill has-icon detected-language-chip" data-language-filter="{}"><img src="/images/icons/{}" alt="{} icon" /><span>{}</span></button>"#, escape_html(&language.to_ascii_lowercase()), icon, escape_html(language), escape_html(language)).ok();
-            } else if let Some(svg) = language_inline_svg(language) {
-                write!(out, r#"<button type="button" class="language-pill has-icon detected-language-chip" data-language-filter="{}">{}<span>{}</span></button>"#, escape_html(&language.to_ascii_lowercase()), svg, escape_html(language)).ok();
-            } else {
-                write!(
-                    out,
-                    r#"<button type="button" class="language-pill detected-language-chip" data-language-filter="{}">{}</button>"#,
-                    escape_html(&language.to_ascii_lowercase()),
-                    escape_html(language)
-                )
-                .ok();
-            }
-        }
-    }
+    render_language_pills_row(&languages, &mut out);
     out.push_str(r"</div></div>");
     out.push_str(r#"<div class="preview-note stronger">This preview is generated before the run starts. It shows what is currently supported, what default policies skip, and which files are outside the enabled analyzer set for this build.</div>"#);
     out.push_str(r"</div>");
@@ -12500,7 +12465,7 @@ struct IndexTemplate {
     @keyframes titleReveal{to{clip-path:inset(0 0% 0 0);}}
     @keyframes titleShimmer{0%{background-position:0% center;}100%{background-position:200% center;}}
     body.dark-theme .hero-title{background:linear-gradient(90deg,#d37a4c 0%,#f0a070 25%,#9bb8ff 50%,#d37a4c 75%,#f0a070 100%);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
-    .hero-subtitle{font-size:15px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:2.5em;opacity:0;}
+    .hero-subtitle{font-size:15px;color:var(--muted);line-height:1.55;max-width:600px;margin:0 auto;min-height:3.2em;opacity:0;}
     .hero-cursor{display:inline-block;width:2px;height:0.9em;background:var(--oxide);vertical-align:text-bottom;margin-left:1px;border-radius:1px;animation:cursorBlink 0.72s step-end infinite;}
     @keyframes cursorBlink{0%,100%{opacity:1;}50%{opacity:0;}}
     .card-sections{display:flex;flex-direction:column;gap:25px;margin:0 0 16px;}
@@ -12603,7 +12568,7 @@ struct IndexTemplate {
       .hero-logo{width:54px;height:60px;}
       .hero-logo-shadow{width:42px;}
       .hero-title{font-size:28px;}
-      .hero-subtitle{font-size:13px;min-height:2em;}
+      .hero-subtitle{font-size:13px;}
       .card-sections{gap:16px;margin-bottom:10px;}
       .card-section-grid-2,.card-section-grid-3{gap:10px;}
       .action-card{padding:8px 15px 8px;}
@@ -12625,7 +12590,7 @@ struct IndexTemplate {
       .hero{margin-bottom:6px;}
       .hero-logo{width:42px;height:46px;}
       .hero-title{font-size:22px;}
-      .hero-subtitle{font-size:12px;min-height:1.6em;}
+      .hero-subtitle{font-size:12px;}
       .card-sections{gap:10px;}
       .action-card-desc{margin-bottom:4px;}
       .divider{margin:8px 0;}

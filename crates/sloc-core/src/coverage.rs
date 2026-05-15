@@ -285,84 +285,84 @@ fn cobertura_scan_methods(class_block: &str) -> (u32, u32) {
 #[must_use]
 pub fn parse_jacoco(content: &str) -> HashMap<PathBuf, FileCoverage> {
     let mut result: HashMap<PathBuf, FileCoverage> = HashMap::new();
-
     let mut scan = content;
     while let Some(pkg_start) = scan.find("<package ") {
         scan = &scan[pkg_start + 9..];
         let pkg_name = extract_attr(scan, "name").unwrap_or_default();
         let pkg_end = scan.find("</package>").unwrap_or(scan.len());
-        let pkg_block = &scan[..pkg_end];
-
-        let mut sf_scan = pkg_block;
-        while let Some(sf_start) = sf_scan.find("<sourcefile ") {
-            sf_scan = &sf_scan[sf_start + 12..];
-            let Some(sf_name) = extract_attr(sf_scan, "name") else {
-                continue;
-            };
-            let sf_end = sf_scan.find("</sourcefile>").unwrap_or(sf_scan.len());
-            let sf_block = &sf_scan[..sf_end];
-
-            let mut lines_found: u32 = 0;
-            let mut lines_hit: u32 = 0;
-            let mut fn_found: u32 = 0;
-            let mut fn_hit: u32 = 0;
-            let mut br_found: u32 = 0;
-            let mut br_hit: u32 = 0;
-
-            let mut cscan = sf_block;
-            while let Some(cpos) = cscan.find("<counter ") {
-                cscan = &cscan[cpos + 9..];
-                let ctype = extract_attr(cscan, "type").unwrap_or_default();
-                let missed: u32 = extract_attr(cscan, "missed")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                let covered: u32 = extract_attr(cscan, "covered")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                match ctype.as_str() {
-                    "LINE" => {
-                        lines_found = missed + covered;
-                        lines_hit = covered;
-                    }
-                    "METHOD" => {
-                        fn_found = missed + covered;
-                        fn_hit = covered;
-                    }
-                    "BRANCH" => {
-                        br_found = missed + covered;
-                        br_hit = covered;
-                    }
-                    _ => {}
-                }
-            }
-
-            let path = if pkg_name.is_empty() {
-                PathBuf::from(&sf_name)
-            } else {
-                PathBuf::from(format!("{pkg_name}/{sf_name}"))
-            };
-
-            result.insert(
-                path,
-                FileCoverage {
-                    lines_found,
-                    lines_hit,
-                    functions_found: fn_found,
-                    functions_hit: fn_hit,
-                    branches_found: br_found,
-                    branches_hit: br_hit,
-                },
-            );
-        }
-
+        parse_jacoco_package(&scan[..pkg_end], &pkg_name, &mut result);
         if pkg_end < scan.len() {
             scan = &scan[pkg_end..];
         } else {
             break;
         }
     }
-
     result
+}
+
+fn parse_jacoco_package(
+    pkg_block: &str,
+    pkg_name: &str,
+    result: &mut HashMap<PathBuf, FileCoverage>,
+) {
+    let mut sf_scan = pkg_block;
+    while let Some(sf_start) = sf_scan.find("<sourcefile ") {
+        sf_scan = &sf_scan[sf_start + 12..];
+        let Some(sf_name) = extract_attr(sf_scan, "name") else {
+            continue;
+        };
+        let sf_end = sf_scan.find("</sourcefile>").unwrap_or(sf_scan.len());
+        let cov = parse_jacoco_counters(&sf_scan[..sf_end]);
+        let path = if pkg_name.is_empty() {
+            PathBuf::from(&sf_name)
+        } else {
+            PathBuf::from(format!("{pkg_name}/{sf_name}"))
+        };
+        result.insert(path, cov);
+    }
+}
+
+fn parse_jacoco_counters(sf_block: &str) -> FileCoverage {
+    let mut lines_found: u32 = 0;
+    let mut lines_hit: u32 = 0;
+    let mut fn_found: u32 = 0;
+    let mut fn_hit: u32 = 0;
+    let mut br_found: u32 = 0;
+    let mut br_hit: u32 = 0;
+    let mut cscan = sf_block;
+    while let Some(cpos) = cscan.find("<counter ") {
+        cscan = &cscan[cpos + 9..];
+        let ctype = extract_attr(cscan, "type").unwrap_or_default();
+        let missed: u32 = extract_attr(cscan, "missed")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let covered: u32 = extract_attr(cscan, "covered")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        match ctype.as_str() {
+            "LINE" => {
+                lines_found = missed + covered;
+                lines_hit = covered;
+            }
+            "METHOD" => {
+                fn_found = missed + covered;
+                fn_hit = covered;
+            }
+            "BRANCH" => {
+                br_found = missed + covered;
+                br_hit = covered;
+            }
+            _ => {}
+        }
+    }
+    FileCoverage {
+        lines_found,
+        lines_hit,
+        functions_found: fn_found,
+        functions_hit: fn_hit,
+        branches_found: br_found,
+        branches_hit: br_hit,
+    }
 }
 
 /// Parse an Istanbul/NYC `coverage-summary.json` file into a per-file coverage map.

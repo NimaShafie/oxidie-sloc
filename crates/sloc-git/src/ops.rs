@@ -39,12 +39,9 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
 #[must_use]
 pub fn normalize_git_url(raw: &str) -> String {
     let url = raw.trim();
-
-    // SSH URLs are already clonable — git handles `git@host:path` natively.
     if url.starts_with("git@") || url.starts_with("ssh://") {
         return url.to_owned();
     }
-
     let scheme = if url.starts_with("https://") {
         "https"
     } else if url.starts_with("http://") {
@@ -52,8 +49,7 @@ pub fn normalize_git_url(raw: &str) -> String {
     } else {
         return url.to_owned();
     };
-
-    let authority_and_path = &url[scheme.len() + 3..]; // strip "scheme://"
+    let authority_and_path = &url[scheme.len() + 3..];
     let (host, path) = authority_and_path
         .find('/')
         .map_or((authority_and_path, "/"), |i| {
@@ -61,67 +57,75 @@ pub fn normalize_git_url(raw: &str) -> String {
         });
     let path = path.trim_end_matches('/');
 
-    // ── Bitbucket Server / Data Center ────────────────────────────────────────
-    // Browse URL: /{context}/projects/{PROJECT}/repos/{REPO}[/...]
-    // Clone URL:  /{context}/scm/{project_lower}/{repo}.git
-    // The Bitbucket context path defaults to "" (root) but some deployments use
-    // a prefix (e.g. /bitbucket). We preserve whatever prefix precedes /projects/.
+    try_normalize_bitbucket_server(scheme, host, path)
+        .or_else(|| try_normalize_gitlab(scheme, host, path))
+        .or_else(|| try_normalize_github(scheme, host, path))
+        .or_else(|| try_normalize_bitbucket_cloud(scheme, host, path))
+        .unwrap_or_else(|| url.to_owned())
+}
+
+// ── Bitbucket Server / Data Center ────────────────────────────────────────────
+// Browse URL: /{context}/projects/{PROJECT}/repos/{REPO}[/...]
+// Clone URL:  /{context}/scm/{project_lower}/{repo}.git
+fn try_normalize_bitbucket_server(scheme: &str, host: &str, path: &str) -> Option<String> {
+    let path_lower = path.to_lowercase();
+    let proj_pos = path_lower.find("/projects/")?;
+    let after = &path[proj_pos + "/projects/".len()..];
+    let parts: Vec<&str> = after.splitn(4, '/').collect();
+    if parts.len() < 3 || !parts[1].eq_ignore_ascii_case("repos") {
+        return None;
+    }
+    let context = &path[..proj_pos];
+    let project = parts[0].to_lowercase();
+    let repo = parts[2].trim_end_matches(".git");
+    Some(format!(
+        "{scheme}://{host}{context}/scm/{project}/{repo}.git"
+    ))
+}
+
+// ── GitLab (any host) ─────────────────────────────────────────────────────────
+// Browse URL: /path/to/repo/-/tree/branch  →  Clone URL: /path/to/repo.git
+fn try_normalize_gitlab(scheme: &str, host: &str, path: &str) -> Option<String> {
+    let idx = path.find("/-/")?;
+    let repo_path = path[..idx].trim_end_matches(".git");
+    Some(format!("{scheme}://{host}{repo_path}.git"))
+}
+
+// ── GitHub ────────────────────────────────────────────────────────────────────
+// Browse URL: github.com/{owner}/{repo}/{tree|blob|...}/...
+fn try_normalize_github(scheme: &str, host: &str, path: &str) -> Option<String> {
+    if host != "github.com" && !host.ends_with(".github.com") {
+        return None;
+    }
+    let p = path.trim_start_matches('/');
+    let parts: Vec<&str> = p.splitn(4, '/').collect();
+    if parts.len() < 3
+        || !matches!(
+            parts[2],
+            "tree" | "blob" | "commits" | "commit" | "releases" | "tags" | "branches"
+        )
     {
-        let path_lower = path.to_lowercase();
-        if let Some(proj_pos) = path_lower.find("/projects/") {
-            let after = &path[proj_pos + "/projects/".len()..];
-            let parts: Vec<&str> = after.splitn(4, '/').collect();
-            // parts[0] = PROJECT_KEY, parts[1] = "repos", parts[2] = REPO, parts[3] = rest
-            if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("repos") {
-                let context = &path[..proj_pos]; // e.g. "" or "/bitbucket"
-                let project = parts[0].to_lowercase();
-                let repo = parts[2].trim_end_matches(".git");
-                return format!("{scheme}://{host}{context}/scm/{project}/{repo}.git");
-            }
-        }
+        return None;
     }
+    let owner = parts[0];
+    let repo = parts[1].trim_end_matches(".git");
+    Some(format!("{scheme}://{host}/{owner}/{repo}.git"))
+}
 
-    // ── GitLab (any host) ─────────────────────────────────────────────────────
-    // Browse URL: /path/to/repo/-/tree/branch
-    // Clone URL:  /path/to/repo.git
-    if let Some(idx) = path.find("/-/") {
-        let repo_path = &path[..idx];
-        let repo_path = repo_path.trim_end_matches(".git");
-        return format!("{scheme}://{host}{repo_path}.git");
+// ── Bitbucket Cloud ───────────────────────────────────────────────────────────
+// Browse URL: bitbucket.org/{workspace}/{repo}/src/...
+fn try_normalize_bitbucket_cloud(scheme: &str, host: &str, path: &str) -> Option<String> {
+    if host != "bitbucket.org" {
+        return None;
     }
-
-    // ── GitHub ────────────────────────────────────────────────────────────────
-    // Browse URL: github.com/{owner}/{repo}/{tree|blob|...}/...
-    // Clone URL:  github.com/{owner}/{repo}.git
-    if host == "github.com" || host.ends_with(".github.com") {
-        let p = path.trim_start_matches('/');
-        let parts: Vec<&str> = p.splitn(4, '/').collect();
-        if parts.len() >= 3
-            && matches!(
-                parts[2],
-                "tree" | "blob" | "commits" | "commit" | "releases" | "tags" | "branches"
-            )
-        {
-            let owner = parts[0];
-            let repo = parts[1].trim_end_matches(".git");
-            return format!("{scheme}://{host}/{owner}/{repo}.git");
-        }
+    let p = path.trim_start_matches('/');
+    let parts: Vec<&str> = p.splitn(4, '/').collect();
+    if parts.len() < 3 || parts[2] != "src" {
+        return None;
     }
-
-    // ── Bitbucket Cloud ───────────────────────────────────────────────────────
-    // Browse URL: bitbucket.org/{workspace}/{repo}/src/...
-    // Clone URL:  bitbucket.org/{workspace}/{repo}.git
-    if host == "bitbucket.org" {
-        let p = path.trim_start_matches('/');
-        let parts: Vec<&str> = p.splitn(4, '/').collect();
-        if parts.len() >= 3 && parts[2] == "src" {
-            let ws = parts[0];
-            let repo = parts[1].trim_end_matches(".git");
-            return format!("{scheme}://{host}/{ws}/{repo}.git");
-        }
-    }
-
-    url.to_owned()
+    let ws = parts[0];
+    let repo = parts[1].trim_end_matches(".git");
+    Some(format!("{scheme}://{host}/{ws}/{repo}.git"))
 }
 
 // ── clone / fetch ─────────────────────────────────────────────────────────────
