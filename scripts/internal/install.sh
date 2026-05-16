@@ -74,29 +74,54 @@ print_log_link() {
     printf '  \033]8;;%s\033\\Click to open log\033]8;;\033\\\n' "$url"
 }
 
-
-# Offer to import sloc-ca.crt into the current user's Windows trust store.
-# Uses PowerShell X509Store API — no Administrator rights required, no GUI dialog.
+# Import sloc-ca.crt into CurrentUser\Root via a direct registry write.
+# The standard X509Store API always triggers a Windows Security Warning dialog for root
+# certificates; writing the backing registry key directly bypasses it — no dialog, no Admin.
 trust_ca_cert() {
     [[ "$PLATFORM" != windows ]] && return 0
     local cert="$REPO_ROOT/certs/sloc-ca.crt"
     [[ -f "$cert" ]] || return 0
     local cert_win
     cert_win="$(cygpath -w "$cert" 2>/dev/null || echo "$cert")"
-    # Skip silently if already trusted
-    if certutil -user -verifystore Root "OxideSLOC Root CA" &>/dev/null 2>&1; then
-        return 0
-    fi
-    echo " Trusting oxide-sloc signing certificate (current user, no Admin required)..."
-    # X509Store.Add() via .NET imports into CurrentUser\Root without a confirmation dialog,
-    # unlike certutil -addstore which always pops a Windows Security Warning for root certs.
-    local ps_script="\$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('${cert_win}'); \$store = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root','CurrentUser'); \$store.Open('ReadWrite'); \$store.Add(\$cert); \$store.Close()"
-    if powershell.exe -NoProfile -NonInteractive -Command "$ps_script" &>/dev/null 2>&1; then
-        echo " [OK] Certificate trusted. Signed binaries will verify without internet."
-    else
-        echo " [WARN] Certificate import failed. To trust manually (no Admin needed):"
-        echo "        certutil -user -addstore Root certs/sloc-ca.crt"
-    fi
+
+    echo " Trusting oxide-sloc signing certificate (current user, no dialog)..."
+
+    local ps_result
+    ps_result="$(powershell.exe -NoProfile -NonInteractive -Command "
+\$certPath = '${cert_win}'
+\$cert    = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(\$certPath)
+\$thumb   = \$cert.Thumbprint
+\$regPath = \"HKCU:\SOFTWARE\Microsoft\SystemCertificates\Root\Certificates\\\$thumb\"
+
+if (Test-Path \$regPath) { Write-Output 'ALREADY_TRUSTED'; exit 0 }
+
+# Blob: propCount(4) + propId=20(4) + reserved(4) + derLen(4) + derBytes(N)
+\$der  = \$cert.RawData
+\$blob = [byte[]]::new(16 + \$der.Length)
+\$pos  = 0
+[System.BitConverter]::GetBytes([uint32]1 ).CopyTo(\$blob, \$pos); \$pos += 4
+[System.BitConverter]::GetBytes([uint32]20).CopyTo(\$blob, \$pos); \$pos += 4
+[System.BitConverter]::GetBytes([uint32]0 ).CopyTo(\$blob, \$pos); \$pos += 4
+[System.BitConverter]::GetBytes([uint32]\$der.Length).CopyTo(\$blob, \$pos); \$pos += 4
+\$der.CopyTo(\$blob, \$pos)
+
+New-Item -Path \$regPath -Force | Out-Null
+Set-ItemProperty -Path \$regPath -Name 'Blob' -Value \$blob -Type Binary
+Write-Output 'IMPORTED'
+" 2>/dev/null)" || true
+
+    case "$ps_result" in
+        ALREADY_TRUSTED)
+            echo " [OK] Certificate already trusted — skipping."
+            ;;
+        IMPORTED)
+            echo " [OK] Certificate trusted silently. Authenticode verification enabled."
+            ;;
+        *)
+            echo " [WARN] Certificate import via registry failed. To trust manually (no Admin needed):"
+            echo "        certutil -user -addstore Root certs/sloc-ca.crt"
+            ;;
+    esac
 }
 
 # Runs `cargo build --release --offline -p oxide-sloc` with an animated progress display.

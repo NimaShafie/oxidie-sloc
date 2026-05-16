@@ -37,19 +37,33 @@ Each section maps to one Jenkins screen.
 | Agent OS | Linux (x86_64) — the Rust toolchain and shell scripts require bash |
 | Disk space | ~2 GB free on the agent: 400 MB toolchain + vendor archive + build output |
 | Git | Must be on the agent's `PATH` |
-| Internet access | Needed during initial plugin and toolchain install; optional afterward (air-gapped path documented in `docs/ci-integrations.md`) |
+| Internet access | Required to install Jenkins (Options B/C/D) and download plugins (Step 4 Option B). Not needed after `git clone` if `jenkins-plugins.tar.xz` is committed to the repo (Options A and E). |
 
 ---
 
 ## 2. Install Jenkins
 
-> **Air-gapped / recommended path:** Use the pre-built controller Docker image
-> (Option A below) which has all plugins bundled from `jenkins-plugins.tar.xz`.
-> Once that archive is generated and committed, no internet access is needed and
-> no manual plugin installation is required.  Skip ahead to
-> [Step 3](#3-complete-the-setup-wizard) after starting the container.
+**Which option for your setup?**
 
-### Option A — Bundled controller image (air-gapped, recommended)
+| Scenario | Option |
+|----------|--------|
+| Fully online — no restrictions | B, C, or D |
+| Online but no Docker | C or D |
+| Air-gapped with Docker | A |
+| Air-gapped without Docker | E |
+| Air-gapped, no networked machine, no Docker | E (requires `jenkins-plugins.tar.xz` committed to repo) |
+
+> **Options A & E pre-requisite:** `jenkins-plugins.tar.xz` must be committed to the
+> repository root.  Run `bash ci/jenkins/bundle-jenkins-plugins.sh` once on a networked
+> + Docker machine, then commit both output files:
+> ```bash
+> git add jenkins-plugins.tar.xz jenkins-plugins.tar.xz.sha256
+> git commit -m "ci: bundle Jenkins plugins for air-gapped install"
+> ```
+> After that one-time step, a plain `git clone` is all any air-gapped host needs —
+> no internet, no Docker, no separate download step.
+
+### Option A — Bundled controller image (air-gapped, Docker)
 
 This image is built from `ci/jenkins/Dockerfile.controller` and has every required
 plugin installed from `jenkins-plugins.tar.xz` bundled into the archive.
@@ -128,6 +142,29 @@ sudo yum install -y jenkins && sudo systemctl start jenkins
 bash ci/jenkins/install-jenkins-plugins.sh --restart
 ```
 
+### Option E — Native package, air-gapped (no Docker)
+
+For hosts with no internet access and no Docker.  Requires `jenkins-plugins.tar.xz`
+committed to the repository root (see the pre-requisite note at the top of this section).
+
+Install Jenkins via your local package mirror (substitute the mirror URL for the
+public `pkg.jenkins.io` URL in Option C or D), then install plugins from the committed
+archive:
+
+```bash
+# From the repository root on the Jenkins host:
+bash ci/jenkins/install-jenkins-plugins.sh --restart
+```
+
+`install-jenkins-plugins.sh` finds `jenkins-plugins.tar.xz` in the repository root,
+verifies its SHA-256 checksum, extracts every plugin to `$JENKINS_HOME/plugins/`,
+pins each plugin to prevent update-center replacement, and restarts Jenkins.
+
+No internet access is needed after `git clone` provided the archive is committed.
+
+Open `http://localhost:8080`, complete the setup wizard, then skip ahead to
+[Step 5 (Add credentials)](#5-add-credentials) — plugins are already installed.
+
 ---
 
 ## 3. Complete the setup wizard
@@ -155,8 +192,9 @@ bash ci/jenkins/install-jenkins-plugins.sh --restart
 
 ## 4. Install required plugins
 
-> **Skip this step** if you used the bundled controller image (Option A) or ran
-> `install-jenkins-plugins.sh` — all plugins are already installed and pinned.
+> **Skip this step** if you used Option A (bundled Docker image) or Option E
+> (native air-gapped), or if you already ran `install-jenkins-plugins.sh` during
+> Step 2 — all plugins are already installed and pinned.
 
 The suggested-plugin set from Step 3 installs the basics.  Install the remaining
 oxide-sloc-specific plugins via the Jenkins UI:

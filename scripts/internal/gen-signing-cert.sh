@@ -158,9 +158,9 @@ unset PKCS12_PASS
 base64 -w0 "$OUT_DIR/sloc-sign.pfx" > "$OUT_DIR/sloc-sign.pfx.b64" 2>/dev/null || \
     base64 "$OUT_DIR/sloc-sign.pfx" | tr -d '\n\r' > "$OUT_DIR/sloc-sign.pfx.b64"
 
-# Copy the public CA cert into certs/ so it can be committed
-mkdir -p "$REPO_ROOT/certs"
-cp "$OUT_DIR/sloc-ca.crt" "$REPO_ROOT/certs/sloc-ca.crt"
+# Copy the public CA cert into deploy/certs/ so it can be committed
+mkdir -p "$REPO_ROOT/deploy/certs"
+cp "$OUT_DIR/sloc-ca.crt" "$REPO_ROOT/deploy/certs/sloc-ca.crt"
 
 # ── summary ──────────────────────────────────────────────────────────────────
 
@@ -173,7 +173,7 @@ echo "  Done. Files written to: _signing/"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  PUBLIC (safe to commit):"
-echo "    certs/sloc-ca.crt     copied to certs/ ← git add this"
+echo "    deploy/certs/sloc-ca.crt   copied to deploy/certs/ ← git add this"
 echo ""
 echo "  SECRET (never commit — keep these offline):"
 echo "    _signing/sloc-ca.key          root CA private key"
@@ -190,7 +190,7 @@ echo "  NEXT STEPS"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  1. Commit the public CA cert:"
-echo "       git add certs/sloc-ca.crt"
+echo "       git add deploy/certs/sloc-ca.crt"
 echo "       git commit -m \"chore: add Authenticode root CA certificate\""
 echo ""
 echo "  2. Set GitHub Actions secrets:"

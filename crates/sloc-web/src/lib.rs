@@ -431,6 +431,8 @@ fn build_router(state: AppState) -> Router {
         .route("/pick-directory", get(pick_directory_handler))
         .route("/open-path", get(open_path_handler))
         .route("/pick-file", get(pick_file_handler))
+        .route("/api/upload-directory", post(upload_directory_handler))
+        .route("/api/upload-file", post(upload_file_handler))
         .route("/locate-report", post(locate_report_handler))
         .route("/locate-reports-dir", post(locate_reports_dir_handler))
         .route("/relocate-scan", post(relocate_scan_handler))
@@ -1093,6 +1095,7 @@ async fn splash(
 }
 
 async fn index(
+    State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
     Query(query): Query<IndexQuery>,
 ) -> impl IntoResponse {
@@ -1149,6 +1152,7 @@ async fn index(
         git_ref,
         git_label_json,
         git_output_dir_json,
+        server_mode: state.server_mode,
     };
 
     Html(
@@ -1435,6 +1439,226 @@ async fn pick_file_handler(State(state): State<AppState>) -> Response {
 #[cfg(not(feature = "native-dialog"))]
 async fn pick_file_handler(State(_state): State<AppState>) -> Response {
     StatusCode::NOT_FOUND.into_response()
+}
+
+// ── Browser-upload handlers (server mode only) ────────────────────────────────
+
+/// Returns true when `path` is inside the oxide-sloc temp-upload staging area.
+/// Used to bypass `allowed_scan_roots` restrictions for client-uploaded projects.
+fn is_upload_tmp_path(path: &Path) -> bool {
+    let upload_root = std::env::temp_dir().join("oxide-sloc-uploads");
+    path.starts_with(&upload_root)
+}
+
+/// Request body for `POST /api/upload-directory`.
+///
+/// Each entry carries a relative path (identical to the browser's
+/// `File.webkitRelativePath`, e.g. `myproject/src/main.rs`) and the file
+/// contents encoded as standard (non-URL-safe) base64. Using JSON + base64
+/// avoids pulling in a `multipart` library that is not in the vendor archive.
+#[derive(Deserialize)]
+struct UploadDirRequest {
+    files: Vec<UploadedFile>,
+}
+
+#[derive(Deserialize)]
+struct UploadedFile {
+    /// `webkitRelativePath` value from the browser File object.
+    path: String,
+    /// Raw file bytes encoded as standard base64.
+    content: String,
+}
+
+/// POST /api/upload-directory
+///
+/// Accepts a JSON body `{ "files": [{ "path": "…", "content": "<base64>" }] }`.
+/// Saves all files to a temp staging directory preserving their relative paths,
+/// then returns the server-side root directory path so the caller can populate
+/// the scan-path field and run a normal analysis.
+///
+/// Only available in server mode; returns 404 in local mode (use the native
+/// rfd dialog instead).
+async fn upload_directory_handler(
+    State(state): State<AppState>,
+    Json(body): Json<UploadDirRequest>,
+) -> Response {
+    if !state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    const MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024; // 100 MB (decoded)
+    const MAX_FILES: usize = 5_000;
+
+    if body.files.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "No files received"})),
+        )
+            .into_response();
+    }
+    if body.files.len() > MAX_FILES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Too many files (limit 5 000)"})),
+        )
+            .into_response();
+    }
+
+    let upload_id = uuid::Uuid::new_v4();
+    let staging = std::env::temp_dir()
+        .join("oxide-sloc-uploads")
+        .join(upload_id.to_string());
+
+    let mut total_bytes: usize = 0;
+    let mut project_root: Option<PathBuf> = None;
+
+    for entry in &body.files {
+        // Guard against path traversal.
+        let rel = std::path::Path::new(&entry.path);
+        if rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+
+        let data = match base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            entry.content.as_bytes(),
+        ) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        total_bytes += data.len();
+        if total_bytes > MAX_TOTAL_BYTES {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Upload exceeds the 100 MB limit"})),
+            )
+                .into_response();
+        }
+
+        // Capture the top-level directory from the first component.
+        if project_root.is_none() {
+            if let Some(first) = rel.components().next() {
+                project_root = Some(staging.join(first.as_os_str()));
+            }
+        }
+
+        let dest = staging.join(rel);
+        if let Some(parent) = dest.parent() {
+            if tokio::fs::create_dir_all(parent).await.is_err() {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Failed to create directory structure"})),
+                )
+                    .into_response();
+            }
+        }
+
+        if tokio::fs::write(&dest, &data).await.is_err() {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to write uploaded file"})),
+            )
+                .into_response();
+        }
+    }
+
+    let file_count = body.files.len();
+    let scan_root = project_root.unwrap_or_else(|| staging.clone());
+    Json(serde_json::json!({
+        "tmp_path": scan_root.to_string_lossy(),
+        "file_count": file_count,
+        "upload_id": upload_id.to_string()
+    }))
+    .into_response()
+}
+
+/// Request body for `POST /api/upload-file`.
+#[derive(Deserialize)]
+struct UploadFileRequest {
+    /// Original filename (used only to preserve the extension).
+    filename: String,
+    /// File bytes encoded as standard base64.
+    content: String,
+}
+
+/// POST /api/upload-file
+///
+/// Single-file variant used for coverage files (`.info`, `.lcov`, `.xml`).
+/// Accepts `{ "filename": "…", "content": "<base64>" }`.
+/// Only available in server mode.
+async fn upload_file_handler(
+    State(state): State<AppState>,
+    Json(body): Json<UploadFileRequest>,
+) -> Response {
+    if !state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    const MAX_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB (decoded)
+
+    let data = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        body.content.as_bytes(),
+    ) {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid base64 content"})),
+            )
+                .into_response();
+        }
+    };
+
+    if data.len() > MAX_FILE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "File exceeds the 10 MB limit"})),
+        )
+            .into_response();
+    }
+
+    // Sanitise: strip any directory component from the filename.
+    let filename = std::path::Path::new(&body.filename)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "upload".to_owned());
+
+    let upload_id = uuid::Uuid::new_v4();
+    let staging = std::env::temp_dir()
+        .join("oxide-sloc-uploads")
+        .join(upload_id.to_string());
+
+    if tokio::fs::create_dir_all(&staging).await.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Failed to create staging directory"})),
+        )
+            .into_response();
+    }
+
+    let dest = staging.join(&filename);
+    if tokio::fs::write(&dest, &data).await.is_err() {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Failed to write uploaded file"})),
+        )
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "tmp_path": dest.to_string_lossy(),
+        "upload_id": upload_id.to_string()
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -2161,7 +2385,11 @@ async fn open_path_handler(
     Query(query): Query<OpenPathQuery>,
 ) -> impl IntoResponse {
     if state.server_mode {
-        return StatusCode::NOT_FOUND.into_response();
+        return Json(serde_json::json!({
+            "server_mode_disabled": true,
+            "message": "Opening a path in the file manager is only available in local desktop mode."
+        }))
+        .into_response();
     }
     let raw = match query.path.as_deref() {
         Some(p) if !p.is_empty() => p,
@@ -2697,7 +2925,7 @@ async fn analyze_handler(
 
     if !is_git_mode {
         let resolved_path = resolve_input_path(&form.path);
-        if state.server_mode {
+        if state.server_mode && !is_upload_tmp_path(&resolved_path) {
             if let Err(resp) = validate_server_scan_path(&config, &resolved_path, &csp_nonce) {
                 return resp;
             }
@@ -2790,6 +3018,15 @@ async fn run_analysis_task(task: AnalysisTask) {
     let cancel_sb = Arc::clone(&task.cancel);
     let (git_repo_sb, git_ref_sb) = (task.git_repo.clone(), task.git_ref.clone());
     let clones_dir_sb = task.clones_dir;
+    // Save the upload staging path before config is moved into spawn_blocking.
+    let upload_staging_root = task
+        .config
+        .discovery
+        .root_paths
+        .first()
+        .filter(|p| is_upload_tmp_path(p))
+        .and_then(|p| p.parent().filter(|par| is_upload_tmp_path(par)))
+        .map(PathBuf::from);
     let config_sb = task.config;
     let analysis_result = tokio::task::spawn_blocking(move || {
         run_analysis_blocking(config_sb, git_repo_sb, git_ref_sb, clones_dir_sb, cancel_sb)
@@ -2941,6 +3178,12 @@ async fn run_analysis_task(task: AnalysisTask) {
         },
     );
     drop(runs);
+
+    // Remove the client-upload staging directory after a successful scan so
+    // that uploaded project files don't accumulate in the OS temp directory.
+    if let Some(staging) = upload_staging_root {
+        let _ = tokio::fs::remove_dir_all(staging).await;
+    }
 
     let _ = scan_delta;
 }
@@ -9932,6 +10175,10 @@ struct SubmoduleRow {
     body.dark-theme .submodule-preview-strip { border-color:rgba(111,155,255,0.22); background:linear-gradient(180deg,rgba(37,99,235,0.09),transparent),var(--surface-2); }
     body.dark-theme .submodule-preview-chip { background:rgba(37,99,235,0.18); border-color:rgba(111,155,255,0.3); }
     body.dark-theme .submodule-base-repo-btn { background:rgba(255,255,255,0.07); border-color:rgba(255,255,255,0.18); }
+    .toast-success{display:flex;align-items:center;gap:10px;background:#e8f5ed;border:1px solid #a3d9b1;border-radius:10px;padding:10px 16px;font-size:13px;color:#1a5c35;font-weight:600;}
+    body.dark-theme .toast-success{background:rgba(26,143,71,0.12);border-color:rgba(163,217,177,0.3);color:#6fcf97;}
+    .toast-error{display:flex;align-items:center;gap:10px;background:#fde8e8;border:1px solid #f5a3a3;border-radius:10px;padding:10px 16px;font-size:13px;color:#7a1a1a;font-weight:600;}
+    body.dark-theme .toast-error{background:rgba(180,30,30,0.12);border-color:rgba(245,163,163,0.3);color:#f08080;}
   </style>
 </head>
 <body>
@@ -10642,7 +10889,12 @@ pytest --cov --cov-report=xml
                   <button type="submit" id="submit-button" class="primary">Run analysis</button>
                 </div>
               </div>
-            </div></form>
+            </div>
+            {% if server_mode %}
+            <input type="file" id="dir-upload-input" webkitdirectory multiple style="display:none" aria-hidden="true">
+            <input type="file" id="cov-upload-input" accept=".info,.lcov,.xml" style="display:none" aria-hidden="true">
+            {% endif %}
+          </form>
         </div>
       </section>
     </div>
@@ -10698,7 +10950,17 @@ pytest --cov --cov-report=xml
       var covScanStatus = document.getElementById("cov-scan-status");
       var coverageSuggestTimer = null;
       var covAutoFilled = false;
+      var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
       var themeToggle = document.getElementById("theme-toggle");
+
+      function showBannerToast(msg, isError) {
+        var t = document.createElement('div');
+        t.className = isError ? 'toast-error' : 'toast-success';
+        t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;min-width:280px;max-width:500px;box-shadow:0 6px 24px rgba(0,0,0,0.18);';
+        t.textContent = msg;
+        document.body.appendChild(t);
+        setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 4500);
+      }
       var mixedLinePolicy = document.getElementById("mixed_line_policy");
       var pythonDocstrings = document.getElementById("python_docstrings_as_comments");
       var pythonWraps = document.querySelectorAll(".python-docstring-wrap");
@@ -11644,6 +11906,93 @@ pytest --cov --cov-report=xml
       }
 
       function pickDirectory(targetInput, kind) {
+        if (SERVER_MODE) {
+          if (kind === 'output') {
+            showBannerToast('In server mode, type the server-side output path directly into the field.');
+            return;
+          }
+          var inputEl = kind === 'coverage'
+            ? document.getElementById('cov-upload-input')
+            : document.getElementById('dir-upload-input');
+          if (!inputEl) return;
+          inputEl.onchange = function () {
+            var files = inputEl.files;
+            if (!files || files.length === 0) return;
+            var browseBtn = targetInput === pathInput ? browsePath : browseOutputDir;
+            if (browseBtn) browseBtn.disabled = true;
+
+            function fileToBase64(file) {
+              return new Promise(function (resolve, reject) {
+                var reader = new FileReader();
+                reader.onload = function () {
+                  var b64 = reader.result.split(',')[1];
+                  resolve(b64);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              });
+            }
+
+            if (kind === 'coverage') {
+              var f = files[0];
+              if (previewPanel && targetInput === pathInput)
+                previewPanel.innerHTML = '<div class="preview-error">Uploading coverage file…</div>';
+              fileToBase64(f).then(function (b64) {
+                return fetch('/api/upload-file', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ filename: f.name, content: b64 })
+                }).then(function (r) { return r.json(); });
+              })
+                .then(function (d) {
+                  if (d && d.tmp_path) {
+                    if (coverageInput) coverageInput.value = d.tmp_path;
+                    setCovStatus('idle');
+                  } else if (d && d.error) { showBannerToast(d.error, true); }
+                })
+                .catch(function (e) { showBannerToast('Upload failed: ' + String(e), true); })
+                .finally(function () { if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; });
+            } else {
+              if (previewPanel && targetInput === pathInput)
+                previewPanel.innerHTML = '<div class="preview-error">Uploading ' + files.length + ' file(s)…</div>';
+              var promises = [];
+              for (var i = 0; i < files.length; i++) {
+                (function (file) {
+                  promises.push(
+                    fileToBase64(file).then(function (b64) {
+                      return { path: file.webkitRelativePath, content: b64 };
+                    })
+                  );
+                })(files[i]);
+              }
+              Promise.all(promises).then(function (fileList) {
+                return fetch('/api/upload-directory', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ files: fileList })
+                }).then(function (r) { return r.json(); });
+              })
+                .then(function (d) {
+                  if (d && d.tmp_path) {
+                    targetInput.value = d.tmp_path;
+                    if (targetInput === pathInput) {
+                      updateReportTitleFromPath();
+                      autoSetOutputDir(d.tmp_path);
+                      fetchProjectHistory(d.tmp_path);
+                      loadPreview();
+                      suggestCoverageFile(d.tmp_path);
+                    }
+                    updateReview();
+                  } else if (d && d.error) { showBannerToast(d.error, true); }
+                })
+                .catch(function (e) { showBannerToast('Upload failed: ' + String(e), true); })
+                .finally(function () { if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; });
+            }
+          };
+          inputEl.click();
+          return;
+        }
+
         var browseButton = targetInput === pathInput ? browsePath : browseOutputDir;
         if (browseButton) browseButton.disabled = true;
 
@@ -11667,7 +12016,6 @@ pytest --cov --cov-report=xml
 
               updateReview();
             } else if (targetInput === pathInput) {
-              // Cancelled — keep existing value and refresh preview with current path
               loadPreview();
             }
           })
@@ -11745,18 +12093,7 @@ pytest --cov --cov-report=xml
       if (browseOutputDir) browseOutputDir.addEventListener("click", function () { pickDirectory(outputDirInput, "output"); });
       if (browseCoverage) {
         browseCoverage.addEventListener("click", function () {
-          browseCoverage.disabled = true;
-          var currentVal = coverageInput ? coverageInput.value : "";
-          fetch("/pick-directory?kind=coverage&current=" + encodeURIComponent(currentVal))
-            .then(function (r) { return r.json(); })
-            .then(function (d) {
-              if (d && d.selected_path && coverageInput) {
-                coverageInput.value = d.selected_path;
-                setCovStatus("idle");
-              }
-            })
-            .catch(function () {})
-            .finally(function () { browseCoverage.disabled = false; });
+          pickDirectory(coverageInput || pathInput, "coverage");
         });
       }
 
@@ -12017,20 +12354,27 @@ pytest --cov --cov-report=xml
         });
       }
 
+      function openPath(folder) {
+        if (!folder) return;
+        fetch('/open-path?path=' + encodeURIComponent(folder))
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d && d.server_mode_disabled)
+              showBannerToast(d.message || 'Opening paths in a file manager is only available in local desktop mode.');
+          })
+          .catch(function () {});
+      }
+
       Array.prototype.slice.call(document.querySelectorAll('.open-folder-button')).forEach(function (btn) {
         btn.addEventListener('click', function () {
-          var folder = btn.getAttribute('data-folder') || btn.dataset.folder || '';
-          if (!folder) return;
-          fetch('/open-path?path=' + encodeURIComponent(folder)).catch(function () {});
+          openPath(btn.getAttribute('data-folder') || btn.dataset.folder || '');
         });
       });
 
       // Re-bind any dynamically added open-folder-buttons (e.g. ws-output-link after path change)
       if (wsOutputLink) {
         wsOutputLink.addEventListener('click', function () {
-          var folder = wsOutputLink.dataset.folder || '';
-          if (!folder) return;
-          fetch('/open-path?path=' + encodeURIComponent(folder)).catch(function () {});
+          openPath(wsOutputLink.dataset.folder || '');
         });
       }
 
@@ -12213,6 +12557,7 @@ struct IndexTemplate {
     git_ref: String,
     git_label_json: String,
     git_output_dir_json: String,
+    server_mode: bool,
 }
 
 // ── SplashTemplate ────────────────────────────────────────────────────────────
@@ -14282,7 +14627,12 @@ struct ScanSetupTemplate {
         btn.addEventListener('click', function () {
           var folder = btn.getAttribute('data-folder') || '';
           if (!folder) return;
-          fetch('/open-path?path=' + encodeURIComponent(folder)).catch(function () {});
+          fetch('/open-path?path=' + encodeURIComponent(folder))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d && d.server_mode_disabled) window.alert(d.message || 'Opening paths in a file manager is only available in local desktop mode.');
+            })
+            .catch(function () {});
         });
       });
 
@@ -17685,7 +18035,12 @@ struct CompareSelectTemplate {
     var deltaPerPage = 25, deltaCurrPage = 1;
 
     function openFolder(path) {
-      fetch('/open-path?path=' + encodeURIComponent(path)).catch(function(){});
+      fetch('/open-path?path=' + encodeURIComponent(path))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.server_mode_disabled) window.alert(d.message || 'Opening paths in a file manager is only available in local desktop mode.');
+        })
+        .catch(function () {});
     }
 
     function getDeltaFilteredRows() {

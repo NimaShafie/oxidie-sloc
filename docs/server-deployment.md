@@ -12,11 +12,20 @@
 |---|---|---|
 | Bind address default | `127.0.0.1:4317` | `0.0.0.0:4317` |
 | Browser auto-open | yes | no |
-| Native file picker | yes | disabled (404) |
-| OS path opener | yes | disabled (404) |
+| File picker | native OS dialog | browser directory upload |
+| OS path opener | yes | toast message (not available) |
 | Startup message | "local web UI" | "server" |
 
-In server mode users enter paths manually into the web form.
+In server mode the native file picker is replaced by a browser-based directory
+upload: users click **Browse**, a standard browser folder-picker opens on their
+own machine, and the selected files are uploaded to the server's temp directory.
+The path field is auto-populated with the server-side temp path, and the
+uploaded files are deleted automatically after the scan completes.
+
+The OS path opener (open folder in Explorer/Finder) cannot open a window on a
+remote client's machine, so in server mode clicking it shows an informational
+message instead.
+
 The scan registry and report artifacts are shared across all sessions.
 
 ---
@@ -35,7 +44,8 @@ docker compose down
 ```
 
 The container runs with `--server` by default — binds to `0.0.0.0:4317`,
-browser auto-open is suppressed, and file-picker routes are disabled.
+browser auto-open is suppressed, and the native file picker is replaced by
+browser-based directory upload.
 
 ### Analyzing paths on the host
 

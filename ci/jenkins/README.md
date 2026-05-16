@@ -15,6 +15,20 @@
 
 On a network-connected agent, step 2 is optional.
 
+**Which plugin install path for your setup?**
+
+| Scenario | Plugin install path |
+|----------|-------------------|
+| Fully online — no restrictions | Path C (Jenkins Update Center) |
+| Online but no Docker | Path B + `download.sh` on a networked machine |
+| Air-gapped with Docker | Path A (bundled controller image) |
+| Air-gapped without Docker | Path B + committed `jenkins-plugins.tar.xz` |
+| Air-gapped, no networked machine, no Docker | Path B + committed `jenkins-plugins.tar.xz` |
+
+> **Air-gapped pre-requisite (scenarios 4 & 5):** `jenkins-plugins.tar.xz` must be
+> committed to the repository root.  Run `bash ci/jenkins/bundle-jenkins-plugins.sh`
+> once on a networked + Docker machine, then commit both output files before deploying.
+
 ## New pipeline features
 
 The Jenkinsfile now supports three additional capability tiers beyond the basic SLOC scan.
@@ -308,94 +322,6 @@ Regenerate and recommit whenever `plugins.txt` changes.
 
 ---
 
-## No admin access / corporate Jenkins
-
-If you cannot install plugins through the CLI or rebuild the Docker image, three paths
-are available.
-
-### Path 1 — Request IT installation
-
-Give your IT or ops team the following:
-
-- `ci/jenkins/plugins.txt` — one plugin ID per non-comment line, with descriptions
-- (Optional) the `.hpi` files in `ci/jenkins/plugins/` — so they have no download step
-
-The table below tells them exactly what each plugin does, so they can prioritise or
-raise questions before installing:
-
-| Plugin ID | What it enables |
-|-----------|----------------|
-| `workflow-aggregator` | Declarative Pipeline syntax — `stages {}`, `when {}`, `post {}` |
-| `pipeline-utility-steps` | `readJSON` / `writeJSON` helpers used in the post-success block |
-| `ws-cleanup` | `cleanWs()` in `post { cleanup }` — removes workspace after each build |
-| `git` | `GitSCM` checkout step — clones the repository on the agent |
-| `credentials-binding` | `credentials()` binding in `environment {}` blocks (SMTP, webhook) |
-| `htmlpublisher` | `publishHTML()` — "SLOC Report" and "Build Dashboard" sidebar links |
-| `plot` | `plot()` — SLOC trend charts across builds (code/comment/blank over time) |
-| `junit` | `junit()` — "Test Result" sidebar link and pass/fail trend |
-| `coverage` | `recordCoverage()` — line/branch/function % per build with drill-down |
-| `pipeline-stage-view` | Stage visualization in the job UI (Blue Ocean lite) |
-| `timestamper` | Timestamps on every console output line |
-| `ansicolor` | ANSI colour in Rust compiler and Clippy output |
-| `job-dsl` | Executes `ci/jenkins/seed-job.groovy` to create the pipeline job |
-| `copyartifact` | Copies artifacts to/from downstream jobs in Pipeline-of-Pipelines setups |
-| `bitbucket` | Bitbucket Branch Source — optional, Bitbucket SCM only |
-| `bitbucket-build-status-notifier` | Posts commit statuses to Bitbucket — optional |
-
-### Path 2 — Upload via Jenkins UI
-
-Requires the **"Administer"** permission in Jenkins (not just build permission).
-
-**Manage Jenkins → Plugins → Advanced → Deploy Plugin → Upload .hpi**
-
-Upload one `.hpi` file at a time.  You must also upload every transitive dependency
-that is not already installed.  Run `bundle-jenkins-plugins.sh` on a Docker-capable
-machine to see the full dependency list — the script prints every plugin it downloads.
-
-This approach works in environments where you cannot run CLI commands or SSH into the
-Jenkins host, but where you do have "Administer" in the Jenkins UI.
-
-### Path 3 — Zero-plugin fallback (standalone HTML dashboard)
-
-`ci/jenkins/generate-dashboard.py` generates a complete, self-contained HTML
-dashboard from the CI output artifacts using only:
-
-- Python 3 standard library — no `pip install`
-- `archiveArtifacts` — Jenkins core step, no extra plugins required
-
-No `Plot`, `junit`, `coverage`, or `htmlpublisher` plugins are needed.  The resulting
-HTML file is archived as a build artifact.  Any user with "Read" access to the job can
-download it from the build page and open it in a browser.
-
-```bash
-python3 ci/jenkins/generate-dashboard.py ci-out/
-# Writes: ci-out/dashboard_<project>.html
-# Archive: archiveArtifacts artifacts: 'ci-out/dashboard_*.html'
-```
-
-The Jenkinsfile already runs this script automatically in the Archive & Publish stage.
-No extra pipeline configuration is needed.
-
-**What each section shows and when it appears:**
-
-| Dashboard section | What it shows | Appears when |
-|-------------------|---------------|--------------|
-| SLOC Summary | Code / comment / blank line counts and files analyzed | Always (requires `result_<slug>.json`) |
-| Language Breakdown | Horizontal bar chart of code lines per language | Always (derived from the same JSON) |
-| Test Results | Total / passed / failed / error / skip counts | `test-results/junit.xml` is present |
-| Code Coverage | Line coverage percentage progress bar | `coverage/lcov.info` is present |
-
-### What each plugin adds vs. the fallback
-
-| Feature | With plugin | Without plugin (fallback) |
-|---------|-------------|--------------------------|
-| SLOC trend chart | `plot` plugin → chart on the job page showing history across builds | `dashboard.html` shows current-build data only |
-| Test pass/fail trend | `junit` plugin → sidebar link and trend chart | `dashboard.html` shows current-build test counts |
-| Coverage trend | `coverage` plugin → line/branch/function % with per-file drill-down | `dashboard.html` shows current-build line coverage % |
-| HTML report sidebar | `htmlpublisher` → persistent sidebar link on every build | `archiveArtifacts` → downloadable artifact on each build page |
-
----
-
 ### Path A — Docker controller image (recommended for Docker setups)
 
 `ci/jenkins/Dockerfile.controller` builds a Jenkins controller with all plugins
@@ -434,6 +360,12 @@ Rebuild the image whenever `jenkins-plugins.tar.xz` is updated.
 
 Use this for native / systemd Jenkins or an already-running Docker container
 where you cannot rebuild the image.
+
+> **Air-gapped hosts (scenarios 4 & 5):** `jenkins-plugins.tar.xz` must already be
+> committed to the repository root.  `install-jenkins-plugins.sh` detects and extracts
+> it automatically — no internet, no Docker, no separate transfer step needed.
+> Run `bash ci/jenkins/bundle-jenkins-plugins.sh` once on a networked + Docker machine
+> to generate the archive, then commit it before deploying to air-gapped hosts.
 
 ```bash
 # From the repo root on the Jenkins host (or inside the container):
