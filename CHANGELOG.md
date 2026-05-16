@@ -10,6 +10,76 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.4] — 2026-05-15
+
+### Added
+
+- **Tree-sitter symbol counting** (`sloc-languages`): Python AST walks now count functions,
+  classes, test functions/classes, and assertion calls using tree-sitter. A new `SymbolKinds`
+  struct drives per-language counting configuration; the C/C++ path returns `SymbolKinds::none()`
+  (no behavioural change for C).
+- **Auth integration tests** (`sloc-web`): 30+ new integration tests covering `auth/login` GET
+  and POST, Bearer and `X-API-Key` header auth, export/import config (valid and malformed TOML),
+  scan profile CRUD, schedule deletion, metrics and submodule endpoints, GitHub webhook smoke,
+  metrics history, and error-module JSON shape (`not_found`, `bad_request`, `422`). New
+  `make_test_router_with_key()` entry point supports auth-enabled test scenarios.
+- **Jenkins graphical report enhancements** (`ci/jenkins/generate-dashboard.py`): Added a
+  per-language metrics table (code / comment / blank / files columns) below the bar chart, a
+  "Top Files by Code Lines" card (top 20 files from `per_file_records`), and a "Code Lines Δ"
+  stat chip showing the SLOC delta between the two most recent builds when trend history has ≥ 2
+  entries. Inline `<style>` extracted to a sidecar `dashboard_<slug>.css` file so the report
+  renders under Jenkins' default artifact-viewer CSP without requiring a credential binding or
+  `init.groovy.d`.
+
+### Changed
+
+- **Jenkins pipeline — SonarQube stage removed** (`Jenkinsfile`): `SKIP_SONAR`, `SONAR_URL`, and
+  `GENERATE_COVERAGE` pipeline parameters and the entire SonarQube scan stage are removed.
+  SonarQube analysis is now run externally via `ci/sonar/` scripts driven by the `SONAR_URL` and
+  `SONAR_TOKEN` environment variables. See `docs/sonarqube-manual-setup.md` for setup
+  instructions. The Graphical Report sidebar link is promoted above the SLOC Report link.
+- **Jenkins CSP handling** (`ci/jenkins/`): The Content-Security-Policy override moved from an
+  in-pipeline `System.setProperty` call (blocked by the Pipeline sandbox) to a startup Groovy
+  script at `ci/jenkins/init.groovy.d/relax-csp.groovy`, which executes during Jenkins boot.
+- **`sloc-config` serde defaults** (`crates/sloc-config/src/lib.rs`): All fields in
+  `DiscoveryConfig`, `AnalysisConfig`, `ReportingConfig`, and `WebConfig` are annotated with
+  `#[serde(default)]`; partial TOML files (e.g. CI presets that omit infrequently-set keys)
+  now deserialize without errors.
+- **CI preset TOMLs** (`ci/sloc-ci-*.toml`): All three presets (`default`, `full-scope`,
+  `strict`) now explicitly declare `enabled_languages`, `extension_overrides`, and
+  `shebang_detection` for self-documenting completeness.
+- **Windows install path** (`scripts/`): `run.sh` on Windows now extracts the pre-built binary
+  from `dist/oxide-sloc-windows-x64.zip` rather than bootstrapping the full Rust toolchain;
+  air-gap Windows deployments require no compiler and no `toolchain/` archives.
+- **`install.sh` relocated** (`scripts/internal/install.sh`): Moved from the repository root to
+  `scripts/internal/`; `run.sh` updated to invoke the new path.
+- **Jenkins trend sparkline** (`ci/jenkins/generate-dashboard.py`): Build-trend card moved before
+  the Language Breakdown card for visual prominence; SLOC trend values persist across builds via
+  the dashboard history store.
+
+### Fixed
+
+- **Jenkins HTML Publisher CSP** (`ci/jenkins/init.groovy.d/relax-csp.groovy`): The relaxed
+  Content-Security-Policy is now applied at Jenkins startup rather than inside the pipeline,
+  preventing sandbox rejections and ensuring the policy is in place before the first build runs.
+- **Jenkins build description format** (`Jenkinsfile`): Build description now uses plain text;
+  removes Jenkins HTML-injection warnings that appeared in the build log.
+- **Web auth handler visibility** (`sloc-web`): Auth handlers reverted to `pub(crate)` to
+  suppress the `redundant_pub_crate` Clippy warning introduced when the auth module was extracted.
+- **RHEL unprivileged firewall check** (`scripts/`): Removed a `firewall-cmd --state` call that
+  failed with a permission error when run as a non-root user on RHEL 8/9.
+
+### Documentation
+
+- **Jenkins manual setup** (`docs/jenkins-manual-setup.md`): Step 5b credential instructions
+  replaced with a note explaining that `sonarqube-oxide-sloc-token` is no longer consumed by the
+  current Jenkinsfile. Troubleshooting section rewritten to reflect the external-script SonarQube
+  path; `SKIP_SONAR` references removed.
+- **Jenkins README** (`ci/jenkins/README.md`): Job-name instructions clarified — `oxide-sloc` is
+  the single canonical SCM-driven job; the `oxide-sloc-manual` name carries no special meaning.
+
+---
+
 ## [1.5.1] — 2026-05-12
 
 ### Fixed
