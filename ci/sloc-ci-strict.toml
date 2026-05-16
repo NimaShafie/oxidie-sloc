@@ -12,6 +12,9 @@ max_file_size_bytes   = 1048576
 excluded_directories  = [".git", "node_modules", "target", ".venv", "__pycache__", "dist", "build"]
 
 [analysis]
+enabled_languages             = []           # empty = autodetect all
+extension_overrides           = {}
+shebang_detection             = true
 mixed_line_policy             = "separate_mixed_category"
 python_docstrings_as_comments = true
 generated_file_detection      = true

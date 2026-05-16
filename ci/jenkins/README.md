@@ -199,7 +199,7 @@ cp ci/jenkins/.env.example ci/jenkins/.env
 
 **URL note:** LAN/remote addresses (e.g., `http://10.0.0.8:8080`) are valid substitutions for `http://localhost:8080`. Strip any trailing slash — `${JENKINS_URL}/createItem` would otherwise produce `//createItem`, which some reverse proxies reject.
 
-**Job name:** Use `oxide-sloc` for the SCM-driven job created from `ci/jenkins/job-config.xml`. Use `oxide-sloc-manual` only if you also intend to maintain a hand-edited copy of the pipeline in the same Jenkins instance and need to disambiguate.
+**Job name:** The SCM-driven job created by `createItem` from `ci/jenkins/job-config.xml` is always named `oxide-sloc` — that is the single canonical job. The name `oxide-sloc-manual` has no special meaning; do not create a second job with that name unless you intend to maintain a completely independent, hand-edited pipeline alongside the SCM-driven one.
 
 ---
 

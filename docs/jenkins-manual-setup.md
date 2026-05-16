@@ -210,16 +210,15 @@ Jenkinsfile itself.  Add only the credentials that match the features you intend
 **Manage Jenkins → Credentials → System → Global credentials (unrestricted)**
 → **Add Credentials** (button in the left sidebar or top-right).
 
-### 5b. SonarQube analysis token (required for SonarQube scans)
+### 5b. SonarQube analysis token
 
-| Field | Value |
-|-------|-------|
-| Kind | **Secret text** |
-| Secret | Your SonarQube analysis token (from SonarQube → My Account → Security → Generate Token) |
-| ID | `sonarqube-oxide-sloc-token` |
-| Description | `SonarQube analysis token for oxide-sloc` |
-
-Click **Create**.
+> **Note:** The SonarQube pipeline stage was removed in the current Jenkinsfile.
+> SonarQube analysis is now run externally via `ci/sonar/` scripts and the
+> `SONAR_URL` / `SONAR_TOKEN` environment variables, not through a Jenkins
+> credential binding.  The `sonarqube-oxide-sloc-token` credential ID described
+> in older docs is **not consumed by the current Jenkinsfile** — you do not need
+> to create it.  Skip this step unless you have re-added a SonarQube stage to a
+> custom Jenkinsfile.
 
 ### 5c. Artifact repository (required for artifact push stage)
 
@@ -368,10 +367,10 @@ Jenkins discovers the `parameters {}` block in the Jenkinsfile only after runnin
 once.  The first build must run **without parameters** to register them.
 
 1. On the job page, click **"Build Now"** in the left sidebar.
-   The first build runs with defaults (SKIP_SONAR and SKIP_WEB_CHECK both default to
-   true for a fresh install). It should complete successfully — Analyze runs against
-   `tests/fixtures/basic` which exists in the repository, and the SonarQube and Web UI
-   stages are skipped by default.
+   The first build runs with defaults (`SKIP_WEB_CHECK` defaults to true for a fresh
+   install). It should complete successfully — Analyze runs against
+   `tests/fixtures/basic` which exists in the repository, and the Web UI check stage
+   is skipped by default.
 
 2. Wait for the build to complete. It should be **green** on the first run with default settings.
 
@@ -612,17 +611,13 @@ or switch `TEST_RUNNER` back to `cargo-test`.
 Install cargo-llvm-cov on the agent (see [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage))
 or uncheck `COVERAGE_STANDALONE`.
 
-### SonarQube stage fails with "Unable to connect to sonar host"
+### SonarQube analysis not running
 
-Either:
-- The SonarQube server at the URL in the `SONAR_URL` build parameter is not reachable from the agent.
-- The `sonarqube-oxide-sloc-token` credential is missing or incorrect.
-
-Check the token under **Manage Jenkins → Credentials** and verify connectivity from
-the agent: `curl -s "$SONAR_URL/api/system/status"` (where `SONAR_URL` is the
-Jenkins build parameter, e.g. `http://10.x.x.x:9000`).
-
-To skip SonarQube on builds where it's not needed, set `SKIP_SONAR = true`.
+The SonarQube pipeline stage was removed from the Jenkinsfile.  SonarQube scans
+are now run externally via the scripts in `ci/sonar/`, driven by the `SONAR_URL`
+and `SONAR_TOKEN` environment variables.  See `docs/sonarqube-manual-setup.md`
+for the current setup instructions.  There is no `SKIP_SONAR` parameter in the
+current Jenkinsfile.
 
 ### Plot charts not appearing
 
