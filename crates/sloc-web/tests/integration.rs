@@ -647,6 +647,84 @@ async fn auth_login_post_wrong_key_redirects_with_error_flag() {
     );
 }
 
+// ── next= sanitization ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn auth_login_get_sanitizes_nested_next_to_root() {
+    // GET /auth/login?next=/auth/login%3Fnext%3D%2F  →  hidden input value must be "/",
+    // not the raw nested string (which would cause a redirect loop after login).
+    let app = make_test_router_with_key("test-key");
+    let resp = app
+        .oneshot(
+            Request::get("/auth/login?next=%2Fauth%2Flogin%3Fnext%3D%2F")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+    // The hidden "next" input must contain "/" and NOT the nested path.
+    assert!(
+        body.contains(r#"name="next" value="/""#),
+        "expected next=\"/\" in form but got body snippet: {}",
+        &body[body.find("name=\"next\"").unwrap_or(0)
+            ..body
+                .find("name=\"next\"")
+                .map(|i| (i + 60).min(body.len()))
+                .unwrap_or(60)]
+    );
+}
+
+#[tokio::test]
+async fn auth_login_get_returns_200_without_redirect_when_key_configured() {
+    // Unauthenticated GET /auth/login must return 200 (the login form), never 302.
+    // The middleware must not redirect /auth/login to itself.
+    let app = make_test_router_with_key("test-key");
+    let resp = app
+        .oneshot(Request::get("/auth/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "GET /auth/login must return 200, not a redirect"
+    );
+}
+
+#[tokio::test]
+async fn auth_login_post_valid_key_with_bad_next_redirects_to_root() {
+    // POST /auth/login with a valid key but next=/http://example.com/x must
+    // redirect to "/" rather than the schema-bearing path.
+    use std::net::SocketAddr;
+    let app = make_test_router_with_key("good-key");
+    let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let mut req = Request::post("/auth/login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "key=good-key&next=%2Fhttp%3A%2F%2Fexample.com%2Fx",
+        ))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "valid login must redirect, got {}",
+        resp.status()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/",
+        "bad next= must be replaced with /, got: {location}"
+    );
+}
+
 // ── API key authentication (Bearer / X-API-Key) ───────────────────────────────
 
 #[tokio::test]
