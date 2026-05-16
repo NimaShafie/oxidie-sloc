@@ -431,8 +431,18 @@ fn build_router(state: AppState) -> Router {
         .route("/pick-directory", get(pick_directory_handler))
         .route("/open-path", get(open_path_handler))
         .route("/pick-file", get(pick_file_handler))
-        .route("/api/upload-directory", post(upload_directory_handler))
-        .route("/api/upload-file", post(upload_file_handler))
+        .route(
+            "/api/upload-directory",
+            post(upload_directory_handler).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/upload-file",
+            post(upload_file_handler).layer(DefaultBodyLimit::max(30 * 1024 * 1024)),
+        )
+        .route(
+            "/api/upload-tarball",
+            post(upload_tarball_handler).layer(DefaultBodyLimit::disable()),
+        )
         .route("/locate-report", post(locate_report_handler))
         .route("/locate-reports-dir", post(locate_reports_dir_handler))
         .route("/relocate-scan", post(relocate_scan_handler))
@@ -667,6 +677,13 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         println!(
             "NOTE: SLOC_TRUST_PROXY=1 — X-Forwarded-For header is trusted for rate limiting. \
              Only set this when oxide-sloc is behind a trusted reverse proxy."
+        );
+    } else if server_mode {
+        println!(
+            "NOTE: SLOC_TRUST_PROXY is not set. If oxide-sloc is behind a reverse proxy \
+             (nginx, Caddy, Traefik), all LAN clients share one rate-limit bucket (the \
+             proxy IP). Set SLOC_TRUST_PROXY=1 to enable per-client rate limiting via \
+             X-Forwarded-For."
         );
     }
 
@@ -1450,6 +1467,13 @@ fn is_upload_tmp_path(path: &Path) -> bool {
     path.starts_with(&upload_root)
 }
 
+/// Returns true when `path` is the built-in sample or test-fixture directory.
+/// These paths ship with the server binary and are always safe to scan/preview.
+fn is_sample_path(path: &Path) -> bool {
+    let root = workspace_root();
+    path.starts_with(root.join("tests").join("fixtures")) || path.starts_with(root.join("samples"))
+}
+
 /// Request body for `POST /api/upload-directory`.
 ///
 /// Each entry carries a relative path (identical to the browser's
@@ -1459,6 +1483,9 @@ fn is_upload_tmp_path(path: &Path) -> bool {
 #[derive(Deserialize)]
 struct UploadDirRequest {
     files: Vec<UploadedFile>,
+    /// If provided, append this batch to an existing upload session instead of
+    /// creating a new staging directory. Must be a plain UUID (no path separators).
+    upload_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1486,8 +1513,8 @@ async fn upload_directory_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    const MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024; // 100 MB (decoded)
-    const MAX_FILES: usize = 5_000;
+    const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024; // 500 MB (decoded)
+    const MAX_FILES: usize = 50_000;
 
     if body.files.is_empty() {
         return (
@@ -1499,15 +1526,28 @@ async fn upload_directory_handler(
     if body.files.len() > MAX_FILES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Too many files (limit 5 000)"})),
+            Json(serde_json::json!({"error": "Too many files (limit 50 000)"})),
         )
             .into_response();
     }
 
-    let upload_id = uuid::Uuid::new_v4();
-    let staging = std::env::temp_dir()
-        .join("oxide-sloc-uploads")
-        .join(upload_id.to_string());
+    // Reuse an existing staging dir when the client sends a continuation batch,
+    // otherwise create a fresh one. Validate the id to prevent path traversal.
+    let (upload_id, staging) = match body.upload_id.as_deref() {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 36
+                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
+        {
+            let s = std::env::temp_dir().join("oxide-sloc-uploads").join(id);
+            (id.to_string(), s)
+        }
+        _ => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let s = std::env::temp_dir().join("oxide-sloc-uploads").join(&id);
+            (id, s)
+        }
+    };
 
     let mut total_bytes: usize = 0;
     let mut project_root: Option<PathBuf> = None;
@@ -1535,7 +1575,7 @@ async fn upload_directory_handler(
             let _ = tokio::fs::remove_dir_all(&staging).await;
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": "Upload exceeds the 100 MB limit"})),
+                Json(serde_json::json!({"error": "Upload exceeds the 500 MB limit"})),
             )
                 .into_response();
         }
@@ -1657,6 +1697,138 @@ async fn upload_file_handler(
     Json(serde_json::json!({
         "tmp_path": dest.to_string_lossy(),
         "upload_id": upload_id.to_string()
+    }))
+    .into_response()
+}
+
+/// POST /api/upload-tarball
+///
+/// Accepts a gzip-compressed tar archive as a raw binary body (`Content-Type: application/gzip`).
+/// Streams the body to a temp file, then extracts it with the vendored `tar` + `flate2` crates.
+/// Returns `{ tmp_path, upload_id }` pointing at the extracted project root.
+///
+/// `DefaultBodyLimit::disable()` is applied per-route so there is no hard size cap at the HTTP
+/// layer; the only limit is the disk space on the server. The browser-side JS creates the archive
+/// one file at a time using the native `CompressionStream('gzip')` API so browser RAM usage stays
+/// bounded regardless of project size.
+async fn upload_tarball_handler(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    if !state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let upload_id = uuid::Uuid::new_v4().to_string();
+    let upload_base = std::env::temp_dir().join("oxide-sloc-uploads");
+    let tarball_path = upload_base.join(format!("{upload_id}.tar.gz"));
+    let staging = upload_base.join(&upload_id);
+
+    if let Err(e) = tokio::fs::create_dir_all(&upload_base).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("IO error: {e}")})),
+        )
+            .into_response();
+    }
+
+    // ── 1. Stream the request body to a temp file (bounded RAM) ──────────────
+    let mut tarball_file = match tokio::fs::File::create(&tarball_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Cannot create temp file: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    use http_body_util::BodyExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut body = request.into_body();
+    loop {
+        match body.frame().await {
+            None => break,
+            Some(Err(e)) => {
+                let _ = tokio::fs::remove_file(&tarball_path).await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Stream error: {e}")})),
+                )
+                    .into_response();
+            }
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    if let Err(e) = tarball_file.write_all(&data).await {
+                        let _ = tokio::fs::remove_file(&tarball_path).await;
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": format!("Write error: {e}")})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+    }
+    drop(tarball_file);
+
+    // ── 2. Extract the tar.gz in a blocking thread ────────────────────────────
+    let staging_clone = staging.clone();
+    let tarball_clone = tarball_path.clone();
+    let extract_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let file = std::fs::File::open(&tarball_clone)?;
+        let buf = std::io::BufReader::new(file);
+        let gz = flate2::read::GzDecoder::new(buf);
+        let mut archive = tar::Archive::new(gz);
+        archive.set_overwrite(true);
+        archive.set_preserve_permissions(false);
+        std::fs::create_dir_all(&staging_clone)?;
+        archive.unpack(&staging_clone)?;
+        Ok(())
+    })
+    .await;
+
+    let _ = tokio::fs::remove_file(&tarball_path).await;
+
+    match extract_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Failed to extract archive: {e}")})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Extraction task panicked: {e}")})),
+            )
+                .into_response();
+        }
+    }
+
+    // ── 3. Find the project root inside the staging dir ───────────────────────
+    // If the tar contained a single top-level directory (the common case when the
+    // browser uses `webkitRelativePath`), return that as the scan root so the path
+    // shown in the UI is clean (e.g. staging/<uuid>/myproject, not staging/<uuid>).
+    let mut scan_root = staging.clone();
+    if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
+        if let Ok(Some(first)) = entries.next_entry().await {
+            if first.path().is_dir() && entries.next_entry().await.unwrap_or(None).is_none() {
+                scan_root = first.path();
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "tmp_path": scan_root.to_string_lossy(),
+        "upload_id": upload_id,
     }))
     .into_response()
 }
@@ -2514,23 +2686,37 @@ async fn preview_handler(
         .unwrap_or_else(|| "tests/fixtures/basic".to_string());
     let resolved = resolve_input_path(&raw_path);
 
+    // If the sample path was requested but doesn't exist on this server (e.g. a deployed
+    // binary whose working directory is not the project root), return a clear message
+    // instead of an opaque OS error from build_preview_html.
+    if state.server_mode && is_sample_path(&resolved) && !resolved.exists() {
+        return Html(
+            r#"<div class="preview-error">Sample directory not available on this server.
+            Enter a path to a project directory or upload files using Browse.</div>"#
+                .to_string(),
+        );
+    }
+
     if state.server_mode {
-        let config = &state.base_config;
-        if config.discovery.allowed_scan_roots.is_empty() {
-            return Html(
-                r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
-            );
-        }
         let canonical = fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-        let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
-            fs::canonicalize(root)
-                .ok()
-                .is_some_and(|r| canonical.starts_with(&r))
-        });
-        if !allowed {
-            return Html(
-                r#"<div class="preview-error">Preview rejected: path is not within an allowed scan directory.</div>"#.to_string()
-            );
+        // Upload temp dirs and built-in sample/fixture paths are always safe to preview.
+        if !is_upload_tmp_path(&canonical) && !is_sample_path(&canonical) {
+            let config = &state.base_config;
+            if config.discovery.allowed_scan_roots.is_empty() {
+                return Html(
+                    r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
+                );
+            }
+            let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
+                fs::canonicalize(root)
+                    .ok()
+                    .is_some_and(|r| canonical.starts_with(&r))
+            });
+            if !allowed {
+                return Html(
+                    r#"<div class="preview-error">Preview rejected: path is not within an allowed scan directory.</div>"#.to_string()
+                );
+            }
         }
     }
 
@@ -2900,8 +3086,11 @@ async fn analyze_handler(
 ) -> impl IntoResponse {
     let Ok(sem_permit) = Arc::clone(&state.analyze_semaphore).try_acquire_owned() else {
         let template = ErrorTemplate {
-            message: "Server is busy — too many concurrent analyses. Please try again in a moment."
-                .to_string(),
+            message: format!(
+                "Server is busy — all {} analysis slots are in use. \
+             Please wait a moment and try again.",
+                MAX_CONCURRENT_ANALYSES
+            ),
             last_report_url: None,
             last_report_label: None,
             csp_nonce: csp_nonce.clone(),
@@ -2925,7 +3114,10 @@ async fn analyze_handler(
 
     if !is_git_mode {
         let resolved_path = resolve_input_path(&form.path);
-        if state.server_mode && !is_upload_tmp_path(&resolved_path) {
+        if state.server_mode
+            && !is_upload_tmp_path(&resolved_path)
+            && !is_sample_path(&resolved_path)
+        {
             if let Err(resp) = validate_server_scan_path(&config, &resolved_path, &csp_nonce) {
                 return resp;
             }
@@ -2972,7 +3164,14 @@ async fn analyze_handler(
         generate_html: form.generate_html.is_some(),
         generate_pdf: form.generate_pdf.is_some(),
         project_path: form.path.clone(),
-        output_dir: form.output_dir.clone(),
+        // In server mode the client-supplied output_dir is ignored — artifacts are
+        // always written under the server's configured output root so remote users
+        // cannot direct writes to arbitrary filesystem paths.
+        output_dir: if state.server_mode {
+            None
+        } else {
+            form.output_dir.clone()
+        },
         clones_dir: state.git_clones_dir.clone(),
     };
 
@@ -4583,6 +4782,7 @@ async fn history_handler(
         browse_error,
         watched_dirs,
         csp_nonce,
+        server_mode: state.server_mode,
     };
     Html(
         template
@@ -10444,6 +10644,7 @@ struct SubmoduleRow {
                       <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
                       <button type="button" class="mini-button oxide" id="browse-path">Browse</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
+                      <span id="upload-limit-tip" style="display:none;margin-left:8px;font-size:11px;color:var(--muted);white-space:nowrap;" title="Files are compressed into a tar.gz archive before uploading. Only source-code files are included — binaries, node_modules, and build artifacts are skipped automatically. Disk space on the server is the only limit."></span>
                       {% endif %}
                     <div class="path-scope-sep"></div>
                     <div class="scope-legend-row">
@@ -10951,6 +11152,13 @@ pytest --cov --cov-report=xml
       var coverageSuggestTimer = null;
       var covAutoFilled = false;
       var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
+      (function () {
+        var tip = document.getElementById('upload-limit-tip');
+        if (tip && SERVER_MODE) {
+          tip.textContent = 'ℹ️  Uploads are gzip-compressed — no practical size limit';
+          tip.style.display = 'inline';
+        }
+      })();
       var themeToggle = document.getElementById("theme-toggle");
 
       function showBannerToast(msg, isError) {
@@ -11953,40 +12161,199 @@ pytest --cov --cov-report=xml
                 .catch(function (e) { showBannerToast('Upload failed: ' + String(e), true); })
                 .finally(function () { if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; });
             } else {
-              if (previewPanel && targetInput === pathInput)
-                previewPanel.innerHTML = '<div class="preview-error">Uploading ' + files.length + ' file(s)…</div>';
-              var promises = [];
+              // ── Filter to source-code files only ─────────────────────────
+              // Binary, generated, and dependency files (node_modules, .git,
+              // build artifacts) are skipped so they are never uploaded.
+              var CODE_EXTS = new Set([
+                'rs','py','js','ts','jsx','tsx','c','cpp','cc','cxx','h','hpp','hh','hxx',
+                'java','go','rb','php','cs','swift','kt','kts','sh','bash','zsh','ksh','fish',
+                'html','htm','css','scss','sass','svelte','vue','sql','lua','r','dart','zig',
+                'nim','ex','exs','erl','hrl','fs','fsx','fsi','fsproj','clj','cljs','cljc',
+                'hs','lhs','pl','pm','t','groovy','scala','m','mm','jl','ps1','psm1','psd1',
+                'asm','s','S','objc','lisp','el','rkt','ml','mli','ocaml','v','sv','vhd','vhdl',
+                'tf','hcl','proto','thrift','avsc','graphql','gql'
+              ]);
+              var codeFiles = [];
               for (var i = 0; i < files.length; i++) {
-                (function (file) {
-                  promises.push(
-                    fileToBase64(file).then(function (b64) {
-                      return { path: file.webkitRelativePath, content: b64 };
-                    })
-                  );
-                })(files[i]);
+                var f = files[i];
+                var name = f.name;
+                if (name === 'Makefile' || name === 'Dockerfile' || name === 'Gemfile' ||
+                    name === 'Rakefile' || name === 'Procfile' || name === 'Justfile') {
+                  codeFiles.push(f); continue;
+                }
+                var dot = name.lastIndexOf('.');
+                if (dot >= 0 && CODE_EXTS.has(name.slice(dot + 1).toLowerCase())) codeFiles.push(f);
               }
-              Promise.all(promises).then(function (fileList) {
-                return fetch('/api/upload-directory', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ files: fileList })
-                }).then(function (r) { return r.json(); });
-              })
-                .then(function (d) {
-                  if (d && d.tmp_path) {
-                    targetInput.value = d.tmp_path;
-                    if (targetInput === pathInput) {
-                      updateReportTitleFromPath();
-                      autoSetOutputDir(d.tmp_path);
-                      fetchProjectHistory(d.tmp_path);
-                      loadPreview();
-                      suggestCoverageFile(d.tmp_path);
+              var total = files.length;
+              var kept = codeFiles.length;
+              if (kept === 0) {
+                if (previewPanel && targetInput === pathInput)
+                  previewPanel.innerHTML = '<div class="preview-error">No supported source files found in the selected folder (' + total.toLocaleString() + ' files scanned).</div>';
+                if (browseBtn) browseBtn.disabled = false;
+                inputEl.value = '';
+                return;
+              }
+
+              // ── Helper: apply upload result to UI ────────────────────────
+              function applyUploadResult(tmpPath) {
+                targetInput.value = tmpPath;
+                if (targetInput === pathInput) {
+                  updateReportTitleFromPath();
+                  autoSetOutputDir(tmpPath);
+                  fetchProjectHistory(tmpPath);
+                  loadPreview();
+                  suggestCoverageFile(tmpPath);
+                }
+                updateReview();
+                if (browseBtn) browseBtn.disabled = false;
+                inputEl.value = '';
+              }
+
+              // ── Path A: tar.gz via native CompressionStream (Chrome 80+, FF 113+, Safari 16.4+)
+              if (typeof CompressionStream !== 'undefined') {
+                if (previewPanel && targetInput === pathInput)
+                  previewPanel.innerHTML = '<div class="preview-error">Building archive: 0 / ' + kept.toLocaleString() + ' files…</div>';
+
+                // Build a minimal POSIX ustar tar header for a single file entry.
+                function buildUstarHeader(filePath, fileSize) {
+                  var BLOCK = 512;
+                  var hdr = new Uint8Array(BLOCK);
+                  var enc = new TextEncoder();
+                  function wStr(off, len, s) {
+                    var b = enc.encode(s);
+                    for (var i = 0; i < Math.min(b.length, len); i++) hdr[off + i] = b[i];
+                  }
+                  function wOct(off, len, val) {
+                    var s = val.toString(8);
+                    while (s.length < len - 1) s = '0' + s;
+                    wStr(off, len, s + '\0');
+                  }
+                  // Long-path split: ustar name ≤99 chars, prefix ≤154 chars.
+                  var name = filePath, prefix = '';
+                  if (filePath.length > 99) {
+                    var split = filePath.lastIndexOf('/', 154);
+                    if (split > 0 && filePath.length - split - 1 <= 99) {
+                      prefix = filePath.substring(0, split);
+                      name   = filePath.substring(split + 1);
+                    } else { name = filePath.substring(0, 99); }
+                  }
+                  wStr(0,   100, name);          // name
+                  wOct(100,   8, 0o000644);      // mode
+                  wOct(108,   8, 0);             // uid
+                  wOct(116,   8, 0);             // gid
+                  wOct(124,  12, fileSize);      // size
+                  wOct(136,  12, 0);             // mtime (epoch)
+                  for (var i = 148; i < 156; i++) hdr[i] = 32; // checksum placeholder = spaces
+                  hdr[156] = 48;                 // type flag '0' = regular file
+                  wStr(157, 100, '');            // linkname
+                  wStr(257,   6, 'ustar');       // magic
+                  wStr(263,   2, '00');          // version
+                  wStr(265,  32, '');            // uname
+                  wStr(297,  32, '');            // gname
+                  wOct(329,   8, 0);             // devmajor
+                  wOct(337,   8, 0);             // devminor
+                  wStr(345, 155, prefix);        // prefix
+                  // Compute checksum (sum of all bytes, placeholder = 32).
+                  var chk = 0;
+                  for (var i = 0; i < BLOCK; i++) chk += hdr[i];
+                  var cs = chk.toString(8);
+                  while (cs.length < 6) cs = '0' + cs;
+                  wStr(148, 8, cs + '\0 ');
+                  return hdr;
+                }
+
+                // Build tar.gz one file at a time, piping through CompressionStream.
+                // RAM usage = compressed output buffer + one file at a time.
+                (async function () {
+                  try {
+                    var BLOCK = 512;
+                    var cs     = new CompressionStream('gzip');
+                    var writer = cs.writable.getWriter();
+                    var chunks = [];
+                    var reader = cs.readable.getReader();
+                    var collecting = (async function () {
+                      while (true) { var r = await reader.read(); if (r.done) break; chunks.push(r.value); }
+                    })();
+
+                    for (var i = 0; i < codeFiles.length; i++) {
+                      var file = codeFiles[i];
+                      var path = file.webkitRelativePath || file.name;
+                      var buf  = await file.arrayBuffer();
+                      var data = new Uint8Array(buf);
+                      // Header block
+                      await writer.write(buildUstarHeader(path, data.length));
+                      // Data padded to 512-byte boundary
+                      if (data.length > 0) {
+                        var padded = Math.ceil(data.length / BLOCK) * BLOCK;
+                        var block  = new Uint8Array(padded);
+                        block.set(data);
+                        await writer.write(block);
+                      }
+                      if ((i + 1) % 50 === 0 || i === codeFiles.length - 1) {
+                        if (previewPanel && targetInput === pathInput)
+                          previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i + 1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files…</div>';
+                      }
                     }
-                    updateReview();
-                  } else if (d && d.error) { showBannerToast(d.error, true); }
-                })
-                .catch(function (e) { showBannerToast('Upload failed: ' + String(e), true); })
-                .finally(function () { if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; });
+                    // End-of-archive: two 512-byte zero blocks
+                    await writer.write(new Uint8Array(BLOCK * 2));
+                    await writer.close();
+                    await collecting;
+
+                    var blob = new Blob(chunks, { type: 'application/gzip' });
+                    var sizeMB = (blob.size / 1048576).toFixed(1);
+                    if (previewPanel && targetInput === pathInput)
+                      previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + (total !== kept ? kept.toLocaleString() + ' of ' + total.toLocaleString() + ' files' : kept.toLocaleString() + ' files') + ')…</div>';
+
+                    var resp = await fetch('/api/upload-tarball', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/gzip' },
+                      body: blob
+                    });
+                    var d = await resp.json();
+                    if (d && d.tmp_path) { applyUploadResult(d.tmp_path); }
+                    else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; }
+                  } catch (e) {
+                    showBannerToast('Upload failed: ' + String(e), true);
+                    if (browseBtn) browseBtn.disabled = false;
+                    inputEl.value = '';
+                  }
+                })();
+
+              } else {
+                // ── Path B: Legacy fallback — sequential JSON+base64 batches ─
+                // Used only on browsers that lack CompressionStream (pre-2023).
+                var BATCH = 200;
+                var batches = [];
+                for (var b = 0; b < kept; b += BATCH) batches.push(codeFiles.slice(b, b + BATCH));
+                var totalBatches = batches.length;
+                if (previewPanel && targetInput === pathInput)
+                  previewPanel.innerHTML = '<div class="preview-error">Uploading ' + kept.toLocaleString() + ' code file' + (kept === 1 ? '' : 's') + (total !== kept ? ' of ' + total.toLocaleString() + ' total' : '') + '…</div>';
+
+                function sendBatch(idx, currentUploadId, lastTmpPath) {
+                  if (idx >= totalBatches) { applyUploadResult(lastTmpPath); return; }
+                  if (previewPanel && targetInput === pathInput && totalBatches > 1)
+                    previewPanel.innerHTML = '<div class="preview-error">Uploading batch ' + (idx + 1) + ' of ' + totalBatches + '…</div>';
+                  Promise.all(batches[idx].map(function (file) {
+                    return fileToBase64(file).then(function (b64) {
+                      return { path: file.webkitRelativePath || file.name, content: b64 };
+                    });
+                  })).then(function (fileList) {
+                    var body = { files: fileList };
+                    if (currentUploadId) body.upload_id = currentUploadId;
+                    return fetch('/api/upload-directory', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(body)
+                    }).then(function (r) { return r.json(); });
+                  }).then(function (d) {
+                    if (d && d.tmp_path) sendBatch(idx + 1, d.upload_id || currentUploadId, d.tmp_path);
+                    else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; }
+                  }).catch(function (e) {
+                    showBannerToast('Upload failed: ' + String(e), true);
+                    if (browseBtn) browseBtn.disabled = false; inputEl.value = '';
+                  });
+                }
+                sendBatch(0, null, '');
+              }
             }
           };
           inputEl.click();
@@ -16218,6 +16585,7 @@ struct RelocateScanTemplate {
         <div>
           <h1>View Reports</h1>
           <p class="panel-meta">{{ total_scans }} report(s) available. Use the View or PDF button to open a report.</p>
+          {% if server_mode %}<p class="panel-meta" style="margin-top:4px;color:var(--muted);">Showing all scans from all users on this server — scan history is shared across authenticated sessions.</p>{% endif %}
         </div>
         <div class="flex-row">
           <button type="button" class="export-btn" id="export-csv-btn">
@@ -16641,6 +17009,7 @@ struct HistoryTemplate {
     browse_error: Option<String>,
     watched_dirs: Vec<String>,
     csp_nonce: String,
+    server_mode: bool,
 }
 
 // ── CompareSelectTemplate ──────────────────────────────────────────────────────
