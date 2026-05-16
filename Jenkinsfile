@@ -48,7 +48,7 @@ pipeline {
         )
         string(
             name:         'REPORT_TITLE',
-            defaultValue: 'CI Smoke Run',
+            defaultValue: 'oxide-sloc CI Report',
             description:  'Title embedded in generated HTML and PDF reports.'
         )
         string(
@@ -77,7 +77,7 @@ pipeline {
         // ── CI config preset ───────────────────────────────────────────────────
         choice(
             name:    'CI_PRESET',
-            choices: ['none', 'default', 'strict', 'full-scope'],
+            choices: ['default', 'none', 'strict', 'full-scope'],
             description: 'CI configuration preset loaded from the ci/ directory:\n' +
                          '  none        — no preset; individual flags below control everything\n' +
                          '  default     — balanced defaults, mirrors web UI defaults  (ci/sloc-ci-default.toml)\n' +
@@ -120,7 +120,7 @@ pipeline {
         )
         booleanParam(
             name:         'SUBMODULE_BREAKDOWN',
-            defaultValue: false,
+            defaultValue: true,
             description:  'Detect .gitmodules and emit per-submodule stats in the report.'
         )
         booleanParam(
@@ -867,16 +867,7 @@ CARGOEOF
                         '''
                     }
 
-                    // d. Re-render stored JSON — verifies the report roundtrip
-                    if (params.GENERATE_HTML) {
-                        sh """
-                            '${env.BINARY}' report '${outDir}/result_${projectSlug}.json' \\
-                                --html-out '${outDir}/re-rendered_${projectSlug}.html'
-                            test -s '${outDir}/re-rendered_${projectSlug}.html'
-                        """
-                    }
-
-                    // e. HTML content sanity checks
+                    // d. HTML content sanity checks
                     if (params.GENERATE_HTML) {
                         withEnv(["REPORT_TITLE=${params.REPORT_TITLE}"]) {
                             sh '''
@@ -1081,24 +1072,11 @@ PYEOF"""
                         fingerprint: true,
                         allowEmptyArchive: true
 
-                    if (params.GENERATE_HTML) {
-                        def rptName = "SLOC Report — ${env.SLOC_PROJECT ?: 'project'}"
-                        publishHTML(target: [
-                            allowMissing         : false,
-                            alwaysLinkToLastBuild: true,
-                            keepAll              : true,
-                            reportDir            : params.OUTPUT_SUBDIR,
-                            reportFiles          : "report_${env.SLOC_PROJECT ?: 'project'}.html",
-                            reportName           : rptName,
-                        ])
-                    }
-
-                    // ── Standalone HTML dashboard (zero-plugin fallback) ──────
-                    // generate-dashboard.py reads result_<slug>.json and, when
-                    // present, test-results/junit.xml and coverage/lcov.info.
-                    // The output is a self-contained HTML file that requires no
-                    // Plot / junit / coverage / htmlpublisher plugins to be useful.
-                    // Wrapped in try/catch so a Python error never fails the build.
+                    // ── Graphical Report (published first → top of sidebar) ───
+                    // generate-dashboard.py reads result_<slug>.json and produces
+                    // a self-contained HTML page with SVG charts and tables.
+                    // CSS is extracted to an external file so it renders correctly
+                    // under Jenkins's default artifact-viewer CSP.
                     try {
                         sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}' '${histFile}'"
                         def dashFile = "${outDir}/dashboard_${proj}.html"
@@ -1109,11 +1087,23 @@ PYEOF"""
                                 keepAll              : true,
                                 reportDir            : params.OUTPUT_SUBDIR,
                                 reportFiles          : "dashboard_${env.SLOC_PROJECT ?: 'project'}.html",
-                                reportName           : "Build Dashboard — ${env.SLOC_PROJECT ?: 'project'}",
+                                reportName           : "Graphical Report — ${env.SLOC_PROJECT ?: 'project'}",
                             ])
                         }
                     } catch (Exception ex) {
                         echo "generate-dashboard.py did not run (Python 3 unavailable or script error): ${ex.message}"
+                    }
+
+                    if (params.GENERATE_HTML) {
+                        def rptName = "SLOC Report — ${env.SLOC_PROJECT ?: 'project'}"
+                        publishHTML(target: [
+                            allowMissing         : false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll              : true,
+                            reportDir            : params.OUTPUT_SUBDIR,
+                            reportFiles          : "report_${env.SLOC_PROJECT ?: 'project'}.html",
+                            reportName           : rptName,
+                        ])
                     }
                 }
             }
@@ -1400,57 +1390,6 @@ PYEOF"""
                     } catch (e) {
                         echo "Bitbucket status notify skipped (plugin not installed): ${e.message}"
                     }
-                }
-            }
-            // Plot plugin trend charts — install the "plot" plugin to activate.
-            // Each call is individually guarded; a missing plugin or missing CSV silently no-ops.
-            //
-            // Charts generated automatically (no manual job config required):
-            //   "SLOC totals over time"    — code_lines / comment_lines / blank_lines
-            //   "Files analyzed"           — files_analyzed       (from summary.csv)
-            //   "Per-language breakdown"   — code_lines by lang   (from per_language.csv)
-            //   "Line coverage % over time"— line_coverage_pct    (from coverage.csv,
-            //                                only when COVERAGE_STANDALONE is enabled)
-            script {
-                def outDir = "${params.OUTPUT_SUBDIR}"
-                try {
-                    plot csvFileName    : 'sloc-summary.csv',
-                         csvSeries      : [[file: "${outDir}/summary.csv",
-                                            inclusionFlag: 'INCLUDE_BY_STRING',
-                                            url: '', displayTableFlag: false]],
-                         group          : 'SLOC Trends',
-                         title          : 'SLOC totals over time',
-                         style          : 'line',
-                         yaxis          : 'Lines',
-                         numBuilds      : '50'
-                } catch (Exception ex) {
-                    echo "Plot (SLOC totals) unavailable or no CSV data yet: ${ex.message}"
-                }
-                try {
-                    plot csvFileName    : 'sloc-per-language.csv',
-                         csvSeries      : [[file: "${outDir}/per_language.csv",
-                                            inclusionFlag: 'INCLUDE_BY_STRING',
-                                            url: '', displayTableFlag: true]],
-                         group          : 'SLOC Trends',
-                         title          : 'Per-language code lines',
-                         style          : 'bar',
-                         yaxis          : 'Code lines',
-                         numBuilds      : '20'
-                } catch (Exception ex) {
-                    echo "Plot (per-language) unavailable or no CSV data yet: ${ex.message}"
-                }
-                try {
-                    plot csvFileName    : 'sloc-coverage.csv',
-                         csvSeries      : [[file: "${outDir}/coverage.csv",
-                                            inclusionFlag: 'INCLUDE_BY_STRING',
-                                            url: '', displayTableFlag: false]],
-                         group          : 'SLOC Trends',
-                         title          : 'Line coverage % over time',
-                         style          : 'line',
-                         yaxis          : 'Coverage %',
-                         numBuilds      : '50'
-                } catch (Exception ex) {
-                    echo "Plot (coverage) unavailable or no CSV data yet: ${ex.message}"
                 }
             }
         }

@@ -1,7 +1,7 @@
 <?xml version='1.1' encoding='UTF-8'?>
 <!-- Importable Pipeline-from-SCM job definition. Bootstrap: see ci/jenkins/README.md -->
 <flow-definition plugin="workflow-job">
-  <description>oxide-sloc — SLOC analysis pipeline. Scans source repositories and produces HTML, JSON, and PDF reports with build-over-build trend data.</description>
+  <description>oxide-sloc — SLOC analysis pipeline. Scans source repositories and produces HTML and JSON reports with build-over-build trend data.</description>
   <keepDependencies>false</keepDependencies>
   <properties>
     <jenkins.model.BuildDiscarderProperty>

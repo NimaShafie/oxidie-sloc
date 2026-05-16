@@ -44,6 +44,7 @@ SCAN_PATH      Path that was scanned (shown in the header).
 import html
 import json
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -430,18 +431,43 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     files_analyzed = int(totals.get("files_analyzed", 0))
 
     # Per-language breakdown
-    lang_rows = []
+    lang_rows = []        # (name, code_lines) for bar chart
+    lang_table_rows = []  # full row dicts for table
     for entry in data.get("totals_by_language", []):
         if not isinstance(entry, dict):
             continue
         name = entry.get("language", "Unknown")
-        # language field may be a string or a nested object with display_name
         if isinstance(name, dict):
             name = name.get("display_name") or name.get("name") or str(name)
-        lang_rows.append((str(name), int(entry.get("code_lines", 0))))
+        code = int(entry.get("code_lines", 0))
+        lang_rows.append((str(name), code))
+        lang_table_rows.append({
+            "name":           str(name),
+            "code_lines":     code,
+            "comment_lines":  int(entry.get("comment_lines", 0)),
+            "blank_lines":    int(entry.get("blank_lines",   0)),
+            "files_analyzed": int(entry.get("files_analyzed", 0)),
+        })
 
     lang_rows.sort(key=lambda x: x[1], reverse=True)
+    lang_table_rows.sort(key=lambda x: x["code_lines"], reverse=True)
     top_lang = lang_rows[0][0] if lang_rows else None
+
+    # Top files by code lines
+    top_files = []
+    for rec in data.get("per_file_records", []):
+        if not isinstance(rec, dict):
+            continue
+        lang = rec.get("language", "")
+        if isinstance(lang, dict):
+            lang = lang.get("display_name") or lang.get("name") or str(lang)
+        top_files.append({
+            "path":       str(rec.get("path", "")),
+            "language":   str(lang),
+            "code_lines": int(rec.get("code_lines", 0)),
+        })
+    top_files.sort(key=lambda x: x["code_lines"], reverse=True)
+    top_files = top_files[:20]
 
     # ── Load test results ───────────────────────────────────────────────────
     junit_path = os.path.join(out_dir, "test-results", "junit.xml")
@@ -509,6 +535,65 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     # Language chart
     lang_chart = svg_hbar(lang_rows[:20])
     lang_caption = f"{len(lang_rows)} language{'s' if len(lang_rows) != 1 else ''} detected"
+
+    # Per-language metrics table
+    if lang_table_rows:
+        _tbl_rows = "\n".join(
+            f"<tr>"
+            f"<td>{html.escape(r['name'])}</td>"
+            f"<td class='num'>{fmt(r['code_lines'])}</td>"
+            f"<td class='num'>{fmt(r['comment_lines'])}</td>"
+            f"<td class='num'>{fmt(r['blank_lines'])}</td>"
+            f"<td class='num'>{fmt(r['files_analyzed'])}</td>"
+            f"</tr>"
+            for r in lang_table_rows
+        )
+        lang_table_html = f"""
+<table class="data-table" style="margin-top:18px">
+  <thead>
+    <tr>
+      <th>Language</th>
+      <th class="num">Code</th>
+      <th class="num">Comments</th>
+      <th class="num">Blank</th>
+      <th class="num">Files</th>
+    </tr>
+  </thead>
+  <tbody>
+    {_tbl_rows}
+  </tbody>
+</table>"""
+    else:
+        lang_table_html = ""
+
+    # Top files section
+    if top_files:
+        _file_rows = "\n".join(
+            f"<tr>"
+            f"<td class='trunc' title='{html.escape(f[\"path\"])}'>{html.escape(f['path'])}</td>"
+            f"<td>{html.escape(f['language'])}</td>"
+            f"<td class='num'>{fmt(f['code_lines'])}</td>"
+            f"</tr>"
+            for f in top_files
+        )
+        files_section = f"""
+<div class="card">
+  <div class="card-title">Top Files by Code Lines</div>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Language</th>
+        <th class="num">Code Lines</th>
+      </tr>
+    </thead>
+    <tbody>
+      {_file_rows}
+    </tbody>
+  </table>
+</div>"""
+    else:
+        files_section = ""
 
     # Test results section
     if junit is not None:
@@ -623,7 +708,7 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     header_meta_html = " &nbsp;&middot;&nbsp; ".join(header_meta_parts)
 
     # ── Assemble the full HTML page ─────────────────────────────────────────
-    page_title = f"oxide-sloc build dashboard — {slug}"
+    page_title = f"oxide-sloc Graphical Report — {slug}"
 
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
@@ -816,6 +901,40 @@ body {{
 .sparkline-wrap {{ overflow-x: auto; margin-bottom: 8px; }}
 .trend-delta {{ font-size: 13px; font-weight: 700; margin-top: 4px; line-height: 1.5; }}
 
+/* ── Data tables ─────────────────────────────────────────────────────────── */
+.data-table {{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}}
+.data-table th {{
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8a6a5a;
+  padding: 6px 10px 8px;
+  border-bottom: 2px solid #e0d8d0;
+}}
+.data-table td {{
+  padding: 7px 10px;
+  border-bottom: 1px solid #f0e8e0;
+  color: #2d1a0e;
+}}
+.data-table tr:last-child td {{ border-bottom: none; }}
+.data-table .num {{
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}}
+.data-table .trunc {{
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {{
   .summary-strip {{ grid-template-columns: repeat(2, 1fr); }}
@@ -830,7 +949,7 @@ body {{
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header class="site-header">
   <span class="brand">oxide-sloc</span>
-  <span class="dash-title">Build Dashboard &mdash; {html.escape(slug)}</span>
+  <span class="dash-title">Graphical Report &mdash; {html.escape(slug)}</span>
   <div class="meta">
     {header_meta_html}
     {back_link}
@@ -858,7 +977,11 @@ body {{
       {lang_chart}
     </div>
     <p class="lang-caption">{html.escape(lang_caption)}</p>
+    {lang_table_html}
   </div>
+
+  <!-- Top Files -->
+  {files_section}
 
   <!-- Test Results -->
   {test_section}
@@ -870,7 +993,7 @@ body {{
 
 <!-- ── Footer ──────────────────────────────────────────────────────────── -->
 <footer class="site-footer">
-  oxide-sloc build dashboard &nbsp;&middot;&nbsp;
+  oxide-sloc Graphical Report &nbsp;&middot;&nbsp;
   generated {html.escape(timestamp)} &nbsp;&middot;&nbsp;
   <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">
     oxide-sloc on GitHub
@@ -880,6 +1003,23 @@ body {{
 </body>
 </html>
 """
+
+    # ── Extract inline CSS to external file (Jenkins CSP fix) ──────────────
+    # Jenkins's default artifact-viewer CSP blocks <style> tags but permits
+    # external stylesheets from 'self'.  Writing the CSS to a separate file
+    # and referencing it via <link> means the report renders correctly without
+    # requiring credentials or a custom init.groovy.d CSP override.
+    css_match = re.search(r"<style>([\s\S]*?)</style>", html_out)
+    if css_match:
+        css_filename = f"dashboard_{slug}.css"
+        css_path = os.path.join(out_dir, css_filename)
+        with open(css_path, "w", encoding="utf-8") as fh:
+            fh.write(css_match.group(1))
+        html_out = html_out.replace(
+            css_match.group(0),
+            f'<link rel="stylesheet" href="{css_filename}">',
+            1,
+        )
 
     # ── Write output file ───────────────────────────────────────────────────
     out_path = os.path.join(out_dir, f"dashboard_{slug}.html")

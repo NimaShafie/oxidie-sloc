@@ -2649,15 +2649,47 @@ pub mod ts {
 
     use super::{ParseMode, RawFileAnalysis, RawLineCounts};
 
+    /// Configuration for which AST node kinds map to symbols in this grammar.
+    struct SymbolKinds {
+        /// Node kind name for function definitions (e.g. `"function_definition"`).
+        function_def: &'static str,
+        /// Node kind name for class definitions (e.g. `"class_definition"`).
+        class_def: &'static str,
+        /// Name field of a function node that, when it starts with this prefix, marks a test.
+        /// Empty string disables test-prefix detection.
+        test_fn_prefix: &'static str,
+        /// Name field of a class node that, when it starts with this prefix, marks a test.
+        /// Empty string disables test-prefix detection.
+        test_class_prefix: &'static str,
+        /// When non-empty, `call` nodes whose `function` is an `attribute` access and whose
+        /// attribute identifier starts with this prefix are counted as test assertions.
+        /// Used for Python `self.assertXxx(...)` detection.
+        assertion_attr_prefix: &'static str,
+    }
+
+    impl SymbolKinds {
+        const fn none() -> Self {
+            Self {
+                function_def: "",
+                class_def: "",
+                test_fn_prefix: "",
+                test_class_prefix: "",
+                assertion_attr_prefix: "",
+            }
+        }
+    }
+
     /// Classify every line of `text` using a tree-sitter grammar.
     ///
     /// `comment_node_kinds` — node type names that represent comments in this grammar
     /// `docstring_stmt_kind` — optional parent node type whose direct `string` child is a docstring
+    /// `symbols` — AST node kinds used to populate symbol counters
     fn analyze_lines(
         text: &str,
         ts_language: &tree_sitter::Language,
         comment_node_kinds: &[&str],
         docstring_stmt_kind: Option<&str>,
+        symbols: &SymbolKinds,
     ) -> Option<RawFileAnalysis> {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(ts_language).ok()?;
@@ -2693,11 +2725,87 @@ pub mod ts {
             &mut raw,
         );
 
+        // Symbol counting: walk the AST a second time to collect function/class/test counts.
+        if !symbols.function_def.is_empty() || !symbols.class_def.is_empty() {
+            count_symbols(tree.root_node(), text.as_bytes(), symbols, &mut raw);
+        }
+
         Some(RawFileAnalysis {
             raw,
             parse_mode: ParseMode::TreeSitter,
             warnings: Vec::new(),
         })
+    }
+
+    /// Walk the AST and populate `raw.functions`, `raw.classes`, `raw.test_count`,
+    /// and `raw.test_assertion_count`.
+    fn count_symbols(node: Node, source: &[u8], kinds: &SymbolKinds, raw: &mut RawLineCounts) {
+        let kind = node.kind();
+
+        if !kinds.function_def.is_empty() && kind == kinds.function_def {
+            let name = node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(source).ok())
+                .unwrap_or("");
+            if !kinds.test_fn_prefix.is_empty() && name.starts_with(kinds.test_fn_prefix) {
+                raw.test_count += 1;
+            } else {
+                raw.functions += 1;
+            }
+            // Recurse into children (body may contain nested functions/classes/calls).
+            for i in 0..node.child_count() {
+                #[allow(clippy::cast_possible_truncation)]
+                if let Some(child) = node.child(i as u32) {
+                    count_symbols(child, source, kinds, raw);
+                }
+            }
+            return;
+        }
+
+        if !kinds.class_def.is_empty() && kind == kinds.class_def {
+            let name = node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(source).ok())
+                .unwrap_or("");
+            if !kinds.test_class_prefix.is_empty() && name.starts_with(kinds.test_class_prefix) {
+                raw.test_count += 1;
+            } else {
+                raw.classes += 1;
+            }
+            // Recurse into methods and nested classes inside the body.
+            for i in 0..node.child_count() {
+                #[allow(clippy::cast_possible_truncation)]
+                if let Some(child) = node.child(i as u32) {
+                    count_symbols(child, source, kinds, raw);
+                }
+            }
+            return;
+        }
+
+        // Assertion detection: call node whose function is an attribute access with an
+        // attribute identifier starting with the configured prefix (e.g. "assert" for Python).
+        if !kinds.assertion_attr_prefix.is_empty() && kind == "call" {
+            if let Some(func) = node.child_by_field_name("function") {
+                if func.kind() == "attribute" {
+                    let attr_text = func
+                        .child_by_field_name("attribute")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .unwrap_or("");
+                    if attr_text.starts_with(kinds.assertion_attr_prefix) {
+                        raw.test_assertion_count += 1;
+                        // Don't recurse into the assertion's arguments.
+                        return;
+                    }
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            #[allow(clippy::cast_possible_truncation)]
+            if let Some(child) = node.child(i as u32) {
+                count_symbols(child, source, kinds, raw);
+            }
+        }
     }
 
     /// Flags describing what kinds of content appear on a single line.
@@ -2855,18 +2963,34 @@ pub mod ts {
         }
     }
 
+    const C_SYMBOLS: SymbolKinds = SymbolKinds::none();
+
+    const PYTHON_SYMBOLS: SymbolKinds = SymbolKinds {
+        function_def: "function_definition",
+        class_def: "class_definition",
+        test_fn_prefix: "test_",
+        test_class_prefix: "Test",
+        assertion_attr_prefix: "assert",
+    };
+
     /// Parse C or C++ source with tree-sitter-c.
     #[must_use]
     pub fn analyze_c(text: &str) -> Option<RawFileAnalysis> {
         let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
-        analyze_lines(text, &lang, &["comment"], None)
+        analyze_lines(text, &lang, &["comment"], None, &C_SYMBOLS)
     }
 
     /// Parse Python source with tree-sitter-python.
     #[must_use]
     pub fn analyze_python(text: &str) -> Option<RawFileAnalysis> {
         let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
-        analyze_lines(text, &lang, &["comment"], Some("expression_statement"))
+        analyze_lines(
+            text,
+            &lang,
+            &["comment"],
+            Some("expression_statement"),
+            &PYTHON_SYMBOLS,
+        )
     }
 }
 
@@ -2927,10 +3051,6 @@ def fn_a():
     }
 
     #[test]
-    #[cfg_attr(
-        feature = "tree-sitter",
-        ignore = "tree-sitter path does not populate symbol counters (see TODO: implement ts symbol counting)"
-    )]
     fn python_test_fn_not_double_counted() {
         // def test_ lines count as tests only, NOT as functions
         let (f, c, _, _, t, _, _) = sym(Language::Python, "def test_foo():");
@@ -2940,10 +3060,6 @@ def fn_a():
     }
 
     #[test]
-    #[cfg_attr(
-        feature = "tree-sitter",
-        ignore = "tree-sitter path does not populate symbol counters (see TODO: implement ts symbol counting)"
-    )]
     fn python_test_class_not_double_counted() {
         // class Test* lines count as tests only, NOT as classes
         let (f, c, _, _, t, _, _) = sym(Language::Python, "class TestFoo:");
@@ -2953,10 +3069,6 @@ def fn_a():
     }
 
     #[test]
-    #[cfg_attr(
-        feature = "tree-sitter",
-        ignore = "tree-sitter path does not populate symbol counters (see TODO: implement ts symbol counting)"
-    )]
     fn python_regular_fn_counts_as_function() {
         let (f, c, _, _, t, _, _) = sym(Language::Python, "def regular():");
         assert_eq!(f, 1, "regular function must be counted");
@@ -2965,10 +3077,6 @@ def fn_a():
     }
 
     #[test]
-    #[cfg_attr(
-        feature = "tree-sitter",
-        ignore = "tree-sitter path does not populate symbol counters (see TODO: implement ts symbol counting)"
-    )]
     fn python_regular_class_counts_as_class() {
         let (f, c, _, _, t, _, _) = sym(Language::Python, "class Regular:");
         assert_eq!(c, 1, "regular class must be counted");

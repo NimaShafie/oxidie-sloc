@@ -29,7 +29,7 @@ def repoUrl = (binding.hasVariable('REPO_URL') ? REPO_URL : System.getenv('REPO_
 
 pipelineJob(jobName) {
     description('oxide-sloc SLOC analysis pipeline. ' +
-                'Scans source repositories and produces HTML, JSON, and PDF reports ' +
+                'Scans source repositories and produces HTML and JSON reports ' +
                 'with build-over-build trend data.')
 
     logRotator {
