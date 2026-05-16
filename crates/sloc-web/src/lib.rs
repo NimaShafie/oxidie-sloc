@@ -10350,7 +10350,7 @@ struct SubmoduleRow {
     .lc-cancel-btn:hover { color:#c0392b;border-color:#c0392b; }
     body.dark-theme .lc-cancelled { background:rgba(80,80,80,0.12);border-color:rgba(150,150,150,0.2); }
     .hidden { display:none !important; }
-    .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
+    .site-footer{text-align:center;padding:6px 24px 8px;font-size:13px;color:var(--muted);position:relative;z-index:1;margin-top:4px;}
     .site-footer a{color:var(--muted);}
     @media (max-width: 1280px) { .scope-stats, .explorer-meta-grid, .explorer-meta-grid.split { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 980px) { .field-grid, .artifact-grid, .review-grid, .scope-stats, .explorer-meta-grid, .explorer-meta-grid.split, .glob-guidance-grid { grid-template-columns: 1fr; } .layout { grid-template-columns: 1fr; } .side-stack { width: auto; max-width: none; } .step-nav { position:static; } .top-nav-inner { grid-template-columns: 1fr; justify-items: stretch; } .nav-project-slot, .nav-status { justify-content:flex-start; } .input-group { grid-template-columns: 1fr 1fr; } .input-group.compact { grid-template-columns: 1fr 1fr; } .better-spacing { justify-content:flex-start; } .file-explorer-controls { flex-direction: column; align-items:flex-start; flex-wrap: wrap; } .file-explorer-search-row { margin-left: 0; flex-wrap: wrap; width: 100%; } .explorer-search { min-width: 0; width: 100%; } .file-explorer-header, .tree-row { grid-template-columns: minmax(0, 1fr) 110px 110px 140px; } .advanced-rule-row, .advanced-rule-row.static-note, .output-identity-grid, .counting-top-grid, .preset-inline-row { grid-template-columns: 1fr; } .wizard-progress { max-width: none; } .path-row-grid { grid-template-columns: 1fr; } .ws-left { flex-wrap: wrap; } .scan-pills-row { flex-wrap: wrap; } }
@@ -10431,9 +10431,20 @@ struct SubmoduleRow {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot"></span>
+            <span id="server-status-label">{% if server_mode %}Server Mode{% else %}Running{% endif %}</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            {% if server_mode %}
+            OxideSLOC is running in server mode — accessible on your LAN.<br>Use Ctrl+C in the terminal to stop.
+            {% else %}
+            OxideSLOC is running locally — only accessible from this machine.<br>Press Ctrl+C in the terminal to stop.
+            {% endif %}
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -10657,7 +10668,7 @@ struct SubmoduleRow {
                   {% if git_repo.is_empty() %}
                   {% if server_mode %}
                   <div id="upload-limit-tip" class="hint" style="margin-top:6px;font-size:11px;">
-                    ℹ️ Files are compressed and streamed — no fixed size limit. Binaries, <code>node_modules</code>, and build artifacts are filtered automatically.
+                    ℹ️ Files are compressed and streamed — no fixed size limit. Binaries, node_modules, and build artifacts are filtered automatically.
                   </div>
                   {% endif %}
                   <div class="path-info-row">
@@ -10969,7 +10980,7 @@ pytest --cov --cov-report=xml
                   <div class="field">
                     <label for="output_dir">Output directory</label>
                     <div class="input-group compact">
-                      <input id="output_dir" name="output_dir" type="text" value="" placeholder="auto: project/sloc" />
+                      <input id="output_dir" name="output_dir" type="text" value="" placeholder="auto: project/sloc" onblur="this.scrollLeft=this.scrollWidth" />
                       <button type="button" class="mini-button oxide" id="browse-output-dir">Browse</button>
                       <button type="button" class="mini-button" id="use-default-output">Use default</button>
                     </div>
@@ -11159,13 +11170,23 @@ pytest --cov --cov-report=xml
       var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
       var themeToggle = document.getElementById("theme-toggle");
 
-      function showBannerToast(msg, isError) {
+      function showBannerToast(msg, isError, opts) {
+        opts = opts || {};
         var t = document.createElement('div');
         t.className = isError ? 'toast-error' : 'toast-success';
-        t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;min-width:280px;max-width:500px;box-shadow:0 6px 24px rgba(0,0,0,0.18);';
-        t.textContent = msg;
+        var topPos = opts.top ? '80px' : null;
+        t.style.cssText = 'position:fixed;' + (topPos ? 'top:' + topPos + ';' : 'bottom:24px;') +
+          'left:50%;transform:translateX(-50%);z-index:9999;min-width:320px;max-width:560px;' +
+          'box-shadow:0 8px 32px rgba(0,0,0,0.22);padding:14px 20px;border-radius:12px;' +
+          'font-size:13px;font-weight:600;line-height:1.5;text-align:center;';
+        if (opts.icon) {
+          var inner = document.createElement('span');
+          inner.innerHTML = opts.icon + ' ';
+          t.appendChild(inner);
+        }
+        t.appendChild(document.createTextNode(msg));
         document.body.appendChild(t);
-        setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 4500);
+        setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 5500);
       }
       var mixedLinePolicy = document.getElementById("mixed_line_policy");
       var pythonDocstrings = document.getElementById("python_docstrings_as_comments");
@@ -12114,7 +12135,11 @@ pytest --cov --cov-report=xml
       function pickDirectory(targetInput, kind) {
         if (SERVER_MODE) {
           if (kind === 'output') {
-            showBannerToast('In server mode, type the server-side output path directly into the field.');
+            showBannerToast(
+              'Server mode: type the output path directly into the field — the path must exist on the server, not your local machine.',
+              false,
+              { top: true, icon: '📁' }
+            );
             return;
           }
           var inputEl = kind === 'coverage'
@@ -12590,10 +12615,20 @@ pytest --cov --cov-report=xml
         if (wsOutputLink) wsOutputLink.dataset.folder = val;
       }
 
+      function scrollInputToEnd(input) {
+        if (!input) return;
+        // Defer so the DOM has the new value before we measure scroll width.
+        requestAnimationFrame(function () {
+          input.scrollLeft = input.scrollWidth;
+          input.selectionStart = input.selectionEnd = input.value.length;
+        });
+      }
+
       function autoSetOutputDir(projectPath) {
         if (!outputDirInput || outputDirInput.dataset.userEdited) return;
         if (GIT_MODE && GIT_OUTPUT_DIR) {
           outputDirInput.value = GIT_OUTPUT_DIR;
+          scrollInputToEnd(outputDirInput);
           syncStripOutputRoot();
           updateReview();
           return;
@@ -12601,6 +12636,7 @@ pytest --cov --cov-report=xml
         if (!projectPath || !projectPath.trim()) return;
         var cleaned = projectPath.trim().replace(/[\\\/]+$/, "");
         outputDirInput.value = cleaned + "/sloc";
+        scrollInputToEnd(outputDirInput);
         syncStripOutputRoot();
         updateReview();
       }
@@ -12821,7 +12857,7 @@ pytest --cov --cov-report=xml
     (function () {
       var raw = {{ prefill_json|safe }};
       if (!raw || typeof raw !== 'object' || !raw.path) return;
-      function setVal(id, val) { var el = document.getElementById(id); if (el) el.value = val; }
+      function setVal(id, val) { var el = document.getElementById(id); if (el) { el.value = val; if (id === 'output-dir') scrollInputToEnd(el); } }
       function setChecked(id, v) { var el = document.getElementById(id); if (el) el.checked = v; }
       function setSelect(id, val) { var el = document.getElementById(id); if (el) el.value = val; }
       setVal('path-input', raw.path || '');
@@ -12901,6 +12937,26 @@ pytest --cov --cov-report=xml
     }
     if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fixArtifactHintSpacing);}else{fixArtifactHintSpacing();}
   }());
+  // Server ping — polls /healthz every 30 s and shows round-trip latency in the nav pill.
+  (function(){
+    var pingEl=document.getElementById('server-ping-ms');
+    var tipEl=document.getElementById('server-tip-ping');
+    function doPing(){
+      var t0=performance.now();
+      fetch('/healthz',{cache:'no-store'})
+        .then(function(){
+          var ms=Math.round(performance.now()-t0);
+          if(pingEl)pingEl.textContent=ms+'ms';
+          if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';
+        })
+        .catch(function(){
+          if(pingEl)pingEl.textContent='';
+          if(tipEl)tipEl.textContent='';
+        });
+    }
+    doPing();
+    setInterval(doPing,30000);
+  })();
   </script>
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
@@ -12908,6 +12964,7 @@ pytest --cov --cov-report=xml
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+    &nbsp;·&nbsp; {% if server_mode %}Deployment: Network Server{% else %}Deployment: Local{% endif %}
   </footer>
 </body>
 </html>
@@ -14425,9 +14482,16 @@ struct ScanSetupTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot"></span>
+            <span id="server-status-label">Running</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — press Ctrl+C in the terminal to stop.<br>
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -14589,14 +14653,19 @@ struct ScanSetupTemplate {
                 {% else %}
                   <a class="button" href="{{ url }}" target="_blank" rel="noopener" id="pdf-open-btn">Open PDF</a>
                 {% endif %}
-              {% when None %}{% endmatch %}
+              {% when None %}
+                <p class="action-empty-note" style="color:var(--muted);font-size:12px;background:rgba(0,0,0,0.04);border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
+                  PDF was not generated for this run. This usually means no Chromium-based browser (Chrome, Edge, Brave) was found on the server, or PDF was not selected in the artifact preset. Re-run with PDF enabled, or set <code>SLOC_BROWSER</code> to your browser path.
+                </p>
+            {% endmatch %}
             {% match pdf_download_url %}
               {% when Some with (url) %}
                 <a class="button secondary" href="{{ url }}" id="pdf-download-btn"{% if pdf_generating %} style="opacity:0.55;pointer-events:none;"{% endif %}>Download PDF</a>
               {% when None %}{% endmatch %}
-            {% match pdf_path %}
-              {% when Some with (_path) %}{% when None %}{% endmatch %}
-            <p class="action-empty-note" style="margin-top:6px;">Print-ready PDF generated from the HTML report. Suitable for sharing or archiving.</p>
+            {% match pdf_url %}
+              {% when Some with (_) %}
+                <p class="action-empty-note" style="margin-top:6px;">Print-ready PDF generated from the HTML report. Suitable for sharing or archiving.</p>
+              {% when None %}{% endmatch %}
           </div>
         </div>
         <div class="action-card">
@@ -15501,6 +15570,18 @@ struct ScanSetupTemplate {
   })();
   </script>
   {% endif %}
+  <script nonce="{{ csp_nonce }}">(function(){
+    var pingEl=document.getElementById('server-ping-ms');
+    var tipEl=document.getElementById('server-tip-ping');
+    function doPing(){
+      var t0=performance.now();
+      fetch('/healthz',{cache:'no-store'})
+        .then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';})
+        .catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';});
+    }
+    doPing();
+    setInterval(doPing,30000);
+  })();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
