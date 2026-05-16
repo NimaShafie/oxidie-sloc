@@ -64,7 +64,8 @@ enum Commands {
     Report(ReportArgs),
     /// Compare two saved JSON results and show the delta
     Diff(DiffArgs),
-    /// Start the web UI (default when no subcommand given)
+    /// Start the web UI (default when no subcommand given).
+    /// Use --server for multi-user LAN access; without it, CORS restricts API calls to localhost only.
     Serve(ServeArgs),
     /// Generate a starter .oxide-sloc.toml config file
     Init(InitArgs),
@@ -295,7 +296,9 @@ struct ServeArgs {
     /// Override the bind address (e.g. 0.0.0.0:4317)
     #[arg(long, value_name = "ADDR")]
     bind: Option<String>,
-    /// Bind to 0.0.0.0, suppress browser auto-open, disable desktop-only routes
+    /// Enable multi-user LAN mode: binds to 0.0.0.0, suppresses browser auto-open,
+    /// disables desktop-only routes, and allows cross-origin API requests from LAN clients.
+    /// Without this flag CORS restricts API access to localhost.
     #[arg(long)]
     server: bool,
 }
