@@ -26,6 +26,9 @@ Thumbs.db
 .env
 ci/jenkins/.env
 
+# Local setup notes — not for publication
+sonarqube-manual-setup.md
+
 # Signing cert generation output — private keys and PFX bundles, never committed
 /_signing/
 

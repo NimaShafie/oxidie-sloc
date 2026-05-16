@@ -11,6 +11,21 @@ workflow requires fully offline distribution of a known-good plugin set (similar
 how `vendor.tar.xz` ships Rust crate sources).  The `download.sh` script in this
 directory is always committed and is enough to regenerate the files on demand.
 
+**Which path for your setup?**
+
+| Scenario | Path |
+|----------|------|
+| Fully online — no restrictions | A or B |
+| Online but no Docker | B |
+| Air-gapped with Docker | A |
+| Air-gapped without Docker | A (requires `jenkins-plugins.tar.xz` pre-committed to repo) |
+| Air-gapped, no networked machine, no Docker | A (requires `jenkins-plugins.tar.xz` pre-committed to repo) |
+
+> **Scenarios 4 & 5 pre-requisite:** Path A's bundling step (`bundle-jenkins-plugins.sh`)
+> requires Docker + internet and must be run once on a networked machine.  Commit the
+> resulting `jenkins-plugins.tar.xz` + `jenkins-plugins.tar.xz.sha256` to the
+> repository root — after that, air-gapped hosts need only `git clone`.
+
 ---
 
 ## Choosing an installation path
@@ -98,88 +113,18 @@ Or upload via the Jenkins UI one file at a time:
 > Center when it starts.  If the Jenkins host has no internet access and no Update
 > Center, you need the full bundle from Path A instead.
 
+> **Air-gapped with no networked machine (scenario 5):** `download.sh` requires
+> internet access to reach the Jenkins Update Center.  Use Path A instead: run
+> `bundle-jenkins-plugins.sh` once on a networked + Docker machine, commit
+> `jenkins-plugins.tar.xz`, then run `install-jenkins-plugins.sh` on the air-gapped
+> host — no internet or file transfer needed after `git clone`.
+
 **Optional — commit the files for distribution:**
 
 ```bash
 git add ci/jenkins/plugins/*.hpi
 git commit -m "ci: add pre-downloaded plugin files for offline install"
 ```
-
----
-
-### Path C — No admin access (corporate Jenkins)
-
-If you do not have shell access to the Jenkins host, three sub-options exist.
-
-#### C1 — Request IT installation
-
-Provide your IT/ops team with:
-
-1. `ci/jenkins/plugins.txt` — the canonical plugin list with one-line descriptions
-2. (Optional) the `.hpi` files in this directory — so they do not need to download anything
-
-The table below lists every required plugin and what pipeline feature it enables:
-
-| Plugin ID | What it enables |
-|-----------|----------------|
-| `workflow-aggregator` | Declarative Pipeline syntax — `stages {}`, `when {}`, `post {}` |
-| `pipeline-utility-steps` | `readJSON` / `writeJSON` helpers used in the post-success block |
-| `ws-cleanup` | `cleanWs()` in `post { cleanup }` — removes workspace after each build |
-| `git` | `GitSCM` checkout step — clones the repository on the agent |
-| `credentials-binding` | `credentials()` binding in `environment {}` blocks (SMTP, webhook) |
-| `htmlpublisher` | `publishHTML()` — "SLOC Report" and "Build Dashboard" sidebar links |
-| `plot` | `plot()` — SLOC trend charts across builds (code/comment/blank over time) |
-| `junit` | `junit()` — "Test Result" sidebar link and pass/fail trend |
-| `coverage` | `recordCoverage()` — line/branch/function % per build with drill-down |
-| `pipeline-stage-view` | Stage visualization in the job UI (Blue Ocean lite) |
-| `timestamper` | Timestamps on every console output line |
-| `ansicolor` | ANSI colour in Rust compiler and Clippy output |
-| `job-dsl` | Executes `ci/jenkins/seed-job.groovy` to create the pipeline job |
-| `copyartifact` | Copies artifacts to/from downstream jobs in Pipeline-of-Pipelines setups |
-| `bitbucket` | Bitbucket Branch Source — optional, Bitbucket SCM only |
-| `bitbucket-build-status-notifier` | Posts commit statuses to Bitbucket — optional |
-
-#### C2 — Upload via Jenkins UI
-
-Requires the **"Administer"** permission in Jenkins (not just build permission).
-
-**Manage Jenkins → Plugins → Advanced → Deploy Plugin → Upload .hpi**
-
-Upload one `.hpi` file at a time.  You must also upload every transitive dependency
-that is not already installed.  The output of `bundle-jenkins-plugins.sh` shows the
-full dependency tree — use that as your list if you need a complete offline install.
-
-This method works even when you cannot run CLI commands or SSH into the host.
-
-#### C3 — Zero-plugin fallback (standalone HTML dashboard)
-
-`ci/jenkins/generate-dashboard.py` generates a complete, self-contained HTML
-dashboard from the CI output artifacts.  It requires only:
-
-- Python 3 (standard library — no `pip install`)
-- `archiveArtifacts` (Jenkins core — no extra plugins)
-
-No `Plot`, `junit`, `coverage`, or `htmlpublisher` plugins are needed.  The generated
-HTML file is archived as a build artifact and can be downloaded and opened in any
-browser.
-
-```bash
-python3 ci/jenkins/generate-dashboard.py ci-out/
-# Writes: ci-out/dashboard_<project>.html
-# Archive it: archiveArtifacts artifacts: 'ci-out/dashboard_*.html'
-```
-
-The dashboard renders four sections:
-- **SLOC Summary** — code / comment / blank line counts and files analyzed
-- **Language Breakdown** — horizontal bar chart of code lines per language
-- **Test Results** — pass / fail / skip / error counts (appears when `junit.xml` exists)
-- **Code Coverage** — line coverage percentage progress bar (appears when `lcov.info` exists)
-
-The Jenkinsfile already calls this script in the Archive & Publish stage and archives
-the result.  No extra pipeline configuration is required.
-
-See `ci/jenkins/README.md → "No admin access / corporate Jenkins"` for a comparison
-of what each plugin adds versus what the fallback provides.
 
 ---
 

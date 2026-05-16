@@ -76,8 +76,7 @@ bash scripts/run.sh   # extracts dist/oxide-sloc-windows-x64.zip → oxide-sloc.
 
 The `dist/` zip contains the release-mode binary built by `x86_64-pc-windows-msvc` in GitHub
 Actions. When the `WINDOWS_CERTIFICATE` GitHub Actions secret is set, the binary inside is
-Authenticode-signed — EDR software (Carbon Black, CrowdStrike, Defender) passes it without any
-exclusion configuration. See [`docs/av-whitelisting.md`](./av-whitelisting.md) for details.
+Authenticode-signed.
 
 > **Force re-extraction:** `bash scripts/run.sh --rebuild` re-extracts the zip even if the
 > binary already exists — useful after a `git pull` that updates `dist/`.
@@ -94,7 +93,7 @@ installs Rust locally into `.tools/` (inside the repo, no system-wide changes, n
 required), and then compiles oxide-sloc from the vendored crate sources.
 
 If `toolchain/` is absent on a fresh clone (`git ls-files toolchain/` returns nothing),
-the maintainer must run `bundle-rust-toolchain.sh` on a networked machine first.
+the maintainer must run `bundle-rust-toolchain.sh` and commit the result first (see [Populating the toolchain archive](#populating-the-toolchain-archive-maintainer-workflow)).
 
 ```bash
 # On the air-gapped Linux machine — after git clone (toolchain/ must already be committed):
@@ -137,12 +136,10 @@ bash scripts/run.sh   # bootstraps Rust, builds from vendor.tar.xz, launches web
 
 ### Populating the toolchain archive (maintainer workflow)
 
-The Linux toolchain archive must be generated on a machine with internet access and committed
-to the repository. (Windows users use `dist/oxide-sloc-windows-x64.zip` instead — no toolchain
-archive needed.)
+Run `bundle-rust-toolchain.sh` to download and commit the Rust toolchain archive. (Windows users use `dist/oxide-sloc-windows-x64.zip` instead — no toolchain archive needed.)
 
 ```bash
-# On any machine with internet access:
+# Requires internet access (run once, then commit the result):
 bash scripts/internal/bundle-rust-toolchain.sh linux-x86_64  # Linux x64
 bash scripts/internal/bundle-rust-toolchain.sh linux-arm64   # Linux arm64
 
@@ -211,9 +208,8 @@ The default (without `--online`) makes no network calls.
 Use this when the target Linux machine has no internet access, no Rust installed, and
 you need a fully self-contained statically-linked binary kit.
 
-Run `scripts/internal/make-airgap-kit.sh` on any **networked** machine to produce a
-self-contained archive that bundles the Rust toolchain, musl C toolchain, vendor
-sources, and the full source tree.
+Run `scripts/internal/make-airgap-kit.sh` to produce a self-contained archive that bundles
+the Rust toolchain, musl C toolchain, vendor sources, and the full source tree.
 
 ### What the kit bundles
 
@@ -228,7 +224,7 @@ sources, and the full source tree.
 
 Result: a **fully static binary** — copy it anywhere on Linux with no runtime deps.
 
-### Generate the kit (networked machine)
+### Generate the kit
 
 ```bash
 bash scripts/internal/make-airgap-kit.sh              # auto-detect arch
@@ -271,8 +267,8 @@ called automatically and should not be invoked directly.
 |---|---|---|
 | `scripts/internal/install.sh` | `run.sh` automatically | Install oxide-sloc (auto-detects best path); accepts `--rebuild`, `--online`, `--auto` |
 | `scripts/internal/airgap-build.sh` | Manually (Option B manual path) | Plain offline build from vendor sources |
-| `scripts/internal/bundle-rust-toolchain.sh` | Maintainers — run on networked machine | Downloads Rust toolchain, stages into `toolchain/` for commit |
-| `scripts/internal/make-airgap-kit.sh` | Maintainers — run on networked machine | Builds Option C self-contained kit for Linux |
+| `scripts/internal/bundle-rust-toolchain.sh` | Maintainer tooling | Downloads Rust toolchain, stages into `toolchain/` for commit |
+| `scripts/internal/make-airgap-kit.sh` | Maintainer tooling | Builds Option C self-contained kit for Linux |
 | `scripts/internal/update-vendor.sh` | Maintainer tooling | Regenerates `vendor.tar.xz` after dependency changes |
 | `scripts/internal/install-hooks.sh` | Developer setup | Installs git pre-commit hooks |
 

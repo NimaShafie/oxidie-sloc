@@ -212,7 +212,7 @@ docker exec -u root <container> jenkins-plugin-cli \
   --plugins $(grep -Ev '^#|^$' ci/jenkins/plugins.txt | awk '{print $1}' | tr '\n' ' ')
 ```
 
-**Path 2 — Docker (air-gapped):** download `.hpi` files on a networked machine, transfer, and copy into `/var/jenkins_home/plugins/`. See `ci/jenkins/plugins.txt` for the download loop.
+**Path 2 — Docker (offline):** download `.hpi` files from a machine with internet access and copy them into `/var/jenkins_home/plugins/`. See `ci/jenkins/plugins.txt` for the download loop.
 
 **Path 3 — Native / systemd install (Jenkins CLI jar):**
 ```bash
@@ -284,14 +284,14 @@ sudo -u jenkins bash ci/jenkins/install-rust-cache.sh
 
 Installs the toolchain pinned in `rust-toolchain.toml` into `~jenkins/.rust-cache`. The Jenkinsfile reads `CARGO_HOME`/`RUSTUP_HOME` from `${HOME}/.rust-cache`, so Docker and native agents resolve to the same layout — just rooted at different home directories.
 
-For an **air-gapped** native agent, run `install-rust-cache.sh` on a networked machine and transfer the archive it generates:
+For a native agent without internet access, pre-build the cache archive and extract it on the agent:
 
 ```bash
-# Networked machine (jenkins user's session):
+# Build the archive (requires internet access):
 bash ci/jenkins/install-rust-cache.sh
 tar -czf rust-cache.tar.gz -C "${HOME}" .rust-cache
 
-# Air-gapped agent — extract into the jenkins user's home (Debian/Ubuntu default):
+# Extract into the jenkins user's home (Debian/Ubuntu default):
 sudo -u jenkins tar -xzf rust-cache.tar.gz -C /var/lib/jenkins
 # For other distros, replace /var/lib/jenkins with: $(getent passwd jenkins | cut -d: -f6)
 ```
@@ -767,7 +767,7 @@ The job:
 
 The job uses `continue-on-error: true` so a VT outage or quota exhaustion never blocks a release.
 
-**False positives:** Freshly compiled Rust binaries are sometimes flagged by heuristic engines. Zero malicious detections is the expected result. If a binary is incorrectly flagged, use the permalink in the release body to open the report on virustotal.com and click **"Is this a false positive?"** to submit a dispute directly to the affected vendor.
+**False positives:** Freshly compiled Rust binaries are sometimes flagged by heuristic engines. Zero malicious detections is the expected result.
 
 ---
 

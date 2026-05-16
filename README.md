@@ -34,7 +34,7 @@ When compiling from source, the build displays a live animated progress indicato
 | **No Rust, Linux, has curl** | `--online` flag | downloads release binary from GitHub Releases |
 | **No Rust, no internet, Linux** | Option C air-gap kit | see [`docs/airgap.md`](./docs/airgap.md) |
 
-No network calls are made by default. On **Windows**, the pre-built binary is already in `dist/` — just run `bash scripts/run.sh`. On **Linux** without Rust, a fully offline build additionally requires the maintainer to have committed the toolchain archive (`bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine — see [`docs/airgap.md`](./docs/airgap.md)).
+No network calls are made by default. On **Windows**, the pre-built binary is already in `dist/` — just run `bash scripts/run.sh`. On **Linux** without Rust, a fully offline build additionally requires the maintainer to have committed the toolchain archive — see [`docs/airgap.md`](./docs/airgap.md).
 
 ---
 
@@ -109,7 +109,7 @@ bash scripts/run.sh   # Windows 10/11 (Git Bash) or Linux — http://127.0.0.1:4
 
 - **Windows:** extracts `dist/oxide-sloc-windows-x64.zip` (committed, ~9 MB) — no Rust required, no compilation, no `.tools/` directory. The pre-built binary is updated automatically by CI after every release.
 - **Linux — Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
-- **Linux — no Rust, toolchain committed:** `install.sh` detects `toolchain/rust-toolchain-linux-*.tar.gz.*` split parts, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires the maintainer to have run `bash scripts/internal/bundle-rust-toolchain.sh` on a networked machine and committed the archives — see [`docs/airgap.md`](./docs/airgap.md).
+- **Linux — no Rust, toolchain committed:** `install.sh` detects `toolchain/rust-toolchain-linux-*.tar.gz.*` split parts, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires the maintainer to have run `bash scripts/internal/bundle-rust-toolchain.sh` and committed the archives — see [`docs/airgap.md`](./docs/airgap.md).
 - **Linux — no Rust, download from GitHub:** run `bash scripts/internal/install.sh --online` (requires `curl`) to fetch the release binary automatically.
 - **Linux — no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
@@ -560,17 +560,16 @@ bash scripts/internal/gen-signing-cert.sh
 This creates a root CA and a code-signing leaf cert, bundles them into a PFX, and prints
 exact next steps. Afterward:
 
-1. Commit the public CA cert: `git add certs/sloc-ca.crt && git commit -m "chore: add Authenticode root CA certificate"`
+1. Commit the public CA cert: `git add deploy/certs/sloc-ca.crt && git commit -m "chore: add Authenticode root CA certificate"`
 2. Paste `_signing/sloc-sign.pfx.b64` as `WINDOWS_CERTIFICATE` and the chosen password as
    `WINDOWS_CERTIFICATE_PASSWORD` in the repo's GitHub Actions secrets.
 
 **Trusting the certificate on air-gapped Windows endpoints:**
 
 Signatures from a self-signed cert are cryptographically valid but require a one-time CA
-import per endpoint (or a single GPO push for domain-joined machines):
+import per endpoint:
 
 ```powershell
-# Run as Administrator — imports sloc-ca.crt from the repo
 Import-Certificate -FilePath .\certs\sloc-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
@@ -579,9 +578,6 @@ After import, verify any signed binary:
 ```powershell
 (Get-AuthenticodeSignature .\oxide-sloc.exe).Status   # Valid
 ```
-
-On air-gapped machines Windows verifies the signature chain locally — no internet access
-is needed. SmartScreen (which requires internet) is not a factor in isolated environments.
 
 ### Jenkins / GitLab CI
 
