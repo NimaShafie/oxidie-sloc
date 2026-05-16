@@ -67,14 +67,23 @@ pub enum BlankInBlockCommentPolicy {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryConfig {
+    #[serde(default)]
     pub root_paths: Vec<PathBuf>,
+    #[serde(default)]
     pub include_globs: Vec<String>,
+    #[serde(default)]
     pub exclude_globs: Vec<String>,
+    #[serde(default = "default_excluded_directories")]
     pub excluded_directories: Vec<String>,
+    #[serde(default = "default_true")]
     pub honor_ignore_files: bool,
+    #[serde(default = "default_true")]
     pub ignore_hidden_files: bool,
+    #[serde(default)]
     pub follow_symlinks: bool,
+    #[serde(default = "default_max_file_size_bytes")]
     pub max_file_size_bytes: u64,
+    #[serde(default)]
     pub parallelism_limit: Option<usize>,
     /// When true, detect .gitmodules and produce a per-submodule summary alongside the overall run.
     #[serde(default = "default_true")]
@@ -104,17 +113,29 @@ impl Default for DiscoveryConfig {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisConfig {
+    #[serde(default)]
     pub enabled_languages: Vec<String>,
+    #[serde(default)]
     pub extension_overrides: BTreeMap<String, String>,
+    #[serde(default = "default_true")]
     pub shebang_detection: bool,
+    #[serde(default)]
     pub mixed_line_policy: MixedLinePolicy,
+    #[serde(default = "default_true")]
     pub python_docstrings_as_comments: bool,
+    #[serde(default = "default_true")]
     pub generated_file_detection: bool,
+    #[serde(default = "default_true")]
     pub minified_file_detection: bool,
+    #[serde(default = "default_true")]
     pub vendor_directory_detection: bool,
+    #[serde(default)]
     pub include_lockfiles: bool,
+    #[serde(default)]
     pub binary_file_behavior: BinaryFileBehavior,
+    #[serde(default)]
     pub decode_failure_behavior: FailureBehavior,
+    #[serde(default)]
     pub parse_failure_behavior: FailureBehavior,
     /// IEEE 1045-1992: how backslash line continuations (C macros, shell, Makefile) are counted.
     #[serde(default)]
@@ -140,6 +161,30 @@ pub struct AnalysisConfig {
 
 const fn default_true() -> bool {
     true
+}
+
+fn default_excluded_directories() -> Vec<String> {
+    vec![".git".into(), "node_modules".into(), "target".into()]
+}
+
+const fn default_max_file_size_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+
+fn default_report_title() -> String {
+    "OxideSLOC Report".into()
+}
+
+fn default_output_formats() -> Vec<String> {
+    vec!["cli".into(), "json".into(), "html".into()]
+}
+
+fn default_theme() -> String {
+    "auto".into()
+}
+
+fn default_bind_address() -> String {
+    "127.0.0.1:4317".into()
 }
 
 /// Validates that `s` is a CSS hex colour: `#RGB` or `#RRGGBB`.
@@ -216,11 +261,17 @@ impl Default for AnalysisConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportingConfig {
+    #[serde(default = "default_report_title")]
     pub report_title: String,
+    #[serde(default = "default_output_formats")]
     pub output_formats: Vec<String>,
+    #[serde(default = "default_true")]
     pub include_summary_charts: bool,
+    #[serde(default = "default_true")]
     pub include_skipped_files_section: bool,
+    #[serde(default = "default_true")]
     pub include_warnings_section: bool,
+    #[serde(default = "default_theme")]
     pub theme: String,
     /// Optional company or team name shown in the report header instead of "`OxideSLOC`".
     #[serde(default)]
@@ -258,6 +309,7 @@ impl Default for ReportingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfig {
+    #[serde(default = "default_bind_address")]
     pub bind_address: String,
     /// When true the server binds to 0.0.0.0 by default, suppresses browser
     /// auto-open, and disables desktop-only routes (pick-directory, open-path).
@@ -292,9 +344,13 @@ pub struct ProfileConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
+    #[serde(default)]
     pub discovery: DiscoveryConfig,
+    #[serde(default)]
     pub analysis: AnalysisConfig,
+    #[serde(default)]
     pub reporting: ReportingConfig,
+    #[serde(default)]
     pub web: WebConfig,
     /// Named profiles that override base config sections when selected via `--profile`.
     #[serde(default)]

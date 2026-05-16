@@ -12,6 +12,9 @@ max_file_size_bytes   = 10485760
 excluded_directories  = [".git"]
 
 [analysis]
+enabled_languages             = []           # empty = autodetect all
+extension_overrides           = {}
+shebang_detection             = true
 mixed_line_policy             = "code_and_comment"
 python_docstrings_as_comments = true
 generated_file_detection      = false   # include generated code
