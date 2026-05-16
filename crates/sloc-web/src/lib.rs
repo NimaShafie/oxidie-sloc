@@ -10645,7 +10645,6 @@ struct SubmoduleRow {
                       <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
                       <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload folder…{% else %}Browse{% endif %}</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
-                      <span id="upload-limit-tip" style="display:none;margin-left:8px;font-size:11px;color:var(--muted);white-space:nowrap;" title="Up to 500 MB / 50,000 source files per upload (compressed). Binaries, node_modules, and build artifacts are skipped automatically."></span>
                       {% endif %}
                     <div class="path-scope-sep"></div>
                     <div class="scope-legend-row">
@@ -10656,6 +10655,11 @@ struct SubmoduleRow {
                     </div>
                   </div>
                   {% if git_repo.is_empty() %}
+                  {% if server_mode %}
+                  <div id="upload-limit-tip" class="hint" style="margin-top:6px;font-size:11px;">
+                    ℹ️ Files are compressed and streamed — no fixed size limit. Binaries, <code>node_modules</code>, and build artifacts are filtered automatically.
+                  </div>
+                  {% endif %}
                   <div class="path-info-row">
                     <button type="button" class="info-icon-btn" id="project-size-btn" title="Total disk size of the selected project directory">
                       <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
@@ -11153,14 +11157,6 @@ pytest --cov --cov-report=xml
       var coverageSuggestTimer = null;
       var covAutoFilled = false;
       var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
-      // keep in sync with MAX_TOTAL_BYTES / MAX_FILES in lib.rs
-      (function () {
-        var tip = document.getElementById('upload-limit-tip');
-        if (tip) {
-          tip.textContent = 'ℹ️  Up to 500 MB / 50,000 source files per upload (compressed). Binaries, node_modules, and build artifacts are skipped automatically.';
-          tip.style.display = 'inline';
-        }
-      })();
       var themeToggle = document.getElementById("theme-toggle");
 
       function showBannerToast(msg, isError) {
