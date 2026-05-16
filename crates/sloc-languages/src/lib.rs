@@ -2737,75 +2737,103 @@ pub mod ts {
         })
     }
 
-    /// Walk the AST and populate `raw.functions`, `raw.classes`, `raw.test_count`,
-    /// and `raw.test_assertion_count`.
-    fn count_symbols(node: Node, source: &[u8], kinds: &SymbolKinds, raw: &mut RawLineCounts) {
-        let kind = node.kind();
-
-        if !kinds.function_def.is_empty() && kind == kinds.function_def {
-            let name = node
-                .child_by_field_name("name")
-                .and_then(|n| n.utf8_text(source).ok())
-                .unwrap_or("");
-            if !kinds.test_fn_prefix.is_empty() && name.starts_with(kinds.test_fn_prefix) {
-                raw.test_count += 1;
-            } else {
-                raw.functions += 1;
-            }
-            // Recurse into children (body may contain nested functions/classes/calls).
-            for i in 0..node.child_count() {
-                #[allow(clippy::cast_possible_truncation)]
-                if let Some(child) = node.child(i as u32) {
-                    count_symbols(child, source, kinds, raw);
-                }
-            }
-            return;
-        }
-
-        if !kinds.class_def.is_empty() && kind == kinds.class_def {
-            let name = node
-                .child_by_field_name("name")
-                .and_then(|n| n.utf8_text(source).ok())
-                .unwrap_or("");
-            if !kinds.test_class_prefix.is_empty() && name.starts_with(kinds.test_class_prefix) {
-                raw.test_count += 1;
-            } else {
-                raw.classes += 1;
-            }
-            // Recurse into methods and nested classes inside the body.
-            for i in 0..node.child_count() {
-                #[allow(clippy::cast_possible_truncation)]
-                if let Some(child) = node.child(i as u32) {
-                    count_symbols(child, source, kinds, raw);
-                }
-            }
-            return;
-        }
-
-        // Assertion detection: call node whose function is an attribute access with an
-        // attribute identifier starting with the configured prefix (e.g. "assert" for Python).
-        if !kinds.assertion_attr_prefix.is_empty() && kind == "call" {
-            if let Some(func) = node.child_by_field_name("function") {
-                if func.kind() == "attribute" {
-                    let attr_text = func
-                        .child_by_field_name("attribute")
-                        .and_then(|n| n.utf8_text(source).ok())
-                        .unwrap_or("");
-                    if attr_text.starts_with(kinds.assertion_attr_prefix) {
-                        raw.test_assertion_count += 1;
-                        // Don't recurse into the assertion's arguments.
-                        return;
-                    }
-                }
-            }
-        }
-
+    /// Recurse into every direct child of `node`.
+    fn recurse_children(node: Node, source: &[u8], kinds: &SymbolKinds, raw: &mut RawLineCounts) {
         for i in 0..node.child_count() {
             #[allow(clippy::cast_possible_truncation)]
             if let Some(child) = node.child(i as u32) {
                 count_symbols(child, source, kinds, raw);
             }
         }
+    }
+
+    /// Handle a function-definition node. Returns `true` if the node matched.
+    fn try_count_function(
+        node: Node,
+        source: &[u8],
+        kinds: &SymbolKinds,
+        raw: &mut RawLineCounts,
+    ) -> bool {
+        if kinds.function_def.is_empty() || node.kind() != kinds.function_def {
+            return false;
+        }
+        let name = node
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(source).ok())
+            .unwrap_or("");
+        if !kinds.test_fn_prefix.is_empty() && name.starts_with(kinds.test_fn_prefix) {
+            raw.test_count += 1;
+        } else {
+            raw.functions += 1;
+        }
+        recurse_children(node, source, kinds, raw);
+        true
+    }
+
+    /// Handle a class-definition node. Returns `true` if the node matched.
+    fn try_count_class(
+        node: Node,
+        source: &[u8],
+        kinds: &SymbolKinds,
+        raw: &mut RawLineCounts,
+    ) -> bool {
+        if kinds.class_def.is_empty() || node.kind() != kinds.class_def {
+            return false;
+        }
+        let name = node
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(source).ok())
+            .unwrap_or("");
+        if !kinds.test_class_prefix.is_empty() && name.starts_with(kinds.test_class_prefix) {
+            raw.test_count += 1;
+        } else {
+            raw.classes += 1;
+        }
+        recurse_children(node, source, kinds, raw);
+        true
+    }
+
+    /// Handle an assertion call node. Returns `true` if the node matched (skips recursion
+    /// into arguments, preserving "don't double-count test bodies" semantics).
+    fn try_count_assertion(
+        node: Node,
+        source: &[u8],
+        kinds: &SymbolKinds,
+        raw: &mut RawLineCounts,
+    ) -> bool {
+        if kinds.assertion_attr_prefix.is_empty() || node.kind() != "call" {
+            return false;
+        }
+        let Some(func) = node.child_by_field_name("function") else {
+            return false;
+        };
+        if func.kind() != "attribute" {
+            return false;
+        }
+        let attr_text = func
+            .child_by_field_name("attribute")
+            .and_then(|n| n.utf8_text(source).ok())
+            .unwrap_or("");
+        if !attr_text.starts_with(kinds.assertion_attr_prefix) {
+            return false;
+        }
+        raw.test_assertion_count += 1;
+        true
+    }
+
+    /// Walk the AST and populate `raw.functions`, `raw.classes`, `raw.test_count`,
+    /// and `raw.test_assertion_count`.
+    fn count_symbols(node: Node, source: &[u8], kinds: &SymbolKinds, raw: &mut RawLineCounts) {
+        if try_count_function(node, source, kinds, raw) {
+            return;
+        }
+        if try_count_class(node, source, kinds, raw) {
+            return;
+        }
+        if try_count_assertion(node, source, kinds, raw) {
+            return;
+        }
+        recurse_children(node, source, kinds, raw);
     }
 
     /// Flags describing what kinds of content appear on a single line.
