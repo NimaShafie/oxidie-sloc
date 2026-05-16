@@ -6,15 +6,17 @@
 # localhost-only).
 #
 # Usage:
-#   bash scripts/serve-server.sh
+#   bash scripts/serve-server.sh                 # no auth (default); all endpoints open
 #   bash scripts/serve-server.sh --port 8080
 #   bash scripts/serve-server.sh --open-firewall
-#   bash scripts/serve-server.sh --no-auth   # skip key generation; all endpoints unauthenticated
-#   SLOC_API_KEY=mysecret bash scripts/serve-server.sh
+#   bash scripts/serve-server.sh --with-auth     # generate an API key; all endpoints require it
+#   bash scripts/serve-server.sh --no-auth       # explicit no-auth (same as default)
+#   SLOC_API_KEY=mysecret bash scripts/serve-server.sh  # use a pre-set key
 #
 # What this does vs. run.sh --host:
 #   - Dedicated entrypoint — purpose is obvious from the filename
-#   - Generates a random SLOC_API_KEY if one is not already set
+#   - Defaults to no authentication for trusted-LAN use; use --with-auth or set
+#     SLOC_API_KEY to require authentication
 #   - Prints all LAN addresses and a ready-made curl example
 #   - Detects firewall status and provides the exact fix command if blocked
 set -euo pipefail
@@ -35,10 +37,12 @@ fi
 # Parse flags
 OPEN_FIREWALL=false
 NO_AUTH=false
+WITH_AUTH=false
 for arg in "$@"; do
     case "$arg" in
         --open-firewall) OPEN_FIREWALL=true ;;
-        --no-auth) NO_AUTH=true ;;
+        --no-auth) NO_AUTH=true ;;        # explicit; now also the default
+        --with-auth) WITH_AUTH=true ;;
         --port) ;;            # next arg consumed below
         --port=*) SLOC_PORT="${arg#--port=}" ;;
         *) ;;
@@ -52,12 +56,12 @@ done
 
 # ── API key setup ──────────────────────────────────────────────────────────────
 _no_auth_mode=false
-if [[ "$NO_AUTH" == true ]]; then
-    # --no-auth: skip key generation entirely; child process gets no SLOC_API_KEY
-    unset SLOC_API_KEY
+if [[ -n "${SLOC_API_KEY:-}" ]]; then
+    # User explicitly set a key in the environment — honor it regardless of flags.
+    export SLOC_API_KEY
     _key_generated=false
-    _no_auth_mode=true
-elif [[ -z "${SLOC_API_KEY:-}" ]]; then
+elif [[ "$WITH_AUTH" == true ]]; then
+    # --with-auth: generate a fresh session key.
     if command -v openssl &>/dev/null; then
         SLOC_API_KEY="$(openssl rand -hex 32)"
     else
@@ -67,8 +71,10 @@ elif [[ -z "${SLOC_API_KEY:-}" ]]; then
     export SLOC_API_KEY
     _key_generated=true
 else
-    export SLOC_API_KEY
+    # Default (and --no-auth): no authentication. All endpoints are open.
+    unset SLOC_API_KEY
     _key_generated=false
+    _no_auth_mode=true
 fi
 
 # ── Detect LAN IPs ─────────────────────────────────────────────────────────────
@@ -222,8 +228,9 @@ print_banner() {
     printf '\n'
 
     if [[ "$_no_auth_mode" == true ]]; then
-        printf '  *** WARNING: --no-auth is set — all endpoints are UNAUTHENTICATED ***\n'
-        printf '  Do not use this mode on untrusted networks.\n'
+        printf '  *** WARNING: running WITHOUT authentication — all endpoints are open ***\n'
+        printf '  Anyone on this network can access and scan directories.\n'
+        printf '  To require authentication, restart with --with-auth or set SLOC_API_KEY.\n'
     elif [[ "$_key_generated" == true ]]; then
         printf '  API key (generated for this session):\n'
         printf '    %s\n' "$SLOC_API_KEY"
@@ -243,10 +250,6 @@ print_banner() {
         if [[ -n "${SLOC_API_KEY:-}" ]]; then
             printf '  API key is set — open the login page to sign in:\n'
             printf '    http://%s:%s/auth/login\n' "$first_ip" "$SLOC_PORT"
-            printf '\n'
-            printf '  For a quick LAN test without auth:\n'
-            printf '    bash scripts/serve-server.sh --no-auth\n'
-            printf '  (warning: all endpoints become unauthenticated)\n'
             printf '\n'
             printf '  Auth lockout: %d failed attempts from the same IP triggers a\n' "${SLOC_AUTH_LOCKOUT_FAILS:-10}"
             printf '  temporary lockout (SLOC_AUTH_LOCKOUT_SECS=%s). Restart the server\n' "${SLOC_AUTH_LOCKOUT_SECS:-3600}"

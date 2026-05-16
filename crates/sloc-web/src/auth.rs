@@ -96,6 +96,7 @@ pub(crate) async fn require_api_key(
     // No credential — redirect browsers, plain 401 for API clients.
     if is_browser_request(&req) {
         let next_path = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
+        let next_path = sanitize_next(next_path);
         let login_url = format!("/auth/login?next={}", urlencode_path(next_path));
         let location = HeaderValue::from_str(&login_url)
             .unwrap_or_else(|_| HeaderValue::from_static("/auth/login"));
@@ -193,6 +194,21 @@ fn is_browser_request(req: &Request<Body>) -> bool {
         .is_some_and(|a| a.contains("text/html"))
 }
 
+/// Returns `raw` only if it is a safe same-origin relative path to redirect to
+/// after login.  Any value that could cause a redirect loop or open redirect
+/// (e.g. `/auth/login*`, `//host`, paths containing `://`) is replaced with `/`.
+fn sanitize_next(raw: &str) -> &str {
+    if raw.starts_with('/')
+        && !raw.starts_with("//")
+        && !raw.contains("://")
+        && !raw.starts_with("/auth/login")
+    {
+        raw
+    } else {
+        "/"
+    }
+}
+
 fn urlencode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -246,7 +262,12 @@ pub(crate) async fn auth_login_get(
         return resp;
     }
     let has_error = query.error.as_deref() == Some("1");
-    let next_url = query.next.unwrap_or_default();
+    let next_url = query
+        .next
+        .as_deref()
+        .map(sanitize_next)
+        .unwrap_or("/")
+        .to_string();
     let lockout_threshold = state.rate_limiter.auth_lockout_threshold;
     Html(
         LoginTemplate {
@@ -272,11 +293,7 @@ pub(crate) async fn auth_login_post(
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("/");
-    let safe_next = if next_url.starts_with('/') && !next_url.starts_with("//") {
-        next_url
-    } else {
-        "/"
-    };
+    let safe_next = sanitize_next(next_url);
 
     let valid = state.api_keys.iter().any(|expected| {
         use secrecy::ExposeSecret;
