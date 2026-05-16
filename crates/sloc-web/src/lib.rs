@@ -573,6 +573,40 @@ pub fn make_test_router() -> Router {
     build_router(state)
 }
 
+/// Test router with one API key pre-loaded. Used by auth integration tests.
+pub fn make_test_router_with_key(api_key: &str) -> Router {
+    let tmp = std::env::temp_dir().join("sloc_test_key");
+    let state = AppState {
+        base_config: AppConfig::default(),
+        artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
+        registry: Arc::new(Mutex::new(ScanRegistry::default())),
+        registry_path: tmp.join("registry.json"),
+        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
+        server_mode: false,
+        tls_enabled: false,
+        api_keys: vec![secrecy::Secret::new(api_key.to_owned())],
+        rate_limiter: Arc::new(IpRateLimiter::new(
+            Duration::from_mins(1),
+            600,
+            10,
+            Duration::from_hours(1),
+        )),
+        trust_proxy: false,
+        git_clones_dir: tmp.join("git-clones"),
+        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
+        schedules_path: tmp.join("schedules.json"),
+        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
+        scan_profiles_path: tmp.join("scan_profiles.json"),
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
+        confluence_path: tmp.join("confluence_config.json"),
+        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
+        watched_dirs_path: tmp.join("watched_dirs.json"),
+    };
+    build_router(state)
+}
+
 /// # Errors
 ///
 /// Returns an error if the server fails to bind to the configured address or
