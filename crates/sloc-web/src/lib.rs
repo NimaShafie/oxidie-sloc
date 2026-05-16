@@ -1513,6 +1513,7 @@ async fn upload_directory_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    // keep in sync with the upload-limit-tip JS text in the scan-setup template
     const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024; // 500 MB (decoded)
     const MAX_FILES: usize = 50_000;
 
@@ -10642,9 +10643,9 @@ struct SubmoduleRow {
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
                       <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
-                      <button type="button" class="mini-button oxide" id="browse-path">Browse</button>
+                      <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload folder…{% else %}Browse{% endif %}</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
-                      <span id="upload-limit-tip" style="display:none;margin-left:8px;font-size:11px;color:var(--muted);white-space:nowrap;" title="Files are compressed into a tar.gz archive before uploading. Only source-code files are included — binaries, node_modules, and build artifacts are skipped automatically. Disk space on the server is the only limit."></span>
+                      <span id="upload-limit-tip" style="display:none;margin-left:8px;font-size:11px;color:var(--muted);white-space:nowrap;" title="Up to 500 MB / 50,000 source files per upload (compressed). Binaries, node_modules, and build artifacts are skipped automatically."></span>
                       {% endif %}
                     <div class="path-scope-sep"></div>
                     <div class="scope-legend-row">
@@ -11152,10 +11153,11 @@ pytest --cov --cov-report=xml
       var coverageSuggestTimer = null;
       var covAutoFilled = false;
       var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
+      // keep in sync with MAX_TOTAL_BYTES / MAX_FILES in lib.rs
       (function () {
         var tip = document.getElementById('upload-limit-tip');
-        if (tip && SERVER_MODE) {
-          tip.textContent = 'ℹ️  Uploads are gzip-compressed — no practical size limit';
+        if (tip) {
+          tip.textContent = 'ℹ️  Up to 500 MB / 50,000 source files per upload (compressed). Binaries, node_modules, and build artifacts are skipped automatically.';
           tip.style.display = 'inline';
         }
       })();
