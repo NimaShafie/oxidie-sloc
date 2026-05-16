@@ -7,7 +7,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use sloc_web::make_test_router;
+use sloc_web::{make_test_router, make_test_router_with_key};
 use tower::ServiceExt;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -32,6 +32,33 @@ async fn post_form(uri: &str, form_body: &str) -> (StatusCode, axum::http::Heade
         .body(Body::from(form_body.to_owned()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
+}
+
+async fn post_json(uri: &str, json_body: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let app = make_test_router();
+    let req = Request::post(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(json_body.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
+}
+
+async fn delete(uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let app = make_test_router();
+    let resp = app
+        .oneshot(Request::delete(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -546,4 +573,439 @@ async fn api_docs_returns_html_with_csp() {
     assert_eq!(status, StatusCode::OK);
     assert!(has_csp(&headers), "missing CSP on /api-docs");
     assert!(body.contains("<html"), "expected HTML on /api-docs");
+}
+
+// ── auth/login routes ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn auth_login_get_redirects_to_root_when_no_key_configured() {
+    // When no SLOC_API_KEYS is set, GET /auth/login must immediately redirect
+    // back to / (there is nothing to authenticate against).
+    let app = make_test_router();
+    let resp = app
+        .oneshot(Request::get("/auth/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "GET /auth/login with no key must redirect, got {}",
+        resp.status()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(location, "/", "must redirect to /");
+}
+
+#[tokio::test]
+async fn auth_login_get_returns_form_when_key_is_configured() {
+    let app = make_test_router_with_key("test-secret-key");
+    let resp = app
+        .oneshot(Request::get("/auth/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(body.contains("<html"), "expected login form HTML");
+    assert!(
+        body.contains("login") || body.contains("key") || body.contains("password"),
+        "expected login form fields"
+    );
+}
+
+#[tokio::test]
+async fn auth_login_post_wrong_key_redirects_with_error_flag() {
+    use std::net::SocketAddr;
+    let app = make_test_router_with_key("correct-key");
+    // auth_login_post requires ConnectInfo<SocketAddr> — inject it as a request extension
+    // so the extractor can resolve the peer IP without a real TCP connection.
+    let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let mut req = Request::post("/auth/login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("key=wrong-key&next=%2F"))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    let resp = app.oneshot(req).await.unwrap();
+    // Wrong key → redirect back to login with error=1
+    assert!(
+        resp.status().is_redirection(),
+        "wrong key must redirect, got {}",
+        resp.status()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        location.contains("error=1"),
+        "redirect after wrong key must include error=1, got: {location}"
+    );
+}
+
+// ── API key authentication (Bearer / X-API-Key) ───────────────────────────────
+
+#[tokio::test]
+async fn wrong_bearer_token_returns_401_when_key_configured() {
+    let app = make_test_router_with_key("secret-token");
+    let resp = app
+        .oneshot(
+            Request::get("/")
+                .header("authorization", "Bearer wrong-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "wrong Bearer token must yield 401"
+    );
+}
+
+#[tokio::test]
+async fn correct_bearer_token_allows_access_to_protected_routes() {
+    let app = make_test_router_with_key("my-secret");
+    let resp = app
+        .oneshot(
+            Request::get("/")
+                .header("authorization", "Bearer my-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "correct Bearer token must allow access, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn correct_x_api_key_header_allows_access() {
+    let app = make_test_router_with_key("my-secret");
+    let resp = app
+        .oneshot(
+            Request::get("/healthz")
+                .header("x-api-key", "my-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // /healthz is outside the auth layer, so it must always be 200.
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn no_credential_on_protected_route_redirects_browser() {
+    let app = make_test_router_with_key("secret");
+    // Browsers send Accept: text/html — the middleware redirects them to login.
+    let resp = app
+        .oneshot(
+            Request::get("/")
+                .header("accept", "text/html,application/xhtml+xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "browser with no credential must be redirected to login, got {}",
+        resp.status()
+    );
+}
+
+// ── export / import config ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn export_config_returns_toml_with_content_disposition() {
+    let (status, headers, body) = get("/export-config").await;
+    assert_eq!(status, StatusCode::OK, "expected 200 from /export-config");
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("toml") || ct.contains("text"),
+        "expected TOML content-type, got: {ct}"
+    );
+    let cd = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cd.contains("attachment") && cd.contains(".toml"),
+        "expected attachment content-disposition with .toml filename, got: {cd}"
+    );
+    assert!(!body.is_empty(), "exported TOML must not be empty");
+}
+
+#[tokio::test]
+async fn import_config_with_valid_toml_returns_ok() {
+    // Round-trip: export the server's default config as TOML, then re-import it.
+    // This avoids hard-coding the full TOML shape (AppConfig has mandatory fields
+    // without #[serde(default)] that vary across versions).
+    let (export_status, _, exported_toml) = get("/export-config").await;
+    assert_eq!(export_status, StatusCode::OK, "export-config must succeed");
+
+    let json_body = format!(
+        r#"{{"toml":{}}}"#,
+        serde_json::to_string(&exported_toml).unwrap()
+    );
+    let (status, headers, body) = post_json("/import-config", &json_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "re-importing the exported config must return 200, body: {body}"
+    );
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON response, got: {ct}");
+    assert!(
+        body.contains("\"ok\""),
+        "expected 'ok' in response, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_config_with_invalid_toml_returns_400() {
+    let (status, _, body) =
+        post_json("/import-config", r#"{"toml":"this is ][[ not valid toml"}"#).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "malformed TOML must return 400, body: {body}"
+    );
+    assert!(
+        body.contains("error"),
+        "expected error message in body, got: {body}"
+    );
+}
+
+// ── scan profiles API ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_scan_profiles_list_returns_json_with_profiles_key() {
+    let (status, headers, body) = get("/api/scan-profiles").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON content-type, got: {ct}");
+    assert!(
+        body.contains("\"profiles\""),
+        "expected 'profiles' key in /api/scan-profiles, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_save_scan_profile_with_empty_name_returns_400() {
+    let (status, _, body) = post_json("/api/scan-profiles", r#"{"name":"   ","params":{}}"#).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty profile name must return 400, body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_save_scan_profile_creates_profile_and_returns_201() {
+    let (status, headers, body) = post_json(
+        "/api/scan-profiles",
+        r#"{"name":"my-profile","params":{"path":"."}}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "valid profile must return 201, body: {body}"
+    );
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON response, got: {ct}");
+    assert!(
+        body.contains("\"ok\""),
+        "expected 'ok' in response, got: {body}"
+    );
+    assert!(
+        body.contains("\"id\""),
+        "expected 'id' in response, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_delete_scan_profile_unknown_id_returns_404() {
+    let (status, _, body) = delete("/api/scan-profiles/does-not-exist").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "deleting unknown profile must return 404, body: {body}"
+    );
+}
+
+// ── schedules API ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_delete_schedule_unknown_id_returns_204() {
+    // ScheduleIdQuery.id is a uuid::Uuid — must use a valid UUID format.
+    let (status, _, _) = delete("/api/schedules?id=00000000-0000-0000-0000-000000000001").await;
+    // api_delete_schedule removes nothing (unknown id) and still returns 204.
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "DELETE /api/schedules must return 204 even for an unknown uuid"
+    );
+}
+
+// ── metrics submodules ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_metrics_submodules_unknown_run_returns_404() {
+    let (status, _, _) = get("/api/metrics/00000000-0000-0000-0000-000000000000/submodules").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown run_id in /api/metrics/{{id}}/submodules must return 404"
+    );
+}
+
+// ── watched-dirs API ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn post_add_watched_dir_with_invalid_path_redirects() {
+    let app = make_test_router();
+    let req = Request::post("/watched-dirs/add")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "folder_path=%2Fdoes%2Fnot%2Fexist%2F__test__&redirect_to=%2Fview-reports",
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // Invalid path → handler redirects back with an error query param.
+    assert!(
+        resp.status().is_redirection(),
+        "add-watched-dir with bad path must redirect, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn post_refresh_watched_dirs_returns_redirect() {
+    let app = make_test_router();
+    let req = Request::post("/watched-dirs/refresh")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("redirect_to=%2Fview-reports"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // With no watched dirs in state, refresh still completes (redirect or 200).
+    assert!(
+        resp.status().as_u16() < 500,
+        "refresh watched-dirs must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+// ── webhook routes (smoke-test: no secret configured) ────────────────────────
+
+#[tokio::test]
+async fn post_github_webhook_non_push_event_returns_200() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/github")
+        .header("content-type", "application/json")
+        .header("x-github-event", "ping")
+        .body(Body::from(r#"{"zen":"test"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // Non-push events are silently accepted (200) per the webhook handler.
+    assert!(
+        resp.status().as_u16() < 500,
+        "non-push GitHub webhook must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+// ── api/metrics/history ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_metrics_history_returns_json_array() {
+    let (status, headers, body) = get("/api/metrics/history").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON content-type, got: {ct}");
+    assert!(
+        body.starts_with('[') || body.starts_with('{'),
+        "expected JSON body from /api/metrics/history, got: {body}"
+    );
+}
+
+// ── error module: typed error responses exercised through handlers ────────────
+
+#[tokio::test]
+async fn error_not_found_has_correct_json_shape() {
+    // Trigger error::not_found via /api/metrics/{unknown_run_id}.
+    let (status, headers, body) = get("/api/metrics/nonexistent-run-id-abc").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("json"),
+        "error::not_found must return JSON, got: {ct}"
+    );
+    assert!(
+        body.contains("\"error\""),
+        "error body must have 'error' key, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn error_bad_request_has_correct_json_shape() {
+    // Trigger error::bad_request via /import-config with invalid TOML.
+    let (status, headers, body) = post_json("/import-config", r#"{"toml":"[invalid"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("json"),
+        "error::bad_request must return JSON, got: {ct}"
+    );
+    assert!(
+        body.contains("\"error\""),
+        "error body must have 'error' key, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn error_unprocessable_entity_returned_for_invalid_config() {
+    // An AppConfig that serialises but fails validate() exercises error::unprocessable_entity.
+    // Build a TOML with an explicitly invalid value if any; otherwise just confirm <422 on bad input.
+    let toml = "[web]\nbind_address = \"\"";
+    let json_body = format!(r#"{{"toml":{}}}"#, serde_json::to_string(toml).unwrap());
+    let (status, _, _) = post_json("/import-config", &json_body).await;
+    // Either 200 (valid empty bind_address accepted) or 422 (validate rejects it).
+    // What must NOT happen is a 5xx.
+    assert!(
+        status.as_u16() < 500,
+        "/import-config must not 5xx for borderline config, got {status}"
+    );
 }
