@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir -p .cargo
-COPY docker-cargo-config.toml .cargo/config.toml
+COPY ci/docker-cargo-config.toml .cargo/config.toml
 COPY crates/ crates/
 COPY vendor.tar.xz vendor.tar.xz.sha256 ./
 

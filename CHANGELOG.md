@@ -94,10 +94,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Windows CA cert trust — no Admin required** (`scripts/install.sh`): `install.sh`
-  auto-detects the self-signed Authenticode CA certificate committed to `certs/` and
+  auto-detects the self-signed Authenticode CA certificate committed to `deploy/certs/` and
   offers to import it into the current user's certificate store using `certutil -addstore
   -user`, which requires no Administrator elevation.
-- **Self-signed Authenticode cert + generator** (`certs/`, `scripts/internal/`): A
+- **Self-signed Authenticode cert + generator** (`deploy/certs/`, `scripts/internal/`): A
   self-signed code-signing certificate and companion generation script are committed to
   the repository so Windows builds can be Authenticode-signed immediately without waiting
   for a commercial CA.
