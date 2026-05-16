@@ -11,6 +11,7 @@
 #   bash scripts/serve-server.sh --open-firewall
 #   bash scripts/serve-server.sh --with-auth     # generate an API key; all endpoints require it
 #   bash scripts/serve-server.sh --no-auth       # explicit no-auth (same as default)
+#   bash scripts/serve-server.sh --quiet         # suppress startup banner (scripted launches)
 #   SLOC_API_KEY=mysecret bash scripts/serve-server.sh  # use a pre-set key
 #
 # What this does vs. run.sh --host:
@@ -38,11 +39,13 @@ fi
 OPEN_FIREWALL=false
 NO_AUTH=false
 WITH_AUTH=false
+QUIET=false
 for arg in "$@"; do
     case "$arg" in
         --open-firewall) OPEN_FIREWALL=true ;;
         --no-auth) NO_AUTH=true ;;        # explicit; now also the default
         --with-auth) WITH_AUTH=true ;;
+        --quiet) QUIET=true ;;
         --port) ;;            # next arg consumed below
         --port=*) SLOC_PORT="${arg#--port=}" ;;
         *) ;;
@@ -204,6 +207,23 @@ print_banner() {
     printf '  ║         OxideSLOC — LAN Server Mode              ║\n'
     printf '  ╚══════════════════════════════════════════════════╝\n'
     printf '\n'
+
+    if [[ "$_no_auth_mode" == true ]]; then
+        printf '  *** WARNING: running WITHOUT authentication — all endpoints are open ***\n'
+        printf '  Anyone on this network can access and scan directories.\n'
+        printf '  To require authentication, restart with --with-auth or set SLOC_API_KEY.\n'
+    elif [[ "$_key_generated" == true ]]; then
+        printf '  API key (generated for this session):\n'
+        printf '    %s\n' "$SLOC_API_KEY"
+        printf '\n'
+        printf '  To set a persistent key:\n'
+        printf '    export SLOC_API_KEY=%s\n' "$SLOC_API_KEY"
+        printf '    bash scripts/serve-server.sh\n'
+    else
+        printf '  API key: set (from environment)\n'
+    fi
+    printf '\n'
+
     printf '  Local   → http://127.0.0.1:%s\n' "$SLOC_PORT"
 
     if [[ -n "$all_ips" ]]; then
@@ -224,22 +244,6 @@ print_banner() {
         fi
     else
         printf '  Network → (could not detect LAN IP — run hostname -I or ipconfig)\n'
-    fi
-    printf '\n'
-
-    if [[ "$_no_auth_mode" == true ]]; then
-        printf '  *** WARNING: running WITHOUT authentication — all endpoints are open ***\n'
-        printf '  Anyone on this network can access and scan directories.\n'
-        printf '  To require authentication, restart with --with-auth or set SLOC_API_KEY.\n'
-    elif [[ "$_key_generated" == true ]]; then
-        printf '  API key (generated for this session):\n'
-        printf '    %s\n' "$SLOC_API_KEY"
-        printf '\n'
-        printf '  To set a persistent key:\n'
-        printf '    export SLOC_API_KEY=%s\n' "$SLOC_API_KEY"
-        printf '    bash scripts/serve-server.sh\n'
-    else
-        printf '  API key: set (from environment)\n'
     fi
     printf '\n'
 
@@ -304,7 +308,7 @@ do_launch_binary() {
     [[ "$PLATFORM" == linux ]] && chmod +x "$bin"
     check_firewall
     maybe_open_firewall
-    print_banner
+    [[ "$QUIET" != true ]] && print_banner
     cd "$REPO_ROOT"
     export OXIDE_SLOC_ROOT="$REPO_ROOT"
     "$bin" serve --server
@@ -514,7 +518,7 @@ do_launch_cargo() {
     fi
     printf '\n  Log \xe2\x86\x92 %s\n' "$LOG_FILE"
 
-    print_banner
+    [[ "$QUIET" != true ]] && print_banner
     "$bin" serve --server
 }
 
