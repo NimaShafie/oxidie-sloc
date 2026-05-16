@@ -3812,7 +3812,6 @@ fn render_result_page(
             .as_ref()
             .map(|_| format!("/runs/json/{run_id}?download=1")),
         html_path: artifacts.html_path.as_ref().map(|p| display_path(p)),
-        pdf_path: artifacts.pdf_path.as_ref().map(|p| display_path(p)),
         json_path: artifacts.json_path.as_ref().map(|p| display_path(p)),
         prev_run_id: prev_entry.as_ref().map(|e| e.run_id.clone()),
         prev_run_timestamp: prev_entry.as_ref().map(|e| fmt_la_time(e.timestamp_utc)),
@@ -15616,7 +15615,6 @@ struct ResultTemplate {
     pdf_download_url: Option<String>,
     json_download_url: Option<String>,
     html_path: Option<String>,
-    pdf_path: Option<String>,
     json_path: Option<String>,
     prev_run_id: Option<String>,
     prev_run_timestamp: Option<String>,
