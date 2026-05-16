@@ -335,7 +335,7 @@ do_launch_cargo() {
     cargo build -p oxide-sloc 2>"$tmpout" &
     local cargo_pid=$!
 
-    trap 'kill "$cargo_pid" 2>/dev/null; rm -f "$tmpout"; printf "\033[?25h\n"; exit 130' INT TERM
+    trap 'kill "$cargo_pid" 2>/dev/null; rm -f "$tmpout"; [[ "$is_tty" -eq 1 ]] && printf "\033[?25h\n"; exit 130' INT TERM
 
     local spin=('|' '/' '-' '\')
     local si=0 compiled=0 last_crate="" bar_w=34
@@ -352,7 +352,11 @@ do_launch_cargo() {
     )
     local msg_idx=0 frame_count=0 msg_interval=17
 
-    printf '\033[?25l'
+    # Suppress cursor-escape TUI when stdout is not a terminal (CI capture, tee, harness).
+    local is_tty=0; [[ -t 1 ]] && is_tty=1
+    local last_plain_ts="$SECONDS"
+
+    [[ "$is_tty" -eq 1 ]] && printf '\033[?25l'
 
     while kill -0 "$cargo_pid" 2>/dev/null; do
         compiled="$(grep -c "^   Compiling" "$tmpout" 2>/dev/null)" || compiled=0
@@ -408,32 +412,42 @@ do_launch_cargo() {
             ic_res="$frame"
         fi
 
-        [[ "$first_draw" -eq 0 ]] && printf "\033[%dA" "$NLINES"
-        first_draw=0
+        if [[ "$is_tty" -eq 1 ]]; then
+            [[ "$first_draw" -eq 0 ]] && printf "\033[%dA" "$NLINES"
+            first_draw=0
 
-        printf "  %s  Step [%d/3]  %-46s\033[K\n"  "$frame"  "$step_n"  "$phase"
-        printf "     [%s] %-16s%s\033[K\n"          "$bar"    "$count_str"  "$pct_str"
-        local current_display
-        if [[ "$compiled" -eq 0 ]]; then
-            (( frame_count % msg_interval == 0 )) && msg_idx=$(( (msg_idx + 1) % ${#resolution_msgs[@]} ))
-            current_display="${resolution_msgs[$msg_idx]}"
+            printf "  %s  Step [%d/3]  %-46s\033[K\n"  "$frame"  "$step_n"  "$phase"
+            printf "     [%s] %-16s%s\033[K\n"          "$bar"    "$count_str"  "$pct_str"
+            local current_display
+            if [[ "$compiled" -eq 0 ]]; then
+                (( frame_count % msg_interval == 0 )) && msg_idx=$(( (msg_idx + 1) % ${#resolution_msgs[@]} ))
+                current_display="${resolution_msgs[$msg_idx]}"
+            else
+                current_display="$last_crate"
+            fi
+            printf "     Current:  %-50s\033[K\n"       "$current_display"
+            printf "     Elapsed:  %-50s\033[K\n"       "$elapsed_str"
+            printf "     \033[K\n"
+            printf "     Milestones:\033[K\n"
+            printf "     %b  Resolve dependencies\033[K\n"  "$ic_res"
+            printf "     %b  Compile workspace\033[K\n"     "$ic_cmp"
+            printf "     %b  Launch server\033[K\n"         "$ic_lnk"
+
+            sleep 0.12
         else
-            current_display="$last_crate"
+            # Non-TTY: print one plain progress line every ~10 s to keep the log alive.
+            if (( SECONDS - last_plain_ts >= 10 )); then
+                printf '  [build] Step [%d/3] %s — %s crates — %s\n' \
+                    "$step_n" "$phase" "$compiled" "$elapsed_str"
+                last_plain_ts="$SECONDS"
+            fi
+            sleep 1
         fi
-        printf "     Current:  %-50s\033[K\n"       "$current_display"
-        printf "     Elapsed:  %-50s\033[K\n"       "$elapsed_str"
-        printf "     \033[K\n"
-        printf "     Milestones:\033[K\n"
-        printf "     %b  Resolve dependencies\033[K\n"  "$ic_res"
-        printf "     %b  Compile workspace\033[K\n"     "$ic_cmp"
-        printf "     %b  Launch server\033[K\n"         "$ic_lnk"
-
-        sleep 0.12
     done
 
     wait "$cargo_pid"
     local exit_code=$?
-    printf '\033[?25h'
+    [[ "$is_tty" -eq 1 ]] && printf '\033[?25h'
     trap - INT TERM
 
     compiled="$(grep -c "^   Compiling" "$tmpout" 2>/dev/null)" || compiled=0
@@ -444,12 +458,14 @@ do_launch_cargo() {
         cat "$tmpout"
     } > "$LOG_FILE"
 
-    [[ "$first_draw" -eq 0 ]] && printf "\033[%dA" "$NLINES"
+    [[ "$is_tty" -eq 1 && "$first_draw" -eq 0 ]] && printf "\033[%dA" "$NLINES"
 
     if [[ $exit_code -ne 0 ]]; then
-        printf "  \xe2\x9c\x97  BUILD FAILED%-67s\n" ""
-        for (( i = 1; i < NLINES; i++ )); do printf "\033[K\n"; done
-        printf '\n'
+        if [[ "$is_tty" -eq 1 ]]; then
+            printf "  \xe2\x9c\x97  BUILD FAILED%-67s\n" ""
+            for (( i = 1; i < NLINES; i++ )); do printf "\033[K\n"; done
+            printf '\n'
+        fi
         cat "$tmpout" >&2
         rm -f "$tmpout"
         printf '\n  Build failed. Full output saved:\n'
@@ -473,21 +489,29 @@ do_launch_cargo() {
         final_pct_str="(100%)"
     fi
 
-    if [[ "$compiled" -gt 0 ]]; then
-        printf "  \xe2\x9c\x93  Step [3/3]  Build complete \xe2\x80\x94 %d crates compiled.%-13s\033[K\n" "$compiled" ""
-        printf "     [%s] %-16s%s\033[K\n"    "$final_bar" "$final_count_str" "$final_pct_str"
-        printf "     Current:  %-50s\033[K\n" "Done."
+    if [[ "$is_tty" -eq 1 ]]; then
+        if [[ "$compiled" -gt 0 ]]; then
+            printf "  \xe2\x9c\x93  Step [3/3]  Build complete \xe2\x80\x94 %d crates compiled.%-13s\033[K\n" "$compiled" ""
+            printf "     [%s] %-16s%s\033[K\n"    "$final_bar" "$final_count_str" "$final_pct_str"
+            printf "     Current:  %-50s\033[K\n" "Done."
+        else
+            printf "  \xe2\x9c\x93  Step [3/3]  Already up to date.%-31s\033[K\n" ""
+            printf "     [%s]\033[K\n"             "$final_bar"
+            printf "     Current:  %-50s\033[K\n" "No changes detected."
+        fi
+        printf "     Elapsed:  %-50s\033[K\n" "$final_elapsed_str"
+        printf "     \033[K\n"
+        printf "     Milestones:\033[K\n"
+        printf "     \xe2\x9c\x93  Resolve dependencies\033[K\n"
+        printf "     \xe2\x9c\x93  Compile workspace\033[K\n"
+        printf "     \xe2\x9c\x93  Launch server\033[K\n"
     else
-        printf "  \xe2\x9c\x93  Step [3/3]  Already up to date.%-31s\033[K\n" ""
-        printf "     [%s]\033[K\n"             "$final_bar"
-        printf "     Current:  %-50s\033[K\n" "No changes detected."
+        if [[ "$compiled" -gt 0 ]]; then
+            printf '  [build] Done — %d crates compiled in %s\n' "$compiled" "$final_elapsed_str"
+        else
+            printf '  [build] Already up to date (%s)\n' "$final_elapsed_str"
+        fi
     fi
-    printf "     Elapsed:  %-50s\033[K\n" "$final_elapsed_str"
-    printf "     \033[K\n"
-    printf "     Milestones:\033[K\n"
-    printf "     \xe2\x9c\x93  Resolve dependencies\033[K\n"
-    printf "     \xe2\x9c\x93  Compile workspace\033[K\n"
-    printf "     \xe2\x9c\x93  Launch server\033[K\n"
     printf '\n  Log \xe2\x86\x92 %s\n' "$LOG_FILE"
 
     print_banner

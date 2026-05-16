@@ -725,6 +725,66 @@ async fn auth_login_post_valid_key_with_bad_next_redirects_to_root() {
     );
 }
 
+#[tokio::test]
+async fn auth_login_post_valid_key_with_protocol_relative_next_redirects_to_root() {
+    // Guards against open-redirect via protocol-relative URL (//evil.com).
+    // sanitize_next() must treat any path starting with "//" as unsafe and fall back to "/".
+    use std::net::SocketAddr;
+    let app = make_test_router_with_key("good-key");
+    let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let mut req = Request::post("/auth/login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("key=good-key&next=%2F%2Fevil.com"))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "valid login must redirect, got {}",
+        resp.status()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/",
+        "protocol-relative next= must be replaced with /, got: {location}"
+    );
+}
+
+#[tokio::test]
+async fn auth_login_post_valid_key_with_safe_next_redirects_there() {
+    // Positive case: a legitimate same-origin path must not be over-restricted.
+    // sanitize_next("/test-metrics") must pass through unchanged.
+    use std::net::SocketAddr;
+    let app = make_test_router_with_key("good-key");
+    let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let mut req = Request::post("/auth/login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("key=good-key&next=%2Ftest-metrics"))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "valid login must redirect, got {}",
+        resp.status()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/test-metrics",
+        "safe same-origin next= must be preserved, got: {location}"
+    );
+}
+
 // ── API key authentication (Bearer / X-API-Key) ───────────────────────────────
 
 #[tokio::test]

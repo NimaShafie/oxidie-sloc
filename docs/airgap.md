@@ -261,7 +261,7 @@ called automatically and should not be invoked directly.
 | Script | Purpose | Notes |
 |---|---|---|
 | `bash scripts/run.sh` | **Primary entry point** — installs on first run, then launches web UI (localhost) | Accepts `--rebuild` / `--force` / `-f` to force a fresh install before launching |
-| `bash scripts/serve-server.sh` | Launch web UI as LAN server with API key setup | Does not auto-install — run `scripts/run.sh` at least once first |
+| `bash scripts/serve-server.sh` | Launch web UI as LAN server (no auth by default; add `--with-auth` to require a key) | Does not auto-install — run `scripts/run.sh` at least once first |
 
 | Internal script | Called by | Purpose |
 |---|---|---|
