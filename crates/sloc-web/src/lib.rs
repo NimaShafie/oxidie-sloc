@@ -10706,7 +10706,7 @@ struct SubmoduleRow {
                   {% if git_repo.is_empty() %}
                   {% if server_mode %}
                   <div id="upload-limit-tip" class="hint" style="margin-top:6px;font-size:11px;">
-                    ℹ️ Files are compressed and streamed — no fixed size limit. Binaries, node_modules, and build artifacts are filtered automatically. You can also <strong>drag a project folder onto the path field</strong> to skip the browser confirmation dialog.
+                    ℹ️ Files are compressed and streamed — no fixed size limit.
                   </div>
                   {% endif %}
                   <div class="path-info-row">
@@ -11017,12 +11017,19 @@ pytest --cov --cov-report=xml
                 <div class="output-field-row">
                   <div class="field">
                     <label for="output_dir">Output directory</label>
+                    {% if server_mode %}
+                    <div class="input-group compact">
+                      <input id="output_dir" name="output_dir" type="text" value="" placeholder="auto: project/sloc" readonly style="cursor:default;opacity:0.68;background:var(--surface-2);" />
+                    </div>
+                    <div class="hint">Output path is managed by the server — each run stores artifacts in a unique timestamped subfolder automatically.</div>
+                    {% else %}
                     <div class="input-group compact">
                       <input id="output_dir" name="output_dir" type="text" value="" placeholder="auto: project/sloc" onblur="this.scrollLeft=this.scrollWidth" />
                       <button type="button" class="mini-button oxide" id="browse-output-dir">Browse</button>
                       <button type="button" class="mini-button" id="use-default-output">Use default</button>
                     </div>
                     <div class="hint">A unique timestamped subfolder is created automatically for each run — your existing files are never overwritten.</div>
+                    {% endif %}
                   </div>
                   <div class="output-field-aside">
                     <strong>Where reports land</strong>
@@ -14612,6 +14619,14 @@ struct ScanSetupTemplate {
     .r-chart-select:focus{border-color:var(--accent);}
     .r-chart-container{width:100%;overflow:hidden;position:relative;flex:1;}
     .r-chart-container svg{display:block;width:100%;height:auto;}
+    .r-expand-btn{background:none;border:1px solid var(--line);border-radius:6px;cursor:pointer;color:var(--muted);padding:3px 8px;font-size:12px;line-height:1;transition:background .13s,color .13s;flex-shrink:0;}
+    .r-expand-btn:hover{background:var(--surface);color:var(--text);}
+    .r-chart-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}
+    .r-chart-modal{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:960px;width:100%;max-height:85vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}
+    .r-chart-modal-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 16px;display:block;}
+    .r-chart-modal-close{position:absolute;top:14px;right:18px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--text);line-height:1;padding:0;}
+    .r-chart-modal-close:hover{opacity:.7;}
+    body.dark-theme .r-chart-modal{background:var(--surface);}
     .r-chart-container .rchit{cursor:pointer;transition:opacity .17s,filter .17s;}
     .r-chart-container .rchit:hover{opacity:.75;filter:brightness(1.14);}
     .r-chart-tab-bar{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
@@ -15185,7 +15200,7 @@ struct ScanSetupTemplate {
         </div>
         {% if has_semantic_data %}
         <div class="r-viz-card">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
             <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Semantic Metrics</p>
             <select class="r-chart-select" id="r-semantic-metric">
               <option value="functions">Functions</option>
@@ -15193,10 +15208,15 @@ struct ScanSetupTemplate {
               <option value="variables">Variables</option>
               <option value="imports">Imports</option>
             </select>
+            <button class="r-expand-btn" id="r-semantic-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
           </div>
           <div class="r-chart-container" id="r-semantic-chart"></div>
         </div>
         {% endif %}
+        <div class="r-viz-card">
+          <p class="r-viz-card-title">Comment Density</p>
+          <div class="r-chart-container" id="r-density-chart"></div>
+        </div>
         {% if has_submodule_data %}
         <div class="r-viz-card">
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
@@ -15377,9 +15397,14 @@ struct ScanSetupTemplate {
         function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
         var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
 
-        // Donut chart — fixed 240×240 viewBox, legend to the right inside the SVG
-        var cx=100,cy=110,Ro=88,Ri=48;
-        var legX=204,DW=360,DH=220;
+        // Donut chart — height matches the stacked-bar chart so both panels align
+        var rHb_d=28;
+        var DH=Math.max(220,D.length*rHb_d+32);
+        var cx=100,cy=Math.round(DH/2),Ro=88,Ri=48;
+        var legX=204,DW=360;
+        var legCount=D.length;
+        var legSpacing=Math.max(12,Math.min(22,Math.floor((DH-30)/Math.max(legCount,1))));
+        var legYStart=Math.round((DH-legCount*legSpacing)/2);
         var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         if(D.length===1){
           var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
@@ -15399,13 +15424,10 @@ struct ScanSetupTemplate {
         }
         ds+='<text x="'+cx+'" y="'+(cy-7)+'" text-anchor="middle" font-family="'+FONT+'" font-size="21" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
         ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
-        var legRows=Math.min(D.length,8);
-        var legYStart=Math.round((DH-legRows*22)/2);
         D.forEach(function(d,i){
-          if(i>=8)return;
-          var ly=legYStart+i*22;
+          var ly=legYStart+i*legSpacing;
           ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(COLS[i%COLS.length])+'"/>';
-          ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(11,legSpacing-2)+'" fill="#43342d">'+esc(d.lang)+'</text>';
         });
         ds+='</svg>';
 
@@ -15535,10 +15557,9 @@ struct ScanSetupTemplate {
         // ── Semantic: horizontal bar chart (one bar per language) ─────────────
         // Horizontal layout avoids the portrait-aspect scaling bug that plagued
         // the old vertical column layout on wide containers.
-        function renderSemantic(key){
-          var el=document.getElementById('r-semantic-chart');
+        function renderSemanticInEl(el,key,sh){
           if(!el||!SEM_D||!SEM_D.length)return;
-          var LW=112,SH=224;
+          var LW=112,SH=sh||224;
           var svgW=Math.max(320,el.offsetWidth||480);
           var BW=Math.max(120,svgW-LW-80);
           var topPad=4,botPad=14;
@@ -15556,8 +15577,57 @@ struct ScanSetupTemplate {
           s+='</svg>';
           el.innerHTML=s;
         }
+        function renderSemantic(key){renderSemanticInEl(document.getElementById('r-semantic-chart'),key,224);}
         var semSel=document.getElementById('r-semantic-metric');
         if(semSel){renderSemantic('functions');semSel.addEventListener('change',function(){renderSemantic(semSel.value);});}
+        var semExpand=document.getElementById('r-semantic-expand');
+        if(semExpand){
+          semExpand.addEventListener('click',function(){
+            var key=semSel?semSel.value:'functions';
+            var n=SEM_D.length||1;
+            var modalH=Math.max(320,n*28+60);
+            var overlay=document.createElement('div');
+            overlay.className='r-chart-modal-overlay';
+            overlay.innerHTML='<div class="r-chart-modal"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">Semantic Metrics — Full View</span><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;"></div></div>';
+            document.body.appendChild(overlay);
+            overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
+            overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
+            var modalEl=document.getElementById('r-sem-modal-chart');
+            if(modalEl){setTimeout(function(){renderSemanticInEl(modalEl,key,modalH);},30);}
+          });
+        }
+
+        // ── Comment Density: comments / (code + comments) per language ───────────
+        function renderDensity(){
+          var el=document.getElementById('r-density-chart');
+          if(!el||!LANG_D||!LANG_D.length)return;
+          var LW=112,SH=224;
+          var svgW=Math.max(320,el.offsetWidth||480);
+          var BW=Math.max(120,svgW-LW-80);
+          var topPad=4,botPad=26;
+          var n=LANG_D.length||1;
+          var rowTotal=Math.floor((SH-topPad-botPad)/n);
+          var bH=Math.min(22,Math.max(10,Math.floor(rowTotal*0.65)));
+          var densities=LANG_D.map(function(d){
+            var sig=(d.code||0)+(d.comments||0);
+            return sig>0?(d.comments||0)/sig:0;
+          });
+          var maxDen=Math.max.apply(null,densities)||1;
+          var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          LANG_D.forEach(function(d,i){
+            var den=densities[i],bw=den/maxDen*BW;
+            var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2);
+            var pct=Math.round(den*100);
+            s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+            if(bw>0.5)s+='<rect'+tt(d.lang,pct+'% of significant lines are comments')+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
+            else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
+            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+pct+'%</text>';
+          });
+          s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.5">comment ratio (higher = more documented)</text>';
+          s+='</svg>';
+          el.innerHTML=s;
+        }
+        renderDensity();
 
         // ── Submodule: horizontal bar chart ────────────────────────────────────
         function renderSubmodule(key,sort){
@@ -15618,6 +15688,7 @@ struct ScanSetupTemplate {
               s+='</svg>';scEl.innerHTML=s;
             })();
             if(semSel)renderSemantic(semSel.value||'functions');
+            renderDensity();
             if(subSel)renderSubmodule(subSel.value||'code',sortSel?sortSel.value:'desc');
           },120);
         });
