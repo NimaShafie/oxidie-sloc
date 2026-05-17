@@ -960,8 +960,14 @@ pub async fn api_list_refs(
     let clones_dir = state.git_clones_dir.clone();
     match tokio::task::spawn_blocking(move || load_refs(&repo, &clones_dir)).await {
         Ok(Ok(refs)) => (StatusCode::OK, Json(serde_json::json!(refs))).into_response(),
-        Ok(Err(e)) => json_error(StatusCode::BAD_GATEWAY, &e.to_string()),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(Err(e)) => {
+            tracing::warn!(event = "git_api_error", "load_refs failed: {e:#}");
+            json_error(StatusCode::BAD_GATEWAY, "Failed to access repository")
+        }
+        Err(e) => {
+            tracing::error!(event = "git_task_panic", "load_refs task panicked: {e}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
     }
 }
 
@@ -1006,8 +1012,14 @@ pub async fn api_scan_ref(
             )
                 .into_response()
         }
-        Ok(Err(e)) => json_error(StatusCode::BAD_GATEWAY, &e.to_string()),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(Err(e)) => {
+            tracing::warn!(event = "git_api_error", "ref scan failed: {e:#}");
+            json_error(StatusCode::BAD_GATEWAY, "Failed to access repository")
+        }
+        Err(e) => {
+            tracing::error!(event = "git_task_panic", "ref scan task panicked: {e}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
     }
 }
 
@@ -1057,8 +1069,14 @@ pub async fn api_compare_refs(
             )
                 .into_response()
         }
-        Ok(Err(e)) => json_error(StatusCode::BAD_GATEWAY, &e.to_string()),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(Err(e)) => {
+            tracing::warn!(event = "git_api_error", "ref compare failed: {e:#}");
+            json_error(StatusCode::BAD_GATEWAY, "Failed to access repository")
+        }
+        Err(e) => {
+            tracing::error!(event = "git_task_panic", "ref compare task panicked: {e}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
     }
 }
 

@@ -303,12 +303,15 @@ pub(crate) async fn auth_login_post(
     if valid {
         const SESSION_SECS: u64 = 8 * 3600;
         let session_id = uuid::Uuid::new_v4().to_string();
-        let expiry = Instant::now() + Duration::from_secs(SESSION_SECS);
-        state
+        let now = Instant::now();
+        let expiry = now + Duration::from_secs(SESSION_SECS);
+        let mut sessions = state
             .sessions
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.clone(), expiry);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Evict expired sessions to prevent unbounded memory growth under sustained logins.
+        sessions.retain(|_, &mut exp| exp > now);
+        sessions.insert(session_id.clone(), expiry);
         let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
         let cookie_value = format!(
             "sloc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}{secure_flag}",

@@ -313,6 +313,47 @@ impl IpRateLimiter {
     }
 }
 
+/// Periodically removes upload staging directories older than `SLOC_UPLOAD_TTL_HOURS` hours
+/// (default 4). This prevents orphaned uploads from filling the disk when a client uploads
+/// files but never triggers a scan.
+fn spawn_upload_staging_cleanup() {
+    tokio::spawn(async move {
+        let ttl_hours: u64 = std::env::var("SLOC_UPLOAD_TTL_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        let ttl_secs = ttl_hours * 3600;
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        interval.tick().await; // consume the immediate first tick
+        loop {
+            interval.tick().await;
+            let upload_root = std::env::temp_dir().join("oxide-sloc-uploads");
+            let Ok(mut dir) = tokio::fs::read_dir(&upload_root).await else {
+                continue;
+            };
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let path = entry.path();
+                let age_secs = tokio::fs::metadata(&path)
+                    .await
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if age_secs > ttl_secs {
+                    tracing::debug!(
+                        event = "upload_staging_cleanup",
+                        path = %path.display(),
+                        age_secs,
+                        "removing stale upload staging directory"
+                    );
+                    let _ = tokio::fs::remove_dir_all(&path).await;
+                }
+            }
+        }
+    });
+}
+
 /// Carries context from scan time to result render time (stored inside `RunArtifacts`).
 #[derive(Clone, Debug, Default)]
 struct RunResultContext {
@@ -385,6 +426,9 @@ pub(crate) struct AppState {
     pub(crate) api_keys: Vec<secrecy::Secret<String>>,
     pub(crate) rate_limiter: Arc<IpRateLimiter>,
     pub(crate) trust_proxy: bool,
+    /// Allowlist of proxy IPs that are permitted to set X-Forwarded-For. Only honoured when
+    /// `trust_proxy` is true. Empty list means X-Forwarded-For is never trusted.
+    pub(crate) trusted_proxy_ips: Vec<IpAddr>,
     /// Directory where remote repositories are cloned for git-browser scans.
     pub(crate) git_clones_dir: PathBuf,
     /// Persisted list of webhook / poll schedules.
@@ -544,11 +588,18 @@ fn build_router(state: AppState) -> Router {
         .route("/auth/login", get(auth::auth_login_get))
         .route("/auth/login", post(auth::auth_login_post))
         // Webhook receivers are public (no API-key auth) — they use per-schedule HMAC secrets.
-        .route("/webhooks/github", post(git_webhook::handle_github_webhook))
-        .route("/webhooks/gitlab", post(git_webhook::handle_gitlab_webhook))
+        // Explicit 512 KB body cap: generous for any real webhook payload, blocks body-flood attacks.
+        .route(
+            "/webhooks/github",
+            post(git_webhook::handle_github_webhook).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route(
+            "/webhooks/gitlab",
+            post(git_webhook::handle_gitlab_webhook).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
         .route(
             "/webhooks/bitbucket",
-            post(git_webhook::handle_bitbucket_webhook),
+            post(git_webhook::handle_bitbucket_webhook).layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .layer(middleware::from_fn_with_state(
@@ -580,6 +631,7 @@ pub fn make_test_router() -> Router {
             Duration::from_hours(1),
         )),
         trust_proxy: false,
+        trusted_proxy_ips: vec![],
         git_clones_dir: tmp.join("git-clones"),
         schedules: Arc::new(Mutex::new(ScheduleStore::default())),
         schedules_path: tmp.join("schedules.json"),
@@ -614,6 +666,7 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
             Duration::from_hours(1),
         )),
         trust_proxy: false,
+        trusted_proxy_ips: vec![],
         git_clones_dir: tmp.join("git-clones"),
         schedules: Arc::new(Mutex::new(ScheduleStore::default())),
         schedules_path: tmp.join("schedules.json"),
@@ -682,17 +735,41 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         );
     }
     let trust_proxy = std::env::var("SLOC_TRUST_PROXY").as_deref() == Ok("1");
+    let trusted_proxy_ips: Vec<IpAddr> = std::env::var("SLOC_TRUSTED_PROXY_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+        .collect();
     if trust_proxy {
-        println!(
-            "NOTE: SLOC_TRUST_PROXY=1 — X-Forwarded-For header is trusted for rate limiting. \
-             Only set this when oxide-sloc is behind a trusted reverse proxy."
-        );
+        if trusted_proxy_ips.is_empty() {
+            println!(
+                "WARNING: SLOC_TRUST_PROXY=1 but SLOC_TRUSTED_PROXY_IPS is not set. \
+                 X-Forwarded-For will NOT be trusted until you specify the proxy IP(s) via \
+                 SLOC_TRUSTED_PROXY_IPS=192.168.1.1,10.0.0.1 to prevent rate-limit bypass."
+            );
+        } else {
+            println!(
+                "NOTE: SLOC_TRUST_PROXY=1 — X-Forwarded-For is trusted from proxy IPs: {}",
+                trusted_proxy_ips
+                    .iter()
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     } else if server_mode {
         println!(
             "NOTE: SLOC_TRUST_PROXY is not set. If oxide-sloc is behind a reverse proxy \
              (nginx, Caddy, Traefik), all LAN clients share one rate-limit bucket (the \
-             proxy IP). Set SLOC_TRUST_PROXY=1 to enable per-client rate limiting via \
-             X-Forwarded-For."
+             proxy IP). Set SLOC_TRUST_PROXY=1 and SLOC_TRUSTED_PROXY_IPS=<proxy-ip> to \
+             enable per-client rate limiting via X-Forwarded-For."
+        );
+    }
+
+    if std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some() {
+        println!(
+            "WARNING: SLOC_GIT_SSL_NO_VERIFY is set — TLS certificate verification is \
+             DISABLED for all git operations. Remove this variable before production use."
         );
     }
 
@@ -704,14 +781,22 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(3600);
-    // 600 req/min per IP across all routes (10/sec — suits local/air-gapped use).
+    // Default: 600 req/min in local mode (suits air-gapped/single-user use),
+    // 120 req/min in server mode (shared network — reduce fuzzing exposure).
+    // Override with SLOC_RATE_LIMIT=<requests_per_minute>.
+    let default_rpm: usize = if server_mode { 120 } else { 600 };
+    let rate_limit_rpm = std::env::var("SLOC_RATE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default_rpm);
     let rate_limiter = Arc::new(IpRateLimiter::new(
         Duration::from_mins(1),
-        600,
+        rate_limit_rpm,
         auth_lockout_threshold,
         Duration::from_secs(auth_lockout_secs),
     ));
     IpRateLimiter::spawn_pruning_task(Arc::clone(&rate_limiter));
+    spawn_upload_staging_cleanup();
 
     let git_clones_dir = resolve_git_clones_dir(&output_root);
     let schedules_path = std::env::var("SLOC_SCHEDULES_PATH")
@@ -741,6 +826,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         api_keys,
         rate_limiter,
         trust_proxy,
+        trusted_proxy_ips,
         git_clones_dir,
         schedules: Arc::new(Mutex::new(schedules)),
         schedules_path,
@@ -1059,12 +1145,17 @@ async fn add_security_headers(
 }
 
 async fn rate_limit(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
-    let ip = req
+    let peer_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip())
-        .or_else(|| {
-            if state.trust_proxy {
+        .map(|c| c.0.ip());
+
+    // Only honour X-Forwarded-For when trust_proxy is on AND the TCP peer is in the
+    // explicitly configured trusted-proxy allowlist. This prevents rate-limit bypass via
+    // header spoofing from direct connections.
+    let ip = peer_ip
+        .and_then(|peer| {
+            if state.trust_proxy && state.trusted_proxy_ips.contains(&peer) {
                 req.headers()
                     .get("X-Forwarded-For")
                     .and_then(|v| v.to_str().ok())
@@ -1074,6 +1165,7 @@ async fn rate_limit(State(state): State<AppState>, req: Request<Body>, next: Nex
                 None
             }
         })
+        .or(peer_ip)
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
 
     if !state.rate_limiter.is_allowed(ip) {
@@ -1570,6 +1662,7 @@ async fn upload_directory_handler(
 
     let mut total_bytes: usize = 0;
     let mut project_root: Option<PathBuf> = None;
+    let mut traversal_attempts: usize = 0;
 
     for entry in &body.files {
         // Guard against path traversal.
@@ -1578,6 +1671,20 @@ async fn upload_directory_handler(
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
+            traversal_attempts += 1;
+            if traversal_attempts >= 5 {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                tracing::warn!(
+                    event = "upload_path_traversal",
+                    upload_id = %upload_id,
+                    "Upload rejected: repeated path traversal attempts detected"
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Upload rejected"})),
+                )
+                    .into_response();
+            }
             continue;
         }
 
@@ -1732,6 +1839,23 @@ async fn upload_file_handler(
 /// layer; the only limit is the disk space on the server. The browser-side JS creates the archive
 /// one file at a time using the native `CompressionStream('gzip')` API so browser RAM usage stays
 /// bounded regardless of project size.
+/// Guards against zip-bomb archives: errors once more than `remaining` bytes have been
+/// decompressed. Wraps any `std::io::Read` source.
+struct SizeLimitReader<R> {
+    inner: R,
+    remaining: u64,
+}
+impl<R: std::io::Read> std::io::Read for SizeLimitReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(std::io::Error::other("decompressed size limit exceeded"));
+        }
+        let n = self.inner.read(buf)?;
+        self.remaining = self.remaining.saturating_sub(n as u64);
+        Ok(n)
+    }
+}
+
 async fn upload_tarball_handler(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -1745,10 +1869,28 @@ async fn upload_tarball_handler(
     let tarball_path = upload_base.join(format!("{upload_id}.tar.gz"));
     let staging = upload_base.join(&upload_id);
 
+    // Configurable size caps: compressed stream and decompressed extraction.
+    let max_compressed_bytes: u64 = std::env::var("SLOC_MAX_TARBALL_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048_u64)
+        * 1024
+        * 1024;
+    let max_decompressed_bytes: u64 = std::env::var("SLOC_MAX_TARBALL_DECOMPRESSED_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_240_u64)
+        * 1024
+        * 1024;
+
     if let Err(e) = tokio::fs::create_dir_all(&upload_base).await {
+        tracing::error!(
+            event = "upload_io_error",
+            "failed to create upload base dir: {e}"
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("IO error: {e}")})),
+            Json(serde_json::json!({"error": "Upload initialization failed"})),
         )
             .into_response();
     }
@@ -1757,9 +1899,13 @@ async fn upload_tarball_handler(
     let mut tarball_file = match tokio::fs::File::create(&tarball_path).await {
         Ok(f) => f,
         Err(e) => {
+            tracing::error!(
+                event = "upload_io_error",
+                "failed to create tarball temp file: {e}"
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Cannot create temp file: {e}")})),
+                Json(serde_json::json!({"error": "Upload initialization failed"})),
             )
                 .into_response();
         }
@@ -1784,11 +1930,20 @@ async fn upload_tarball_handler(
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {
                     compressed_bytes += data.len() as u64;
-                    if let Err(e) = tarball_file.write_all(&data).await {
+                    if compressed_bytes > max_compressed_bytes {
                         let _ = tokio::fs::remove_file(&tarball_path).await;
                         return (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(serde_json::json!({"error": "Tarball exceeds the allowed size limit"})),
+                        )
+                            .into_response();
+                    }
+                    if let Err(e) = tarball_file.write_all(&data).await {
+                        let _ = tokio::fs::remove_file(&tarball_path).await;
+                        tracing::error!(event = "upload_io_error", "tarball write error: {e}");
+                        return (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": format!("Write error: {e}")})),
+                            Json(serde_json::json!({"error": "Upload write failed"})),
                         )
                             .into_response();
                     }
@@ -1805,7 +1960,12 @@ async fn upload_tarball_handler(
         let file = std::fs::File::open(&tarball_clone)?;
         let buf = std::io::BufReader::new(file);
         let gz = flate2::read::GzDecoder::new(buf);
-        let mut archive = tar::Archive::new(gz);
+        // Zip-bomb guard: abort extraction if decompressed bytes exceed the limit.
+        let limited = SizeLimitReader {
+            inner: gz,
+            remaining: max_decompressed_bytes,
+        };
+        let mut archive = tar::Archive::new(limited);
         archive.set_overwrite(true);
         archive.set_preserve_permissions(false);
         std::fs::create_dir_all(&staging_clone)?;
@@ -1820,17 +1980,30 @@ async fn upload_tarball_handler(
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let _ = tokio::fs::remove_dir_all(&staging).await;
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Failed to extract archive: {e}")})),
-            )
-                .into_response();
+            let is_size_limit = e.to_string().contains("decompressed size limit exceeded");
+            tracing::warn!(
+                event = "upload_extract_error",
+                "tarball extraction failed: {e:#}"
+            );
+            let (status, msg) = if is_size_limit {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Archive exceeds the decompressed size limit",
+                )
+            } else {
+                (StatusCode::BAD_REQUEST, "Failed to extract archive")
+            };
+            return (status, Json(serde_json::json!({"error": msg}))).into_response();
         }
         Err(e) => {
             let _ = tokio::fs::remove_dir_all(&staging).await;
+            tracing::error!(
+                event = "upload_extract_panic",
+                "tarball extraction task panicked: {e}"
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Extraction task panicked: {e}")})),
+                Json(serde_json::json!({"error": "Archive extraction failed"})),
             )
                 .into_response();
         }
