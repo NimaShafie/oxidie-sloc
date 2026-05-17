@@ -67,7 +67,7 @@ use sloc_core::{
     analyze, compute_delta, read_json, AnalysisRun, FileChangeStatus, RegistryEntry, ScanRegistry,
     ScanSummarySnapshot, SummaryTotals, WatchedDirsStore,
 };
-use sloc_report::{render_html, render_sub_report_html, write_pdf_from_html};
+use sloc_report::{render_html, render_sub_report_html, write_pdf_from_html, write_pdf_from_run};
 const MAX_CONCURRENT_ANALYSES: usize = 4;
 
 /// Windows-only helpers that force the native file-picker dialog into the
@@ -1878,6 +1878,7 @@ fn locate_report_error(message: impl Into<String>, csp_nonce: &str) -> Response 
         last_report_url: Some("/view-reports".to_string()),
         last_report_label: Some("View Reports".to_string()),
         csp_nonce: csp_nonce.to_owned(),
+        version: env!("CARGO_PKG_VERSION"),
     }
     .render()
     .unwrap_or_else(|_| "<pre>Error.</pre>".to_string());
@@ -2188,6 +2189,7 @@ async fn relocate_scan_handler(
             last_report_url: Some("/compare-scans".to_string()),
             last_report_label: Some("Compare Scans".to_string()),
             csp_nonce: csp_nonce.clone(),
+            version: env!("CARGO_PKG_VERSION"),
         }
         .render()
         .unwrap_or_else(|_| "<pre>Error.</pre>".to_string());
@@ -2320,6 +2322,7 @@ fn missing_scan_relocate_response(
         redirect_url: redirect_url.to_string(),
         server_mode,
         csp_nonce: csp_nonce.to_owned(),
+        version: env!("CARGO_PKG_VERSION"),
     }
     .render()
     .unwrap_or_else(|_| "<pre>Error.</pre>".to_string());
@@ -2846,6 +2849,7 @@ fn validate_server_scan_path(
             last_report_url: None,
             last_report_label: None,
             csp_nonce: csp_nonce.to_owned(),
+            version: env!("CARGO_PKG_VERSION"),
         };
         return Err((
             StatusCode::FORBIDDEN,
@@ -2871,6 +2875,7 @@ fn validate_server_scan_path(
             last_report_url: None,
             last_report_label: None,
             csp_nonce: csp_nonce.to_owned(),
+            version: env!("CARGO_PKG_VERSION"),
         };
         return Err((
             StatusCode::FORBIDDEN,
@@ -3127,6 +3132,7 @@ async fn analyze_handler(
             last_report_url: None,
             last_report_label: None,
             csp_nonce: csp_nonce.clone(),
+            version: env!("CARGO_PKG_VERSION"),
         };
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3641,6 +3647,7 @@ async fn async_run_result_handler(
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
                 csp_nonce: csp_nonce.clone(),
+                version: env!("CARGO_PKG_VERSION"),
             }
             .render()
             .unwrap_or_else(|_| "<pre>Report not found.</pre>".to_string());
@@ -3656,6 +3663,7 @@ async fn async_run_result_handler(
             last_report_url: Some("/view-reports".to_string()),
             last_report_label: Some("View Reports".to_string()),
             csp_nonce: csp_nonce.clone(),
+            version: env!("CARGO_PKG_VERSION"),
         }
         .render()
         .unwrap_or_else(|_| "<pre>No JSON.</pre>".to_string());
@@ -4336,6 +4344,7 @@ fn serve_html_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
                 csp_nonce: csp_nonce.to_owned(),
+                version: env!("CARGO_PKG_VERSION"),
             }
             .render()
             .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
@@ -4385,6 +4394,7 @@ fn serve_pdf_artifact(
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
                 csp_nonce: csp_nonce.to_owned(),
+                version: env!("CARGO_PKG_VERSION"),
             }
             .render()
             .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
@@ -4433,6 +4443,7 @@ fn serve_json_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
                 csp_nonce: csp_nonce.to_owned(),
+                version: env!("CARGO_PKG_VERSION"),
             }
             .render()
             .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
@@ -4532,6 +4543,7 @@ async fn resolve_artifact_set(
         last_report_url: Some("/view-reports".to_string()),
         last_report_label: Some("View Reports".to_string()),
         csp_nonce: csp_nonce.to_owned(),
+        version: env!("CARGO_PKG_VERSION"),
     }
     .render()
     .unwrap_or_else(|_| "<pre>Report not found.</pre>".to_string());
@@ -4569,6 +4581,7 @@ async fn artifact_handler(
                     last_report_url: Some(format!("/runs/html/{run_id}")),
                     last_report_label: Some("View HTML Report".to_string()),
                     csp_nonce: csp_nonce.clone(),
+                    version: env!("CARGO_PKG_VERSION"),
                 }
                 .render()
                 .unwrap_or_else(|_| "<pre>PDF not available.</pre>".to_string());
@@ -4699,6 +4712,7 @@ async fn artifact_handler(
                     last_report_url: Some("/view-reports".to_string()),
                     last_report_label: Some("View Reports".to_string()),
                     csp_nonce: csp_nonce.clone(),
+                    version: env!("CARGO_PKG_VERSION"),
                 }
                 .render()
                 .unwrap_or_else(|_| "<pre>JSON not available.</pre>".to_string());
@@ -4716,6 +4730,7 @@ async fn artifact_handler(
                     last_report_url: Some(format!("/runs/html/{run_id}")),
                     last_report_label: Some("View HTML Report".to_string()),
                     csp_nonce: csp_nonce.clone(),
+                    version: env!("CARGO_PKG_VERSION"),
                 }
                 .render()
                 .unwrap_or_else(|_| "<pre>CSV not available.</pre>".to_string());
@@ -4752,6 +4767,7 @@ async fn artifact_handler(
                     last_report_url: Some(format!("/runs/html/{run_id}")),
                     last_report_label: Some("View HTML Report".to_string()),
                     csp_nonce: csp_nonce.clone(),
+                    version: env!("CARGO_PKG_VERSION"),
                 }
                 .render()
                 .unwrap_or_else(|_| "<pre>Excel not available.</pre>".to_string());
@@ -4830,6 +4846,7 @@ async fn artifact_handler(
                     last_report_url: Some("/view-reports".to_string()),
                     last_report_label: Some("View Reports".to_string()),
                     csp_nonce: csp_nonce.clone(),
+                    version: env!("CARGO_PKG_VERSION"),
                 }
                 .render()
                 .unwrap_or_else(|_| "<pre>Sub-report not found.</pre>".to_string());
@@ -5199,6 +5216,7 @@ fn load_scan_for_compare(
                     last_report_url: Some("/compare-scans".to_string()),
                     last_report_label: Some("Compare Scans".to_string()),
                     csp_nonce: csp_nonce.to_owned(),
+                    version: env!("CARGO_PKG_VERSION"),
                 }
                 .render()
                 .unwrap_or_else(|_| format!("<pre>{scan_label} load failed.</pre>"));
@@ -5298,6 +5316,7 @@ async fn compare_handler(
             last_report_url: Some("/compare-scans".to_string()),
             last_report_label: Some("Compare Scans".to_string()),
             csp_nonce: csp_nonce.clone(),
+            version: env!("CARGO_PKG_VERSION"),
         }
         .render()
         .unwrap_or_else(|_| "<pre>Run not found.</pre>".to_string());
@@ -5334,6 +5353,7 @@ async fn compare_handler(
             last_report_url: Some("/compare-scans".to_string()),
             last_report_label: Some("Compare Scans".to_string()),
             csp_nonce: csp_nonce.clone(),
+            version: env!("CARGO_PKG_VERSION"),
         }
         .render()
         .unwrap_or_else(|_| "<pre>JSON data missing.</pre>".to_string());
@@ -6188,25 +6208,31 @@ async fn trend_report_handler(
     let version = env!("CARGO_PKG_VERSION");
 
     // Build the watched-dirs bar HTML (outside the format! so braces don't need escaping).
-    let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
-        r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
-            .to_string()
+    // Hidden in Network Server mode — folder watching is a local desktop feature.
+    let watched_dirs_html: String = if state.server_mode {
+        String::new()
     } else {
-        watched_dirs_list
-            .iter()
-            .fold(String::new(), |mut s, d| {
-                use std::fmt::Write as _;
-                let escaped = d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
-                write!(
-                    s,
-                    r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
-                ).expect("write to String is infallible");
-                s
-            })
+        let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
+            r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
+                .to_string()
+        } else {
+            watched_dirs_list
+                .iter()
+                .fold(String::new(), |mut s, d| {
+                    use std::fmt::Write as _;
+                    let escaped =
+                        d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+                    write!(
+                        s,
+                        r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
+                    ).expect("write to String is infallible");
+                    s
+                })
+        };
+        format!(
+            r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
+        )
     };
-    let watched_dirs_html = format!(
-        r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/trend-reports"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
-    );
 
     let html = format!(
         r##"<!doctype html>
@@ -6316,7 +6342,7 @@ async fn trend_report_handler(
     #scan-history-table col:nth-child(8){{width:150px;}}
     #scan-history-table td:nth-child(8){{overflow:visible!important;white-space:normal!important;}}
     .tag-chip{{display:inline-flex;padding:2px 8px;border-radius:999px;background:var(--info-bg);color:var(--info-text);font-size:11px;font-weight:700;margin-right:4px;}}
-    .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;flex-wrap:wrap;margin-bottom:16px;position:relative;z-index:1;}}
+    .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;flex-wrap:wrap;margin-bottom:14px;position:relative;z-index:1;}}
     .toolbar-divider{{width:1px;background:var(--line);align-self:stretch;flex-shrink:0;margin:0 6px;}}
     .toolbar-right{{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;}}
     .watched-bar-left{{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;}}
@@ -7374,7 +7400,7 @@ async fn trend_report_handler(
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
-  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
 </body>
 </html>"##,
     );
@@ -7847,26 +7873,31 @@ async fn test_metrics_handler(
     let nonce = &csp_nonce;
     let version = env!("CARGO_PKG_VERSION");
 
-    let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
-        r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
-            .to_string()
+    // Hidden in Network Server mode — folder watching is a local desktop feature.
+    let watched_dirs_html: String = if state.server_mode {
+        String::new()
     } else {
-        watched_dirs_list
-            .iter()
-            .fold(String::new(), |mut s, d| {
-                use std::fmt::Write as _;
-                let escaped =
-                    d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
-                write!(
-                    s,
-                    r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
-                ).expect("write to String is infallible");
-                s
-            })
+        let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
+            r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
+                .to_string()
+        } else {
+            watched_dirs_list
+                .iter()
+                .fold(String::new(), |mut s, d| {
+                    use std::fmt::Write as _;
+                    let escaped =
+                        d.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+                    write!(
+                        s,
+                        r#"<span class="watched-chip"><span class="watched-chip-path" title="{escaped}">{escaped}</span><form method="POST" action="/watched-dirs/remove" style="display:contents"><input type="hidden" name="folder_path" value="{escaped}"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="watched-chip-rm" title="Remove folder">&#x2715;</button></form></span>"#
+                    ).expect("write to String is infallible");
+                    s
+                })
+        };
+        format!(
+            r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
+        )
     };
-    let watched_dirs_html = format!(
-        r#"<div class="watched-bar" id="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips">{watched_dirs_chips}</div></div><div class="watched-bar-right"><button type="button" class="btn" id="add-watched-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Choose</button><form method="POST" action="/watched-dirs/refresh" style="display:contents"><input type="hidden" name="redirect_to" value="/test-metrics"><button type="submit" class="btn">&#8635; Refresh</button></form></div></div>"#
-    );
 
     // Build per-root SCOPE_DATA for instant JS scope switching (no API fetch on selection change).
     let scope_data_json: String = {
@@ -8012,13 +8043,13 @@ async fn test_metrics_handler(
     body.dark-theme .chart-box{{border-color:var(--line-strong);}}
     .btn{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .13s;}}
     .btn:hover{{background:var(--surface-2);}}
-    .scope-bar{{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin-bottom:16px;position:relative;z-index:1;flex-wrap:wrap;}}
+    .scope-bar{{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:14px;position:relative;z-index:1;flex-wrap:wrap;}}
     .scope-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
     .scope-sel-wrap{{display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap;}}
     .scope-sel{{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;padding:5px 10px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;max-width:500px;}}
     .scope-sel:focus{{border-color:var(--accent);}}
     body.dark-theme .scope-sel{{background:var(--surface);color:var(--text);}}
-    .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 16px;flex-wrap:wrap;margin-bottom:16px;position:relative;z-index:1;}}
+    .watched-bar{{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;flex-wrap:wrap;margin-bottom:14px;position:relative;z-index:1;}}
     .watched-bar-left{{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;}}
     .watched-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
     .watched-chips{{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;align-items:center;}}
@@ -8670,7 +8701,7 @@ async fn test_metrics_handler(
     applyScope();
   }})();
   </script>
-  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
 </body>
 </html>"#,
     );
@@ -8872,23 +8903,41 @@ fn persist_run_artifacts(
     }
 
     if generate_pdf {
-        let source_html_path = if let Some(existing) = html_path.as_ref() {
-            existing.clone()
-        } else {
-            let temp_html = run_dir.join("_report_rendered.html");
-            fs::write(&temp_html, report_html).with_context(|| {
-                format!(
-                    "failed to write temporary HTML report to {}",
-                    temp_html.display()
-                )
-            })?;
-            temp_html
-        };
-
         let pdf_dest = run_dir.join(format!("report_{file_stem}.pdf"));
-        let cleanup_src = !generate_html;
-        pdf_path = Some(pdf_dest.clone());
-        pending_pdf = Some((source_html_path, pdf_dest, cleanup_src));
+
+        // Attempt pure-Rust native PDF (zero external dependencies).
+        // Falls back to the HTML→browser background task on failure.
+        match write_pdf_from_run(run, &pdf_dest) {
+            Ok(()) => {
+                eprintln!(
+                    "[oxide-sloc][pdf] native PDF written to {}",
+                    pdf_dest.display()
+                );
+                pdf_path = Some(pdf_dest);
+                // pending_pdf stays None — no background browser task needed.
+            }
+            Err(native_err) => {
+                eprintln!(
+                    "[oxide-sloc][pdf] native PDF failed ({native_err:#}), \
+                     scheduling HTML→browser fallback"
+                );
+                let source_html_path = if let Some(existing) = html_path.as_ref() {
+                    existing.clone()
+                } else {
+                    let temp_html = run_dir.join("_report_rendered.html");
+                    fs::write(&temp_html, report_html).with_context(|| {
+                        format!(
+                            "failed to write temporary HTML report to {}",
+                            temp_html.display()
+                        )
+                    })?;
+                    temp_html
+                };
+                let cleanup_src = !generate_html;
+                pdf_path = Some(pdf_dest.clone());
+                pending_pdf = Some((source_html_path, pdf_dest, cleanup_src));
+            }
+        }
     }
 
     // CSV and XLSX are always generated (like JSON) — no extra flag required.
@@ -13489,7 +13538,7 @@ pytest --cov --cov-report=xml
     }
     doPing();
     setInterval(doPing,5000);
-    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='Mode: '+(isServer?'Network Server':'Local');}
+    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');}
   })();
   </script>
   <footer class="site-footer">
@@ -14251,7 +14300,7 @@ struct IndexTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -14323,7 +14372,7 @@ struct SplashTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:960px;margin:0 auto;padding:40px 24px 36px;position:relative;z-index:1;}
+    .page{max-width:1104px;margin:0 auto;padding:40px 24px 36px;position:relative;z-index:1;}
     .page-header{text-align:center;margin-bottom:16px;}
     .page-header h1{font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;}
     .page-header p{font-size:15px;color:var(--muted);line-height:1.6;white-space:nowrap;margin:0 auto;}
@@ -14715,7 +14764,7 @@ struct SplashTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -16491,7 +16540,7 @@ struct ScanSetupTemplate {
     }
     doPing();
     setInterval(doPing,5000);
-    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='Mode: '+(isServer?'Network Server':'Local');}
+    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
@@ -16890,7 +16939,7 @@ struct ResultTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -17102,7 +17151,7 @@ struct ScanWaitTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -17115,6 +17164,7 @@ struct ErrorTemplate {
     /// Label for the secondary action button; defaults to "View last report" when None.
     last_report_label: Option<String>,
     csp_nonce: String,
+    version: &'static str,
 }
 
 // ── RelocateScanTemplate ──────────────────────────────────────────────────────
@@ -17324,7 +17374,7 @@ struct ErrorTemplate {
     });
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -17337,6 +17387,7 @@ struct RelocateScanTemplate {
     redirect_url: String,
     server_mode: bool,
     csp_nonce: String,
+    version: &'static str,
 }
 
 // ── HistoryTemplate (View Reports) ────────────────────────────────────────────
@@ -18025,7 +18076,7 @@ struct RelocateScanTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -18790,7 +18841,7 @@ struct HistoryTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -20023,7 +20074,7 @@ struct CompareSelectTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
