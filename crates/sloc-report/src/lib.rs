@@ -369,14 +369,42 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
         eprintln!("[oxide-sloc][pdf] --no-sandbox enabled via SLOC_BROWSER_NOSANDBOX=1");
     }
 
-    let browser = Browser::new(LaunchOptions {
-        headless: true,
-        path: Some(browser_path),
-        window_size: Some((1122, 794)), // A4 landscape at 96 dpi
-        sandbox: !no_sandbox,
-        ..Default::default()
-    })
-    .context("failed to launch browser via CDP")?;
+    let browser = if no_sandbox {
+        Browser::new(LaunchOptions {
+            headless: true,
+            path: Some(browser_path),
+            window_size: Some((1122, 794)),
+            sandbox: false,
+            ..Default::default()
+        })
+        .context("failed to launch browser via CDP (no-sandbox)")?
+    } else {
+        // Try with sandbox first; on VMs/containers without user namespaces, retry without.
+        match Browser::new(LaunchOptions {
+            headless: true,
+            path: Some(browser_path.clone()),
+            window_size: Some((1122, 794)),
+            sandbox: true,
+            ..Default::default()
+        }) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "[oxide-sloc][pdf] sandboxed launch failed ({e:#}), retrying with --no-sandbox"
+                );
+                Browser::new(LaunchOptions {
+                    headless: true,
+                    path: Some(browser_path),
+                    window_size: Some((1122, 794)),
+                    sandbox: false,
+                    ..Default::default()
+                })
+                .context(
+                    "failed to launch browser via CDP (sandboxed and no-sandbox both failed)",
+                )?
+            }
+        }
+    };
 
     let tab = browser.new_tab().context("failed to open browser tab")?;
 
@@ -1543,6 +1571,14 @@ struct WarningOpportunityRow {
     .chart-controls label { font-size:13px; font-weight:700; color:var(--muted); display:flex; align-items:center; gap:6px; }
     .chart-select { background:var(--surface-2); border:1px solid var(--line-strong); border-radius:8px; padding:5px 10px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer; outline:none; appearance:auto; }
     .chart-select:focus { border-color:var(--accent); }
+    .chart-expand-btn { background:none; border:1px solid var(--line-strong); border-radius:6px; cursor:pointer; color:var(--muted); padding:4px 10px; font-size:13px; line-height:1; transition:background .13s,color .13s; }
+    .chart-expand-btn:hover { background:var(--surface-2); color:var(--text); }
+    .chart-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9999; display:flex; align-items:center; justify-content:center; padding:24px; box-sizing:border-box; }
+    .chart-modal { background:var(--bg); border-radius:16px; padding:24px 28px; max-width:1000px; width:100%; max-height:88vh; overflow-y:auto; position:relative; box-shadow:0 24px 80px rgba(0,0,0,0.3); }
+    .chart-modal-title { font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin:0 0 16px; display:block; }
+    .chart-modal-close { position:absolute; top:14px; right:18px; background:none; border:none; font-size:22px; cursor:pointer; color:var(--text); line-height:1; padding:0; }
+    .chart-modal-close:hover { opacity:.7; }
+    body.dark-theme .chart-modal { background:var(--surface); }
     .chart-container { width:100%; overflow:visible; }
     .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:stretch; }
     .charts-grid > .panel { margin:0; display:flex; flex-direction:column; }
@@ -1823,11 +1859,21 @@ struct WarningOpportunityRow {
                   <option value="tests">Tests</option>
                 </select>
               </label>
+              <button class="chart-expand-btn" id="semantic-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <div id="semantic-chart" class="chart-container" style="position:relative;height:234px;"><canvas id="canvas-semantic"></canvas></div>
           </div>
         </section>
         {% endif %}
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>Comment Density</h2></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Comments as a percentage of significant lines (code + comments) per language — a proxy for documentation coverage.</p>
+            <div id="density-chart" class="chart-container" style="position:relative;min-height:150px;"><canvas id="canvas-density"></canvas></div>
+          </div>
+        </section>
       </div>
 
       <!-- ── Tests & Coverage ──────────────────────────────────────────── -->
@@ -2742,8 +2788,13 @@ struct WarningOpportunityRow {
         function px(n){return Math.round(n);}
         function tt(label,val){return ' class="rchit" data-ttl="'+String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" data-ttv="'+String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"';}
         var tot = D.reduce(function(a,d){return a+d.code;},0)||1;
-        // Donut
-        var cx=100,cy=110,Ro=88,Ri=48,legX=204,DW=360,DH=220;
+        // Donut — height matches the stacked-bar chart so both panels align
+        var rHb_d=28;
+        var DH=Math.max(220,D.length*rHb_d+32);
+        var cx=100,cy=Math.round(DH/2),Ro=88,Ri=48,legX=204,DW=360;
+        var legCount=D.length;
+        var legSpacing=Math.max(12,Math.min(22,Math.floor((DH-30)/Math.max(legCount,1))));
+        var legYStart=Math.round((DH-legCount*legSpacing)/2);
         var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         if(D.length===1){
           var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
@@ -2763,12 +2814,10 @@ struct WarningOpportunityRow {
         }
         ds+='<text x="'+cx+'" y="'+(cy-7)+'" text-anchor="middle" font-family="'+FONT+'" font-size="21" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
         ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
-        var legRows=Math.min(D.length,8),legYStart=Math.round((DH-legRows*22)/2);
         D.forEach(function(d,i){
-          if(i>=8)return;
-          var ly=legYStart+i*22;
+          var ly=legYStart+i*legSpacing;
           ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(PALETTE[i%PALETTE.length])+'"/>';
-          ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(11,legSpacing-2)+'" fill="#43342d">'+esc(d.lang)+'</text>';
         });
         ds+='</svg>';
         // Horizontal stacked-bar chart
@@ -3168,6 +3217,101 @@ struct WarningOpportunityRow {
         }
         if (semSel) semSel.addEventListener('change', renderSemantic);
         renderSemantic();
+
+        var semExpandBtn = document.getElementById('semantic-expand-btn');
+        if (semExpandBtn) {
+          semExpandBtn.addEventListener('click', function() {
+            var mKey = semSel ? semSel.value : 'functions';
+            var n = SEM_D.length || 1;
+            var modalH = Math.max(320, n * 30 + 60);
+            var overlay = document.createElement('div');
+            overlay.className = 'chart-modal-overlay';
+            overlay.innerHTML = '<div class="chart-modal"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Semantic Metrics — Full View</span><div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
+            document.body.appendChild(overlay);
+            overlay.querySelector('.chart-modal-close').addEventListener('click', function() { document.body.removeChild(overlay); });
+            overlay.addEventListener('click', function(e) { if (e.target === overlay) document.body.removeChild(overlay); });
+            var modalCanvas = document.getElementById('canvas-semantic-modal');
+            if (modalCanvas) {
+              var data = SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);});
+              var c = clr();
+              var col = SEM_COLS[mKey] || OX;
+              new Chart(modalCanvas, {
+                type: 'bar',
+                data: {
+                  labels: data.map(function(d){return d.lang;}),
+                  datasets: [{ label: SEM_LABELS[mKey]||mKey, data: data.map(function(d){return d[mKey]||0;}),
+                    backgroundColor: col, borderRadius: 4 }]
+                },
+                options: {
+                  responsive: true, maintainAspectRatio: false,
+                  scales: {
+                    x: { grid: { display: false }, ticks: { color: c.text } },
+                    y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} } }
+                  },
+                  plugins: { legend: { display: false }, tooltip: { callbacks: {
+                    title: function(items){return items.length?items[0].label:'';},
+                    label: function(ctx){ return '  '+(SEM_LABELS[mKey]||mKey)+': '+Number(ctx.parsed.y).toLocaleString(); }
+                  }}}
+                }
+              });
+            }
+          });
+        }
+      })();
+
+      // ── Comment Density: comments / (code + comments) per language ──────────
+      (function() {
+        var canvas = document.getElementById('canvas-density');
+        if (!canvas || !D || !D.length) return;
+        var data = D.slice().sort(function(a,b){
+          var da=(a.comments||0)/Math.max((a.code||0)+(a.comments||0),1);
+          var db=(b.comments||0)/Math.max((b.code||0)+(b.comments||0),1);
+          return db-da;
+        });
+        var labels = data.map(function(d){return d.lang;});
+        var densities = data.map(function(d){
+          var sig=(d.code||0)+(d.comments||0);
+          return sig>0?Math.round((d.comments||0)/sig*1000)/10:0;
+        });
+        var wrap = canvas.parentElement;
+        if (wrap) wrap.style.height = Math.max(150, Math.min(500, data.length*29+36))+'px';
+        var c = clr();
+        var densChart = new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [{ label: 'Comment %',
+              data: densities,
+              backgroundColor: data.map(function(_,i){return PALETTE[i%PALETTE.length];}),
+              borderRadius: 4
+            }]
+          },
+          options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            animation: { duration: 500, easing: 'easeOutQuart' },
+            scales: {
+              x: { min: 0, max: 100,
+                   grid: { color: c.grid },
+                   ticks: { color: c.text, callback: function(v){return v+'%';} },
+                   title: { display: true, text: 'Comment %', color: c.text } },
+              y: { grid: { display: false }, ticks: { color: c.text } }
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: {
+                title: function(items){return items.length?items[0].label:'';},
+                label: function(ctx){
+                  var d=data[ctx.dataIndex]||{};
+                  var sig=(d.code||0)+(d.comments||0);
+                  return ['  Comment ratio: '+ctx.parsed.x+'%',
+                          '  Comments: '+Number(d.comments||0).toLocaleString(),
+                          '  Significant lines: '+Number(sig).toLocaleString()];
+                }
+              }}
+            }
+          }
+        });
+        ALL_CHARTS.push(densChart);
       })();
 
       // ── Dark mode sync ────────────────────────────────────────────────────────
