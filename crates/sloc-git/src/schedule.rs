@@ -68,6 +68,7 @@ impl ScanSchedule {
         branch: String,
         provider: ScanScheduleProvider,
         label: String,
+        webhook_secret: Option<String>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -76,7 +77,7 @@ impl ScanSchedule {
             branch,
             kind: ScanScheduleKind::Webhook,
             provider,
-            webhook_secret: Some(generate_secret()),
+            webhook_secret: Some(webhook_secret.unwrap_or_else(generate_secret)),
             interval_secs: None,
             last_scan_sha: None,
             last_scan_at: None,
