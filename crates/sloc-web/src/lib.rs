@@ -489,7 +489,7 @@ fn build_router(state: AppState) -> Router {
         .route("/integrations", get(integrations::integrations_handler))
         .route(
             "/webhook-setup",
-            get(|| async { axum::response::Redirect::permanent("/integrations#webhooks") }),
+            get(|| async { axum::response::Redirect::permanent("/integrations") }),
         )
         .route(
             "/confluence-setup",
@@ -4365,7 +4365,7 @@ async fn artifact_handler(
                      background:linear-gradient(180deg,var(--nav),var(--nav-2));\
                      border-bottom:1px solid rgba(255,255,255,0.12);\
                      box-shadow:0 4px 14px rgba(0,0,0,0.18);}}\
-                     .top-nav-inner{{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;\
+                     .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;\
                      min-height:56px;display:flex;align-items:center;gap:14px;}}\
                      .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}}\
                      .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;\
@@ -4385,7 +4385,7 @@ async fn artifact_handler(
                      .theme-toggle .icon-sun{{display:none;}}\
                      body.dark-theme .theme-toggle .icon-sun{{display:block;}}\
                      body.dark-theme .theme-toggle .icon-moon{{display:none;}}\
-                     .page{{max-width:min(1400px,88vw);margin:0 auto;padding:60px 24px;\
+                     .page{{width:100%;max-width:1720px;margin:0 auto;padding:60px 24px;\
                      display:flex;align-items:center;justify-content:center;\
                      min-height:calc(100vh - 56px);}}\
                      .panel{{background:var(--surface);border:1px solid var(--line);\
@@ -5999,7 +5999,7 @@ async fn trend_report_handler(
     .code-particles{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}.code-particle{{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}}
     @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
     .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
-    .top-nav-inner{{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
+    .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
     .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
     .brand-copy{{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}}
     .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}}
@@ -6026,7 +6026,7 @@ async fn trend_report_handler(
     .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}} .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
     .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
     .tz-select:focus{{border-color:var(--oxide);}}
-    .page{{max-width:min(1400px,88vw);margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;flex:1;}}
+    .page{{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
     h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
     .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
@@ -6159,7 +6159,7 @@ async fn trend_report_handler(
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -7078,10 +7078,10 @@ async fn trend_report_handler(
     }})();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{version} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{version} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -7648,7 +7648,7 @@ async fn test_metrics_handler(
     .code-particles{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}.code-particle{{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}}
     @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
     .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
-    .top-nav-inner{{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
+    .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}}
     .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}} .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
     .brand-copy{{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}}
     .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}} .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}}
@@ -7675,7 +7675,7 @@ async fn test_metrics_handler(
     .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}} .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
     .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
     .tz-select:focus{{border-color:var(--oxide);}}
-    .page{{max-width:min(1400px,88vw);margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;flex:1;}}
+    .page{{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
     h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
     .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
@@ -7784,7 +7784,7 @@ async fn test_metrics_handler(
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -9925,7 +9925,7 @@ struct SubmoduleRow {
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
     .background-watermarks img { position: absolute; opacity: 0.16; filter: blur(0.3px); user-select: none; max-width: none; }
     .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-    .top-nav-inner { max-width: min(1400px, 88vw); margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; }
     .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .brand-copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
@@ -9966,7 +9966,7 @@ struct SubmoduleRow {
     .tz-select:focus{border-color:var(--oxide);}
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
-    .page { max-width: min(1400px, 88vw); margin: 0 auto; padding: 18px 24px 40px; flex: 1; width: 100%; display: flex; flex-direction: column; }
+    .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 36px; width: 100%; display: flex; flex-direction: column; }
     .summary-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
     .workbench-strip { display:flex; align-items:stretch; gap:16px; margin-bottom: 18px; flex-wrap: nowrap; overflow: visible; }
     .workbench-box { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); transition: transform .2s ease, box-shadow .2s ease; }
@@ -10466,7 +10466,7 @@ struct SubmoduleRow {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -13138,10 +13138,10 @@ pytest --cov --cov-report=xml
   })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: {% if server_mode %}Network Server{% else %}Local{% endif %}</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: {% if server_mode %}Network Server{% else %}Local{% endif %}</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -13192,7 +13192,7 @@ struct IndexTemplate {
     .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
@@ -13223,7 +13223,7 @@ struct IndexTemplate {
     .tz-select:focus{border-color:var(--oxide);}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
-    .page{max-width:min(1400px,88vw);margin:0 auto;padding:18px 24px 12px;position:relative;z-index:1;flex:1;}
+    .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 12px;position:relative;z-index:1;}
     .hero{text-align:center;margin:0 auto 18px;}
     .hero-logo-wrap{display:inline-block;cursor:default;}
     .hero-logo{width:66px;height:73px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));display:block;}
@@ -13402,7 +13402,7 @@ struct IndexTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -13629,10 +13629,10 @@ struct IndexTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -13937,7 +13937,7 @@ struct SplashTemplate {
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);} body{display:flex;flex-direction:column;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;}
@@ -13968,7 +13968,7 @@ struct SplashTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:960px;margin:0 auto;padding:40px 24px 64px;position:relative;z-index:1;flex:1;}
+    .page{max-width:960px;margin:0 auto;padding:40px 24px 36px;position:relative;z-index:1;}
     .page-header{text-align:center;margin-bottom:16px;}
     .page-header h1{font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;}
     .page-header p{font-size:15px;color:var(--muted);line-height:1.6;white-space:nowrap;margin:0 auto;}
@@ -14039,7 +14039,7 @@ struct SplashTemplate {
     }
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
-    .server-online-pill{cursor:default;}
+    .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{visibility:hidden;opacity:0;pointer-events:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);border:1px solid rgba(255,255,255,0.10);transition:opacity 0.15s ease;}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip{visibility:visible;opacity:1;pointer-events:auto;}
   </style>
 </head>
 <body>
@@ -14072,7 +14072,7 @@ struct SplashTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -14209,10 +14209,10 @@ struct SplashTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -14439,7 +14439,7 @@ struct ScanSetupTemplate {
     .background-watermarks img { position: absolute; opacity: 0.16; filter: blur(0.3px); user-select: none; max-width: none; }
     .top-nav, .page { position: relative; z-index: 2; }
     .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-    .top-nav-inner { max-width: min(1400px, 88vw); margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; }
     .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .brand-mark { width: 42px; height: 42px; border-radius: 14px; background: radial-gradient(circle at 35% 35%, #f2a578, var(--oxide) 58%, var(--oxide-2)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), 0 8px 18px rgba(0,0,0,0.22); flex: 0 0 auto; }
@@ -14478,7 +14478,7 @@ struct ScanSetupTemplate {
     .tz-select:focus{border-color:var(--oxide);}
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
-    .page { max-width: min(1400px, 88vw); margin: 0 auto; padding: 18px 24px 40px; flex: 1; }
+    .page { width: 100%; max-width: 1720px; margin: 0 auto; padding: 18px 24px 36px; }
     .hero, .panel, .metric, .path-item { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .hero, .panel { padding: 22px; }
     .hero { margin-bottom: 18px; background: linear-gradient(180deg, rgba(255,255,255,0.30), transparent), var(--surface); }
@@ -14677,7 +14677,7 @@ struct ScanSetupTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -15733,10 +15733,10 @@ struct ScanSetupTemplate {
   }());
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -15938,7 +15938,7 @@ struct ResultTemplate {
     body.dark-theme { --bg:#1b1511; --surface:#261c17; --surface-2:#2d221d; --line:#524238; --line-strong:#6b5548; --text:#f5ece6; --muted:#c7b7aa; --muted-2:#9c877a; }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);} body{display:flex;flex-direction:column;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;}
     .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
@@ -15950,7 +15950,7 @@ struct ResultTemplate {
     .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
     .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
-    .page-body{max-width:min(1400px,88vw);margin:0 auto;padding:32px 24px 80px;flex:1;}
+    .page-body{padding:32px 24px 36px;}
     .wait-panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:36px 40px;box-shadow:var(--shadow);position:relative;}
     .wait-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(111,155,255,0.12);border:1px solid rgba(111,155,255,0.3);border-radius:999px;padding:5px 14px 5px 10px;font-size:12px;font-weight:700;color:var(--accent-2);margin-bottom:20px;}
     .pulse-dot{width:9px;height:9px;border-radius:50%;background:var(--accent-2);animation:pulse 1.4s ease-in-out infinite;}
@@ -16021,7 +16021,7 @@ struct ResultTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -16146,10 +16146,10 @@ struct ResultTemplate {
     })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -16246,7 +16246,7 @@ struct ScanWaitTemplate {
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
     @keyframes wmFade{from{opacity:var(--wm-op,0.08);}to{opacity:calc(var(--wm-op,0.08)*0.3);}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
@@ -16275,7 +16275,7 @@ struct ScanWaitTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:min(1400px,88vw);margin:0 auto;padding:28px 24px 40px;position:relative;z-index:1;flex:1;}
+    .page{width:100%;max-width:1720px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 18px;font-size:28px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .error-box{border-radius:16px;border:1px solid var(--line);background:var(--surface-2);padding:16px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:13px;}
@@ -16322,7 +16322,7 @@ struct ScanWaitTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -16462,7 +16462,7 @@ struct ErrorTemplate {
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
     @keyframes wmFade{from{opacity:var(--wm-op,0.08);}to{opacity:calc(var(--wm-op,0.08)*0.3);}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
@@ -16491,7 +16491,7 @@ struct ErrorTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:860px;margin:0 auto;padding:28px 24px 40px;position:relative;z-index:1;flex:1;}
+    .page{max-width:860px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 18px;}
@@ -16546,7 +16546,7 @@ struct ErrorTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -16684,7 +16684,7 @@ struct RelocateScanTemplate {
     .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
@@ -16713,7 +16713,7 @@ struct RelocateScanTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:min(1400px,88vw);margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;flex:1;}
+    .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
     .panel-header h1{margin:0;font-size:24px;font-weight:850;letter-spacing:-0.03em;}
@@ -16850,7 +16850,7 @@ struct RelocateScanTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -17038,10 +17038,10 @@ struct RelocateScanTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -17387,7 +17387,7 @@ struct HistoryTemplate {
     .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
@@ -17416,7 +17416,7 @@ struct HistoryTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:min(1400px,88vw);margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;flex:1;}
+    .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
     .panel-header h1{margin:0 0 6px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}
@@ -17562,7 +17562,7 @@ struct HistoryTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -17734,10 +17734,10 @@ struct HistoryTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -18151,7 +18151,7 @@ struct CompareSelectTemplate {
     }
     *{box-sizing:border-box;} html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);} body{display:flex;flex-direction:column;}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:min(1400px,88vw);margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;} .brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
     .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
     .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;} .brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
@@ -18179,7 +18179,7 @@ struct CompareSelectTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:min(1400px,88vw);margin:0 auto;padding:18px 24px 40px;position:relative;z-index:1;flex:1;}
+    .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .hero{background:linear-gradient(180deg,rgba(255,255,255,0.20),transparent),var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 28px 28px;margin-bottom:18px;}
     .hero-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:20px;flex-wrap:wrap;}
@@ -18393,7 +18393,7 @@ struct CompareSelectTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
@@ -18716,10 +18716,10 @@ struct CompareSelectTemplate {
   <div id="ic-tt"></div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -19632,7 +19632,7 @@ pub(crate) struct LoginTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:960px;margin:0 auto;padding:40px 24px 60px;position:relative;z-index:1;flex:1;}
+    .page{max-width:960px;margin:0 auto;padding:40px 24px 36px;position:relative;z-index:1;}
     .page-header{margin-bottom:28px;}
     .page-title{font-size:28px;font-weight:900;letter-spacing:-0.03em;margin:0 0 6px;}
     .page-subtitle{font-size:15px;color:var(--muted);line-height:1.6;margin:0;}
@@ -19740,7 +19740,7 @@ pub(crate) struct LoginTemplate {
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
@@ -20775,10 +20775,10 @@ ok</div>
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>

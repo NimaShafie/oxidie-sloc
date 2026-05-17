@@ -33,7 +33,7 @@ use super::{AppState, CspNonce};
     .code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide-2);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
-    .top-nav-inner{max-width:1400px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:12px;text-decoration:none;}
     .brand-logo{width:36px;height:40px;object-fit:contain;}
     .brand-title{color:#fff;font-size:16px;font-weight:800;}.brand-sub{color:rgba(255,255,255,0.75);font-size:12px;}
@@ -43,7 +43,7 @@ use super::{AppState, CspNonce};
     .nav-pill{display:inline-flex;align-items:center;min-height:34px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;}
     .nav-pill:hover{background:rgba(255,255,255,0.18);}
     .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:34px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
-    .page{max-width:1400px;margin:0 auto;padding:32px 24px 60px;position:relative;z-index:1;flex:1;}
+    .page{width:100%;max-width:1720px;margin:0 auto;padding:32px 24px 36px;position:relative;z-index:1;}
     h1{font-size:26px;font-weight:850;margin:0 0 6px;letter-spacing:-0.03em;}
     .subtitle{color:var(--muted);font-size:14px;margin:0 0 24px;}
     .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:24px;box-shadow:var(--shadow);margin-bottom:20px;}
@@ -77,6 +77,15 @@ use super::{AppState, CspNonce};
     .copy-btn{padding:4px 10px;font-size:11px;border-radius:6px;border:1px solid var(--line);background:var(--surface);cursor:pointer;font-weight:700;color:var(--muted);}
     .copy-btn:hover{background:var(--line);}
     .empty-state{text-align:center;padding:32px;color:var(--muted);font-size:14px;}
+    .empty-rich{text-align:center;padding:40px 20px 32px;}
+    .empty-rich-icon{width:52px;height:52px;border-radius:14px;background:var(--surface-2);border:2px solid var(--line);display:inline-flex;align-items:center;justify-content:center;margin-bottom:13px;}
+    .empty-rich-icon svg{width:26px;height:26px;stroke:var(--muted);fill:none;stroke-width:1.5;}
+    .empty-rich-title{font-size:14px;font-weight:700;color:var(--text);margin:0 0 5px;}
+    .empty-rich-desc{font-size:12px;color:var(--muted);max-width:400px;margin:0 auto 16px;line-height:1.55;}
+    .empty-rich-tips{display:flex;flex-direction:column;gap:7px;max-width:360px;margin:0 auto;text-align:left;}
+    .empty-rich-tip{display:flex;align-items:flex-start;gap:9px;font-size:12px;color:var(--muted);line-height:1.5;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;}
+    .empty-rich-tip svg{width:14px;height:14px;stroke:var(--oxide-2);fill:none;stroke-width:2;flex-shrink:0;margin-top:1px;}
+    .empty-rich-tip strong{color:var(--text);}
     /* Confluence tab */
     .tier-radio-row{display:flex;gap:18px;margin-bottom:14px;}
     .tier-radio{display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:700;}
@@ -97,7 +106,7 @@ use super::{AppState, CspNonce};
     .info-btn:hover .info-tip,.info-btn:focus .info-tip{display:block;}
     body.dark-theme .info-tip{background:var(--surface-2);box-shadow:0 6px 18px rgba(0,0,0,0.36);}
     /* Integrations module */
-    .integrations-module{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:28px;}
+    .integrations-module{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:12px;}
     .integrations-header{padding:26px 28px 20px;}
     .integrations-header h1{margin-bottom:6px;}
     .integrations-header .subtitle{margin-bottom:0;}
@@ -151,7 +160,7 @@ use super::{AppState, CspNonce};
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <button class="nav-dropdown-btn" type="button">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -161,17 +170,24 @@ use super::{AppState, CspNonce};
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
-            <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
         </button>
-        <button class="theme-toggle" id="themeToggle" type="button" title="Toggle theme">
+        <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle theme">
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/></svg>
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
         </button>
@@ -357,10 +373,8 @@ use super::{AppState, CspNonce};
     function showTab(name) {
       document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
       document.querySelectorAll('.tab-pane').forEach(function(p) { p.classList.toggle('active', p.dataset.tab === name); });
-      history.replaceState(null, '', '#' + name);
     }
-    var initHash = location.hash.replace('#', '');
-    showTab(initHash === 'confluence' ? 'confluence' : 'webhooks');
+    showTab('webhooks');
     document.querySelectorAll('.tab-btn').forEach(function(b) {
       b.addEventListener('click', function() { showTab(b.dataset.tab); });
     });
@@ -414,7 +428,18 @@ use super::{AppState, CspNonce};
       var data = await r.json();
       var el = document.getElementById('scheduleList');
       var list = data.schedules || [];
-      if (!list.length) { el.innerHTML = '<div class="empty-state">No schedules configured yet.</div>'; return; }
+      if (!list.length) {
+        el.innerHTML = '<div class="empty-rich">'
+          + '<div class="empty-rich-icon"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg></div>'
+          + '<div class="empty-rich-title">No schedules configured yet</div>'
+          + '<div class="empty-rich-desc">Add a webhook or polling schedule below to automatically trigger SLOC scans whenever code is pushed to your repository.</div>'
+          + '<div class="empty-rich-tips">'
+          + '<div class="empty-rich-tip"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span><strong>Webhook</strong> — GitHub, GitLab, or Bitbucket sends a push event and a scan triggers instantly.</span></div>'
+          + '<div class="empty-rich-tip"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span><strong>Polling</strong> — OxideSLOC checks the branch on a fixed interval and scans when a new commit appears.</span></div>'
+          + '</div>'
+          + '</div>';
+        return;
+      }
       el.innerHTML = list.map(function (s) {
         var badge = s.kind === 'webhook' ? '<span class="sched-badge badge-webhook">Webhook</span>' : '<span class="sched-badge badge-poll">Poll</span>';
         var extra = s.interval_secs ? ' · every ' + s.interval_secs + 's' : (s.provider && s.provider !== 'any' ? ' · ' + esc(s.provider) : '');
@@ -612,7 +637,7 @@ use super::{AppState, CspNonce};
     })();
 
     // ── Event wiring ──────────────────────────────────────────────────────────
-    document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+    document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
 
     // Webhooks
     document.getElementById('fKind').addEventListener('change', onKindChange);
@@ -631,6 +656,32 @@ use super::{AppState, CspNonce};
     document.getElementById('manualPostBtn').addEventListener('click', manualPost);
     document.getElementById('manualCopyBtn').addEventListener('click', copyWikiMarkup);
 
+    // ── Server ping ───────────────────────────────────────────────────────────
+    (function() {
+      var dot = document.getElementById('status-dot');
+      var pingEl = document.getElementById('server-ping-ms');
+      var tipEl = document.getElementById('server-tip-ping');
+      var lbl = document.getElementById('server-status-label');
+      var isServer = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && location.hostname !== '[::1]';
+      if (lbl) lbl.textContent = isServer ? 'Server' : 'Local';
+      function setDot(ms) {
+        if (!dot) return;
+        if (ms < 100) { dot.style.background = '#26d768'; dot.style.boxShadow = '0 0 0 4px rgba(38,215,104,0.14)'; }
+        else if (ms < 300) { dot.style.background = '#f5a623'; dot.style.boxShadow = '0 0 0 4px rgba(245,166,35,0.14)'; }
+        else { dot.style.background = '#e05c5c'; dot.style.boxShadow = '0 0 0 4px rgba(224,92,92,0.14)'; }
+      }
+      function doPing() {
+        var t0 = performance.now();
+        fetch('/healthz', { cache: 'no-store' })
+          .then(function() { var ms = Math.round(performance.now() - t0); if (pingEl) pingEl.textContent = ms + 'ms'; if (tipEl) tipEl.textContent = 'Server latency: ' + ms + ' ms'; setDot(ms); })
+          .catch(function() { if (pingEl) pingEl.textContent = ''; if (tipEl) tipEl.textContent = ''; if (dot) { dot.style.background = '#e05c5c'; dot.style.boxShadow = '0 0 0 4px rgba(224,92,92,0.14)'; } });
+      }
+      doPing();
+      setInterval(doPing, 5000);
+      var fm = document.getElementById('footer-mode');
+      if (fm) { var isServer = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && location.hostname !== '[::1]'; fm.textContent = 'Mode: ' + (isServer ? 'Network Server' : 'Local'); }
+    })();
+
     // ── Init ──────────────────────────────────────────────────────────────────
     applyTheme();
     loadWebhookSchedules();
@@ -640,8 +691,9 @@ use super::{AppState, CspNonce};
   })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
