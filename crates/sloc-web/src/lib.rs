@@ -521,6 +521,13 @@ fn build_router(state: AppState) -> Router {
             "/api/confluence/wiki-markup",
             get(confluence::api_wiki_markup),
         )
+        // ── Run lifecycle: bundle download + delete + cleanup ─────────────────
+        .route("/api/runs/{run_id}/bundle", get(download_bundle_handler))
+        .route(
+            "/api/runs/{run_id}",
+            axum::routing::delete(delete_run_handler),
+        )
+        .route("/api/runs/cleanup", post(cleanup_runs_handler))
         // ── REST API reference page ────────────────────────────────────────────
         .route("/api-docs", get(api_docs_handler))
         .route_layer(middleware::from_fn_with_state(
@@ -1717,7 +1724,9 @@ async fn upload_file_handler(
 ///
 /// Accepts a gzip-compressed tar archive as a raw binary body (`Content-Type: application/gzip`).
 /// Streams the body to a temp file, then extracts it with the vendored `tar` + `flate2` crates.
-/// Returns `{ tmp_path, upload_id }` pointing at the extracted project root.
+/// Returns `{ tmp_path, upload_id, compressed_bytes, original_bytes }` pointing at the extracted
+/// project root. The two size fields power the "Original / Compressed project size" display in the
+/// web UI.
 ///
 /// `DefaultBodyLimit::disable()` is applied per-route so there is no hard size cap at the HTTP
 /// layer; the only limit is the disk space on the server. The browser-side JS creates the archive
@@ -1760,6 +1769,7 @@ async fn upload_tarball_handler(
     use tokio::io::AsyncWriteExt as _;
 
     let mut body = request.into_body();
+    let mut compressed_bytes: u64 = 0;
     loop {
         match body.frame().await {
             None => break,
@@ -1773,6 +1783,7 @@ async fn upload_tarball_handler(
             }
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {
+                    compressed_bytes += data.len() as u64;
                     if let Err(e) = tarball_file.write_all(&data).await {
                         let _ = tokio::fs::remove_file(&tarball_path).await;
                         return (
@@ -1838,9 +1849,19 @@ async fn upload_tarball_handler(
         }
     }
 
+    // Compute original (uncompressed) size of the extracted tree.
+    let original_bytes = tokio::task::spawn_blocking({
+        let p = scan_root.clone();
+        move || dir_size_bytes(&p)
+    })
+    .await
+    .unwrap_or(0);
+
     Json(serde_json::json!({
         "tmp_path": scan_root.to_string_lossy(),
         "upload_id": upload_id,
+        "compressed_bytes": compressed_bytes,
+        "original_bytes": original_bytes,
     }))
     .into_response()
 }
@@ -3787,7 +3808,18 @@ fn render_result_page(
     let run_dir = artifacts.output_dir.clone();
     let git_branch = run.git_branch.clone();
     let git_commit = run.git_commit_short.clone();
+    let git_commit_long = run.git_commit_long.clone();
     let git_author = run.git_commit_author.clone();
+    let scan_performed_by = format!(
+        "{} / {}",
+        run.environment.initiator_username, run.environment.initiator_hostname
+    );
+    let scan_time_display = fmt_la_time(run.tool.timestamp_utc);
+    let os_display = format!(
+        "{} / {}",
+        run.environment.operating_system, run.environment.architecture
+    );
+    let test_count = run.summary_totals.test_count;
 
     let template = ResultTemplate {
         version: env!("CARGO_PKG_VERSION"),
@@ -3874,7 +3906,12 @@ fn render_result_page(
         }),
         git_branch,
         git_commit,
+        git_commit_long,
         git_author,
+        scan_performed_by,
+        scan_time_display,
+        os_display,
+        test_count,
         current_scan_number: prev_scan_count + 1,
         prev_scan_count,
         submodule_rows: run
@@ -4040,6 +4077,201 @@ async fn pdf_status_handler(
     };
     let ready = pdf_path.is_some_and(|p| p.exists());
     Json(PdfStatusResponse { ready }).into_response()
+}
+
+/// GET /api/runs/:run_id/bundle
+///
+/// Streams a gzip-compressed tar archive containing every artifact in the run's
+/// output directory (HTML, PDF, JSON, CSV, XLSX, scan-config JSON). The archive
+/// is built in memory so it never touches a temp file.
+async fn download_bundle_handler(
+    State(state): State<AppState>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    // Resolve output directory from in-memory cache or persisted registry.
+    let output_dir = {
+        let cache = state.artifacts.lock().await;
+        cache.get(&run_id).map(|a| a.output_dir.clone())
+    };
+    let output_dir = if let Some(d) = output_dir {
+        d
+    } else {
+        let reg = state.registry.lock().await;
+        match reg.find_by_run_id(&run_id) {
+            Some(entry) => recover_artifacts_from_registry(entry).output_dir,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Run not found"})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    if !output_dir.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Output directory no longer exists on disk"})),
+        )
+            .into_response();
+    }
+
+    // Build tar.gz in a blocking thread to avoid blocking the async runtime.
+    let run_id_clone = run_id.clone();
+    let archive_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+        use flate2::{write::GzEncoder, Compression};
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut tar = tar::Builder::new(&mut enc);
+            tar.follow_symlinks(false);
+            // Append every regular file in the output directory, skipping
+            // sub-directories (the output dir is always flat).
+            if let Ok(entries) = std::fs::read_dir(&output_dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    let p = entry.path();
+                    if p.is_file() {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy();
+                        let archive_path = format!("{run_id_clone}/{name}");
+                        tar.append_path_with_name(&p, &archive_path)?;
+                    }
+                }
+            }
+            tar.finish()?;
+        }
+        Ok(enc.finish()?)
+    })
+    .await;
+
+    match archive_result {
+        Ok(Ok(bytes)) => {
+            let filename = format!("oxide-sloc-{}.tar.gz", &run_id[..run_id.len().min(8)]);
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/gzip")
+                .header(
+                    "Content-Disposition",
+                    format!("attachment; filename=\"{filename}\""),
+                )
+                .header("Content-Length", bytes.len().to_string())
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Archive build failed: {e}")})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Task panicked: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/runs/:run_id
+///
+/// Removes all on-disk artifacts for the run and purges the run from the
+/// in-memory cache and the persisted registry. Returns 204 on success.
+async fn delete_run_handler(
+    State(state): State<AppState>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    // Resolve output directory.
+    let output_dir = {
+        let mut cache = state.artifacts.lock().await;
+        let dir = cache.get(&run_id).map(|a| a.output_dir.clone());
+        cache.remove(&run_id);
+        dir
+    };
+    let output_dir = if let Some(d) = output_dir {
+        d
+    } else {
+        let reg = state.registry.lock().await;
+        reg.find_by_run_id(&run_id)
+            .map(|e| recover_artifacts_from_registry(e).output_dir)
+            .unwrap_or_default()
+    };
+
+    // Remove from persisted registry.
+    {
+        let mut reg = state.registry.lock().await;
+        reg.entries.retain(|e| e.run_id != run_id);
+        let _ = reg.save(&state.registry_path);
+    }
+
+    // Delete on-disk artifacts.
+    if output_dir.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(&output_dir).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to delete files: {e}")})),
+            )
+                .into_response();
+        }
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// POST /api/runs/cleanup
+///
+/// Deletes all runs older than `older_than_days` days (default 30). Removes on-disk artifacts and
+/// purges the registry. Returns `{ deleted: N }` with the count of runs removed.
+async fn cleanup_runs_handler(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let days = body
+        .get("older_than_days")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30)
+        .max(1);
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+
+    // Collect stale entries from the registry.
+    let stale: Vec<(String, PathBuf)> = {
+        let reg = state.registry.lock().await;
+        reg.entries
+            .iter()
+            .filter(|e| e.timestamp_utc < cutoff)
+            .map(|e| {
+                let arts = recover_artifacts_from_registry(e);
+                (e.run_id.clone(), arts.output_dir)
+            })
+            .collect()
+    };
+
+    let mut deleted = 0usize;
+    for (run_id, output_dir) in &stale {
+        // Remove from in-memory cache.
+        state.artifacts.lock().await.remove(run_id);
+        // Delete on-disk artifacts (non-fatal if already gone).
+        if output_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(output_dir).await {
+                eprintln!(
+                    "[oxide-sloc] cleanup: failed to remove {}: {e:#}",
+                    output_dir.display()
+                );
+                continue;
+            }
+        }
+        deleted += 1;
+    }
+
+    // Purge stale run IDs from the registry in one pass.
+    let stale_ids: std::collections::HashSet<&str> =
+        stale.iter().map(|(id, _)| id.as_str()).collect();
+    {
+        let mut reg = state.registry.lock().await;
+        reg.entries
+            .retain(|e| !stale_ids.contains(e.run_id.as_str()));
+        let _ = reg.save(&state.registry_path);
+    }
+
+    Json(serde_json::json!({ "deleted": deleted })).into_response()
 }
 
 /// Serve the HTML artifact for a run — view or download.
@@ -6198,6 +6430,10 @@ async fn trend_report_handler(
           </span>
         </div>
         <div class="chart-actions">
+          <button type="button" class="export-btn" id="cleanup-runs-btn" title="Delete scans older than a chosen number of days">
+            <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Clean up old runs
+          </button>
           <button type="button" class="export-btn" id="export-xlsx-btn" title="Download scan history as Excel workbook (.xlsx)">
             <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export Excel
@@ -7015,6 +7251,59 @@ async fn trend_report_handler(
     if(xlsxBtn)xlsxBtn.addEventListener('click',exportXLSX);
     var pngBtn=document.getElementById('export-png-btn');
     if(pngBtn)pngBtn.addEventListener('click',exportPNG);
+
+    // ── Clean-up modal ───────────────────────────────────────────────────────
+    (function(){{
+      var triggerBtn=document.getElementById('cleanup-runs-btn');
+      if(!triggerBtn)return;
+      var modal=document.createElement('div');
+      modal.style.cssText='display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;';
+      modal.innerHTML='<div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-width:460px;width:95%;box-shadow:0 16px 48px rgba(0,0,0,0.28);">'
+        +'<div style="font-size:16px;font-weight:800;margin-bottom:10px;">Clean up old runs</div>'
+        +'<p style="font-size:13px;color:var(--text);margin:0 0 14px;">Delete all scan artifacts older than the chosen number of days. This removes files from disk and clears the registry. <strong>This cannot be undone.</strong></p>'
+        +'<label style="font-size:12px;font-weight:700;color:var(--muted);">Delete runs older than</label>'
+        +'<div style="display:flex;align-items:center;gap:8px;margin:6px 0 16px;">'
+        +'<input type="number" id="cleanup-days-input" value="30" min="1" max="3650" style="width:80px;padding:7px 10px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:14px;font-weight:700;">'
+        +'<span style="font-size:13px;color:var(--muted);">days</span></div>'
+        +'<div id="cleanup-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>'
+        +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
+        +'<button class="button secondary" id="cleanup-cancel-btn" type="button">Cancel</button>'
+        +'<button class="button" id="cleanup-confirm-btn" type="button" style="background:#b23030;border-color:#b23030;">Delete old runs</button>'
+        +'</div></div>';
+      document.body.appendChild(modal);
+      triggerBtn.addEventListener('click',function(){{
+        document.getElementById('cleanup-status').style.display='none';
+        modal.style.display='flex';
+      }});
+      document.getElementById('cleanup-cancel-btn').addEventListener('click',function(){{modal.style.display='none';}});
+      modal.addEventListener('click',function(e){{if(e.target===modal)modal.style.display='none';}});
+      document.getElementById('cleanup-confirm-btn').addEventListener('click',async function(){{
+        var days=parseInt(document.getElementById('cleanup-days-input').value,10)||30;
+        var confirmBtn=this;
+        confirmBtn.disabled=true;
+        var status=document.getElementById('cleanup-status');
+        status.style.display='block';
+        status.style.background='#dbeafe';status.style.color='#1e40af';
+        status.textContent='Deleting…';
+        try{{
+          var resp=await fetch('/api/runs/cleanup',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{older_than_days:days}})}});
+          var d=await resp.json();
+          if(resp.ok){{
+            status.style.background='#dcfce7';status.style.color='#166534';
+            status.textContent='Deleted '+d.deleted+' run'+(d.deleted===1?'':''s')+'older than '+days+' days. Refreshing…';
+            setTimeout(function(){{window.location.reload();}},1500);
+          }}else{{
+            status.style.background='#fee2e2';status.style.color='#991b1b';
+            status.textContent='Error: '+(d.error||'Unexpected error');
+            confirmBtn.disabled=false;
+          }}
+        }}catch(e){{
+          status.style.background='#fee2e2';status.style.color='#991b1b';
+          status.textContent='Network error: '+String(e);
+          confirmBtn.disabled=false;
+        }}
+      }});
+    }})();
 
     populateSubmodules(rootSel.value);
     loadAndRender();
@@ -10692,7 +10981,7 @@ struct SubmoduleRow {
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
                       <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required onblur="this.scrollLeft=this.scrollWidth" />
-                      <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload folder…{% else %}Browse{% endif %}</button>
+                      <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload{% else %}Browse{% endif %}</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
                       {% endif %}
                     <div class="path-scope-sep"></div>
@@ -11213,6 +11502,13 @@ pytest --cov --cov-report=xml
       var coverageSuggestTimer = null;
       var covAutoFilled = false;
       var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
+      function fmtBytes(b) {
+        b = Number(b) || 0;
+        if (b >= 1073741824) return (b / 1073741824).toFixed(1).replace(/\.0$/, '') + ' GB';
+        if (b >= 1048576)    return (b / 1048576).toFixed(1).replace(/\.0$/, '') + ' MB';
+        if (b >= 1024)       return Math.round(b / 1024) + ' KB';
+        return b + ' B';
+      }
       var themeToggle = document.getElementById("theme-toggle");
 
       function showBannerToast(msg, isError, opts) {
@@ -12153,7 +12449,14 @@ pytest --cov --cov-report=xml
             var projectSize = explorerWrap ? explorerWrap.getAttribute('data-project-size') : null;
             var sizeText = document.getElementById('project-size-text');
             var sizeBtn = document.getElementById('project-size-btn');
-            if (sizeText && projectSize) {
+            // In server mode with upload sizes available, keep the compressed/original pair.
+            if (SERVER_MODE && window._lastUploadSizes) {
+              var us = window._lastUploadSizes;
+              if (sizeText) sizeText.textContent = 'Original: ' + fmtBytes(us.original_bytes) +
+                ' · Compressed: ' + fmtBytes(us.compressed_bytes);
+              if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(us.original_bytes) +
+                ' — Compressed archive size: ' + fmtBytes(us.compressed_bytes);
+            } else if (sizeText && projectSize) {
               sizeText.textContent = 'Project size: ' + projectSize;
               if (sizeBtn) sizeBtn.title = 'Total disk size of the selected project directory: ' + projectSize;
             } else if (sizeText) {
@@ -12263,9 +12566,22 @@ pytest --cov --cov-report=xml
               }
 
               // ── Helper: apply upload result to UI ────────────────────────
-              function applyUploadResult(tmpPath) {
+              // sizes = {compressed_bytes, original_bytes} from the server response (server mode only).
+              function applyUploadResult(tmpPath, sizes) {
                 targetInput.value = tmpPath;
                 scrollInputToEnd(targetInput);
+                if (sizes && SERVER_MODE) {
+                  window._lastUploadSizes = sizes;
+                  // Immediately show both sizes before preview loads.
+                  var sizeText = document.getElementById('project-size-text');
+                  var sizeBtn = document.getElementById('project-size-btn');
+                  if (sizeText) {
+                    sizeText.textContent = 'Original: ' + fmtBytes(sizes.original_bytes) +
+                      ' · Compressed: ' + fmtBytes(sizes.compressed_bytes);
+                  }
+                  if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(sizes.original_bytes) +
+                    ' — Compressed archive size: ' + fmtBytes(sizes.compressed_bytes);
+                }
                 if (targetInput === pathInput) {
                   updateReportTitleFromPath();
                   autoSetOutputDir(tmpPath);
@@ -12379,8 +12695,12 @@ pytest --cov --cov-report=xml
                       body: blob
                     });
                     var d = await resp.json();
-                    if (d && d.tmp_path) { applyUploadResult(d.tmp_path); }
-                    else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; }
+                    if (d && d.tmp_path) {
+                      applyUploadResult(d.tmp_path, {
+                        compressed_bytes: d.compressed_bytes || 0,
+                        original_bytes: d.original_bytes || 0
+                      });
+                    } else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (browseBtn) browseBtn.disabled = false; inputEl.value = ''; }
                   } catch (e) {
                     showBannerToast('Upload failed: ' + String(e), true);
                     if (browseBtn) browseBtn.disabled = false;
@@ -12599,9 +12919,18 @@ pytest --cov --cov-report=xml
               if (btn) btn.disabled = false; return;
             }
 
-            function finish(tmpPath) {
+            function finish(tmpPath, sizes) {
               pathInput.value = tmpPath;
               scrollInputToEnd(pathInput);
+              if (sizes) {
+                window._lastUploadSizes = sizes;
+                var sizeText = document.getElementById('project-size-text');
+                var sizeBtn = document.getElementById('project-size-btn');
+                if (sizeText) sizeText.textContent = 'Original: ' + fmtBytes(sizes.original_bytes) +
+                  ' · Compressed: ' + fmtBytes(sizes.compressed_bytes);
+                if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(sizes.original_bytes) +
+                  ' — Compressed archive size: ' + fmtBytes(sizes.compressed_bytes);
+              }
               updateReportTitleFromPath();
               autoSetOutputDir(tmpPath);
               fetchProjectHistory(tmpPath);
@@ -12612,7 +12941,7 @@ pytest --cov --cov-report=xml
             }
 
             if (typeof CompressionStream === 'undefined') {
-              showBannerToast('Your browser lacks CompressionStream. Use the “Upload folder…” button instead.', true);
+              showBannerToast('Your browser lacks CompressionStream. Use the “Upload” button instead.', true);
               if (btn) btn.disabled = false; return;
             }
 
@@ -12658,8 +12987,9 @@ pytest --cov --cov-report=xml
               if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + kept.toLocaleString() + ' files)…</div>';
               var resp = await fetch('/api/upload-tarball', { method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body: blob });
               var d = await resp.json();
-              if (d && d.tmp_path) { finish(d.tmp_path); }
-              else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (btn) btn.disabled = false; }
+              if (d && d.tmp_path) {
+                finish(d.tmp_path, { compressed_bytes: d.compressed_bytes || 0, original_bytes: d.original_bytes || 0 });
+              } else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (btn) btn.disabled = false; }
             } catch (err) {
               showBannerToast('Upload failed: ' + String(err), true);
               if (btn) btn.disabled = false;
@@ -12873,6 +13203,8 @@ pytest --cov --cov-report=xml
 
       function onPathChange() {
         var val = pathInput ? pathInput.value : "";
+        // Discard stale upload sizes when the user edits the path manually.
+        window._lastUploadSizes = null;
         updateReportTitleFromPath();
         autoSetOutputDir(val);
         updateSidebarSummary();
@@ -14557,6 +14889,28 @@ struct ScanSetupTemplate {
     body.dark-theme .soft-chip.success { background:linear-gradient(135deg,rgba(143,226,168,0.12),rgba(143,226,168,0.05)); border-color:rgba(143,226,168,0.3); box-shadow:0 0 0 4px rgba(143,226,168,0.07),0 2px 8px rgba(0,0,0,0.2); }
     .toolbar-row { display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; margin-bottom: 12px; }
     .muted { color: var(--muted); }
+    /* Run-ID chip row (mirrors HTML report) */
+    .run-id-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .run-id-chip { display:flex; flex-direction:column; gap:5px; padding:12px 14px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent); color:var(--text); position:relative; cursor:default; transition:transform 0.18s ease,box-shadow 0.18s ease; min-width:0; flex:1 1 180px; max-width:320px; }
+    .run-id-chip[data-copy] { cursor:pointer; }
+    .run-id-chip:hover { transform:translateY(-3px); box-shadow:0 8px 24px rgba(0,0,0,0.15); z-index:10; }
+    .run-id-chip.muted-chip { border-left-color:var(--line-strong); }
+    .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:var(--accent); display:flex; align-items:center; gap:4px; }
+    .run-id-chip.muted-chip .run-id-chip-label { color:var(--muted-2); }
+    .run-id-chip-value { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
+    .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity 0.18s ease; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
+    .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .run-id-chip:hover .chip-tooltip { opacity:1; }
+    .chip-label-icon { display:inline-block; vertical-align:middle; opacity:0.8; flex:0 0 auto; }
+    @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
+    .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
+    /* Meta chips row */
+    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 0; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+    .meta-chip { display:inline-flex; align-items:center; gap:5px; padding:0 14px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
+    .meta-chip:first-child { padding-left:0; }
+    .meta-chip:last-child { border-right:none; }
+    .meta-chip b { color:var(--text); font-weight:700; }
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
     .open-path-btn { display:inline-flex; align-items:center; justify-content:center; border-radius: 14px; border: 1px solid var(--line-strong); padding: 11px 14px; color: var(--text); background: var(--surface-3); font-weight: 800; font-size: 14px; cursor: pointer; text-decoration: none; }
@@ -14723,7 +15077,6 @@ struct ScanSetupTemplate {
         <div>
           <div class="soft-chip success"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>Run finished successfully</div>
           <h1 class="hero-title">{{ report_title }}</h1>
-          <p class="hero-subtitle">Your HTML, PDF, and JSON artifacts are now saved. Use the quick actions below to view, download, or copy the saved paths for sharing outside oxide-sloc.</p>
         </div>
         <div class="hero-quick-actions">
           {% if server_mode %}
@@ -14738,42 +15091,140 @@ struct ScanSetupTemplate {
         </div>
       </div>
 
+      <!-- Run metadata chips: Run ID · Git Commit · Branch · Last Commit By -->
+      <div class="run-id-row">
+        <span class="run-id-chip" data-copy="{{ run_id }}" style="max-width:none;flex:2 1 300px;">
+          <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>Run ID</span>
+          <span class="run-id-chip-value">{{ run_id }}</span>
+          <span class="chip-tooltip">Unique identifier for this analysis run — click to copy</span>
+        </span>
+        {% match git_commit_long %}
+          {% when Some with (long_sha) %}
+          <span class="run-id-chip" data-copy="{{ long_sha }}">
+            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
+            <span class="run-id-chip-value">{{ long_sha }}</span>
+            <span class="chip-tooltip">Full commit SHA for the scanned state — click to copy</span>
+          </span>
+          {% when None %}
+          <span class="run-id-chip muted-chip">
+            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
+            <span class="run-id-chip-value">Not detected</span>
+            <span class="chip-tooltip">No Git commit SHA was found for this scan</span>
+          </span>
+        {% endmatch %}
+        {% match git_branch %}
+          {% when Some with (branch) %}
+          <span class="run-id-chip">
+            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
+            <span class="run-id-chip-value">{{ branch }}</span>
+            <span class="chip-tooltip">Git branch active at scan time</span>
+          </span>
+          {% when None %}
+          <span class="run-id-chip muted-chip">
+            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
+            <span class="run-id-chip-value">Not detected</span>
+            <span class="chip-tooltip">No Git branch was found for this scan</span>
+          </span>
+        {% endmatch %}
+        {% match git_author %}
+          {% when Some with (author) %}
+          <span class="run-id-chip">
+            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Last Commit By</span>
+            <span class="run-id-chip-value">{{ author }}</span>
+            <span class="chip-tooltip">Author of the most recent commit at scan time</span>
+          </span>
+          {% when None %}
+          <span class="run-id-chip muted-chip">
+            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Last Commit By</span>
+            <span class="run-id-chip-value">Not detected</span>
+            <span class="chip-tooltip">No commit author was found for this scan</span>
+          </span>
+        {% endmatch %}
+      </div>
+
+      <!-- Scan metadata row -->
+      <div class="meta">
+        <span class="meta-chip">Scan by <b>{{ scan_performed_by }}</b></span>
+        <span class="meta-chip">Scanned <b>{{ scan_time_display }}</b></span>
+        <span class="meta-chip">Generated <b>{{ scan_time_display }}</b></span>
+        <span class="meta-chip">OS <b>{{ os_display }}</b></span>
+        <span class="meta-chip">Files analyzed <b>{{ files_analyzed }}</b></span>
+        <span class="meta-chip">Files skipped <b>{{ files_skipped }}</b></span>
+      </div>
+
+      <!-- 12 summary stat chips -->
       <div class="summary-strip">
         <div class="stat-chip" data-raw="{{ physical_lines }}">
-          <div class="stat-chip-label">Physical Lines</div>
+          <div class="stat-chip-label">Physical lines</div>
           <div class="stat-chip-val">{{ physical_lines }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Total physical lines including code, comments, and blank lines</div>
+          <div class="stat-chip-tip">Total lines across all analyzed files, including code, comments, and blank lines.</div>
         </div>
         <div class="stat-chip" data-raw="{{ code_lines }}">
           <div class="stat-chip-label">Code</div>
           <div class="stat-chip-val">{{ code_lines }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Executable source lines (IEEE 1045 SLOC)</div>
+          <div class="stat-chip-tip">Lines containing executable source code, excluding comments and blanks.</div>
         </div>
         <div class="stat-chip" data-raw="{{ comment_lines }}">
           <div class="stat-chip-label">Comments</div>
           <div class="stat-chip-val">{{ comment_lines }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Lines classified as comments or documentation</div>
+          <div class="stat-chip-tip">Lines consisting entirely of comments or inline documentation.</div>
         </div>
         <div class="stat-chip" data-raw="{{ blank_lines }}">
           <div class="stat-chip-label">Blank</div>
           <div class="stat-chip-val">{{ blank_lines }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Empty or whitespace-only lines</div>
+          <div class="stat-chip-tip">Empty or whitespace-only lines used for readability and spacing.</div>
         </div>
-        <div class="stat-chip" data-raw="{{ files_analyzed }}">
-          <div class="stat-chip-label">Files Analyzed</div>
-          <div class="stat-chip-val">{{ files_analyzed }}</div>
+        <div class="stat-chip" data-raw="{{ mixed_lines }}">
+          <div class="stat-chip-label">Mixed separate</div>
+          <div class="stat-chip-val">{{ mixed_lines }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Source files successfully parsed and counted</div>
+          <div class="stat-chip-tip">Lines that contain both code and a trailing comment, counted separately per the mixed-line policy.</div>
         </div>
         <div class="stat-chip" data-raw="{{ functions }}">
           <div class="stat-chip-label">Functions</div>
           <div class="stat-chip-val">{{ functions }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Best-effort count of function and method definitions</div>
+          <div class="stat-chip-tip">Best-effort count of function/method definitions detected across all source files.</div>
+        </div>
+        <div class="stat-chip" data-raw="{{ classes }}">
+          <div class="stat-chip-label">Classes / Types</div>
+          <div class="stat-chip-val">{{ classes }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Best-effort count of class, struct, interface, and type definitions.</div>
+        </div>
+        <div class="stat-chip" data-raw="{{ variables }}">
+          <div class="stat-chip-label">Variables</div>
+          <div class="stat-chip-val">{{ variables }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Best-effort count of variable and constant declarations.</div>
+        </div>
+        <div class="stat-chip" data-raw="{{ imports }}">
+          <div class="stat-chip-label">Imports</div>
+          <div class="stat-chip-val">{{ imports }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Best-effort count of import, include, and module-use statements.</div>
+        </div>
+        <div class="stat-chip" data-raw="{{ test_count }}">
+          <div class="stat-chip-label">Tests</div>
+          <div class="stat-chip-val">{{ test_count }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Best-effort count of test cases detected by framework pattern (GTest, PyTest, JUnit, etc.).</div>
+        </div>
+        <div class="stat-chip" data-density data-code="{{ code_lines }}" data-physical="{{ physical_lines }}">
+          <div class="stat-chip-label">Code density</div>
+          <div class="stat-chip-val stat-chip-density-val">—</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Percentage of physical lines that contain executable source code — higher means a leaner, code-dense codebase.</div>
+        </div>
+        <div class="stat-chip" data-raw="{{ files_analyzed }}">
+          <div class="stat-chip-label">Files analyzed</div>
+          <div class="stat-chip-val">{{ files_analyzed }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Total number of source files included in this analysis.</div>
         </div>
       </div>
 
@@ -14914,6 +15365,20 @@ struct ScanSetupTemplate {
             <p class="action-empty-note" style="margin-top:6px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
           </div>
         </div>
+        <div class="action-card">
+          <h3>Download bundle</h3>
+          <div class="action-buttons">
+            <a class="button secondary" href="/api/runs/{{ run_id }}/bundle" download>Download all artifacts</a>
+            <p class="action-empty-note" style="margin-top:6px;">Downloads a .tar.gz archive containing every artifact for this run (HTML, PDF, JSON, CSV, scan config).</p>
+          </div>
+        </div>
+        <div class="action-card" id="delete-run-card">
+          <h3>Delete run</h3>
+          <div class="action-buttons">
+            <button class="button" id="delete-run-btn" type="button" style="background:#b23030;border-color:#b23030;">Delete this run</button>
+            <p class="action-empty-note" style="margin-top:6px;">Permanently removes all artifacts for this run from disk. This action cannot be undone.</p>
+          </div>
+        </div>
         {% if confluence_configured %}
         <div class="action-card" id="confluenceCard">
           <h3>Confluence</h3>
@@ -14941,6 +15406,17 @@ struct ScanSetupTemplate {
         </div>
       </div>
       {% endif %}
+      <div id="delete-run-modal" style="display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;">
+        <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-width:460px;width:95%;box-shadow:0 16px 48px rgba(0,0,0,0.28);">
+          <div style="font-size:16px;font-weight:800;margin-bottom:10px;color:#b23030;">Delete run — irreversible</div>
+          <p style="font-size:13px;color:var(--text);margin:0 0 18px;">This will permanently delete all artifacts for this run from disk (HTML, PDF, JSON, CSV, scan config). <strong>This cannot be undone</strong> and the run will no longer be accessible by anyone.</p>
+          <div id="delete-run-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>
+          <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button class="button secondary" id="delete-run-cancel" type="button">Cancel</button>
+            <button class="button" id="delete-run-confirm" type="button" style="background:#b23030;border-color:#b23030;">Yes, delete permanently</button>
+          </div>
+        </div>
+      </div>
       {% if !submodule_rows.is_empty() %}
       <div class="submodule-panel">
         <div class="toolbar-row">
@@ -15334,6 +15810,26 @@ struct ScanSetupTemplate {
           if(valEl)valEl.textContent=fmt(raw);
           var exactEl=chip.querySelector('.stat-chip-exact');
           if(exactEl)exactEl.textContent=raw>=10000?raw.toLocaleString():'';
+        });
+        // Code density chip
+        Array.prototype.slice.call(document.querySelectorAll('.stat-chip[data-density]')).forEach(function(chip){
+          var code=parseInt(chip.getAttribute('data-code'),10);
+          var phys=parseInt(chip.getAttribute('data-physical'),10);
+          if(isNaN(code)||isNaN(phys)||phys===0)return;
+          var pct=(code/phys*100).toFixed(1)+'%';
+          var valEl=chip.querySelector('.stat-chip-val');
+          if(valEl)valEl.textContent=pct;
+        });
+        // Click-to-copy on run-id-chip elements
+        Array.prototype.slice.call(document.querySelectorAll('.run-id-chip[data-copy]')).forEach(function(chip){
+          chip.addEventListener('click',function(){
+            var val=chip.getAttribute('data-copy');
+            if(!val)return;
+            if(navigator.clipboard){navigator.clipboard.writeText(val).catch(function(){});}
+            else{var ta=document.createElement('textarea');ta.value=val;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);}
+            chip.classList.add('chip-copied-flash');
+            setTimeout(function(){chip.classList.remove('chip-copied-flash');},900);
+          });
         });
       })();
 
@@ -15874,6 +16370,48 @@ struct ScanSetupTemplate {
   })();
   </script>
   {% endif %}
+  <script nonce="{{ csp_nonce }}">
+  (function() {
+    var deleteBtn = document.getElementById('delete-run-btn');
+    var modal     = document.getElementById('delete-run-modal');
+    var cancelBtn = document.getElementById('delete-run-cancel');
+    var confirmBtn= document.getElementById('delete-run-confirm');
+    if (!deleteBtn || !modal) return;
+    deleteBtn.addEventListener('click', function() {
+      document.getElementById('delete-run-status').style.display = 'none';
+      modal.style.display = 'flex';
+    });
+    cancelBtn.addEventListener('click', function() { modal.style.display = 'none'; });
+    modal.addEventListener('click', function(e) { if (e.target === modal) modal.style.display = 'none'; });
+    confirmBtn.addEventListener('click', async function() {
+      confirmBtn.disabled = true;
+      cancelBtn.disabled = true;
+      var status = document.getElementById('delete-run-status');
+      status.style.display = 'block';
+      status.style.background = '#dbeafe'; status.style.color = '#1e40af';
+      status.textContent = 'Deleting…';
+      try {
+        var resp = await fetch('/api/runs/{{ run_id }}', { method: 'DELETE' });
+        if (resp.status === 204 || resp.ok) {
+          status.style.background = '#dcfce7'; status.style.color = '#166534';
+          status.textContent = 'Deleted. Redirecting…';
+          setTimeout(function() { window.location.href = '/view-reports'; }, 1200);
+        } else {
+          var d = await resp.json().catch(function(){return {};});
+          status.style.background = '#fee2e2'; status.style.color = '#991b1b';
+          status.textContent = 'Error: ' + (d.error || 'Unexpected server error');
+          confirmBtn.disabled = false;
+          cancelBtn.disabled = false;
+        }
+      } catch (e) {
+        status.style.background = '#fee2e2'; status.style.color = '#991b1b';
+        status.textContent = 'Network error: ' + String(e);
+        confirmBtn.disabled = false;
+        cancelBtn.disabled = false;
+      }
+    });
+  })();
+  </script>
   <script nonce="{{ csp_nonce }}">(function(){
     var dot=document.getElementById('status-dot');
     var pingEl=document.getElementById('server-ping-ms');
@@ -15961,7 +16499,13 @@ struct ResultTemplate {
     // git context
     git_branch: Option<String>,
     git_commit: Option<String>,
+    git_commit_long: Option<String>,
     git_author: Option<String>,
+    // scan metadata for hero section
+    scan_performed_by: String,
+    scan_time_display: String,
+    os_display: String,
+    test_count: u64,
     // history
     prev_scan_count: usize,
     current_scan_number: usize,
