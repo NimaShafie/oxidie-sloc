@@ -605,6 +605,318 @@ fn write_pdf_via_wkhtmltopdf(html_path: &Path, pdf_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Generate a PDF summary report directly from `AnalysisRun` data using the pure-Rust
+/// `printpdf` crate.  No external tools (Chrome, wkhtmltopdf) are required — this path
+/// is always available on both Windows and Linux server deployments.
+///
+/// # Errors
+///
+/// Returns an error if the output directory cannot be created or the PDF file cannot be written.
+pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
+    use printpdf::{BuiltinFont, Color, Mm, PdfDocument, Rgb};
+    use std::fs::File;
+    use std::io::BufWriter;
+
+    if let Some(parent) = pdf_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create PDF directory {}", parent.display()))?;
+    }
+
+    // A4 landscape: 297 mm wide × 210 mm tall (y=0 = bottom, y=210 = top).
+    const W: f32 = 297.0;
+    const H: f32 = 210.0;
+
+    let title = pdf_safe_str(&run.effective_configuration.reporting.report_title);
+    let ts = run
+        .tool
+        .timestamp_utc
+        .format("%Y-%m-%d %H:%M UTC")
+        .to_string();
+    let version = env!("CARGO_PKG_VERSION");
+
+    let (doc, page1, layer1) =
+        PdfDocument::new(format!("oxide-sloc: {title}"), Mm(W), Mm(H), "Content");
+
+    let font_reg = doc
+        .add_builtin_font(BuiltinFont::Helvetica)
+        .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
+    let font_bold = doc
+        .add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
+
+    let layer = doc.get_page(page1).get_layer(layer1);
+
+    // ── Header strip ──────────────────────────────────────────────────────────
+    const HDR_H: f32 = 13.5;
+    let hdr_y = H - HDR_H;
+    pdf_fill_rect(
+        &layer,
+        0.0,
+        hdr_y,
+        W,
+        HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    layer.use_text("oxide-sloc", 13.0, Mm(10.0), Mm(hdr_y + 4.5), &font_bold);
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    layer.use_text(
+        "Code Metrics Report",
+        9.5,
+        Mm(54.0),
+        Mm(hdr_y + 5.0),
+        &font_reg,
+    );
+    layer.use_text(
+        pdf_safe_str(&ts),
+        8.0,
+        Mm(W - 70.0),
+        Mm(hdr_y + 5.0),
+        &font_reg,
+    );
+
+    // ── Report title + scan roots ─────────────────────────────────────────────
+    let title_y = hdr_y - 7.5;
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
+    layer.use_text(
+        pdf_trunc(&title, 80),
+        9.5,
+        Mm(10.0),
+        Mm(title_y),
+        &font_bold,
+    );
+    let roots: String = run
+        .input_roots
+        .iter()
+        .map(|r| pdf_safe_str(r))
+        .collect::<Vec<_>>()
+        .join(", ");
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    layer.use_text(
+        pdf_trunc(&roots, 90),
+        7.5,
+        Mm(10.0),
+        Mm(title_y - 5.5),
+        &font_reg,
+    );
+
+    // ── Stat chips (4 boxes, centred) ─────────────────────────────────────────
+    const CHIP_W: f32 = 62.0;
+    const CHIP_H: f32 = 16.0;
+    const CHIP_GAP: f32 = 4.5;
+    let chips_y = hdr_y - 40.0;
+    let chips_x_start = (W - (4.0 * CHIP_W + 3.0 * CHIP_GAP)) / 2.0;
+    let chips: [(&str, u64); 4] = [
+        ("Code Lines", run.summary_totals.code_lines),
+        ("Comment Lines", run.summary_totals.comment_lines),
+        ("Blank Lines", run.summary_totals.blank_lines),
+        ("Files Analyzed", run.summary_totals.files_analyzed),
+    ];
+    for (i, (label, value)) in chips.iter().enumerate() {
+        let cx = chips_x_start + i as f32 * (CHIP_W + CHIP_GAP);
+        pdf_fill_rect(
+            &layer,
+            cx,
+            chips_y,
+            CHIP_W,
+            CHIP_H,
+            Rgb::new(0.945, 0.925, 0.90, None),
+        );
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.49, 0.27, 0.10, None)));
+        layer.use_text(
+            pdf_fmt_num(*value),
+            12.0,
+            Mm(cx + 4.0),
+            Mm(chips_y + 7.5),
+            &font_bold,
+        );
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+        layer.use_text(
+            pdf_safe_str(label),
+            6.5,
+            Mm(cx + 4.0),
+            Mm(chips_y + 2.5),
+            &font_reg,
+        );
+    }
+
+    // Secondary summary line
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.35, 0.35, 0.35, None)));
+    layer.use_text(
+        format!(
+            "Physical Lines: {}   |   Files Skipped: {}   |   Run ID: {}",
+            pdf_fmt_num(run.summary_totals.total_physical_lines),
+            pdf_fmt_num(run.summary_totals.files_skipped),
+            pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(16)]),
+        ),
+        7.0,
+        Mm(10.0),
+        Mm(chips_y - 5.5),
+        &font_reg,
+    );
+
+    // ── Language breakdown table ───────────────────────────────────────────────
+    let tbl_top = chips_y - 12.0;
+    let col_x: [f32; 6] = [10.0, 83.0, 125.0, 163.0, 201.0, 239.0];
+    let col_labels = [
+        "Language",
+        "Files",
+        "Code Lines",
+        "Comments",
+        "Blank",
+        "Physical",
+    ];
+
+    pdf_fill_rect(
+        &layer,
+        10.0,
+        tbl_top - 6.5,
+        W - 20.0,
+        6.5,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    for (i, lbl) in col_labels.iter().enumerate() {
+        layer.use_text(*lbl, 7.0, Mm(col_x[i] + 2.0), Mm(tbl_top - 4.5), &font_bold);
+    }
+
+    const ROW_H: f32 = 6.0;
+    const FOOTER_H: f32 = 10.0;
+    let max_rows = ((tbl_top - 6.5 - FOOTER_H) / ROW_H).floor() as usize;
+    let lang_rows = run.totals_by_language.len().min(max_rows);
+
+    for (ri, lang) in run.totals_by_language.iter().take(lang_rows).enumerate() {
+        let ry = tbl_top - 6.5 - (ri + 1) as f32 * ROW_H;
+        let bg = if ri % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(&layer, 10.0, ry, W - 20.0, ROW_H, bg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        let cells = [
+            pdf_safe_str(lang.language.display_name()),
+            pdf_fmt_num(lang.files),
+            pdf_fmt_num(lang.code_lines),
+            pdf_fmt_num(lang.comment_lines),
+            pdf_fmt_num(lang.blank_lines),
+            pdf_fmt_num(lang.total_physical_lines),
+        ];
+        for (ci, cell) in cells.iter().enumerate() {
+            layer.use_text(
+                cell.clone(),
+                7.0,
+                Mm(col_x[ci] + 2.0),
+                Mm(ry + 1.5),
+                &font_reg,
+            );
+        }
+    }
+    if lang_rows < run.totals_by_language.len() {
+        let overflow_y = tbl_top - 6.5 - (lang_rows + 1) as f32 * ROW_H;
+        let safe_y = overflow_y.max(FOOTER_H + 1.0);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.5, 0.5, 0.5, None)));
+        layer.use_text(
+            format!(
+                "... {} more languages — open the HTML report for the full breakdown",
+                run.totals_by_language.len() - lang_rows
+            ),
+            6.5,
+            Mm(12.0),
+            Mm(safe_y + 1.0),
+            &font_reg,
+        );
+    }
+
+    // ── Footer ────────────────────────────────────────────────────────────────
+    pdf_fill_rect(
+        &layer,
+        0.0,
+        0.0,
+        W,
+        FOOTER_H,
+        Rgb::new(0.93, 0.91, 0.87, None),
+    );
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    layer.use_text(
+        format!(
+            "Generated by oxide-sloc v{version}  |  AGPL-3.0-or-later  |  github.com/oxide-sloc/oxide-sloc"
+        ),
+        6.5,
+        Mm(10.0),
+        Mm(3.0),
+        &font_reg,
+    );
+
+    doc.save(&mut BufWriter::new(File::create(pdf_path).with_context(
+        || format!("cannot create PDF at {}", pdf_path.display()),
+    )?))
+    .map_err(|e| anyhow::anyhow!("printpdf save error: {e}"))?;
+
+    Ok(())
+}
+
+fn pdf_fill_rect(
+    layer: &printpdf::PdfLayerReference,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: printpdf::Rgb,
+) {
+    use printpdf::path::{PaintMode, WindingOrder};
+    use printpdf::{Color, Mm, Point, Polygon};
+    layer.set_fill_color(Color::Rgb(color));
+    layer.add_polygon(Polygon {
+        rings: vec![vec![
+            (Point::new(Mm(x), Mm(y)), false),
+            (Point::new(Mm(x + w), Mm(y)), false),
+            (Point::new(Mm(x + w), Mm(y + h)), false),
+            (Point::new(Mm(x), Mm(y + h)), false),
+        ]],
+        mode: PaintMode::Fill,
+        winding_order: WindingOrder::NonZero,
+    });
+}
+
+fn pdf_safe_str(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_ascii_control() {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
+fn pdf_trunc(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+fn pdf_fmt_num(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        let s = format!("{m:.1}M");
+        if s.ends_with(".0M") {
+            format!("{}M", n / 1_000_000)
+        } else {
+            s
+        }
+    } else if n >= 10_000 {
+        format!("{}K", n / 1_000)
+    } else if n >= 1_000 {
+        format!("{},{:03}", n / 1_000, n % 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Launch a headless Chromium-based browser to print `html_path` as a PDF to `pdf_path`.
 ///
 /// Tries CDP (headless Chrome) first; falls back to `wkhtmltopdf` when no Chromium-based
