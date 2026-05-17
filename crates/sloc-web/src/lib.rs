@@ -3655,7 +3655,14 @@ async fn async_run_result_handler(
         store.is_configured()
     };
 
-    render_result_page(&run, &artifacts, &run_id, &csp_nonce, confluence_configured)
+    render_result_page(
+        &run,
+        &artifacts,
+        &run_id,
+        &csp_nonce,
+        confluence_configured,
+        state.server_mode,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3666,6 +3673,7 @@ fn render_result_page(
     run_id: &str,
     csp_nonce: &str,
     confluence_configured: bool,
+    server_mode: bool,
 ) -> Response {
     let ctx = &artifacts.result_context;
     let prev_entry = &ctx.prev_entry;
@@ -3955,6 +3963,7 @@ fn render_result_page(
             .any(|l| l.functions > 0 || l.classes > 0),
         csp_nonce: csp_nonce.to_owned(),
         confluence_configured,
+        server_mode,
         report_header_footer: run
             .effective_configuration
             .reporting
@@ -6142,9 +6151,16 @@ async fn trend_report_handler(
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -7054,9 +7070,11 @@ async fn trend_report_handler(
     oxide-sloc v{version} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
+  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
 </body>
 </html>"##,
     );
@@ -7758,9 +7776,16 @@ async fn test_metrics_handler(
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -7907,6 +7932,7 @@ async fn test_metrics_handler(
     oxide-sloc v{version} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -8344,6 +8370,7 @@ async fn test_metrics_handler(
     applyScope();
   }})();
   </script>
+  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
 </body>
 </html>"#,
     );
@@ -9970,6 +9997,7 @@ struct SubmoduleRow {
     .scope-legend-row { display:inline-flex; flex-direction:row; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:13px; flex-shrink:0; border-left:3px solid var(--line-strong); }
     .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; }
     .path-scope-grid { display:grid; grid-template-columns: 42% auto auto 1px auto; gap:0 8px; align-items:center; }
+    #path.drag-over { background: rgba(37,99,235,0.05) !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important; }
     .path-scope-grid > input[type=text] { width:100%; min-width:0; }
     .git-source-banner { display:flex; align-items:center; gap:10px; padding:10px 14px; background:linear-gradient(135deg,rgba(124,58,237,0.07),rgba(99,40,217,0.05)); border:1.5px solid rgba(124,58,237,0.22); border-radius:9px; margin-bottom:12px; font-size:13px; color:var(--text); flex-wrap:wrap; }
     .git-source-banner svg { width:15px; height:15px; stroke:#7c3aed; fill:none; stroke-width:2; flex-shrink:0; }
@@ -10013,7 +10041,7 @@ struct SubmoduleRow {
     .summary-body { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .coverage-pills { display:flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
     .coverage-pill, .language-pill, .soft-chip { display:inline-flex; align-items:center; min-height: 32px; padding: 0 12px; border-radius: 999px; border:1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 13px; font-weight: 700; }
-    .layout { display:grid; grid-template-columns: 244px minmax(0, 1fr); gap: 18px; align-items:start; min-height: calc(100vh - 57px); }
+    .layout { display:grid; grid-template-columns: 244px minmax(0, 1fr); gap: 18px; align-items:start; }
     .side-stack { display:grid; gap: 16px; align-items:start; align-self: start; position: sticky; top: 73px; max-height: calc(100vh - 90px); overflow-y: auto; width: 244px; max-width: 244px; scrollbar-width: none; }
     .side-stack::-webkit-scrollbar { display: none; }
     .step-nav { padding: 20px 16px; }
@@ -10190,7 +10218,7 @@ struct SubmoduleRow {
     .review-scan-note-label { font-size: 10px; font-weight: 900; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-2); margin-bottom: 4px; }
     .review-scan-note p { margin: 3px 0 0; font-size: 12px; line-height: 1.45; }
     .review-scan-note code { display:inline; padding: 1px 5px; border-radius: 5px; font-size: 11px; }
-    .review-card { min-height: 200px; }
+    .review-card { min-height: 0; }
     .scope-info-row { display:flex; gap:14px; align-items:stretch; margin:12px 0; }
     .scope-info-row .explorer-language-strip { flex:1; min-width:0; overflow:hidden; }
     .scope-info-row .preview-note { flex:0 0 52%; margin:0; font-size:12px; line-height:1.5; padding:10px 12px; }
@@ -10432,15 +10460,15 @@ struct SubmoduleRow {
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
           <div class="nav-pill server-online-pill" id="server-status-pill">
-            <span class="status-dot"></span>
-            <span id="server-status-label">{% if server_mode %}Server Mode{% else %}Running{% endif %}</span>
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">{% if server_mode %}Server{% else %}Local{% endif %}</span>
             <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
           </div>
           <div class="server-status-tip">
             {% if server_mode %}
-            OxideSLOC is running in server mode — accessible on your LAN.<br>Use Ctrl+C in the terminal to stop.
+            OxideSLOC is running in server mode — accessible on your LAN.
             {% else %}
-            OxideSLOC is running locally — only accessible from this machine.<br>Press Ctrl+C in the terminal to stop.
+            OxideSLOC is running locally — only accessible from this machine.
             {% endif %}
             <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
           </div>
@@ -10652,7 +10680,7 @@ struct SubmoduleRow {
                       <input type="hidden" name="git_repo" value="{{ git_repo }}" />
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
-                      <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
+                      <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required onblur="this.scrollLeft=this.scrollWidth" />
                       <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload folder…{% else %}Browse{% endif %}</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
                       {% endif %}
@@ -10667,7 +10695,7 @@ struct SubmoduleRow {
                   {% if git_repo.is_empty() %}
                   {% if server_mode %}
                   <div id="upload-limit-tip" class="hint" style="margin-top:6px;font-size:11px;">
-                    ℹ️ Files are compressed and streamed — no fixed size limit. Binaries, node_modules, and build artifacts are filtered automatically.
+                    ℹ️ Files are compressed and streamed — no fixed size limit. Binaries, node_modules, and build artifacts are filtered automatically. You can also <strong>drag a project folder onto the path field</strong> to skip the browser confirmation dialog.
                   </div>
                   {% endif %}
                   <div class="path-info-row">
@@ -12219,6 +12247,7 @@ pytest --cov --cov-report=xml
               // ── Helper: apply upload result to UI ────────────────────────
               function applyUploadResult(tmpPath) {
                 targetInput.value = tmpPath;
+                scrollInputToEnd(targetInput);
                 if (targetInput === pathInput) {
                   updateReportTitleFromPath();
                   autoSetOutputDir(tmpPath);
@@ -12394,6 +12423,7 @@ pytest --cov --cov-report=xml
           .then(function (data) {
             if (data && data.selected_path) {
               targetInput.value = data.selected_path;
+              scrollInputToEnd(targetInput);
 
               if (targetInput === pathInput) {
                 updateReportTitleFromPath();
@@ -12480,6 +12510,149 @@ pytest --cov --cov-report=xml
 
       if (browsePath) browsePath.addEventListener("click", function () { pickDirectory(pathInput, "project"); });
       if (browseOutputDir) browseOutputDir.addEventListener("click", function () { pickDirectory(outputDirInput, "output"); });
+
+      // ── Drag-and-drop directory upload (server mode only) ─────────────────
+      // Dropping a folder onto the path field bypasses Chrome's
+      // "Upload X files to this site?" confirmation dialog.
+      async function readDirRecursively(dirEntry, basePath) {
+        var reader = dirEntry.createReader();
+        var all = [];
+        for (;;) {
+          var batch = await new Promise(function(res) { reader.readEntries(res, function() { res([]); }); });
+          if (!batch.length) break;
+          for (var i = 0; i < batch.length; i++) all.push(batch[i]);
+        }
+        var SKIP = new Set(['node_modules','.git','.hg','vendor','dist','build','target','__pycache__','.svn','.idea','.vscode']);
+        var out = [];
+        for (var i = 0; i < all.length; i++) {
+          var sub = all[i];
+          if (sub.isFile) {
+            var f = await new Promise(function(res) { sub.file(res); });
+            out.push({ file: f, path: basePath + '/' + sub.name });
+          } else if (sub.isDirectory && !SKIP.has(sub.name)) {
+            var nested = await readDirRecursively(sub, basePath + '/' + sub.name);
+            for (var j = 0; j < nested.length; j++) out.push(nested[j]);
+          }
+        }
+        return out;
+      }
+
+      function setupPathDropZone() {
+        if (!SERVER_MODE || !pathInput) return;
+        var CODE_EXTS = new Set([
+          'rs','py','js','ts','jsx','tsx','c','cpp','cc','cxx','h','hpp','hh','hxx',
+          'java','go','rb','php','cs','swift','kt','kts','sh','bash','zsh','ksh','fish',
+          'html','htm','css','scss','sass','svelte','vue','sql','lua','r','dart','zig',
+          'nim','ex','exs','erl','hrl','fs','fsx','fsi','fsproj','clj','cljs','cljc',
+          'hs','lhs','pl','pm','t','groovy','scala','m','mm','jl','ps1','psm1','psd1',
+          'asm','s','S','lisp','el','rkt','ml','mli','tf','hcl','proto','thrift','graphql','gql'
+        ]);
+        pathInput.addEventListener('dragover', function(e) {
+          e.preventDefault();
+          pathInput.classList.add('drag-over');
+        });
+        pathInput.addEventListener('dragleave', function() { pathInput.classList.remove('drag-over'); });
+        pathInput.addEventListener('drop', function(e) {
+          e.preventDefault();
+          pathInput.classList.remove('drag-over');
+          var items = e.dataTransfer.items;
+          if (!items || !items.length) return;
+          var dirEntry = null;
+          for (var i = 0; i < items.length; i++) {
+            var entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+            if (entry && entry.isDirectory) { dirEntry = entry; break; }
+          }
+          if (!dirEntry) { showBannerToast('Drop a project folder (not individual files).', true); return; }
+          var btn = browsePath;
+          if (btn) btn.disabled = true;
+          if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Reading folder contents…</div>';
+
+          readDirRecursively(dirEntry, dirEntry.name).then(async function(allEntries) {
+            var total = allEntries.length;
+            var codeEntries = allEntries.filter(function(e) {
+              var n = e.file.name;
+              if (n === 'Makefile' || n === 'Dockerfile' || n === 'Gemfile' || n === 'Rakefile' || n === 'Procfile' || n === 'Justfile') return true;
+              var dot = n.lastIndexOf('.');
+              return dot >= 0 && CODE_EXTS.has(n.slice(dot + 1).toLowerCase());
+            });
+            var kept = codeEntries.length;
+            if (kept === 0) {
+              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">No supported source files found (' + total.toLocaleString() + ' files scanned).</div>';
+              if (btn) btn.disabled = false; return;
+            }
+
+            function finish(tmpPath) {
+              pathInput.value = tmpPath;
+              scrollInputToEnd(pathInput);
+              updateReportTitleFromPath();
+              autoSetOutputDir(tmpPath);
+              fetchProjectHistory(tmpPath);
+              loadPreview();
+              suggestCoverageFile(tmpPath);
+              updateReview();
+              if (btn) btn.disabled = false;
+            }
+
+            if (typeof CompressionStream === 'undefined') {
+              showBannerToast('Your browser lacks CompressionStream. Use the “Upload folder…” button instead.', true);
+              if (btn) btn.disabled = false; return;
+            }
+
+            try {
+              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Building archive: 0 / ' + kept.toLocaleString() + ' files…</div>';
+              var BLOCK = 512;
+              var cs = new CompressionStream('gzip');
+              var wtr = cs.writable.getWriter();
+              var chunks = [];
+              var rdr = cs.readable.getReader();
+              var collecting = (async function() { while (true) { var r = await rdr.read(); if (r.done) break; chunks.push(r.value); } })();
+
+              function buildHdr(fp, sz) {
+                var hdr = new Uint8Array(BLOCK);
+                var enc = new TextEncoder();
+                function wS(o, l, s) { var b = enc.encode(s); for (var i = 0; i < Math.min(b.length, l); i++) hdr[o + i] = b[i]; }
+                function wO(o, l, v) { var s = v.toString(8); while (s.length < l - 1) s = '0' + s; wS(o, l, s + '\0'); }
+                var nm = fp, pfx = '';
+                if (fp.length > 99) { var sp = fp.lastIndexOf('/', 154); if (sp > 0 && fp.length - sp - 1 <= 99) { pfx = fp.substring(0, sp); nm = fp.substring(sp + 1); } else { nm = fp.substring(0, 99); } }
+                wS(0,100,nm); wO(100,8,0o000644); wO(108,8,0); wO(116,8,0); wO(124,12,sz); wO(136,12,0);
+                for (var i = 148; i < 156; i++) hdr[i] = 32;
+                hdr[156] = 48; wS(157,100,''); wS(257,6,'ustar'); wS(263,2,'00'); wS(265,32,''); wS(297,32,''); wO(329,8,0); wO(337,8,0); wS(345,155,pfx);
+                var chk = 0; for (var i = 0; i < BLOCK; i++) chk += hdr[i];
+                var cv = chk.toString(8); while (cv.length < 6) cv = '0' + cv; wS(148,8,cv+'\0 ');
+                return hdr;
+              }
+
+              for (var i = 0; i < codeEntries.length; i++) {
+                var ce = codeEntries[i];
+                var buf = await ce.file.arrayBuffer();
+                var data = new Uint8Array(buf);
+                await wtr.write(buildHdr(ce.path, data.length));
+                if (data.length > 0) { var padded = Math.ceil(data.length / BLOCK) * BLOCK; var blk = new Uint8Array(padded); blk.set(data); await wtr.write(blk); }
+                if ((i + 1) % 50 === 0 || i === codeEntries.length - 1)
+                  if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i+1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files…</div>';
+              }
+              await wtr.write(new Uint8Array(BLOCK * 2));
+              await wtr.close();
+              await collecting;
+
+              var blob = new Blob(chunks, { type: 'application/gzip' });
+              var sizeMB = (blob.size / 1048576).toFixed(1);
+              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + kept.toLocaleString() + ' files)…</div>';
+              var resp = await fetch('/api/upload-tarball', { method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body: blob });
+              var d = await resp.json();
+              if (d && d.tmp_path) { finish(d.tmp_path); }
+              else { showBannerToast((d && d.error) ? d.error : 'Upload failed', true); if (btn) btn.disabled = false; }
+            } catch (err) {
+              showBannerToast('Upload failed: ' + String(err), true);
+              if (btn) btn.disabled = false;
+            }
+          }).catch(function(err) {
+            showBannerToast('Could not read folder: ' + String(err), true);
+            if (btn) btn.disabled = false;
+          });
+        });
+      }
+      setupPathDropZone();
       if (browseCoverage) {
         browseCoverage.addEventListener("click", function () {
           pickDirectory(coverageInput || pathInput, "coverage");
@@ -12936,34 +13109,30 @@ pytest --cov --cov-report=xml
     }
     if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fixArtifactHintSpacing);}else{fixArtifactHintSpacing();}
   }());
-  // Server ping — polls /healthz every 30 s and shows round-trip latency in the nav pill.
   (function(){
+    var dot=document.getElementById('status-dot');
     var pingEl=document.getElementById('server-ping-ms');
     var tipEl=document.getElementById('server-tip-ping');
+    var fm=document.getElementById('footer-mode');
+    function setDotColor(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}
     function doPing(){
       var t0=performance.now();
       fetch('/healthz',{cache:'no-store'})
-        .then(function(){
-          var ms=Math.round(performance.now()-t0);
-          if(pingEl)pingEl.textContent=ms+'ms';
-          if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';
-        })
-        .catch(function(){
-          if(pingEl)pingEl.textContent='';
-          if(tipEl)tipEl.textContent='';
-        });
+        .then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDotColor(ms);})
+        .catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});
     }
     doPing();
-    setInterval(doPing,30000);
+    setInterval(doPing,5000);
+    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='Mode: '+(isServer?'Network Server':'Local');}
   })();
   </script>
   <footer class="site-footer">
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: {% if server_mode %}Network Server{% else %}Local{% endif %}</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
-    &nbsp;·&nbsp; {% if server_mode %}Deployment: Network Server{% else %}Deployment: Local{% endif %}
   </footer>
 </body>
 </html>
@@ -13225,14 +13394,16 @@ struct IndexTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          {% if server_mode %}
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running in server mode — accessible on your LAN.<br>Use Ctrl+C in the terminal to stop.</div>
-          {% else %}
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running locally — only accessible from this machine.<br>Press Ctrl+C in the terminal to stop.</div>
-          {% endif %}
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">{% if server_mode %}Server{% else %}Local{% endif %}</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            {% if server_mode %}OxideSLOC is running in server mode — accessible on your LAN.{% else %}OxideSLOC is running locally — only accessible from this machine.{% endif %}
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -13448,6 +13619,7 @@ struct IndexTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -13711,6 +13883,7 @@ struct IndexTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -13888,7 +14061,17 @@ struct SplashTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
+        </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
         </button>
@@ -14015,6 +14198,7 @@ struct SplashTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -14162,6 +14346,7 @@ struct SplashTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -14483,12 +14668,12 @@ struct ScanSetupTemplate {
         </div>
         <div class="server-status-wrap" id="server-status-wrap">
           <div class="nav-pill server-online-pill" id="server-status-pill">
-            <span class="status-dot"></span>
-            <span id="server-status-label">Running</span>
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
             <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
           </div>
           <div class="server-status-tip">
-            OxideSLOC is running — press Ctrl+C in the terminal to stop.<br>
+            OxideSLOC is running — accessible on your network.
             <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
           </div>
         </div>
@@ -14512,9 +14697,15 @@ struct ScanSetupTemplate {
           <p class="hero-subtitle">Your HTML, PDF, and JSON artifacts are now saved. Use the quick actions below to view, download, or copy the saved paths for sharing outside oxide-sloc.</p>
         </div>
         <div class="hero-quick-actions">
+          {% if server_mode %}
+          <button type="button" class="copy-button secondary" disabled title="Output folder is on the server — path is not meaningful for remote users" style="opacity:0.45;cursor:not-allowed;">Copy output folder</button>
+          {% else %}
           <button type="button" class="copy-button secondary" data-copy-value="{{ output_dir }}">Copy output folder</button>
+          {% endif %}
           <button type="button" class="copy-button secondary" data-copy-value="{{ run_id }}">Copy run ID</button>
+          {% if !server_mode %}
           <button type="button" class="copy-button secondary open-path-btn open-folder-button" data-folder="{{ output_dir }}">Open output folder</button>
+          {% endif %}
         </div>
       </div>
 
@@ -15050,11 +15241,39 @@ struct ScanSetupTemplate {
         button.addEventListener('click', function () {
           var value = button.getAttribute('data-copy-value') || '';
           if (!value) return;
+          var originalText = button.textContent;
+          function flashSuccess() {
+            button.textContent = 'Copied!';
+            setTimeout(function () { button.textContent = originalText; }, 1800);
+          }
+          function flashFail() {
+            button.textContent = 'Copy failed';
+            setTimeout(function () { button.textContent = originalText; }, 2000);
+          }
           if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(value).catch(function () {});
+            navigator.clipboard.writeText(value).then(flashSuccess, function () {
+              fallbackCopy(value, flashSuccess, flashFail);
+            });
+          } else {
+            fallbackCopy(value, flashSuccess, flashFail);
           }
         });
       });
+      function fallbackCopy(text, onSuccess, onFail) {
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.top = '-9999px';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          var ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          if (ok) { onSuccess(); } else { onFail(); }
+        } catch (e) { onFail(); }
+      }
 
       Array.prototype.slice.call(document.querySelectorAll('.open-folder-button')).forEach(function (btn) {
         btn.addEventListener('click', function () {
@@ -15503,6 +15722,7 @@ struct ScanSetupTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -15570,16 +15790,20 @@ struct ScanSetupTemplate {
   </script>
   {% endif %}
   <script nonce="{{ csp_nonce }}">(function(){
+    var dot=document.getElementById('status-dot');
     var pingEl=document.getElementById('server-ping-ms');
     var tipEl=document.getElementById('server-tip-ping');
+    var fm=document.getElementById('footer-mode');
+    function setDotColor(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}
     function doPing(){
       var t0=performance.now();
       fetch('/healthz',{cache:'no-store'})
-        .then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';})
-        .catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';});
+        .then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDotColor(ms);})
+        .catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});
     }
     doPing();
-    setInterval(doPing,30000);
+    setInterval(doPing,5000);
+    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
@@ -15675,6 +15899,7 @@ struct ResultTemplate {
     csp_nonce: String,
     /// Whether Confluence integration is configured — shows Post button when true.
     confluence_configured: bool,
+    server_mode: bool,
     /// Header/footer identification banner, mirrored from the HTML/PDF report.
     report_header_footer: Option<String>,
 }
@@ -15785,9 +16010,16 @@ struct ResultTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -15903,6 +16135,7 @@ struct ResultTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -15963,6 +16196,7 @@ struct ResultTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -16077,9 +16311,16 @@ struct ScanWaitTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -16167,6 +16408,7 @@ struct ScanWaitTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -16293,9 +16535,16 @@ struct ErrorTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -16381,6 +16630,7 @@ struct ErrorTemplate {
     });
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -16589,9 +16839,16 @@ struct RelocateScanTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -16770,6 +17027,7 @@ struct RelocateScanTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -17073,6 +17331,7 @@ struct RelocateScanTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -17292,9 +17551,16 @@ struct HistoryTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -17457,6 +17723,7 @@ struct HistoryTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -17829,6 +18096,7 @@ struct HistoryTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -18113,9 +18381,16 @@ struct CompareSelectTemplate {
             <a href="/webhook-setup"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
           </div>
         </div>
-        <div class="server-status-wrap">
-          <div class="nav-pill server-online-pill"><span class="status-dot"></span>Online</div>
-          <div class="server-status-tip">OxideSLOC is running as a local server in your terminal.<br>Close the terminal window to stop the server.</div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running — accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
         </div>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -18429,6 +18704,7 @@ struct CompareSelectTemplate {
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -19051,6 +19327,7 @@ struct CompareSelectTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -20485,6 +20762,7 @@ ok</div>
     oxide-sloc v{{ version }} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
