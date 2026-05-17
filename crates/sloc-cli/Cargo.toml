@@ -18,7 +18,7 @@ name = "oxide-sloc"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["native-dialog"]
 native-dialog = ["sloc-web/native-dialog"]
 
 [dependencies]
