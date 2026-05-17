@@ -162,6 +162,35 @@ fn build_semantic_chart_json(run: &AnalysisRun) -> String {
     format!("[{}]", entries.join(","))
 }
 
+fn build_file_size_histogram_json(run: &AnalysisRun) -> String {
+    // Buckets: Tiny <50, Small 50-199, Medium 200-499, Large 500-999, Huge >=1000
+    let labels = [
+        ("Tiny\n(<50)", 0u64, 49u64),
+        ("Small\n(50–199)", 50, 199),
+        ("Medium\n(200–499)", 200, 499),
+        ("Large\n(500–999)", 500, 999),
+        ("Huge\n(≥1000)", 1000, u64::MAX),
+    ];
+    let mut counts = [0u64; 5];
+    for f in &run.per_file_records {
+        let cl = f.effective_counts.code_lines;
+        for (i, &(_, lo, hi)) in labels.iter().enumerate() {
+            if cl >= lo && cl <= hi {
+                counts[i] += 1;
+                break;
+            }
+        }
+    }
+    let entries: Vec<String> = labels
+        .iter()
+        .zip(counts.iter())
+        .map(|((label, _, _), count)| {
+            format!(r#"{{"label":"{}","count":{}}}"#, json_escape(label), count)
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
 // ── Coverage / density helpers ────────────────────────────────────────────────
 
 // ratio/percentage display, precision loss acceptable
@@ -273,6 +302,7 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         submodule_chart_json: build_submodule_chart_json(run),
         scatter_chart_json: build_scatter_chart_json(run),
         semantic_chart_json: build_semantic_chart_json(run),
+        file_size_histogram_json: build_file_size_histogram_json(run),
         has_submodule_data: !run.submodule_summaries.is_empty(),
         has_semantic_data: run
             .totals_by_language
@@ -460,12 +490,130 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Locate the `wkhtmltopdf` binary on Linux and Windows.
+///
+/// Search order:
+/// 1. `wkhtmltopdf` / `wkhtmltopdf.exe` anywhere in `$PATH` (covers Linux packages and
+///    Windows installs that add the bin dir to the system PATH).
+/// 2. Windows-only: standard MSI install locations under `Program Files` and
+///    `Program Files (x86)`.
+/// 3. Linux-only: absolute paths that package managers commonly use but that may not be
+///    on the service account's `$PATH`.
+fn discover_wkhtmltopdf() -> Option<PathBuf> {
+    if let Some(p) = which_in_path("wkhtmltopdf") {
+        return Some(p);
+    }
+
+    #[cfg(windows)]
+    {
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(base) = std::env::var(var) {
+                let candidate = PathBuf::from(base)
+                    .join("wkhtmltopdf")
+                    .join("bin")
+                    .join("wkhtmltopdf.exe");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    for p in [
+        "/usr/bin/wkhtmltopdf",
+        "/usr/local/bin/wkhtmltopdf",
+        "/opt/wkhtmltopdf/bin/wkhtmltopdf",
+        "/snap/bin/wkhtmltopdf",
+    ] {
+        let candidate = PathBuf::from(p);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// Generate a PDF using `wkhtmltopdf` when no Chromium-based browser is available.
+///
+/// Works on both Linux and Windows:
+/// - Linux: install via `dnf install wkhtmltopdf` (RHEL/CentOS) or `apt install wkhtmltopdf`
+/// - Windows: install the MSI from <https://wkhtmltopdf.org/downloads.html>; the installer
+///   adds `wkhtmltopdf.exe` to `Program Files\wkhtmltopdf\bin\` which is checked automatically.
+fn write_pdf_via_wkhtmltopdf(html_path: &Path, pdf_path: &Path) -> Result<()> {
+    eprintln!("[oxide-sloc][pdf] trying wkhtmltopdf fallback");
+
+    let exe = discover_wkhtmltopdf().context(
+        "wkhtmltopdf not found. \
+         Linux: install via 'dnf install wkhtmltopdf' or 'apt install wkhtmltopdf'. \
+         Windows: install the MSI from https://wkhtmltopdf.org/downloads.html. \
+         Alternatively, set SLOC_BROWSER to a Chromium-based browser executable.",
+    )?;
+    eprintln!("[oxide-sloc][pdf] wkhtmltopdf = {}", exe.display());
+
+    // Strip the extended-length prefix on Windows (\\?\) so wkhtmltopdf can parse the path.
+    let html_normalized = PathBuf::from(
+        html_path
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string(),
+    );
+    // file_url() handles Windows drive letters (C:\ → /C:/) and encodes special chars.
+    let html_url = file_url(&html_normalized);
+    eprintln!("[oxide-sloc][pdf] wkhtmltopdf url = {html_url}");
+
+    let pdf_str = pdf_path
+        .to_str()
+        .context("PDF output path contains non-UTF-8 characters")?;
+
+    let output = std::process::Command::new(&exe)
+        .args([
+            "--enable-javascript",
+            "--javascript-delay",
+            "2000",
+            "--quiet",
+            "--orientation",
+            "Landscape",
+            "--page-size",
+            "A4",
+            "--margin-top",
+            "9",
+            "--margin-bottom",
+            "9",
+            "--margin-left",
+            "13",
+            "--margin-right",
+            "13",
+            "--print-media-type",
+            &html_url,
+            pdf_str,
+        ])
+        .output()
+        .with_context(|| format!("failed to launch wkhtmltopdf at {}", exe.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("wkhtmltopdf exited with {}: {stderr}", output.status);
+    }
+
+    if !pdf_path.exists() {
+        anyhow::bail!("wkhtmltopdf exited successfully but {pdf_path:?} was not created");
+    }
+
+    eprintln!("[oxide-sloc][pdf] wkhtmltopdf wrote {}", pdf_path.display());
+    Ok(())
+}
+
 /// Launch a headless Chromium-based browser to print `html_path` as a PDF to `pdf_path`.
+///
+/// Tries CDP (headless Chrome) first; falls back to `wkhtmltopdf` when no Chromium-based
+/// browser is found on the server.
 ///
 /// # Errors
 ///
-/// Returns an error if no supported browser is found, the browser process fails to start,
-/// or the PDF file is not produced within the timeout.
+/// Returns an error if no PDF tool (Chromium or wkhtmltopdf) is available, the tool fails
+/// to start, or the PDF file is not produced within the timeout.
 pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
     eprintln!("[oxide-sloc][pdf] starting");
 
@@ -489,7 +637,20 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
         })?;
     }
 
-    write_pdf_via_cdp(&absolute_html, &absolute_pdf)?;
+    match write_pdf_via_cdp(&absolute_html, &absolute_pdf) {
+        Ok(()) => {}
+        Err(cdp_err) => {
+            eprintln!("[oxide-sloc][pdf] CDP failed ({cdp_err:#}), trying wkhtmltopdf fallback");
+            write_pdf_via_wkhtmltopdf(&absolute_html, &absolute_pdf).with_context(|| {
+                format!(
+                    "PDF generation failed via both CDP ({cdp_err:#}) and wkhtmltopdf. \
+                     Install a Chromium-based browser (Chrome, Edge, Brave) or wkhtmltopdf \
+                     on the server, or set SLOC_BROWSER to the browser executable path."
+                )
+            })?;
+        }
+    }
+
     eprintln!("[oxide-sloc][pdf] done");
     Ok(())
 }
@@ -1913,6 +2074,16 @@ struct WarningOpportunityRow {
             <div id="density-chart" class="chart-container" style="position:relative;min-height:150px;"><canvas id="canvas-density"></canvas></div>
           </div>
         </section>
+
+        <section class="panel stack chart-section">
+          <div>
+            <div class="toolbar">
+              <div class="toolbar-left"><h2>File Size Distribution</h2></div>
+            </div>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Number of files in each SLOC bucket — a quick view of whether the codebase favours small focused modules or large files.</p>
+            <div id="filesize-chart" class="chart-container" style="position:relative;min-height:150px;"><canvas id="canvas-filesize"></canvas></div>
+          </div>
+        </section>
       </div>
 
       <!-- ── Tests & Coverage ──────────────────────────────────────────── -->
@@ -2797,6 +2968,7 @@ struct WarningOpportunityRow {
       var SUB_D = {{ submodule_chart_json|safe }};
       var SCAT_D = {{ scatter_chart_json|safe }};
       var SEM_D = {{ semantic_chart_json|safe }};
+      var HIST_D = {{ file_size_histogram_json|safe }};
       if (!D || !D.length) return;
 
       var PALETTE = ['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030',
@@ -3353,6 +3525,49 @@ struct WarningOpportunityRow {
         ALL_CHARTS.push(densChart);
       })();
 
+      // ── File Size Distribution histogram ──────────────────────────────────────
+      (function() {
+        var canvas = document.getElementById('canvas-filesize');
+        if (!canvas || !HIST_D || !HIST_D.length) return;
+        var labels = HIST_D.map(function(d){return d.label.replace(/\\n/g,'\n');});
+        var counts = HIST_D.map(function(d){return d.count||0;});
+        var total = counts.reduce(function(a,b){return a+b;},0);
+        var c = clr();
+        var fsChart = new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [{ label: 'Files',
+              data: counts,
+              backgroundColor: ['#2A6846','#4472C4','#C45C10','#D4A017','#B23030'],
+              borderRadius: 6
+            }]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            animation: { duration: 500, easing: 'easeOutQuart' },
+            scales: {
+              x: { grid: { display: false }, ticks: { color: c.text, font: { size: 11 } } },
+              y: { beginAtZero: true,
+                   grid: { color: c.grid },
+                   ticks: { color: c.text, precision: 0 },
+                   title: { display: true, text: 'File Count', color: c.text } }
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: {
+                label: function(ctx) {
+                  var n = ctx.parsed.y;
+                  var pct = total > 0 ? Math.round(n/total*1000)/10 : 0;
+                  return ['  Files: '+n, '  Share: '+pct+'%'];
+                }
+              }}
+            }
+          }
+        });
+        ALL_CHARTS.push(fsChart);
+      })();
+
       // ── Dark mode sync ────────────────────────────────────────────────────────
       document.querySelectorAll('[data-theme-toggle]').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -3669,6 +3884,7 @@ struct ReportTemplate<'a> {
     submodule_chart_json: String,
     scatter_chart_json: String,
     semantic_chart_json: String,
+    file_size_histogram_json: String,
     has_submodule_data: bool,
     has_semantic_data: bool,
     has_coverage_data: bool,
