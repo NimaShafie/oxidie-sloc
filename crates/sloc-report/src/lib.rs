@@ -523,6 +523,17 @@ fn discover_browser() -> Option<PathBuf> {
         }
     }
 
+    // Absolute path fallbacks for Linux servers where the browser may not be
+    // in $PATH (e.g. installed via snap, flatpak, or a minimal systemd service env).
+    #[cfg(not(windows))]
+    {
+        for candidate in linux_browser_candidates() {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
 }
 
@@ -557,6 +568,31 @@ fn windows_browser_candidates() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+#[cfg(not(windows))]
+fn linux_browser_candidates() -> Vec<PathBuf> {
+    vec![
+        // snap (Ubuntu, common on servers)
+        PathBuf::from("/snap/bin/chromium"),
+        PathBuf::from("/snap/bin/chromium-browser"),
+        // standard apt/dnf paths
+        PathBuf::from("/usr/bin/chromium"),
+        PathBuf::from("/usr/bin/chromium-browser"),
+        PathBuf::from("/usr/bin/google-chrome"),
+        PathBuf::from("/usr/bin/google-chrome-stable"),
+        PathBuf::from("/usr/bin/microsoft-edge"),
+        PathBuf::from("/usr/bin/microsoft-edge-stable"),
+        PathBuf::from("/usr/bin/brave-browser"),
+        PathBuf::from("/usr/bin/brave-browser-stable"),
+        // local installs
+        PathBuf::from("/usr/local/bin/chromium"),
+        PathBuf::from("/usr/local/bin/chromium-browser"),
+        PathBuf::from("/usr/local/bin/google-chrome"),
+        // flatpak wrapper scripts
+        PathBuf::from("/var/lib/flatpak/exports/bin/org.chromium.Chromium"),
+        PathBuf::from("/usr/share/flatpak/exports/bin/org.chromium.Chromium"),
+    ]
 }
 
 fn which_in_path(exe: &str) -> Option<PathBuf> {
