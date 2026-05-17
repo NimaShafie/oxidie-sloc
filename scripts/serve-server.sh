@@ -289,8 +289,12 @@ print_banner() {
             printf '\n'
         fi
         printf '  CLI test:\n'
-        printf '    curl -H "Authorization: Bearer %s" http://%s:%s/healthz\n' \
-               "${SLOC_API_KEY:-<no-key>}" "$first_ip" "$SLOC_PORT"
+        if [[ -n "${SLOC_API_KEY:-}" ]]; then
+            printf '    curl -H "Authorization: Bearer %s" http://%s:%s/healthz\n' \
+                   "$SLOC_API_KEY" "$first_ip" "$SLOC_PORT"
+        else
+            printf '    curl http://%s:%s/healthz\n' "$first_ip" "$SLOC_PORT"
+        fi
     fi
     printf '\n'
 

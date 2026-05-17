@@ -3071,34 +3071,40 @@ struct WarningOpportunityRow {
         if (!el || !SUB_D || !SUB_D.length) return;
         var FONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-        function px(n){return Math.round(n);}
         var data = SUB_D.slice().sort(function(a,b){return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));}).slice(0,15);
         var maxT = Math.max.apply(null, data.map(function(d){return (d.code||0)+(d.comment||0)+(d.blank||0);})) || 1;
-        // Scale bar height so few-submodule repos render at comparable height to Submodule Breakdown.
-        var rHb = Math.max(32, Math.min(72, Math.round(240 / Math.max(data.length, 1))));
-        var bH  = Math.round(rHb * 0.62);
-        var LW=90, BW=900, legH=28, topPad=8;
-        var SH = data.length * rHb + legH + topPad;
-        var svgW = LW + BW + 42;
-        var s = '<svg viewBox="0 0 '+svgW+' '+SH+'" width="100%" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
+        // Match Breakdown chart height so both panels grow at the same rate.
+        var wrapH = Math.max(150, Math.min(540, data.length * 25 + 36));
+        var bH = Math.max(18, Math.min(62, Math.round((wrapH - 38) / data.length * 0.72)));
+        var LW = 84;
+        el.style.minHeight = wrapH + 'px';
+        el.style.display = 'flex';
+        el.style.flexDirection = 'column';
+        el.style.justifyContent = 'center';
+        var s = '<div style="width:100%;font-family:'+FONT+';padding:4px 0;">';
         data.forEach(function(d,i){
           var tot2 = (d.code||0)+(d.comment||0)+(d.blank||0);
-          var cW = (d.code||0)/maxT*BW, cmW = (d.comment||0)/maxT*BW, blW = (d.blank||0)/maxT*BW;
-          var y = topPad + i*rHb, x = LW;
-          var pct = Math.round(tot2/maxT*100);
+          var pct = Math.round(tot2/maxT*1000)/10;
           var name = d.name.length > 12 ? d.name.slice(0,11)+'…' : d.name;
-          s += '<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(name)+'</text>';
-          if(cW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Code" data-ttv="'+fmt(d.code||0)+' lines ('+pct+'% of largest)" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>'; x+=cW;
-          if(cmW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Comments" data-ttv="'+fmt(d.comment||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>'; x+=cmW;
-          if(blW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Blank" data-ttv="'+fmt(d.blank||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-          var xEnd = px(LW + tot2/maxT*BW);
-          s += '<text x="'+(xEnd+4)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(tot2)+'</text>';
+          var ttPct = Math.round(tot2/maxT*100);
+          s += '<div style="display:flex;align-items:center;margin-bottom:'+(i<data.length-1?'5':'0')+'px;">';
+          s += '<span style="width:'+LW+'px;flex-shrink:0;text-align:right;padding-right:7px;font-size:11px;color:#43342d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(d.name)+'">'+esc(name)+'</span>';
+          s += '<div style="flex:1;">';
+          s += '<div style="width:'+pct+'%;height:'+bH+'px;display:flex;border-radius:3px;overflow:hidden;min-width:2px;">';
+          if((d.code||0)>0) s += '<div style="flex:'+(d.code||0)+';background:'+OX+';" data-ttl="'+esc(d.name)+' — Code" data-ttv="'+fmt(d.code||0)+' lines ('+ttPct+'% of largest)"></div>';
+          if((d.comment||0)>0) s += '<div style="flex:'+(d.comment||0)+';background:'+GN+';" data-ttl="'+esc(d.name)+' — Comments" data-ttv="'+fmt(d.comment||0)+' lines"></div>';
+          if((d.blank||0)>0) s += '<div style="flex:'+(d.blank||0)+';background:'+GY+';" data-ttl="'+esc(d.name)+' — Blank" data-ttv="'+fmt(d.blank||0)+' lines"></div>';
+          s += '</div>';
+          s += '</div>';
+          s += '<span style="width:44px;flex-shrink:0;padding-left:5px;font-size:10px;color:#7b675b;font-variant-numeric:tabular-nums;">'+fmt(tot2)+'</span>';
+          s += '</div>';
         });
-        var ly = SH - legH + 6;
-        s += '<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
-        s += '<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/><text x="'+(LW+67)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>';
-        s += '<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/><text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blank</text>';
-        s += '</svg>';
+        s += '<div style="display:flex;align-items:center;gap:14px;margin-top:10px;padding-left:'+(LW+1)+'px;font-size:11px;font-weight:700;color:#43342d;">';
+        s += '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:9px;height:9px;background:'+OX+';border-radius:1px;flex-shrink:0;"></span>Code</span>';
+        s += '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:9px;height:9px;background:'+GN+';border-radius:1px;flex-shrink:0;"></span>Comments</span>';
+        s += '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:9px;height:9px;background:'+GY+';border-radius:1px;flex-shrink:0;"></span>Blank</span>';
+        s += '</div>';
+        s += '</div>';
         el.innerHTML = s;
       })();
 
