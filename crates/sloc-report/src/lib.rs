@@ -3077,9 +3077,9 @@ struct WarningOpportunityRow {
         // Scale bar height so few-submodule repos render at comparable height to Submodule Breakdown.
         var rHb = Math.max(32, Math.min(72, Math.round(240 / Math.max(data.length, 1))));
         var bH  = Math.round(rHb * 0.62);
-        var LW=90, BW=750, legH=28, topPad=8;
+        var LW=90, BW=900, legH=28, topPad=8;
         var SH = data.length * rHb + legH + topPad;
-        var svgW = LW + BW + 55;
+        var svgW = LW + BW + 42;
         var s = '<svg viewBox="0 0 '+svgW+' '+SH+'" width="100%" style="display:block;" xmlns="http://www.w3.org/2000/svg">';
         data.forEach(function(d,i){
           var tot2 = (d.code||0)+(d.comment||0)+(d.blank||0);
@@ -3091,7 +3091,8 @@ struct WarningOpportunityRow {
           if(cW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Code" data-ttv="'+fmt(d.code||0)+' lines ('+pct+'% of largest)" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>'; x+=cW;
           if(cmW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Comments" data-ttv="'+fmt(d.comment||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>'; x+=cmW;
           if(blW>0.5) s += '<rect class="rchit" data-ttl="'+esc(d.name)+' — Blank" data-ttv="'+fmt(d.blank||0)+' lines" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-          s += '<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(tot2)+'</text>';
+          var xEnd = px(LW + tot2/maxT*BW);
+          s += '<text x="'+(xEnd+4)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="#7b675b">'+fmt(tot2)+'</text>';
         });
         var ly = SH - legH + 6;
         s += '<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
