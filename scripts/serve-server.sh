@@ -48,6 +48,20 @@ for arg in "$@"; do
         --quiet) QUIET=true ;;
         --port) ;;            # next arg consumed below
         --port=*) SLOC_PORT="${arg#--port=}" ;;
+        --help|-h)
+            printf 'Usage: bash scripts/serve-server.sh [options]\n\n'
+            printf 'Options:\n'
+            printf '  --port <n>       Bind on port n (default: 4317)\n'
+            printf '  --open-firewall  Open port %s/tcp via firewall-cmd / ufw / iptables\n' "$SLOC_PORT"
+            printf '  --with-auth      Generate a session API key (all endpoints require it)\n'
+            printf '  --no-auth        Explicit no-auth mode (default)\n'
+            printf '  --quiet          Suppress startup banner\n'
+            printf '  --help           Show this help\n\n'
+            printf 'Environment:\n'
+            printf '  SLOC_API_KEY=<key>  Use a pre-set API key instead of generating one\n\n'
+            printf 'For persistent install (survives reboots): bash scripts/install-systemd.sh\n'
+            exit 0
+            ;;
         *) ;;
     esac
 done
@@ -107,7 +121,13 @@ FIREWALL_FIX=""
 maybe_open_firewall() {
     [[ "$PLATFORM" != linux ]] && return
     [[ "$OPEN_FIREWALL" != true ]] && return
-    [[ -z "$FIREWALL_FIX" ]] && return
+    if [[ -z "$FIREWALL_FIX" ]]; then
+        if [[ "$FIREWALL_STATUS" == "no managed firewall detected" ]]; then
+            printf '  --open-firewall: No supported firewall tool found (firewall-cmd, ufw, iptables).\n'
+            printf '  Open port %s/tcp manually.\n' "$SLOC_PORT"
+        fi
+        return
+    fi
     printf '  Opening port %s/tcp via sudo...\n' "$SLOC_PORT"
     if sudo -n true 2>/dev/null; then
         eval "$FIREWALL_FIX"
@@ -141,6 +161,14 @@ check_firewall() {
         else
             FIREWALL_STATUS="BLOCKED (ufw active, port not permitted)"
             FIREWALL_FIX="sudo ufw allow ${SLOC_PORT}/tcp"
+        fi
+    elif command -v iptables &>/dev/null; then
+        if iptables -C INPUT -p tcp --dport "${SLOC_PORT}" -j ACCEPT &>/dev/null 2>&1 \
+           || sudo -n iptables -C INPUT -p tcp --dport "${SLOC_PORT}" -j ACCEPT &>/dev/null 2>&1; then
+            FIREWALL_STATUS="open (iptables)"
+        else
+            FIREWALL_STATUS="iptables present — port ${SLOC_PORT}/tcp not explicitly allowed"
+            FIREWALL_FIX="sudo iptables -A INPUT -p tcp --dport ${SLOC_PORT} -j ACCEPT"
         fi
     else
         FIREWALL_STATUS="no managed firewall detected"

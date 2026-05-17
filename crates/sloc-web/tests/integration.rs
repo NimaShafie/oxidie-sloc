@@ -82,6 +82,33 @@ async fn healthz_returns_ok() {
 }
 
 #[tokio::test]
+async fn api_health_alias_returns_ok() {
+    let (status, _, body) = get("/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.trim(), "ok");
+}
+
+#[tokio::test]
+async fn api_version_returns_json() {
+    let (status, headers, body) = get("/api/version").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("application/json"),
+        "expected JSON content-type, got: {ct}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(parsed["name"], "oxide-sloc");
+    assert!(
+        parsed["version"].is_string(),
+        "version field must be a string"
+    );
+}
+
+#[tokio::test]
 async fn badge_total_sloc_returns_svg() {
     let (status, headers, body) = get("/badge/total_sloc").await;
     assert_eq!(status, StatusCode::OK);

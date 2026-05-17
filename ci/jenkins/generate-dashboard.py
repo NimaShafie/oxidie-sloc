@@ -570,7 +570,7 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     if top_files:
         _file_rows = "\n".join(
             f"<tr>"
-            f"<td class='trunc' title='{html.escape(f[\"path\"])}'>{html.escape(f['path'])}</td>"
+            f'<td class="trunc" title="{html.escape(f["path"])}">{html.escape(f["path"])}</td>'
             f"<td>{html.escape(f['language'])}</td>"
             f"<td class='num'>{fmt(f['code_lines'])}</td>"
             f"</tr>"
