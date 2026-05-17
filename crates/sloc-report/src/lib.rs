@@ -165,11 +165,11 @@ fn build_semantic_chart_json(run: &AnalysisRun) -> String {
 fn build_file_size_histogram_json(run: &AnalysisRun) -> String {
     // Buckets: Tiny <50, Small 50-199, Medium 200-499, Large 500-999, Huge >=1000
     let labels = [
-        ("Tiny\n(<50)", 0u64, 49u64),
-        ("Small\n(50–199)", 50, 199),
-        ("Medium\n(200–499)", 200, 499),
-        ("Large\n(500–999)", 500, 999),
-        ("Huge\n(≥1000)", 1000, u64::MAX),
+        ("Tiny (<50)", 0u64, 49u64),
+        ("Small (50-199)", 50, 199),
+        ("Medium (200-499)", 200, 499),
+        ("Large (500-999)", 500, 999),
+        ("Huge (>=1000)", 1000, u64::MAX),
     ];
     let mut counts = [0u64; 5];
     for f in &run.per_file_records {
@@ -3529,7 +3529,7 @@ struct WarningOpportunityRow {
       (function() {
         var canvas = document.getElementById('canvas-filesize');
         if (!canvas || !HIST_D || !HIST_D.length) return;
-        var labels = HIST_D.map(function(d){return d.label.replace(/\\n/g,'\n');});
+        var labels = HIST_D.map(function(d){return d.label;});
         var counts = HIST_D.map(function(d){return d.count||0;});
         var total = counts.reduce(function(a,b){return a+b;},0);
         var c = clr();
@@ -3854,6 +3854,40 @@ struct WarningOpportunityRow {
       document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});
     }
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
+  <script>
+  (function(){
+    var params=new URLSearchParams(location.search);
+    if(params.get('autoprint')!=='1')return;
+    var overlay=document.createElement('div');
+    overlay.id='autoprint-overlay';
+    overlay.style.cssText='position:fixed;inset:0;z-index:99999;background:var(--bg,#fff);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
+    overlay.innerHTML='<div style="font-size:20px;font-weight:800;color:var(--text,#1a1a1a);">Preparing PDF…</div>'
+      +'<div style="font-size:13px;color:var(--muted,#666);">Use your browser’s print dialog → <strong>Save as PDF</strong>.</div>'
+      +'<div style="width:200px;height:4px;border-radius:2px;background:rgba(0,0,0,0.1);overflow:hidden;">'
+      +'<div id="autoprint-bar" style="height:100%;width:0%;background:#e07b3a;transition:width 1.5s ease;border-radius:2px;"></div></div>';
+    document.body.appendChild(overlay);
+    setTimeout(function(){var b=document.getElementById('autoprint-bar');if(b)b.style.width='80%';},50);
+    var deadline=Date.now()+12000;
+    function tryPrint(){
+      if(window.oxSlocChartsReady||Date.now()>deadline){
+        var b=document.getElementById('autoprint-bar');
+        if(b)b.style.width='100%';
+        setTimeout(function(){
+          overlay.style.display='none';
+          window.print();
+        },350);
+      } else {
+        setTimeout(tryPrint,150);
+      }
+    }
+    if(document.readyState==='loading'){
+      document.addEventListener('DOMContentLoaded',function(){setTimeout(tryPrint,250);});
+    } else {
+      setTimeout(tryPrint,250);
+    }
+    window.addEventListener('afterprint',function(){overlay.remove();});
   }());
   </script>
   <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
