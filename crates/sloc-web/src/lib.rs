@@ -5082,6 +5082,7 @@ async fn compare_select_handler(
         total_scans,
         watched_dirs,
         csp_nonce,
+        server_mode: state.server_mode,
     };
     Html(
         template
@@ -6208,9 +6209,10 @@ async fn trend_report_handler(
     let version = env!("CARGO_PKG_VERSION");
 
     // Build the watched-dirs bar HTML (outside the format! so braces don't need escaping).
-    // Hidden in Network Server mode — folder watching is a local desktop feature.
+    // Build the watched-dirs bar HTML. In Network Server mode show a locked notice instead
+    // of interactive controls — folder watching is managed by the host administrator.
     let watched_dirs_html: String = if state.server_mode {
-        String::new()
+        r#"<div class="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips"><span class="watched-none">Network Server mode — watched folder settings can only be modified by the host administrator.</span></div></div></div>"#.to_string()
     } else {
         let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
             r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
@@ -7316,7 +7318,7 @@ async fn trend_report_handler(
           var d=await resp.json();
           if(resp.ok){{
             status.style.background='#dcfce7';status.style.color='#166534';
-            status.textContent='Deleted '+d.deleted+' run'+(d.deleted===1?'':''s')+'older than '+days+' days. Refreshing…';
+            status.textContent='Deleted '+d.deleted+' run'+(d.deleted===1?'':'s')+' older than '+days+' days. Refreshing…';
             setTimeout(function(){{window.location.reload();}},1500);
           }}else{{
             status.style.background='#fee2e2';status.style.color='#991b1b';
@@ -7873,9 +7875,10 @@ async fn test_metrics_handler(
     let nonce = &csp_nonce;
     let version = env!("CARGO_PKG_VERSION");
 
-    // Hidden in Network Server mode — folder watching is a local desktop feature.
+    // Build the watched-dirs bar HTML. In Network Server mode show a locked notice instead
+    // of interactive controls — folder watching is managed by the host administrator.
     let watched_dirs_html: String = if state.server_mode {
-        String::new()
+        r#"<div class="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips"><span class="watched-none">Network Server mode — watched folder settings can only be modified by the host administrator.</span></div></div></div>"#.to_string()
     } else {
         let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
             r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
@@ -17624,6 +17627,9 @@ struct RelocateScanTemplate {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
         <span class="watched-label">Watched Folders</span>
         <div class="watched-chips">
+          {% if server_mode %}
+          <span class="watched-none">Network Server mode — watched folder settings can only be modified by the host administrator.</span>
+          {% else %}
           {% for dir in watched_dirs %}
           <span class="watched-chip">
             <span class="watched-chip-path" title="{{ dir }}">{{ dir }}</span>
@@ -17637,8 +17643,10 @@ struct RelocateScanTemplate {
           {% if watched_dirs.is_empty() %}
           <span class="watched-none">No folders watched — click Choose to add one</span>
           {% endif %}
+          {% endif %}
         </div>
       </div>
+      {% if !server_mode %}
       <div class="watched-bar-right">
         <button type="button" class="btn" id="add-watched-btn">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -17649,6 +17657,7 @@ struct RelocateScanTemplate {
           <button type="submit" class="btn">&#8635; Refresh</button>
         </form>
       </div>
+      {% endif %}
     </div>
     {% if total_scans > 0 %}
     <div class="summary-strip">
@@ -18324,6 +18333,9 @@ struct HistoryTemplate {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
         <span class="watched-label">Watched Folders</span>
         <div class="watched-chips">
+          {% if server_mode %}
+          <span class="watched-none">Network Server mode — watched folder settings can only be modified by the host administrator.</span>
+          {% else %}
           {% for dir in watched_dirs %}
           <span class="watched-chip">
             <span class="watched-chip-path" title="{{ dir }}">{{ dir }}</span>
@@ -18337,8 +18349,10 @@ struct HistoryTemplate {
           {% if watched_dirs.is_empty() %}
           <span class="watched-none">No folders watched — click Choose to add one</span>
           {% endif %}
+          {% endif %}
         </div>
       </div>
+      {% if !server_mode %}
       <div class="watched-bar-right">
         <button type="button" class="btn" id="add-watched-btn">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -18349,6 +18363,7 @@ struct HistoryTemplate {
           <button type="submit" class="btn">&#8635; Refresh</button>
         </form>
       </div>
+      {% endif %}
     </div>
     {% if total_scans > 0 %}
     <div class="summary-strip">
@@ -18853,6 +18868,7 @@ struct CompareSelectTemplate {
     total_scans: usize,
     watched_dirs: Vec<String>,
     csp_nonce: String,
+    server_mode: bool,
 }
 
 // ── CompareTemplate ────────────────────────────────────────────────────────────
