@@ -15,6 +15,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use tracing::info;
+
 use sloc_git::{
     clone_or_fetch, create_worktree, destroy_worktree, get_sha, parse_bitbucket_push,
     parse_github_push, parse_gitlab_push,
@@ -38,6 +40,8 @@ pub struct CreateScheduleRequest {
     pub kind: String,
     pub provider: Option<String>,
     pub interval_secs: Option<u64>,
+    /// Webhook HMAC secret. If omitted, a random secret is auto-generated.
+    pub webhook_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,25 +150,57 @@ async fn dispatch_hmac_webhook<F>(
     F: Fn(&[u8], &str, &str) -> bool,
 {
     let store = state.schedules.lock().await;
-    let matching: Vec<ScanSchedule> = store
-        .find_matching(&event.repo_url, &event.branch)
+    let candidates = store.find_matching(&event.repo_url, &event.branch);
+    let candidate_count = candidates.len();
+    let matching: Vec<ScanSchedule> = candidates
         .into_iter()
         .filter(|s| matches_hmac(s, body, sig, &verify))
         .cloned()
         .collect();
+    let valid_sig_count = matching.len();
     drop(store);
+    info!(
+        repo = %event.repo_url,
+        branch = %event.branch,
+        matched_schedules = candidate_count,
+        valid_signatures = valid_sig_count,
+        "inbound HMAC webhook received"
+    );
+    if candidate_count > 0 && valid_sig_count == 0 {
+        info!(
+            repo = %event.repo_url,
+            branch = %event.branch,
+            "webhook HMAC verification failed for all matching schedules — no scan triggered"
+        );
+    }
     spawn_scans(state, event, matching);
 }
 
 async fn dispatch_token_webhook(state: AppState, event: WebhookEvent, token: &str) {
     let store = state.schedules.lock().await;
-    let matching: Vec<ScanSchedule> = store
-        .find_matching(&event.repo_url, &event.branch)
+    let candidates = store.find_matching(&event.repo_url, &event.branch);
+    let candidate_count = candidates.len();
+    let matching: Vec<ScanSchedule> = candidates
         .into_iter()
         .filter(|s| matches_token(s, token))
         .cloned()
         .collect();
+    let valid_token_count = matching.len();
     drop(store);
+    info!(
+        repo = %event.repo_url,
+        branch = %event.branch,
+        matched_schedules = candidate_count,
+        valid_tokens = valid_token_count,
+        "inbound token webhook received"
+    );
+    if candidate_count > 0 && valid_token_count == 0 {
+        info!(
+            repo = %event.repo_url,
+            branch = %event.branch,
+            "webhook token verification failed for all matching schedules — no scan triggered"
+        );
+    }
     spawn_scans(state, event, matching);
 }
 
@@ -327,7 +363,13 @@ fn build_schedule(req: CreateScheduleRequest) -> ScanSchedule {
             Some("bitbucket") => ScanScheduleProvider::Bitbucket,
             _ => ScanScheduleProvider::Any,
         };
-        ScanSchedule::new_webhook(req.repo_url, req.branch, provider, req.label)
+        ScanSchedule::new_webhook(
+            req.repo_url,
+            req.branch,
+            provider,
+            req.label,
+            req.webhook_secret,
+        )
     }
 }
 

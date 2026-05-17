@@ -1404,6 +1404,7 @@ dependencies = [
  "sloc-report",
  "sloc-web",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]

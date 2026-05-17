@@ -877,6 +877,12 @@ CARGOEOF
                         }
                     }
 
+                    // e. Extract inline CSS/JS from the HTML report to companion files so
+                    //    it renders under Jenkins's default CSP (which blocks unsafe-inline).
+                    if (params.GENERATE_HTML) {
+                        sh "python3 ci/jenkins/extract-report-assets.py '${outDir}/report_${projectSlug}.html' || true"
+                    }
+
                     // f. Mixed-line policy matrix — spot-checks all four policies
                     for (def policy in ['code-only', 'code-and-comment', 'comment-only', 'separate-mixed-category']) {
                         withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
@@ -934,11 +940,15 @@ CARGOEOF
                     when { expression { params.WEBHOOK_URL?.trim() as Boolean } }
                     steps {
                         script {
-                            def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                            sh """
-                                '${env.BINARY}' send '${outDir}/result.json' \\
-                                    --webhook-url '${params.WEBHOOK_URL}'
-                            """
+                            try {
+                                def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+                                sh """
+                                    '${env.BINARY}' send '${outDir}/result_${env.SLOC_PROJECT ?: 'project'}.json' \\
+                                        --webhook-url '${params.WEBHOOK_URL}'
+                                """
+                            } catch (err) {
+                                unstable("Send webhook failed (delivery error, scan artifacts preserved): ${err.message}")
+                            }
                         }
                     }
                 }
@@ -951,14 +961,18 @@ CARGOEOF
                     }
                     steps {
                         script {
-                            def outDir  = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                            def recArgs = params.EMAIL_RECIPIENTS.tokenize(',')
-                                .collect { "--smtp-to '${it.trim()}'" }.join(' ')
-                            sh """
-                                '${env.BINARY}' send '${outDir}/result.json' \\
-                                    --smtp-from "\${SLOC_SMTP_USER}" \\
-                                    ${recArgs}
-                            """
+                            try {
+                                def outDir  = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+                                def recArgs = params.EMAIL_RECIPIENTS.tokenize(',')
+                                    .collect { "--smtp-to '${it.trim()}'" }.join(' ')
+                                sh """
+                                    '${env.BINARY}' send '${outDir}/result_${env.SLOC_PROJECT ?: 'project'}.json' \\
+                                        --smtp-from "\${SLOC_SMTP_USER}" \\
+                                        ${recArgs}
+                                """
+                            } catch (err) {
+                                unstable("Send email failed (delivery error, scan artifacts preserved): ${err.message}")
+                            }
                         }
                     }
                 }
@@ -1146,11 +1160,12 @@ PYEOF"""
                         .replace('${BUILD_NUMBER}', env.BUILD_NUMBER ?: '0')
 
                     def filesToPush = []
-                    if (params.ARTIFACT_PUSH_JSON)                           filesToPush << 'result.json'
-                    if (params.ARTIFACT_PUSH_CSV)                            filesToPush << 'report.csv'
-                    if (params.ARTIFACT_PUSH_XLSX)                           filesToPush << 'report.xlsx'
-                    if (params.ARTIFACT_PUSH_HTML && params.GENERATE_HTML)   filesToPush << 'report.html'
-                    if (params.ARTIFACT_PUSH_PDF  && params.GENERATE_PDF)    filesToPush << 'report.pdf'
+                    def proj = env.SLOC_PROJECT ?: 'project'
+                    if (params.ARTIFACT_PUSH_JSON)                           filesToPush << "result_${proj}.json"
+                    if (params.ARTIFACT_PUSH_CSV)                            filesToPush << "report_${proj}.csv"
+                    if (params.ARTIFACT_PUSH_XLSX)                           filesToPush << "report_${proj}.xlsx"
+                    if (params.ARTIFACT_PUSH_HTML && params.GENERATE_HTML)   filesToPush << "report_${proj}.html"
+                    if (params.ARTIFACT_PUSH_PDF  && params.GENERATE_PDF)    filesToPush << "report_${proj}.pdf"
 
                     if (filesToPush.isEmpty()) {
                         echo 'No artifact files selected for push — skipping.'
@@ -1245,7 +1260,7 @@ PYEOF"""
                     # Determine what was scanned as "current"
                     CURRENT_JSON="${OUT}/ref-scan.json"
                     if [ ! -f "${CURRENT_JSON}" ]; then
-                        CURRENT_JSON="${OUT}/result.json"
+                        CURRENT_JSON="${OUT}/result_${SLOC_PROJECT:-project}.json"
                     fi
                     if [ ! -f "${CURRENT_JSON}" ]; then
                         echo "No current scan JSON found — cannot compare."
