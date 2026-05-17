@@ -560,6 +560,19 @@ fn discover_browser() -> Option<PathBuf> {
                 return Some(candidate);
             }
         }
+
+        // Final fallback: ask the shell's `which` so we catch browsers installed
+        // in non-standard locations that weren't found via PATH or static paths.
+        if let Some(path) = which_subprocess(&[
+            "chromium-browser",
+            "chromium",
+            "google-chrome",
+            "google-chrome-stable",
+            "microsoft-edge",
+            "brave-browser",
+        ]) {
+            return Some(path);
+        }
     }
 
     None
@@ -613,6 +626,14 @@ fn linux_browser_candidates() -> Vec<PathBuf> {
         PathBuf::from("/usr/bin/microsoft-edge-stable"),
         PathBuf::from("/usr/bin/brave-browser"),
         PathBuf::from("/usr/bin/brave-browser-stable"),
+        // package-managed library locations (Ubuntu 20.04, Debian)
+        PathBuf::from("/usr/lib/chromium-browser/chromium-browser"),
+        PathBuf::from("/usr/lib/chromium/chromium"),
+        PathBuf::from("/usr/lib/chromium/chrome"),
+        // manual / opt installs
+        PathBuf::from("/opt/google/chrome/google-chrome"),
+        PathBuf::from("/opt/google/chrome-beta/google-chrome"),
+        PathBuf::from("/opt/google/chrome-unstable/google-chrome"),
         // local installs
         PathBuf::from("/usr/local/bin/chromium"),
         PathBuf::from("/usr/local/bin/chromium-browser"),
@@ -621,6 +642,24 @@ fn linux_browser_candidates() -> Vec<PathBuf> {
         PathBuf::from("/var/lib/flatpak/exports/bin/org.chromium.Chromium"),
         PathBuf::from("/usr/share/flatpak/exports/bin/org.chromium.Chromium"),
     ]
+}
+
+/// Ask the shell for a browser that may be in PATH but not in the hardcoded list above.
+/// Used as a last resort when all static-path checks have failed.
+#[cfg(not(windows))]
+fn which_subprocess(names: &[&str]) -> Option<PathBuf> {
+    for name in names {
+        if let Ok(out) = std::process::Command::new("which").arg(name).output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                let path = PathBuf::from(s.trim());
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn which_in_path(exe: &str) -> Option<PathBuf> {

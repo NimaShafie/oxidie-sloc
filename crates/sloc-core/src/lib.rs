@@ -247,6 +247,10 @@ pub struct AnalysisRun {
 
 fn run_git_in(dir: &Path, args: &[&str]) -> Option<String> {
     std::process::Command::new("git")
+        // Bypass git's safe-directory ownership check so that the web server
+        // (which may run as a different OS user than the repo owner) can still
+        // read git metadata from the scanned directory.
+        .args(["-c", "safe.directory=*"])
         .args(args)
         .current_dir(dir)
         .output()
