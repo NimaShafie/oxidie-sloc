@@ -14849,6 +14849,12 @@ struct ScanSetupTemplate {
     .action-card { padding: 12px 14px 14px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); display:flex; flex-direction:column; align-items:center; justify-content:center; }
     .action-card h3 { margin:0 0 10px; font-size: 16px; text-align:center; }
     .action-buttons { display:flex; flex-wrap:wrap; gap: 10px; justify-content:center; }
+    .run-mgmt-strip { display:flex; flex-wrap:wrap; gap:14px; align-items:stretch; margin-top:18px; }
+    .run-mgmt-card { flex:1; min-width:220px; padding:12px 16px; border-radius:14px; border:1px solid var(--line); background:var(--surface-2); display:flex; flex-direction:column; align-items:flex-start; gap:6px; }
+    .run-mgmt-card h3 { margin:0 0 4px; font-size:14px; font-weight:800; }
+    .run-mgmt-card .action-buttons { justify-content:flex-start; }
+    .run-mgmt-card .action-empty-note { font-size:11px; color:var(--muted); margin:0; }
+    body.dark-theme .run-mgmt-card { background:var(--surface-2); border-color:var(--line); }
     .button, .copy-button {
       display: inline-flex; align-items: center; justify-content: center; border-radius: 14px; border: 1px solid rgba(111, 144, 255, 0.30); padding: 11px 14px; text-decoration: none; color: white; background: linear-gradient(135deg, var(--accent), var(--accent-2)); font-weight: 800; font-size: 14px; box-shadow: 0 12px 24px rgba(73, 106, 255, 0.22); cursor: pointer;
     }
@@ -14960,6 +14966,7 @@ struct ScanSetupTemplate {
       .top-nav-inner, .two-col, .action-grid { grid-template-columns: 1fr; }
       .nav-project-slot, .nav-status { justify-content:flex-start; }
       .hero-top { flex-direction: column; }
+      .run-mgmt-strip { flex-direction: column; }
     }
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
@@ -15365,20 +15372,6 @@ struct ScanSetupTemplate {
             <p class="action-empty-note" style="margin-top:6px;">Download scan-config.json to replay this exact setup via the Scan Setup page.</p>
           </div>
         </div>
-        <div class="action-card">
-          <h3>Download bundle</h3>
-          <div class="action-buttons">
-            <a class="button secondary" href="/api/runs/{{ run_id }}/bundle" download>Download all artifacts</a>
-            <p class="action-empty-note" style="margin-top:6px;">Downloads a .tar.gz archive containing every artifact for this run (HTML, PDF, JSON, CSV, scan config).</p>
-          </div>
-        </div>
-        <div class="action-card" id="delete-run-card">
-          <h3>Delete run</h3>
-          <div class="action-buttons">
-            <button class="button" id="delete-run-btn" type="button" style="background:#b23030;border-color:#b23030;">Delete this run</button>
-            <p class="action-empty-note" style="margin-top:6px;">Permanently removes all artifacts for this run from disk. This action cannot be undone.</p>
-          </div>
-        </div>
         {% if confluence_configured %}
         <div class="action-card" id="confluenceCard">
           <h3>Confluence</h3>
@@ -15389,6 +15382,22 @@ struct ScanSetupTemplate {
           <p class="action-empty-note" style="margin-top:6px;">Create or update a Confluence page with this scan result, or copy wiki markup for manual paste.</p>
         </div>
         {% endif %}
+      </div>
+      <div class="run-mgmt-strip">
+        <div class="run-mgmt-card">
+          <h3>Download bundle</h3>
+          <div class="action-buttons">
+            <button class="button secondary" id="download-bundle-btn" type="button">Download all artifacts</button>
+          </div>
+          <p class="action-empty-note">Downloads a .tar.gz archive containing every artifact for this run (HTML, PDF, JSON, CSV, scan config).</p>
+        </div>
+        <div class="run-mgmt-card" id="delete-run-card">
+          <h3>Delete run</h3>
+          <div class="action-buttons">
+            <button class="button" id="delete-run-btn" type="button" style="background:#b23030;border-color:#b23030;">Delete this run</button>
+          </div>
+          <p class="action-empty-note">Permanently removes all artifacts for this run from disk. This action cannot be undone.</p>
+        </div>
       </div>
       {% if confluence_configured %}
       <div id="confluenceModal" style="display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.45);align-items:center;justify-content:center;">
@@ -16412,6 +16421,37 @@ struct ScanSetupTemplate {
     });
   })();
   </script>
+  <script nonce="{{ csp_nonce }}">(function(){
+    var bundleBtn = document.getElementById('download-bundle-btn');
+    if (bundleBtn) {
+      bundleBtn.addEventListener('click', function() {
+        bundleBtn.disabled = true;
+        var orig = bundleBtn.textContent;
+        bundleBtn.textContent = 'Preparing…';
+        fetch('/api/runs/{{ run_id }}/bundle')
+          .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.blob();
+          })
+          .then(function(blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'oxide-sloc-{{ run_id }}.tar.gz';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 5000);
+            bundleBtn.disabled = false;
+            bundleBtn.textContent = orig;
+          })
+          .catch(function(e) {
+            bundleBtn.disabled = false;
+            bundleBtn.textContent = orig;
+            alert('Bundle download failed: ' + String(e));
+          });
+      });
+    }
+  })();</script>
   <script nonce="{{ csp_nonce }}">(function(){
     var dot=document.getElementById('status-dot');
     var pingEl=document.getElementById('server-ping-ms');
