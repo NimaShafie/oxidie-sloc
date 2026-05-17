@@ -414,7 +414,7 @@ once.  The first build must run **without parameters** to register them.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 
-From this point on, all 40+ configuration parameters are visible in the build form.
+From this point on, all 39 configuration parameters are visible in the build form.
 
 ---
 
@@ -483,7 +483,11 @@ After a successful build, confirm each feature is wired correctly:
 ### Build description
 - The build list shows a description line like:
   ```
-  scan=src  code=12543  files=87  comments=1204  blank=987  tests=42 fail=0 err=0  coverage=74.2%
+  12,543 code · 1,204 cmts · 987 blank · 87 files | src
+  ```
+  With test results and coverage appended when enabled:
+  ```
+  12,543 code · 1,204 cmts · 987 blank · 87 files | src · 42/100 tests OK · 74.2% cov
   ```
   This confirms all metadata was correctly read from the build output.
 
