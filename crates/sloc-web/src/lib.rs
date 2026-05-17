@@ -7367,8 +7367,8 @@ async fn trend_report_handler(
     }})();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{version} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{version} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -8229,10 +8229,10 @@ async fn test_metrics_handler(
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{version} — local code analysis - metrics, history and reports &nbsp;·&nbsp;
-    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{version} — Mode: Server</em>
+    &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Server</em>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
@@ -10870,8 +10870,6 @@ struct SubmoduleRow {
             </div>
           </div>
           <div class="ws-divider"></div>
-          <div class="ws-stat" data-wb-tip="Localhost mode — all scans run on this machine against local file system paths."><span class="ws-label">Mode</span><span class="ws-value">Localhost</span></div>
-          <div class="ws-divider"></div>
           <div class="ws-stat ws-stat-clamp" data-wb-tip="Directory path of the project currently selected or most recently analyzed."><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
           <div class="ws-divider"></div>
           <div class="ws-stat ws-stat-output" data-wb-tip="Folder where scan artifacts — JSON, HTML, and PDF reports — are written after each completed scan.">
@@ -12555,6 +12553,24 @@ pytest --cov --cov-report=xml
                 var dot = name.lastIndexOf('.');
                 if (dot >= 0 && CODE_EXTS.has(name.slice(dot + 1).toLowerCase())) codeFiles.push(f);
               }
+              // Collect specific .git metadata files for server-side git detection.
+              // These have no source extension so they are excluded by the loop above,
+              // but the server needs them to read branch/commit/author without running git.
+              var gitMetaFiles = [];
+              for (var i = 0; i < files.length; i++) {
+                var f = files[i];
+                var rp = (f.webkitRelativePath || '').replace(/\\/g, '/');
+                var gitIdx = rp.indexOf('/.git/');
+                if (gitIdx < 0) continue;
+                var gitRel = rp.slice(gitIdx + 1);
+                if (gitRel === '.git/HEAD' || gitRel === '.git/packed-refs' ||
+                    gitRel === '.git/logs/HEAD' ||
+                    gitRel.startsWith('.git/refs/heads/') ||
+                    gitRel.startsWith('.git/refs/tags/')) {
+                  gitMetaFiles.push(f);
+                }
+              }
+              var uploadFiles = codeFiles.concat(gitMetaFiles);
               var total = files.length;
               var kept = codeFiles.length;
               if (kept === 0) {
@@ -12660,8 +12676,8 @@ pytest --cov --cov-report=xml
                       while (true) { var r = await reader.read(); if (r.done) break; chunks.push(r.value); }
                     })();
 
-                    for (var i = 0; i < codeFiles.length; i++) {
-                      var file = codeFiles[i];
+                    for (var i = 0; i < uploadFiles.length; i++) {
+                      var file = uploadFiles[i];
                       var path = file.webkitRelativePath || file.name;
                       var buf  = await file.arrayBuffer();
                       var data = new Uint8Array(buf);
@@ -12674,7 +12690,7 @@ pytest --cov --cov-report=xml
                         block.set(data);
                         await writer.write(block);
                       }
-                      if ((i + 1) % 50 === 0 || i === codeFiles.length - 1) {
+                      if ((i + 1) % 50 === 0 || i === uploadFiles.length - 1) {
                         if (previewPanel && targetInput === pathInput)
                           previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i + 1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files…</div>';
                       }
@@ -12713,7 +12729,7 @@ pytest --cov --cov-report=xml
                 // Used only on browsers that lack CompressionStream (pre-2023).
                 var BATCH = 200;
                 var batches = [];
-                for (var b = 0; b < kept; b += BATCH) batches.push(codeFiles.slice(b, b + BATCH));
+                for (var b = 0; b < uploadFiles.length; b += BATCH) batches.push(uploadFiles.slice(b, b + BATCH));
                 var totalBatches = batches.length;
                 if (previewPanel && targetInput === pathInput)
                   previewPanel.innerHTML = '<div class="preview-error">Uploading ' + kept.toLocaleString() + ' code file' + (kept === 1 ? '' : 's') + (total !== kept ? ' of ' + total.toLocaleString() + ' total' : '') + '…</div>';
@@ -13477,8 +13493,8 @@ pytest --cov --cov-report=xml
   })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: {% if server_mode %}Network Server{% else %}Local{% endif %}</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: {% if server_mode %}Network Server{% else %}Local{% endif %}</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -13968,8 +13984,8 @@ struct IndexTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -14548,8 +14564,8 @@ struct SplashTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -15331,9 +15347,18 @@ struct ScanSetupTemplate {
                   <a class="button" href="{{ url }}" target="_blank" rel="noopener" id="pdf-open-btn">Open PDF</a>
                 {% endif %}
               {% when None %}
-                <p class="action-empty-note" style="color:var(--muted);font-size:12px;background:rgba(0,0,0,0.04);border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
-                  PDF was not generated for this run. This usually means no Chromium-based browser (Chrome, Edge, Brave) was found on the server, or PDF was not selected in the artifact preset. Re-run with PDF enabled, or set <code>SLOC_BROWSER</code> to your browser path.
-                </p>
+                {% match html_url %}
+                  {% when Some with (hurl) %}
+                    <a class="button" href="{{ hurl }}?autoprint=1" target="_blank" rel="noopener" id="pdf-open-btn">Generate PDF</a>
+                    <p class="action-empty-note" style="margin-top:6px;font-size:11px;">
+                      No PDF renderer found on the server. Opens the HTML report in your browser
+                      with the print dialog ready — choose <strong>Save as PDF</strong>.
+                    </p>
+                  {% when None %}
+                    <p class="action-empty-note" style="color:var(--muted);font-size:12px;background:rgba(0,0,0,0.04);border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
+                      PDF and HTML reports were not generated for this run. Re-run with HTML or PDF output enabled.
+                    </p>
+                {% endmatch %}
             {% endmatch %}
             {% match pdf_download_url %}
               {% when Some with (url) %}
@@ -16309,8 +16334,8 @@ struct ScanSetupTemplate {
   }());
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -16801,8 +16826,8 @@ struct ResultTemplate {
     })();
   </script>
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -17693,8 +17718,8 @@ struct RelocateScanTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -18389,8 +18414,8 @@ struct HistoryTemplate {
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -19371,8 +19396,8 @@ struct CompareSelectTemplate {
   <div id="ic-tt"></div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -21430,8 +21455,8 @@ ok</div>
   </div>
 
   <footer class="site-footer">
-    oxide-sloc v{{ version }} — local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">Mode: Local</em>
+    local code analysis - metrics, history and reports
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
