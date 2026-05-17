@@ -530,6 +530,8 @@ fn build_router(state: AppState) -> Router {
 
     protected
         .route("/healthz", get(healthz))
+        .route("/api/health", get(healthz))
+        .route("/api/version", get(api_version_handler))
         .route("/badge/{metric}", get(badge_handler))
         .route("/static/chart.js", get(chart_js_handler))
         .route("/auth/login", get(auth::auth_login_get))
@@ -1097,12 +1099,14 @@ async fn splash(
         .next()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(4317);
+    let has_api_key = !state.api_keys.is_empty();
     let template = SplashTemplate {
         csp_nonce,
         server_mode: state.server_mode,
         lan_ip,
         port,
         version: env!("CARGO_PKG_VERSION"),
+        has_api_key,
     };
     Html(
         template
@@ -1226,6 +1230,13 @@ async fn scan_setup_handler(
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn api_version_handler() -> impl IntoResponse {
+    axum::Json(serde_json::json!({
+        "name": "oxide-sloc",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 async fn api_docs_handler(
@@ -13559,10 +13570,12 @@ struct IndexTemplate {
           Copy URL
         </button>
       </div>
-      <p class="lan-hint">Share this address with anyone on the same network. They will be asked to authenticate.</p>
+      <p class="lan-hint">Share this address with anyone on the same network.{% if has_api_key %} Authentication: enabled.{% else %} Authentication: not configured — all endpoints are open.{% endif %}</p>
+      {% if has_api_key %}
       <div class="lan-auth-row">curl -H &quot;Authorization: Bearer $SLOC_API_KEY&quot; http://{{ ip }}:{{ port }}/healthz</div>
+      {% endif %}
       {% else %}
-      <p class="lan-hint">Could not auto-detect your LAN IP. Find it with <code>hostname -I</code> (Linux) or <code>ipconfig</code> (Windows), then open <code>http://&lt;your-ip&gt;:{{ port }}</code>.</p>
+      <p class="lan-hint">Could not auto-detect your LAN IP. Find it with <code>hostname -I</code> (Linux) or <code>ipconfig</code> (Windows), then open <code>http://&lt;your-ip&gt;:{{ port }}</code>.{% if has_api_key %} Authentication: enabled.{% else %} Authentication: not configured.{% endif %}</p>
       {% endif %}
     </div>
     {% endif %}
@@ -13895,6 +13908,7 @@ struct SplashTemplate {
     lan_ip: Option<String>,
     port: u16,
     version: &'static str,
+    has_api_key: bool,
 }
 
 // ── ScanSetupTemplate ─────────────────────────────────────────────────────────

@@ -101,6 +101,16 @@ ExecStart=/usr/local/bin/oxide-sloc serve --server --config /etc/oxide-sloc/conf
 
 ### 4. Install and enable the service
 
+**Preferred — use the installer script** (automates all steps above):
+
+```bash
+sudo bash scripts/install-systemd.sh
+```
+
+To undo the install: `sudo bash scripts/install-systemd.sh --uninstall`
+
+**Manual steps (equivalent to what the script does):**
+
 ```bash
 sudo cp deploy/oxide-sloc.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -184,10 +194,18 @@ A sliding-window rate limiter enforces **60 requests per 60-second window per cl
 
 ## Health check
 
-`GET /healthz` returns `200 OK` with body `ok`.
+Three equivalent endpoints return `200 OK` with body `ok`:
+
+| Endpoint | Use case |
+|---|---|
+| `GET /healthz` | Traditional; used by the Docker `HEALTHCHECK` directive |
+| `GET /api/health` | Conventional REST API path; preferred for monitoring tools |
+| `GET /api/version` | Returns `{"name":"oxide-sloc","version":"X.Y.Z"}` — use when the version is needed |
 
 ```bash
 curl http://localhost:4317/healthz
+curl http://localhost:4317/api/health
+curl http://localhost:4317/api/version
 ```
 
-The Docker image includes a `HEALTHCHECK` that polls this endpoint every 30 seconds.
+The Docker image includes a `HEALTHCHECK` that polls `/healthz` every 30 seconds.
