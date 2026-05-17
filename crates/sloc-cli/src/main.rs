@@ -360,6 +360,11 @@ struct SendArgs {
     /// Bearer token for webhook auth. Defaults to `SLOC_WEBHOOK_TOKEN` env var.
     #[arg(long, value_name = "TOKEN", env = "SLOC_WEBHOOK_TOKEN")]
     webhook_token: Option<String>,
+    /// Allow HTTP scheme and private/RFC-1918 IP addresses for webhook delivery.
+    /// Also settable via SLOC_ALLOW_PRIVATE_WEBHOOK=1.
+    /// Use in lab or corporate-intranet environments where the receiver is not publicly reachable.
+    #[arg(long, env = "SLOC_ALLOW_PRIVATE_WEBHOOK")]
+    allow_private_net: bool,
 
     // --- Microsoft Teams ---
     /// Post an Adaptive Card summary to a Microsoft Teams Incoming Webhook URL (repeatable).
@@ -1089,11 +1094,23 @@ async fn run_send(args: SendArgs) -> Result<()> {
     }
 
     for url in &args.webhook_url {
-        send_webhook(url, args.webhook_token.as_deref(), &run).await?;
+        send_webhook(
+            url,
+            args.webhook_token.as_deref(),
+            &run,
+            args.allow_private_net,
+        )
+        .await?;
     }
 
     for url in &args.notify_teams {
-        send_teams_card(url, &run, args.report_url.as_deref()).await?;
+        send_teams_card(
+            url,
+            &run,
+            args.report_url.as_deref(),
+            args.allow_private_net,
+        )
+        .await?;
     }
 
     if args.confluence_url.is_some() {
@@ -1200,11 +1217,19 @@ const fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
     }
 }
 
-fn validate_webhook_url(raw: &str) -> Result<()> {
+fn validate_webhook_url(raw: &str, allow_private_net: bool) -> Result<()> {
     let parsed = reqwest::Url::parse(raw).with_context(|| format!("invalid webhook URL: {raw}"))?;
+    if allow_private_net {
+        tracing::warn!(
+            url = raw,
+            "private-net webhook allowed — HTTPS and IP restrictions bypassed"
+        );
+        return Ok(());
+    }
     if parsed.scheme() != "https" {
         anyhow::bail!(
-            "webhook URL must use HTTPS (got scheme \"{}\")",
+            "webhook URL must use HTTPS (got scheme \"{}\"); \
+             use --allow-private-net to send to HTTP endpoints",
             parsed.scheme()
         );
     }
@@ -1216,14 +1241,22 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         if is_ip_blocked(ip) {
-            anyhow::bail!("webhook URL resolves to a blocked IP address: {ip}");
+            anyhow::bail!(
+                "webhook URL resolves to a blocked IP address: {ip}; \
+                 use --allow-private-net to send to private addresses"
+            );
         }
     }
     Ok(())
 }
 
-async fn send_webhook(url: &str, token: Option<&str>, run: &AnalysisRun) -> Result<()> {
-    validate_webhook_url(url)?;
+async fn send_webhook(
+    url: &str,
+    token: Option<&str>,
+    run: &AnalysisRun,
+    allow_private_net: bool,
+) -> Result<()> {
+    validate_webhook_url(url, allow_private_net)?;
 
     let client = reqwest::Client::new();
     let mut req = client.post(url).json(run);
@@ -1263,8 +1296,13 @@ fn fmt_thousands(n: u64) -> String {
 ///
 /// The payload uses the `attachments` envelope understood by both legacy
 /// Incoming Webhook connectors and Power Automate-backed webhook flows.
-async fn send_teams_card(url: &str, run: &AnalysisRun, report_url: Option<&str>) -> Result<()> {
-    validate_webhook_url(url)?;
+async fn send_teams_card(
+    url: &str,
+    run: &AnalysisRun,
+    report_url: Option<&str>,
+    allow_private_net: bool,
+) -> Result<()> {
+    validate_webhook_url(url, allow_private_net)?;
 
     let totals = &run.summary_totals;
     let title = &run.effective_configuration.reporting.report_title;
@@ -2058,7 +2096,7 @@ async fn post_github_comment(args: &PrCommentArgs, body: &str) -> Result<()> {
         args.repo, args.pr_number
     );
 
-    validate_webhook_url(&url)?;
+    validate_webhook_url(&url, false)?;
 
     let payload = serde_json::json!({ "body": body });
     let client = reqwest::Client::new();
@@ -2104,7 +2142,7 @@ async fn post_gitlab_comment(args: &PrCommentArgs, body: &str) -> Result<()> {
         args.pr_number
     );
 
-    validate_webhook_url(&url)?;
+    validate_webhook_url(&url, false)?;
 
     let payload = serde_json::json!({ "body": body });
     let client = reqwest::Client::new();
