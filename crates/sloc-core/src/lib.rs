@@ -245,22 +245,6 @@ pub struct AnalysisRun {
     pub git_commit_date: Option<String>,
 }
 
-fn run_git_in(dir: &Path, args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        // Bypass git's safe-directory ownership check so that the web server
-        // (which may run as a different OS user than the repo owner) can still
-        // read git metadata from the scanned directory.
-        .args(["-c", "safe.directory=*"])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 #[derive(Default)]
 struct GitInfo {
     commit_short: Option<String>,
@@ -272,21 +256,219 @@ struct GitInfo {
     commit_date: Option<String>,
 }
 
-fn detect_git_for_run(project_path: &Path) -> GitInfo {
-    GitInfo {
-        commit_short: run_git_in(project_path, &["rev-parse", "--short", "HEAD"]),
-        commit_long: run_git_in(project_path, &["rev-parse", "HEAD"]),
-        branch: run_git_in(project_path, &["branch", "--show-current"]),
-        author: run_git_in(project_path, &["log", "--format=%an", "-1"]),
-        tags: run_git_in(project_path, &["tag", "--points-at", "HEAD"]).map(|t| {
-            t.lines()
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }),
-        nearest_tag: run_git_in(project_path, &["describe", "--tags", "--abbrev=0", "HEAD"]),
-        commit_date: run_git_in(project_path, &["log", "--format=%aI", "-1"]),
+/// Locate the `.git` directory by walking up from `start`.
+/// Handles plain repos, worktrees (`.git` is a file with `gitdir:` pointer), and
+/// submodules. Returns `None` if no git repo is found.
+fn find_git_dir(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        let candidate = dir.join(".git");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if candidate.is_file() {
+            // Worktree / submodule: `.git` file contains "gitdir: <path>".
+            // The path uses forward slashes on all platforms (git convention).
+            // On Windows it may be an absolute Windows path such as
+            // "C:/Users/…/.git/worktrees/name" — Path::new().is_absolute()
+            // recognises both "C:/" and "C:\" prefixes on Windows.
+            if let Ok(content) = fs::read_to_string(&candidate) {
+                if let Some(ptr) = content.trim().strip_prefix("gitdir: ") {
+                    // Normalise forward-slash paths to the OS separator so that
+                    // Path operations (join, exists, canonicalize) work correctly
+                    // on Windows.
+                    let ptr_native = ptr.replace('/', std::path::MAIN_SEPARATOR_STR);
+                    let resolved = if Path::new(&ptr_native).is_absolute() {
+                        PathBuf::from(&ptr_native)
+                    } else {
+                        dir.join(&ptr_native)
+                    };
+                    // canonicalize resolves ".." components and symlinks; fall
+                    // back to the un-canonicalized path if it fails (e.g. on
+                    // some Windows configurations canonicalize returns a UNC
+                    // "\\?\" prefix that confuses later path operations).
+                    let final_path = resolved.canonicalize().unwrap_or(resolved);
+                    if final_path.is_dir() {
+                        return Some(final_path);
+                    }
+                }
+            }
+        }
+        current = dir.parent();
     }
+    None
+}
+
+/// Resolve a git ref name (e.g. `refs/heads/main`) to a full 40-char commit SHA.
+/// Checks loose ref files first, then `packed-refs`.
+fn resolve_ref(git_dir: &Path, refname: &str) -> Option<String> {
+    // Build the OS-native path to the loose ref file by joining each
+    // forward-slash component individually.  This produces the correct
+    // separator on every platform without any manual replacement.
+    let ref_path = refname
+        .split('/')
+        .fold(git_dir.to_path_buf(), |p, c| p.join(c));
+    if ref_path.exists() {
+        let sha = fs::read_to_string(&ref_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.len() >= 40 && s.chars().all(|c| c.is_ascii_hexdigit()));
+        if sha.is_some() {
+            return sha;
+        }
+    }
+    // Packed refs: each line is "<sha> <refname>" (lines starting with '#' are
+    // comments; lines starting with '^' are peeled tag objects to skip).
+    // str::lines() handles both \n and \r\n, so Windows line endings are fine.
+    let packed = fs::read_to_string(git_dir.join("packed-refs")).ok()?;
+    for line in packed.lines() {
+        if line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let mut cols = line.splitn(2, ' ');
+        let sha = cols.next()?;
+        let name = cols.next()?.trim();
+        if name == refname {
+            return Some(sha.to_string());
+        }
+    }
+    None
+}
+
+/// Parse the last entry of `.git/logs/HEAD` to get the commit author name and
+/// author-date in ISO 8601 format.
+///
+/// Reflog line format:
+/// `<old-sha> <new-sha> Author Name <email> <unix-ts> <tz-offset>\t<message>`
+fn parse_last_reflog_entry(git_dir: &Path) -> (Option<String>, Option<String>) {
+    let log_path = git_dir.join("logs").join("HEAD");
+    let content = match fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+    let last = match content.lines().rfind(|l| !l.trim().is_empty()) {
+        Some(l) => l,
+        None => return (None, None),
+    };
+
+    // Skip the two 40-char SHAs + their separating spaces
+    // (an initial commit shows 0000... as old-sha, still 40 chars)
+    let Some(after_shas) = last.splitn(3, ' ').nth(2) else {
+        return (None, None);
+    };
+
+    // Author name ends just before " <email>"
+    let author = after_shas.find(" <").map(|i| after_shas[..i].to_string());
+
+    // Timestamp is the number after the closing ">"
+    let date = (|| {
+        let close = after_shas.find("> ")?;
+        let rest = after_shas[close + 2..].trim_start();
+        let mut tokens = rest.splitn(3, ' ');
+        let ts_str = tokens.next()?;
+        let tz_str = tokens.next().map(|s| s.split('\t').next().unwrap_or(s))?;
+        let ts: i64 = ts_str.parse().ok()?;
+        use chrono::TimeZone as _;
+        let dt = chrono::Utc.timestamp_opt(ts, 0).single()?;
+        // Format as ISO 8601 with timezone offset, e.g. 2026-05-17T12:51:54-07:00
+        let tz_display = if tz_str.len() == 5 {
+            format!("{}:{}", &tz_str[..3], &tz_str[3..])
+        } else {
+            tz_str.to_string()
+        };
+        Some(format!("{}{}", dt.format("%Y-%m-%dT%H:%M:%S"), tz_display))
+    })();
+
+    (author, date)
+}
+
+/// Detect git metadata by reading `.git/` files directly — no `git` executable
+/// needed. Falls back gracefully for detached HEADs, shallow clones, and missing
+/// reflogs.
+fn detect_git_for_run(project_path: &Path) -> GitInfo {
+    let Some(git_dir) = find_git_dir(project_path) else {
+        return GitInfo::default();
+    };
+
+    let head_raw = match fs::read_to_string(git_dir.join("HEAD")) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return GitInfo::default(),
+    };
+
+    let (branch, commit_long) = if let Some(refname) = head_raw.strip_prefix("ref: ") {
+        let branch = refname
+            .strip_prefix("refs/heads/")
+            .map(|b| b.trim().to_string());
+        let sha = resolve_ref(&git_dir, refname.trim());
+        (branch, sha)
+    } else if head_raw.len() >= 40 && head_raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Detached HEAD — the HEAD file itself is the commit SHA
+        (None, Some(head_raw[..40].to_string()))
+    } else {
+        (None, None)
+    };
+
+    let commit_short = commit_long
+        .as_deref()
+        .map(|s| s.chars().take(7).collect::<String>());
+
+    let (author, commit_date) = parse_last_reflog_entry(&git_dir);
+
+    // Tags and nearest-tag still require git CLI — try it as a best-effort bonus
+    // but don't block on it. If git isn't available these will simply be None.
+    let tags = run_git_cmd(project_path, &["tag", "--points-at", "HEAD"]).map(|t| {
+        t.lines()
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let nearest_tag = run_git_cmd(project_path, &["describe", "--tags", "--abbrev=0", "HEAD"]);
+
+    GitInfo {
+        commit_short,
+        commit_long,
+        branch,
+        author,
+        tags,
+        nearest_tag,
+        commit_date,
+    }
+}
+
+/// Run a git command as a best-effort supplemental source.  Not used for the
+/// core commit/branch/author fields — those come from direct file reads above.
+fn run_git_cmd(dir: &Path, args: &[&str]) -> Option<String> {
+    // Try the bare name first (works when git is on PATH), then fall back to
+    // absolute paths for service accounts that run with a stripped PATH.
+    // Unix paths silently fail on Windows and vice-versa.
+    let candidates: &[&str] = &[
+        // Works on all platforms when git is on PATH
+        "git",
+        // Common Linux / macOS install locations
+        "/usr/bin/git",
+        "/usr/local/bin/git",
+        "/opt/homebrew/bin/git",
+        // Git for Windows default installation paths
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+    ];
+    for &exe in candidates {
+        let result = std::process::Command::new(exe)
+            .args(["-c", "safe.directory=*"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if result.is_some() {
+            return result;
+        }
+    }
+    None
 }
 
 fn get_current_username() -> String {
