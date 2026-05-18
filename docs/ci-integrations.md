@@ -775,7 +775,7 @@ The job uses `continue-on-error: true` so a VT outage or quota exhaustion never 
 
 **Stages:** `quality` → `build` → `smoke` → `archive`
 
-Smoke jobs run in parallel: `smoke:plain`, `smoke:per-file`, `smoke:reports`, `smoke:re-render`, `smoke:policies`, `smoke:web-ui`.
+Smoke jobs run in parallel: `smoke:plain`, `smoke:per-file`, `smoke:reports`, `smoke:re-render`, `smoke:policies`, `smoke:web-ui`, `smoke:pdf`.
 
 ### Adding a scan to your project's pipeline
 
