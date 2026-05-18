@@ -88,22 +88,49 @@ pub async fn api_delete_schedule(
 
 // ── webhook receivers ─────────────────────────────────────────────────────────
 
+/// Validate the X-GitHub-Event header; return a short-circuit `Response` for
+/// missing or non-push events, or `None` to continue processing a push.
+fn check_github_event_header(event: &str) -> Option<Response> {
+    if event == "push" {
+        return None;
+    }
+    let resp = if event.is_empty() {
+        info!(
+            "github webhook received without X-GitHub-Event header — likely misconfigured sender"
+        );
+        (StatusCode::BAD_REQUEST, "missing X-GitHub-Event header").into_response()
+    } else {
+        info!(event = %event, "github webhook: ignoring non-push event");
+        StatusCode::OK.into_response()
+    };
+    Some(resp)
+}
+
+/// Validate the X-GitLab-Event header; return a short-circuit `Response` for
+/// missing or non-push events, or `None` to continue processing a push.
+fn check_gitlab_event_header(event: &str) -> Option<Response> {
+    if event == "Push Hook" || event == "Tag Push Hook" {
+        return None;
+    }
+    let resp = if event.is_empty() {
+        info!(
+            "gitlab webhook received without X-GitLab-Event header — likely misconfigured sender"
+        );
+        (StatusCode::BAD_REQUEST, "missing X-GitLab-Event header").into_response()
+    } else {
+        info!(event = %event, "gitlab webhook: ignoring non-push event");
+        StatusCode::OK.into_response()
+    };
+    Some(resp)
+}
+
 pub async fn handle_github_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let event_header = header_str(&headers, "x-github-event");
-    match event_header.as_str() {
-        "" => {
-            info!("github webhook received without X-GitHub-Event header — likely misconfigured sender");
-            return (StatusCode::BAD_REQUEST, "missing X-GitHub-Event header").into_response();
-        }
-        "push" => {}
-        other => {
-            info!(event = %other, "github webhook: ignoring non-push event");
-            return StatusCode::OK.into_response();
-        }
+    if let Some(resp) = check_github_event_header(&header_str(&headers, "x-github-event")) {
+        return resp;
     }
     let event = match parse_github_push(&body) {
         Ok(e) => e,
@@ -126,17 +153,8 @@ pub async fn handle_gitlab_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let event_type = header_str(&headers, "x-gitlab-event");
-    match event_type.as_str() {
-        "" => {
-            info!("gitlab webhook received without X-GitLab-Event header — likely misconfigured sender");
-            return (StatusCode::BAD_REQUEST, "missing X-GitLab-Event header").into_response();
-        }
-        "Push Hook" | "Tag Push Hook" => {}
-        other => {
-            info!(event = %other, "gitlab webhook: ignoring non-push event");
-            return StatusCode::OK.into_response();
-        }
+    if let Some(resp) = check_gitlab_event_header(&header_str(&headers, "x-gitlab-event")) {
+        return resp;
     }
     let event = match parse_gitlab_push(&body) {
         Ok(e) => e,
