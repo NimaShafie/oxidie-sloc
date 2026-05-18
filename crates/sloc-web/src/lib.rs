@@ -5997,11 +5997,40 @@ async fn project_history_handler(
     let resolved = resolve_input_path(&path);
     let root_str = resolved.to_string_lossy().replace('\\', "/");
 
+    // In server mode, uploads land under <tmp>/oxide-sloc-uploads/<uuid>/<project-name>.
+    // The UUID is freshly generated for every upload, so an exact root_str match never finds
+    // previous scans of the same project. Fall back to matching by project name within the
+    // uploads staging directory so Scan History populates correctly across uploads.
+    let upload_root = std::env::temp_dir()
+        .join("oxide-sloc-uploads")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let upload_name_suffix: Option<String> =
+        if state.server_mode && root_str.starts_with(&upload_root) {
+            resolved
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| format!("/{name}"))
+        } else {
+            None
+        };
+
     let entries: Vec<_> = {
         let reg = state.registry.lock().await;
         reg.entries
             .iter()
-            .filter(|e| e.input_roots.iter().any(|r| r == &root_str))
+            .filter(|e| {
+                if e.input_roots.iter().any(|r| r == &root_str) {
+                    return true;
+                }
+                if let Some(ref suffix) = upload_name_suffix {
+                    return e
+                        .input_roots
+                        .iter()
+                        .any(|r| r.starts_with(&upload_root) && r.ends_with(suffix.as_str()));
+                }
+                false
+            })
             .cloned()
             .collect()
     };
