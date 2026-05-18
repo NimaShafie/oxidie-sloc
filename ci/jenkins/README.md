@@ -7,11 +7,12 @@
 ## Operator workflow (overview)
 
 1. `cp ci/jenkins/.env.example ci/jenkins/.env` — fill in `JENKINS_TOKEN`
-2. _(Recommended)_ Pre-populate the agent rust-cache: run `bash ci/jenkins/install-rust-cache.sh` or build the Docker agent image from `ci/jenkins/Dockerfile.agent`. On air-gapped agents this step is required; on network-connected agents Rust downloads at runtime.
-3. `set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh` — all checks must pass
-4. Run the `createItem` curl (Step 1 below)
-5. Run the seed-build curl (Step 2 below)
-6. After the job is created, see [Cleanup](#cleanup) to remove the local credentials file.
+2. _(One-time, controller setup)_ Deploy `ci/jenkins/init.groovy.d/relax-csp.groovy` to `$JENKINS_HOME/init.groovy.d/` and restart Jenkins — required for interactive features (charts, sorting, expand modals) in the published HTML report. See [§ "Setting the artifact-viewer CSP"](#setting-the-artifact-viewer-csp) below.
+3. _(Recommended)_ Pre-populate the agent rust-cache: run `bash ci/jenkins/install-rust-cache.sh` or build the Docker agent image from `ci/jenkins/Dockerfile.agent`. On air-gapped agents this step is required; on network-connected agents Rust downloads at runtime.
+4. `set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh` — all checks must pass
+5. Run the `createItem` curl (Step 1 below)
+6. Run the seed-build curl (Step 2 below)
+7. After the job is created, see [Cleanup](#cleanup) to remove the local credentials file.
 
 On a network-connected agent, step 2 is optional.
 
@@ -227,11 +228,13 @@ set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh
 
 All lines must print `[ok]`. Fix any `[fail]` before continuing.
 
-If a `[info]` line reports that `hudson.model.DirectoryBrowserSupport.CSP` is at the default value, re-run with `--install-csp` to copy `relax-csp.groovy` into the running Jenkins container and restart it (requires Docker on the same host as Jenkins):
+If a `[warn]` line reports that `hudson.model.DirectoryBrowserSupport.CSP` is at the default value, re-run with `--install-csp` to copy `relax-csp.groovy` into the running Jenkins container and restart it (requires Docker on the same host as Jenkins):
 
 ```bash
 set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh --install-csp
 ```
+
+If `docker ps` requires root on your host, run as `DOCKER='sudo docker' bash ci/jenkins/preflight.sh --install-csp`.
 
 ---
 
@@ -462,7 +465,21 @@ curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     "${JENKINS_URL}/createItem?name=${JOB_NAME}"
 ```
 
-A 200 response with an empty body means the job was created successfully. A 400 with `job already exists` means the job name is taken — choose a different `JOB_NAME`.
+A 200 response with an empty body means the job was created successfully. A 400
+with `job already exists` means a job named `${JOB_NAME}` is already configured —
+since `oxide-sloc` is the single canonical SCM-driven job (see "URL note" above),
+do **not** pick a different name. Delete the existing job and re-run `createItem`:
+
+```bash
+CRUMB=$(curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
+    "${JENKINS_URL}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,\":\",//crumb)")
+curl -sS -X POST -u "${JENKINS_USER}:${JENKINS_TOKEN}" -H "${CRUMB}" \
+    "${JENKINS_URL}/job/${JOB_NAME}/doDelete"
+```
+
+A successful deletion returns HTTP 302. Re-run `bash ci/jenkins/preflight.sh`
+afterwards — the `[ok] No existing job named 'oxide-sloc' — safe to create`
+line confirms you may proceed.
 
 ### Step 2 — Trigger the first (seed) build
 

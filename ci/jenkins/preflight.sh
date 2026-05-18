@@ -43,6 +43,7 @@ ANY_FAIL=0
 ok()   { printf '[ok]   %s\n' "$*"; }
 fail() { printf '[fail] %s\n' "$*" >&2; ANY_FAIL=1; }
 info() { printf '[info] %s\n' "$*"; }
+warn() { printf '[warn] %s\n' "$*"; }
 
 # ── Validate required variables ──────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ fi
 CSP=$(curl -sS -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
     "${JENKINS_URL}/scriptText" --data-urlencode 'script=println(System.getProperty("hudson.model.DirectoryBrowserSupport.CSP"))' 2>/dev/null || true)
 if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
-    info "CSP at default — HTML report may render unstyled. Re-run with --install-csp to fix (Docker only), or see docs/ci-integrations.md § Setting the artifact-viewer CSP."
+    warn "CSP at default — interactive JavaScript in the published HTML report will be blocked (default-src 'none' with no script-src). The CSS still loads, so the report appears styled but charts/sorting/expand modals are non-functional. Fix with --install-csp (requires Docker) or follow ci/jenkins/README.md § Setting the artifact-viewer CSP for native installs."
 
     if [ "$INSTALL_CSP" -eq 1 ]; then
         CSP_GROOVY="$(cd "$(dirname "$0")" && pwd)/init.groovy.d/relax-csp.groovy"
@@ -175,14 +176,28 @@ if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
         elif ! command -v docker >/dev/null 2>&1; then
             fail "--install-csp: Docker is not available on this machine."
         else
-            JENKINS_CONTAINER=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i jenkins | head -1 || true)
-            if [ -z "$JENKINS_CONTAINER" ]; then
-                fail "--install-csp: no running Jenkins container found. Start your Jenkins container first."
+            DOCKER_CMD="${DOCKER:-docker}"
+            DOCKER_PS_OUT=$($DOCKER_CMD ps --format '{{.Names}}' 2>&1)
+            DOCKER_PS_RC=$?
+            if [ $DOCKER_PS_RC -ne 0 ]; then
+                if echo "$DOCKER_PS_OUT" | grep -qE 'permission denied|connect: permission|Got permission denied'; then
+                    fail "--install-csp: cannot reach the Docker socket as the current user. Either:
+   (a) add your user to the 'docker' group and re-login,
+   (b) re-run with DOCKER='sudo docker' bash ci/jenkins/preflight.sh --install-csp, or
+   (c) apply the CSP manually — see ci/jenkins/README.md § Setting the artifact-viewer CSP."
+                else
+                    fail "--install-csp: 'docker ps' failed: ${DOCKER_PS_OUT}"
+                fi
             else
-                docker exec "$JENKINS_CONTAINER" mkdir -p /var/jenkins_home/init.groovy.d
-                docker cp "$CSP_GROOVY" "${JENKINS_CONTAINER}:/var/jenkins_home/init.groovy.d/relax-csp.groovy"
-                docker restart "$JENKINS_CONTAINER"
-                ok "CSP override installed and Jenkins restarted (container: ${JENKINS_CONTAINER})"
+                JENKINS_CONTAINER=$(echo "$DOCKER_PS_OUT" | grep -i jenkins | head -1 || true)
+                if [ -z "$JENKINS_CONTAINER" ]; then
+                    fail "--install-csp: no Jenkins container found in 'docker ps' output. Start your Jenkins container first."
+                else
+                    $DOCKER_CMD exec "$JENKINS_CONTAINER" mkdir -p /var/jenkins_home/init.groovy.d
+                    $DOCKER_CMD cp "$CSP_GROOVY" "${JENKINS_CONTAINER}:/var/jenkins_home/init.groovy.d/relax-csp.groovy"
+                    $DOCKER_CMD restart "$JENKINS_CONTAINER"
+                    ok "CSP override installed and Jenkins restarted (container: ${JENKINS_CONTAINER})"
+                fi
             fi
         fi
     fi
