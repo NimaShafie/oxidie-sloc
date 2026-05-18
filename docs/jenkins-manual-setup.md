@@ -431,7 +431,6 @@ From this point on, all 39 configuration parameters are visible in the build for
    | `SCAN_PATH` | Path within the repository to analyze (e.g., `src` or `.`) |
    | `REPORT_TITLE` | A descriptive title for the HTML report |
    | `GENERATE_HTML` | Check to produce an HTML report (recommended) |
-   | `SKIP_SONAR` | Check to skip SonarQube if you haven't set up a server yet |
    | `SKIP_WEB_CHECK` | Check if port 4317 is not available on the agent |
 
 3. Click **Build**.
