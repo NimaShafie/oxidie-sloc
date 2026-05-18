@@ -363,6 +363,15 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         accent_hex,
         report_header_footer,
         chart_js: CHART_JS,
+        run_id_short: run
+            .tool
+            .run_id
+            .split('-')
+            .next_back()
+            .unwrap_or(&run.tool.run_id)
+            .chars()
+            .take(7)
+            .collect(),
     };
 
     template.render().context("failed to render HTML report")
@@ -785,6 +794,11 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             Mm(row1_bot + 3.0),
             &font_reg,
         );
+        // Exact full number at bottom-right, mirroring .stat-chip-exact in the HTML UI.
+        let exact = pdf_fmt_full(*value);
+        let exact_x = (cx + chip_w - exact.len() as f32 * 1.1 - 1.5).max(cx + 4.0);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
+        layer.use_text(exact, 5.5, Mm(exact_x), Mm(row1_bot + 1.5), &font_reg);
     }
 
     // Row 2 -- file + symbol counts (cool/blue palette)
@@ -828,6 +842,10 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             Mm(row2_bot + 3.0),
             &font_reg,
         );
+        let exact = pdf_fmt_full(*value);
+        let exact_x = (cx + chip_w - exact.len() as f32 * 1.1 - 1.5).max(cx + 4.0);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.60, None)));
+        layer.use_text(exact, 5.5, Mm(exact_x), Mm(row2_bot + 1.5), &font_reg);
     }
 
     // -- Info lines (composition, git, tests/coverage -- no warnings) ---------
@@ -849,17 +867,17 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             parts.push(format!(
                 "Mixed {:.1}% ({} lines)",
                 mixed_pct,
-                pdf_fmt_num(tot.mixed_lines_separate)
+                pdf_fmt_full(tot.mixed_lines_separate)
             ));
         }
         if tot.imports > 0 {
-            parts.push(format!("Imports: {}", pdf_fmt_num(tot.imports)));
+            parts.push(format!("Imports: {}", pdf_fmt_full(tot.imports)));
         }
         if tot.variables > 0 {
-            parts.push(format!("Variables: {}", pdf_fmt_num(tot.variables)));
+            parts.push(format!("Variables: {}", pdf_fmt_full(tot.variables)));
         }
         if tot.classes > 0 {
-            parts.push(format!("Classes: {}", pdf_fmt_num(tot.classes)));
+            parts.push(format!("Classes: {}", pdf_fmt_full(tot.classes)));
         }
         layer.set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
         layer.use_text(
@@ -909,24 +927,24 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     if has_tests || has_coverage {
         let mut tc: Vec<String> = vec![];
         if tot.test_count > 0 {
-            tc.push(format!("Tests: {}", pdf_fmt_num(tot.test_count)));
+            tc.push(format!("Tests: {}", pdf_fmt_full(tot.test_count)));
         }
         if tot.test_assertion_count > 0 {
             tc.push(format!(
                 "Assertions: {}",
-                pdf_fmt_num(tot.test_assertion_count)
+                pdf_fmt_full(tot.test_assertion_count)
             ));
         }
         if tot.test_suite_count > 0 {
-            tc.push(format!("Suites: {}", pdf_fmt_num(tot.test_suite_count)));
+            tc.push(format!("Suites: {}", pdf_fmt_full(tot.test_suite_count)));
         }
         if has_coverage {
             if tot.coverage_lines_found > 0 {
                 tc.push(format!(
                     "Line Cov: {:.1}% ({}/{})",
                     tot.coverage_lines_hit as f64 / tot.coverage_lines_found as f64 * 100.0,
-                    pdf_fmt_num(tot.coverage_lines_hit),
-                    pdf_fmt_num(tot.coverage_lines_found)
+                    pdf_fmt_full(tot.coverage_lines_hit),
+                    pdf_fmt_full(tot.coverage_lines_found)
                 ));
             }
             if tot.coverage_functions_found > 0 {
@@ -997,7 +1015,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
         layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
         layer.use_text(
-            pdf_fmt_num(*val),
+            pdf_fmt_full(*val),
             6.5,
             Mm(left_x + half_w * lbl_frac + 2.0),
             Mm(ry + 1.5),
@@ -1045,11 +1063,11 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     );
     left_y -= TBL_HDR_H;
     let lc_rows: [(&str, String); 5] = [
-        ("Physical lines", pdf_fmt_num(tot.total_physical_lines)),
-        ("Code lines", pdf_fmt_num(tot.code_lines)),
-        ("Comment lines", pdf_fmt_num(tot.comment_lines)),
-        ("Blank lines", pdf_fmt_num(tot.blank_lines)),
-        ("Mixed (separate)", pdf_fmt_num(tot.mixed_lines_separate)),
+        ("Physical lines", pdf_fmt_full(tot.total_physical_lines)),
+        ("Code lines", pdf_fmt_full(tot.code_lines)),
+        ("Comment lines", pdf_fmt_full(tot.comment_lines)),
+        ("Blank lines", pdf_fmt_full(tot.blank_lines)),
+        ("Mixed (separate)", pdf_fmt_full(tot.mixed_lines_separate)),
     ];
     for (ri, (lbl, val)) in lc_rows.iter().enumerate() {
         let ry = left_y - (ri + 1) as f32 * ROW_H;
@@ -1090,10 +1108,10 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     );
     right_y -= TBL_HDR_H;
     let cs_rows: [(&str, String); 4] = [
-        ("Functions", pdf_fmt_num(tot.functions)),
-        ("Classes / Types", pdf_fmt_num(tot.classes)),
-        ("Variables", pdf_fmt_num(tot.variables)),
-        ("Imports", pdf_fmt_num(tot.imports)),
+        ("Functions", pdf_fmt_full(tot.functions)),
+        ("Classes / Types", pdf_fmt_full(tot.classes)),
+        ("Variables", pdf_fmt_full(tot.variables)),
+        ("Imports", pdf_fmt_full(tot.imports)),
     ];
     for (ri, (lbl, val)) in cs_rows.iter().enumerate() {
         let ry = right_y - (ri + 1) as f32 * ROW_H;
@@ -1321,18 +1339,18 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
                 let cells = [
                     pdf_trunc(&file_str, 40),
                     lang_str,
-                    pdf_fmt_num(raw.total_physical_lines),
-                    pdf_fmt_num(eff.code_lines),
-                    pdf_fmt_num(eff.comment_lines),
-                    pdf_fmt_num(eff.blank_lines),
-                    pdf_fmt_num(eff.mixed_lines_separate),
-                    pdf_fmt_num(raw.functions),
-                    pdf_fmt_num(raw.classes),
-                    pdf_fmt_num(raw.variables),
-                    pdf_fmt_num(raw.imports),
-                    pdf_fmt_num(raw.test_count),
-                    pdf_fmt_num(raw.test_assertion_count),
-                    pdf_fmt_num(raw.test_suite_count),
+                    pdf_fmt_full(raw.total_physical_lines),
+                    pdf_fmt_full(eff.code_lines),
+                    pdf_fmt_full(eff.comment_lines),
+                    pdf_fmt_full(eff.blank_lines),
+                    pdf_fmt_full(eff.mixed_lines_separate),
+                    pdf_fmt_full(raw.functions),
+                    pdf_fmt_full(raw.classes),
+                    pdf_fmt_full(raw.variables),
+                    pdf_fmt_full(raw.imports),
+                    pdf_fmt_full(raw.test_count),
+                    pdf_fmt_full(raw.test_assertion_count),
+                    pdf_fmt_full(raw.test_suite_count),
                 ];
                 for (ci, cell) in cells.iter().enumerate() {
                     pf_layer.use_text(
@@ -1435,6 +1453,19 @@ fn pdf_fmt_num(n: u64) -> String {
     } else {
         n.to_string()
     }
+}
+
+fn pdf_fmt_full(n: u64) -> String {
+    // Comma-separated full number: 15319 → "15,319", 1374 → "1,374"
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 /// Launch a headless Chromium-based browser to print `html_path` as a PDF to `pdf_path`.
@@ -2164,6 +2195,8 @@ struct WarningOpportunityRow {
     .run-id-chip:hover .chip-tooltip { opacity:1; }
     .chip-copy-icon { display:inline-block; margin-left:5px; font-size:10px; opacity:0.55; vertical-align:middle; }
     .chip-label-icon { display:inline-block; vertical-align:middle; margin-right:3px; margin-top:-1px; opacity:0.8; }
+    .run-id-short-badge { font-family:ui-monospace,monospace; font-size:13px; font-weight:700; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:2px 8px; letter-spacing:0.04em; white-space:nowrap; vertical-align:middle; }
+    body.dark-theme .run-id-short-badge { color:var(--muted-2); }
     .author-handle { font-size:11px; font-weight:600; color:var(--muted-2); margin-left:1.5em; font-family:ui-monospace,monospace; }
     @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
     .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
@@ -2730,7 +2763,10 @@ struct WarningOpportunityRow {
       <div class="hero-top">
         <div>
           <div class="section-kicker">Saved report artifact</div>
-          <h1>{{ title }}</h1>
+          <div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;">
+            <h1>{{ title }}</h1>
+            <span class="run-id-short-badge" title="Short run ID — matches the ID shown in View Reports">{{ run_id_short }}</span>
+          </div>
           <div class="run-id-row">
             <span class="run-id-chip" data-copy="{{ run.tool.run_id }}">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>Run ID</span>
@@ -4832,6 +4868,7 @@ struct ReportTemplate<'a> {
     /// Text for the header/footer identification banner on every report page.
     report_header_footer: Option<String>,
     chart_js: &'static str,
+    run_id_short: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
