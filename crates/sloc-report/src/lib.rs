@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use askama::Template;
 use chrono::{DateTime, FixedOffset, Utc};
-use sloc_core::{AnalysisRun, FileRecord};
+use sloc_core::{AnalysisRun, FileRecord, SummaryTotals};
 
 // Embed logo images at compile time so every generated HTML report is fully
 // self-contained.  Server-relative paths like /images/logo/... break when the
@@ -842,224 +842,198 @@ fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> f32 {
+fn pdf_info_parts_stats(tot: &SummaryTotals) -> Vec<String> {
+    let total = tot.total_physical_lines.max(1) as f64;
+    let code_pct = tot.code_lines as f64 / total * 100.0;
+    let cmt_pct = tot.comment_lines as f64 / total * 100.0;
+    let blank_pct = tot.blank_lines as f64 / total * 100.0;
+    let mixed_pct = tot.mixed_lines_separate as f64 / total * 100.0;
+    let mut parts = vec![
+        format!("Code {code_pct:.1}%"),
+        format!("Comments {cmt_pct:.1}%"),
+        format!("Blank {blank_pct:.1}%"),
+    ];
+    if tot.mixed_lines_separate > 0 {
+        parts.push(format!(
+            "Mixed {mixed_pct:.1}% ({} lines)",
+            pdf_fmt_full(tot.mixed_lines_separate)
+        ));
+    }
+    if tot.imports > 0 {
+        parts.push(format!("Imports: {}", pdf_fmt_full(tot.imports)));
+    }
+    if tot.variables > 0 {
+        parts.push(format!("Variables: {}", pdf_fmt_full(tot.variables)));
+    }
+    if tot.classes > 0 {
+        parts.push(format!("Classes: {}", pdf_fmt_full(tot.classes)));
+    }
+    parts
+}
+
+fn pdf_info_parts_git(run: &AnalysisRun) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref b) = run.git_branch {
+        parts.push(format!("Branch: {}", pdf_safe_str(b)));
+    }
+    if let Some(ref c) = run.git_commit_short {
+        parts.push(format!("Commit: {}", pdf_safe_str(c)));
+    }
+    if let Some(ref t) = run.git_nearest_tag {
+        parts.push(format!("Nearest Tag: {}", pdf_safe_str(t)));
+    }
+    if let Some(ref a) = run.git_commit_author {
+        parts.push(format!("Author: {}", pdf_safe_str(a)));
+    }
+    if let Some(ref d) = run.git_commit_date {
+        parts.push(format!("Commit Date: {}", pdf_safe_str(d)));
+    }
+    parts
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn pdf_info_parts_tests(tot: &SummaryTotals) -> Vec<String> {
+    let mut tc: Vec<String> = Vec::new();
+    if tot.test_count > 0 {
+        tc.push(format!("Tests: {}", pdf_fmt_full(tot.test_count)));
+    }
+    if tot.test_assertion_count > 0 {
+        tc.push(format!(
+            "Assertions: {}",
+            pdf_fmt_full(tot.test_assertion_count)
+        ));
+    }
+    if tot.test_suite_count > 0 {
+        tc.push(format!("Suites: {}", pdf_fmt_full(tot.test_suite_count)));
+    }
+    if tot.coverage_lines_found > 0 {
+        tc.push(format!(
+            "Line Cov: {:.1}% ({}/{})",
+            tot.coverage_lines_hit as f64 / tot.coverage_lines_found as f64 * 100.0,
+            pdf_fmt_full(tot.coverage_lines_hit),
+            pdf_fmt_full(tot.coverage_lines_found)
+        ));
+    }
+    if tot.coverage_functions_found > 0 {
+        tc.push(format!(
+            "Func Cov: {:.1}%",
+            tot.coverage_functions_hit as f64 / tot.coverage_functions_found as f64 * 100.0
+        ));
+    }
+    if tot.coverage_branches_found > 0 {
+        tc.push(format!(
+            "Branch Cov: {:.1}%",
+            tot.coverage_branches_hit as f64 / tot.coverage_branches_found as f64 * 100.0
+        ));
+    }
+    tc
+}
+
+fn pdf_info_emit_line(ctx: &PdfCtx<'_>, y: f32, r: f32, g: f32, b: f32, text: &str) -> f32 {
     use printpdf::{Color, Mm, Rgb};
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
+    ctx.layer.use_text(
+        pdf_trunc(text, 110),
+        7.0,
+        Mm(ctx.margin),
+        Mm(y),
+        ctx.font_reg,
+    );
+    y - 5.0
+}
+
+fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> f32 {
     let tot = &run.summary_totals;
-    let mut info_y = row2_bot - 6.5;
-    {
-        let total = tot.total_physical_lines.max(1) as f64;
-        let code_pct = tot.code_lines as f64 / total * 100.0;
-        let cmt_pct = tot.comment_lines as f64 / total * 100.0;
-        let blank_pct = tot.blank_lines as f64 / total * 100.0;
-        let mixed_pct = tot.mixed_lines_separate as f64 / total * 100.0;
-        let mut parts = vec![
-            format!("Code {code_pct:.1}%"),
-            format!("Comments {cmt_pct:.1}%"),
-            format!("Blank {blank_pct:.1}%"),
-        ];
-        if tot.mixed_lines_separate > 0 {
-            parts.push(format!(
-                "Mixed {mixed_pct:.1}% ({} lines)",
-                pdf_fmt_full(tot.mixed_lines_separate)
-            ));
-        }
-        if tot.imports > 0 {
-            parts.push(format!("Imports: {}", pdf_fmt_full(tot.imports)));
-        }
-        if tot.variables > 0 {
-            parts.push(format!("Variables: {}", pdf_fmt_full(tot.variables)));
-        }
-        if tot.classes > 0 {
-            parts.push(format!("Classes: {}", pdf_fmt_full(tot.classes)));
-        }
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
-        ctx.layer.use_text(
-            pdf_trunc(&parts.join("  |  "), 110),
-            7.0,
-            Mm(ctx.margin),
-            Mm(info_y),
-            ctx.font_reg,
-        );
-        info_y -= 5.0;
+    let mut y = row2_bot - 6.5;
+    let stats = pdf_info_parts_stats(tot);
+    y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.15, &stats.join("  |  "));
+    let git = pdf_info_parts_git(run);
+    if !git.is_empty() {
+        y = pdf_info_emit_line(ctx, y, 0.10, 0.35, 0.15, &git.join("  |  "));
     }
-    let has_git =
-        run.git_branch.is_some() || run.git_commit_short.is_some() || run.git_nearest_tag.is_some();
-    if has_git {
-        let mut git_parts: Vec<String> = vec![];
-        if let Some(ref b) = run.git_branch {
-            git_parts.push(format!("Branch: {}", pdf_safe_str(b)));
-        }
-        if let Some(ref c) = run.git_commit_short {
-            git_parts.push(format!("Commit: {}", pdf_safe_str(c)));
-        }
-        if let Some(ref t) = run.git_nearest_tag {
-            git_parts.push(format!("Nearest Tag: {}", pdf_safe_str(t)));
-        }
-        if let Some(ref a) = run.git_commit_author {
-            git_parts.push(format!("Author: {}", pdf_safe_str(a)));
-        }
-        if let Some(ref d) = run.git_commit_date {
-            git_parts.push(format!("Commit Date: {}", pdf_safe_str(d)));
-        }
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.35, 0.15, None)));
-        ctx.layer.use_text(
-            pdf_trunc(&git_parts.join("  |  "), 110),
-            7.0,
-            Mm(ctx.margin),
-            Mm(info_y),
-            ctx.font_reg,
-        );
-        info_y -= 5.0;
+    let tests = pdf_info_parts_tests(tot);
+    if !tests.is_empty() {
+        y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.50, &tests.join("  |  "));
     }
-    let has_tests = tot.test_count > 0 || tot.test_assertion_count > 0 || tot.test_suite_count > 0;
-    let has_coverage = tot.coverage_lines_found > 0;
-    if has_tests || has_coverage {
-        let mut tc: Vec<String> = vec![];
-        if tot.test_count > 0 {
-            tc.push(format!("Tests: {}", pdf_fmt_full(tot.test_count)));
-        }
-        if tot.test_assertion_count > 0 {
-            tc.push(format!(
-                "Assertions: {}",
-                pdf_fmt_full(tot.test_assertion_count)
-            ));
-        }
-        if tot.test_suite_count > 0 {
-            tc.push(format!("Suites: {}", pdf_fmt_full(tot.test_suite_count)));
-        }
-        if has_coverage {
-            if tot.coverage_lines_found > 0 {
-                tc.push(format!(
-                    "Line Cov: {:.1}% ({}/{})",
-                    tot.coverage_lines_hit as f64 / tot.coverage_lines_found as f64 * 100.0,
-                    pdf_fmt_full(tot.coverage_lines_hit),
-                    pdf_fmt_full(tot.coverage_lines_found)
-                ));
-            }
-            if tot.coverage_functions_found > 0 {
-                tc.push(format!(
-                    "Func Cov: {:.1}%",
-                    tot.coverage_functions_hit as f64 / tot.coverage_functions_found as f64 * 100.0
-                ));
-            }
-            if tot.coverage_branches_found > 0 {
-                tc.push(format!(
-                    "Branch Cov: {:.1}%",
-                    tot.coverage_branches_hit as f64 / tot.coverage_branches_found as f64 * 100.0
-                ));
-            }
-        }
+    y
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn pdf_table_render_section(
+    ctx: &PdfCtx<'_>,
+    x: f32,
+    top: f32,
+    w: f32,
+    lbl_frac: f32,
+    title: &str,
+    rows: &[(&str, String)],
+) {
+    use printpdf::{Color, Mm, Rgb};
+    pdf_fill_rect(
+        ctx.layer,
+        x,
+        top - ctx.tbl_hdr_h,
+        w,
+        ctx.tbl_hdr_h,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        title,
+        7.0,
+        Mm(x + 2.0),
+        Mm(top - ctx.tbl_hdr_h + 1.5),
+        ctx.font_bold,
+    );
+    let y = top - ctx.tbl_hdr_h;
+    for (ri, (lbl, val)) in rows.iter().enumerate() {
+        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, y);
+        let bg = if ri % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(ctx.layer, x, ry, w, ctx.row_h, bg);
         ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.50, None)));
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        ctx.layer
+            .use_text(*lbl, 6.5, Mm(x + 2.0), Mm(ry + 1.5), ctx.font_reg);
+        let is_dash = val == "--";
+        let val_rgb = if is_dash {
+            Rgb::new(0.55, 0.55, 0.55, None)
+        } else {
+            Rgb::new(0.12, 0.12, 0.12, None)
+        };
+        let val_font = if is_dash { ctx.font_reg } else { ctx.font_bold };
+        ctx.layer.set_fill_color(Color::Rgb(val_rgb));
         ctx.layer.use_text(
-            pdf_trunc(&tc.join("  |  "), 110),
-            7.0,
-            Mm(ctx.margin),
-            Mm(info_y),
-            ctx.font_reg,
+            val.as_str(),
+            6.5,
+            Mm(x + w * lbl_frac + 2.0),
+            Mm(ry + 1.5),
+            val_font,
         );
-        info_y -= 5.0;
     }
-    info_y
 }
 
 #[allow(clippy::cast_precision_loss)]
 fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
-    use printpdf::{Color, Mm, Rgb};
     let tot = &run.summary_totals;
     let half_w = (2.0f32.mul_add(-ctx.margin, ctx.w) - 4.0) / 2.0;
     let left_x = ctx.margin;
     let right_x = ctx.margin + half_w + 4.0;
     let lbl_frac: f32 = 0.68;
 
-    let mut left_y = tbl_top;
-    pdf_fill_rect(
-        ctx.layer,
-        left_x,
-        left_y - ctx.tbl_hdr_h,
-        half_w,
-        ctx.tbl_hdr_h,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
-        "FILES",
-        7.0,
-        Mm(left_x + 2.0),
-        Mm(left_y - ctx.tbl_hdr_h + 1.5),
-        ctx.font_bold,
-    );
-    left_y -= ctx.tbl_hdr_h;
-    let files_num_rows: [(&str, u64); 2] = [
-        ("Files analyzed", tot.files_analyzed),
-        ("Files skipped", tot.files_skipped),
+    let files_rows: [(&str, String); 4] = [
+        ("Files analyzed", pdf_fmt_full(tot.files_analyzed)),
+        ("Files skipped", pdf_fmt_full(tot.files_skipped)),
+        ("Files modified", "--".to_string()),
+        ("Files unchanged", "--".to_string()),
     ];
-    let files_dash_rows: [&str; 2] = ["Files modified", "Files unchanged"];
-    for (ri, (lbl, val)) in files_num_rows.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, left_y);
-        let bg = if ri % 2 == 0 {
-            Rgb::new(0.975, 0.965, 0.95, None)
-        } else {
-            Rgb::new(1.0, 1.0, 1.0, None)
-        };
-        pdf_fill_rect(ctx.layer, left_x, ry, half_w, ctx.row_h, bg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        ctx.layer
-            .use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
-        ctx.layer.use_text(
-            pdf_fmt_full(*val),
-            6.5,
-            Mm(left_x + half_w * lbl_frac + 2.0),
-            Mm(ry + 1.5),
-            ctx.font_bold,
-        );
-    }
-    for (ri, lbl) in files_dash_rows.iter().enumerate() {
-        let ri2 = ri + files_num_rows.len();
-        let ry = ((ri2 + 1) as f32).mul_add(-ctx.row_h, left_y);
-        let bg = if ri2.is_multiple_of(2) {
-            Rgb::new(0.975, 0.965, 0.95, None)
-        } else {
-            Rgb::new(1.0, 1.0, 1.0, None)
-        };
-        pdf_fill_rect(ctx.layer, left_x, ry, half_w, ctx.row_h, bg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        ctx.layer
-            .use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
-        ctx.layer.use_text(
-            "--",
-            6.5,
-            Mm(left_x + half_w * lbl_frac + 2.0),
-            Mm(ry + 1.5),
-            ctx.font_reg,
-        );
-    }
-    left_y -= 4.0f32.mul_add(ctx.row_h, 3.0);
-    pdf_fill_rect(
-        ctx.layer,
-        left_x,
-        left_y - ctx.tbl_hdr_h,
-        half_w,
-        ctx.tbl_hdr_h,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
-        "LINE COUNTS",
-        7.0,
-        Mm(left_x + 2.0),
-        Mm(left_y - ctx.tbl_hdr_h + 1.5),
-        ctx.font_bold,
-    );
-    left_y -= ctx.tbl_hdr_h;
+    pdf_table_render_section(ctx, left_x, tbl_top, half_w, lbl_frac, "FILES", &files_rows);
+
     let lc_rows: [(&str, String); 5] = [
         ("Physical lines", pdf_fmt_full(tot.total_physical_lines)),
         ("Code lines", pdf_fmt_full(tot.code_lines)),
@@ -1067,118 +1041,49 @@ fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
         ("Blank lines", pdf_fmt_full(tot.blank_lines)),
         ("Mixed (separate)", pdf_fmt_full(tot.mixed_lines_separate)),
     ];
-    for (ri, (lbl, val)) in lc_rows.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, left_y);
-        let bg = if ri % 2 == 0 {
-            Rgb::new(0.975, 0.965, 0.95, None)
-        } else {
-            Rgb::new(1.0, 1.0, 1.0, None)
-        };
-        pdf_fill_rect(ctx.layer, left_x, ry, half_w, ctx.row_h, bg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        ctx.layer
-            .use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
-        ctx.layer.use_text(
-            val.as_str(),
-            6.5,
-            Mm(left_x + half_w * lbl_frac + 2.0),
-            Mm(ry + 1.5),
-            ctx.font_bold,
-        );
-    }
-    let mut right_y = tbl_top;
-    pdf_fill_rect(
-        ctx.layer,
-        right_x,
-        right_y - ctx.tbl_hdr_h,
+    let lc_top = tbl_top - ctx.tbl_hdr_h - (files_rows.len() as f32).mul_add(ctx.row_h, 3.0);
+    pdf_table_render_section(
+        ctx,
+        left_x,
+        lc_top,
         half_w,
-        ctx.tbl_hdr_h,
-        Rgb::new(0.098, 0.11, 0.15, None),
+        lbl_frac,
+        "LINE COUNTS",
+        &lc_rows,
     );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
-        "CODE STRUCTURE",
-        7.0,
-        Mm(right_x + 2.0),
-        Mm(right_y - ctx.tbl_hdr_h + 1.5),
-        ctx.font_bold,
-    );
-    right_y -= ctx.tbl_hdr_h;
+
     let cs_rows: [(&str, String); 4] = [
         ("Functions", pdf_fmt_full(tot.functions)),
         ("Classes / Types", pdf_fmt_full(tot.classes)),
         ("Variables", pdf_fmt_full(tot.variables)),
         ("Imports", pdf_fmt_full(tot.imports)),
     ];
-    for (ri, (lbl, val)) in cs_rows.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, right_y);
-        let bg = if ri % 2 == 0 {
-            Rgb::new(0.975, 0.965, 0.95, None)
-        } else {
-            Rgb::new(1.0, 1.0, 1.0, None)
-        };
-        pdf_fill_rect(ctx.layer, right_x, ry, half_w, ctx.row_h, bg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        ctx.layer
-            .use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
-        ctx.layer.use_text(
-            val.as_str(),
-            6.5,
-            Mm(right_x + half_w * lbl_frac + 2.0),
-            Mm(ry + 1.5),
-            ctx.font_bold,
-        );
-    }
-    right_y -= (cs_rows.len() as f32).mul_add(ctx.row_h, 3.0);
-    pdf_fill_rect(
-        ctx.layer,
+    pdf_table_render_section(
+        ctx,
         right_x,
-        right_y - ctx.tbl_hdr_h,
+        tbl_top,
         half_w,
-        ctx.tbl_hdr_h,
-        Rgb::new(0.098, 0.11, 0.15, None),
+        lbl_frac,
+        "CODE STRUCTURE",
+        &cs_rows,
     );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
-        "LINE CHANGE SUMMARY",
-        7.0,
-        Mm(right_x + 2.0),
-        Mm(right_y - ctx.tbl_hdr_h + 1.5),
-        ctx.font_bold,
-    );
-    right_y -= ctx.tbl_hdr_h;
-    let lcs_labels: [&str; 4] = [
-        "Lines added",
-        "Lines removed",
-        "Lines modified (net)",
-        "Lines unmodified",
+
+    let lcs_rows: [(&str, String); 4] = [
+        ("Lines added", "--".to_string()),
+        ("Lines removed", "--".to_string()),
+        ("Lines modified (net)", "--".to_string()),
+        ("Lines unmodified", "--".to_string()),
     ];
-    for (ri, lbl) in lcs_labels.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, right_y);
-        let bg = if ri % 2 == 0 {
-            Rgb::new(0.975, 0.965, 0.95, None)
-        } else {
-            Rgb::new(1.0, 1.0, 1.0, None)
-        };
-        pdf_fill_rect(ctx.layer, right_x, ry, half_w, ctx.row_h, bg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        ctx.layer
-            .use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
-        ctx.layer.use_text(
-            "--",
-            6.5,
-            Mm(right_x + half_w * lbl_frac + 2.0),
-            Mm(ry + 1.5),
-            ctx.font_reg,
-        );
-    }
+    let lcs_top = tbl_top - ctx.tbl_hdr_h - (cs_rows.len() as f32).mul_add(ctx.row_h, 3.0);
+    pdf_table_render_section(
+        ctx,
+        right_x,
+        lcs_top,
+        half_w,
+        lbl_frac,
+        "LINE CHANGE SUMMARY",
+        &lcs_rows,
+    );
 }
 
 fn pdf_render_page1_footer(ctx: &PdfCtx<'_>, run: &AnalysisRun, footer_h: f32, version: &str) {

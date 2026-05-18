@@ -55,7 +55,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
-use sloc_config::{AppConfig, BinaryFileBehavior, MixedLinePolicy};
+use sloc_config::{
+    AppConfig, BinaryFileBehavior, BlankInBlockCommentPolicy, ContinuationLinePolicy,
+    MixedLinePolicy,
+};
 use sloc_git::ScheduleStore;
 
 #[derive(Clone)]
@@ -1406,6 +1409,9 @@ struct AnalyzeForm {
     exclude_globs: Option<String>,
     submodule_breakdown: Option<String>,
     coverage_file: Option<String>,
+    continuation_line_policy: Option<ContinuationLinePolicy>,
+    blank_in_block_comment_policy: Option<BlankInBlockCommentPolicy>,
+    count_compiler_directives: Option<String>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1656,6 +1662,64 @@ fn resolve_or_create_staging(id: Option<&str>) -> (String, PathBuf) {
     }
 }
 
+/// Decode, size-check, and write one uploaded file entry into `staging`.
+/// Returns `Ok(())` whether the file was written or skipped (bad base64).
+/// Returns `Err(Response)` for fatal errors; the caller is responsible for
+/// cleaning up `staging` before propagating the error.
+#[allow(clippy::result_large_err)]
+async fn stage_decoded_entry(
+    entry: &UploadedFile,
+    staging: &Path,
+    total_bytes: &mut usize,
+    project_root: &mut Option<PathBuf>,
+) -> Result<(), Response> {
+    const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024;
+
+    let Ok(data) = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        entry.content.as_bytes(),
+    ) else {
+        return Ok(());
+    };
+
+    *total_bytes += data.len();
+    if *total_bytes > MAX_TOTAL_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Upload exceeds the 500 MB limit"})),
+        )
+            .into_response());
+    }
+
+    let rel = std::path::Path::new(&entry.path);
+    if project_root.is_none() {
+        if let Some(first) = rel.components().next() {
+            *project_root = Some(staging.join(first.as_os_str()));
+        }
+    }
+
+    let dest = staging.join(rel);
+    if let Some(parent) = dest.parent() {
+        if tokio::fs::create_dir_all(parent).await.is_err() {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to create directory structure"})),
+            )
+                .into_response());
+        }
+    }
+
+    if tokio::fs::write(&dest, &data).await.is_err() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Failed to write uploaded file"})),
+        )
+            .into_response());
+    }
+
+    Ok(())
+}
+
 /// Write a batch of uploaded files into `staging`, enforcing the total-bytes cap
 /// and path-traversal guard. Returns `(file_count, project_root)` on success or
 /// an error `Response` on failure (staging dir is cleaned up before returning).
@@ -1664,7 +1728,6 @@ async fn write_upload_files(
     staging: &Path,
     upload_id: &str,
 ) -> Result<(usize, Option<PathBuf>), Response> {
-    const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024;
     let mut total_bytes: usize = 0;
     let mut project_root: Option<PathBuf> = None;
     let mut traversal_attempts: usize = 0;
@@ -1692,48 +1755,11 @@ async fn write_upload_files(
             continue;
         }
 
-        let Ok(data) = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            entry.content.as_bytes(),
-        ) else {
-            continue;
-        };
-
-        total_bytes += data.len();
-        if total_bytes > MAX_TOTAL_BYTES {
+        if let Err(resp) =
+            stage_decoded_entry(entry, staging, &mut total_bytes, &mut project_root).await
+        {
             let _ = tokio::fs::remove_dir_all(staging).await;
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": "Upload exceeds the 500 MB limit"})),
-            )
-                .into_response());
-        }
-
-        if project_root.is_none() {
-            if let Some(first) = rel.components().next() {
-                project_root = Some(staging.join(first.as_os_str()));
-            }
-        }
-
-        let dest = staging.join(rel);
-        if let Some(parent) = dest.parent() {
-            if tokio::fs::create_dir_all(parent).await.is_err() {
-                let _ = tokio::fs::remove_dir_all(staging).await;
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Failed to create directory structure"})),
-                )
-                    .into_response());
-            }
-        }
-
-        if tokio::fs::write(&dest, &data).await.is_err() {
-            let _ = tokio::fs::remove_dir_all(staging).await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Failed to write uploaded file"})),
-            )
-                .into_response());
+            return Err(resp);
         }
     }
 
@@ -3270,6 +3296,14 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
     config.discovery.include_globs = split_patterns(form.include_globs.as_deref());
     config.discovery.exclude_globs = split_patterns(form.exclude_globs.as_deref());
     config.discovery.submodule_breakdown = form.submodule_breakdown.as_deref() == Some("enabled");
+    if let Some(policy) = form.continuation_line_policy {
+        config.analysis.continuation_line_policy = policy;
+    }
+    if let Some(policy) = form.blank_in_block_comment_policy {
+        config.analysis.blank_in_block_comment_policy = policy;
+    }
+    config.analysis.count_compiler_directives =
+        form.count_compiler_directives.as_deref() != Some("disabled");
     if let Some(cov) = &form.coverage_file {
         let trimmed = cov.trim();
         if !trimmed.is_empty() {
@@ -11599,6 +11633,65 @@ pytest --cov --cov-report=xml
                   </div>
                 </div>
               </div>
+              <div class="subsection-bar">IEEE 1045-1992 counting</div>
+              <div class="scan-rules-grid">
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Continuation lines</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Continuation-line policy</h4>
+                    <select name="continuation_line_policy" id="continuation_line_policy">
+                      <option value="each_physical_line" selected>Each physical line (default)</option>
+                      <option value="collapse_to_logical">Collapse to logical line</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Controls how backslash-continued lines (C macros, shell, Makefile) are counted.<br /><strong>Each physical line</strong> — the IEEE 1045-1992 default; every line with content is counted separately.<br /><strong>Collapse to logical</strong> — a backslash-continued sequence counts as one logical line, matching logical-SLOC conventions.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;">#define MAX(a, b) \
+    ((a) &gt; (b) ? (a) : (b))
+# each_physical_line → 2 SLOC
+# collapse_to_logical → 1 SLOC</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Block-comment blanks</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Blank lines in block comments</h4>
+                    <select name="blank_in_block_comment_policy" id="blank_in_block_comment_policy">
+                      <option value="count_as_comment" selected>Count as comment (default)</option>
+                      <option value="count_as_blank">Count as blank</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Decides how blank lines that fall inside a <code style="font-size:12px;">/* … */</code> block comment are classified.<br /><strong>Count as comment</strong> — IEEE-aligned; blank lines are part of the comment body.<br /><strong>Count as blank</strong> — legacy behaviour; blank lines inside block comments are treated as ordinary blank lines.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;">/*
+ * Summary line
+ *              ← blank inside block comment
+ * Detail line
+ */
+# count_as_comment → blank counts toward comments
+# count_as_blank   → blank counts toward blanks</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Compiler directives</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Count compiler directives</h4>
+                    <select name="count_compiler_directives" id="count_compiler_directives">
+                      <option value="enabled" selected>Include in code SLOC (default)</option>
+                      <option value="disabled">Exclude from code SLOC</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> IEEE 1045-1992 §4.2 — controls whether preprocessor directives contribute to code SLOC. Applies to C, C++, and Objective-C.<br /><strong>Include</strong> — <code style="font-size:12px;">#include</code> / <code style="font-size:12px;">#define</code> lines count toward code SLOC (default).<br /><strong>Exclude</strong> — directives are tracked separately in raw counts but not added to effective code SLOC; useful when comparing with tools that strip the preprocessor layer.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;">#include &lt;stdio.h&gt;   ← compiler directive
+#define BUF 256     ← compiler directive
+int main() { … }   ← code
+# enabled  → 3 code SLOC
+# disabled → 1 code SLOC + 2 directive lines</div>
+                  </div>
+                </div>
+              </div>
+
               <div class="always-tracked-tip">
                 <div class="always-tracked-tip-icon">ℹ</div>
                 <div class="always-tracked-tip-body">
