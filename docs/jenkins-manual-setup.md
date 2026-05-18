@@ -217,7 +217,7 @@ center cannot replace them, and restarts Jenkins.
    | Plugin (search term) | Purpose |
    |---------------------|---------|
    | `Pipeline: Stage View` | Stage visualization in the job UI |
-   | `HTML Publisher` | "SLOC Report — &lt;slug&gt;" / "Build Dashboard — &lt;slug&gt;" / "Coverage Report" sidebar links |
+   | `HTML Publisher` | "OxideSLOC — Jenkins CI Report" / "OxideSLOC — Jenkins HTML Report" / "Coverage Source" sidebar links |
    | `Plot` | Build-over-build SLOC trend charts |
    | `JUnit` | "Test Result" sidebar link (cargo-nextest builds) |
    | `Coverage` | Native LCOV/Cobertura integration — line/branch % on build pages |
@@ -339,8 +339,9 @@ in the oxide-sloc HTML report.  Fix this with an init script:
    - Docker: `docker restart jenkins`
    - Native: `sudo systemctl restart jenkins`
 
-> **Without this step**, the SLOC Report and Coverage Report HTML pages will render
-> unstyled (plain text-like).  Everything else still works.
+> **Without this step**, the "OxideSLOC — Jenkins CI Report" and "OxideSLOC — Jenkins HTML Report"
+> pages will render with broken interactive features (CSS still loads, but JS is blocked — see
+> Step 11 for full symptoms).
 
 ---
 
@@ -444,22 +445,22 @@ From this point on, all 39 configuration parameters are visible in the build for
 
 After a successful build, confirm each feature is wired correctly:
 
-### SLOC Report (HTML Publisher)
-- The left sidebar shows a **"SLOC Report — &lt;SLOC_PROJECT&gt;"** link.
-  The slug is derived from `SCAN_PATH` basename (e.g. `"SLOC Report — basic"` for the
-  default `tests/fixtures/basic`). If `SLOC_PROJECT` is set explicitly, that exact string
-  is used as the slug.
-- Clicking it opens the HTML report in the browser.
-- If it shows unstyled content, revisit [Step 6](#6-configure-the-csp-header-html-report-viewer).
+### OxideSLOC — Jenkins CI Report (HTML Publisher)
+- The left sidebar shows a **"OxideSLOC — Jenkins CI Report"** link.
+  This is a fixed name (no per-project slug); the URL is
+  `/job/<JOB>/<N>/OxideSLOC_20_e28094_20Jenkins_20CI_20Report/`
+  (Jenkins encodes the em-dash as `_e28094_`).
+- Clicking it opens the report in the browser.
+- If interactive features (sorting, expand modals, charts) are broken, the
+  Jenkins CSP is at default — see [Step 6](#6-configure-the-csp-header-html-report-viewer).
 
-### Build Dashboard (standalone, no-plugin fallback)
-- A second sidebar link, **"Build Dashboard — &lt;SLOC_PROJECT&gt;"**, is published from
-  `ci/jenkins/generate-dashboard.py`. This is a self-contained HTML file that works even
-  on Jenkins instances where the Plot/JUnit/Coverage plugins are absent.
-- Both sidebar links use Jenkins' em-dash URL encoding: the `—` character becomes
-  `_e28094_` in the path (e.g. `/job/<JOB>/<N>/SLOC_20Report_20_e28094_20basic/`).
-  Bookmarks from a pre-15b0a27e installation (which used `/SLOC_20Report/`) will return
-  404 — update them once after upgrading.
+### OxideSLOC — Jenkins HTML Report (HTML Publisher — standalone)
+- A second sidebar link, **"OxideSLOC — Jenkins HTML Report"**, is published from
+  `ci/jenkins/generate-dashboard.py`. This is a self-contained HTML file that works
+  even on Jenkins instances where the Plot/JUnit/Coverage plugins are absent.
+- URL: `/job/<JOB>/<N>/OxideSLOC_20_e28094_20Jenkins_20HTML_20Report/`.
+- Bookmarks from a pre-f96f53d installation (which used `/SLOC_20Report_20_e28094_20<slug>/`
+  and `/Graphical_20Report_20_e28094_20<slug>/`) will return 404 — update them once after upgrading.
 
 ### Trend charts (Plot plugin)
 - The job page shows **"SLOC Trends"** charts below the build history.
@@ -491,12 +492,13 @@ After a successful build, confirm each feature is wired correctly:
   This confirms all metadata was correctly read from the build output.
 
 ### Archived artifacts
-- Click the build number → **"Build Artifacts"** to see all archived files:
-  - `target/release/oxide-sloc` (the compiled binary)
-  - `ci-out/result.json`, `ci-out/report.html` (scan outputs)
-  - `ci-out/test-results/` (JUnit XML and/or raw test output)
-  - `ci-out/coverage/` (lcov.info, sonar-coverage.xml, html/)
-  - `ci-out/summary.csv`, `ci-out/per_language.csv`, `ci-out/coverage.csv` (trend CSVs)
+- Click the build number → **"Build Artifacts"** to see all archived files. With default parameters:
+  - `ci-out/result_<slug>.json` (scan output, slug = `SCAN_PATH` basename)
+  - `ci-out/report_<slug>.html`, `report_<slug>.css`, `report_<slug>.js`,
+    `report_<slug>.xlsx`, `report_<slug>.csv` (HTML report with assets and exports)
+  - `ci-out/summary.csv`, `ci-out/per_language.csv` (trend CSVs)
+  - `ci-out/test-results/junit.xml` (when `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`)
+  - `ci-out/coverage/{lcov.info,sonar-coverage.xml,html/}` (when `COVERAGE_STANDALONE = true`)
 
 ---
 
