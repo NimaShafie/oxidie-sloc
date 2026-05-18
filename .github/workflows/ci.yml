@@ -48,7 +48,7 @@ jobs:
 
   check-windows:
     name: Quality gates (Windows)
-    runs-on: windows-latest
+    runs-on: windows-2022  # windows-latest is rolling out to windows-2025-vs2026 (June 2026); ncc-bundled actions (rust-cache dist) fail on that image — stay on 2022 until upstream fixes land
     defaults:
       run:
         shell: bash
