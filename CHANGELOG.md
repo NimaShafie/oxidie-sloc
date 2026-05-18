@@ -10,6 +10,117 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.5] — 2026-05-17
+
+### Added
+
+- **Pure-Rust PDF generation** (`sloc-report`): Native PDF output via `printpdf` — zero external
+  tool dependencies. Chromium / wkhtmltopdf are no longer required for PDF export. The PDF
+  report includes 8 stat chips, git/test/coverage metrics, a 7-column language table, a
+  per-file page, full comma-formatted numbers in tables, and exact counts in chip badges.
+- **REST endpoints: `/api/health` and `/api/version`** (`sloc-web`): Lightweight health-check
+  and version-info routes suitable for uptime monitors and CI pipelines.
+- **Systemd installer** (`scripts/`): `serve-server.sh` installs and enables a `systemd` unit on
+  Linux so the web UI survives reboots without a process manager.
+- **Browser-upload API for server mode** (`sloc-web`): Clients that cannot access the local
+  filesystem can upload a `tar.gz` archive for analysis — streaming upload with larger limits and
+  a sample-path preview in the UI.
+- **Run-management APIs** (`sloc-web`): `POST /api/runs/:id/bundle` and
+  `DELETE /api/runs/:id` let callers download or discard individual scan artefacts; the
+  web UI surfaces these as a cleanup modal with run-ID chips.
+- **Comment-density chart** (`sloc-web`): Visual breakdown of comment vs. blank vs. code
+  lines added to the analysis result page alongside the existing language donut.
+- **Semantic expand modal** (`sloc-web`): Table rows can be expanded in-place to show
+  per-file details without leaving the results page.
+- **`--allow-private-net` webhook flag + custom webhook secrets** (`sloc-git`, `sloc-web`):
+  Operators can now permit webhooks from RFC-1918 ranges (useful for local GitLab) and
+  configure a per-endpoint HMAC secret for payload verification.
+- **`--quiet` flag for `serve-server.sh`**: Suppresses the startup banner and auth-warning
+  block; useful in scripted / non-TTY contexts.
+- **Short run-ID badge in report title** (`sloc-web`): Each completed scan now displays a
+  truncated UUID badge next to the report heading, matching the run shown in Scan History.
+- **`autoprint` PDF fallback** (`sloc-report`): When a headless browser is available but
+  the native PDF path is preferred, the renderer automatically falls back rather than
+  failing hard.
+- **File-size histogram** (`sloc-web`): New bar chart on the results page bucketing
+  per-file sizes for quick identification of outlier source files.
+- **Git-native metadata** (`sloc-core`): `analyze()` now optionally captures branch name,
+  HEAD commit hash, and author statistics from the local git repository without shelling out
+  to an external process.
+- **Dynamic ping status pill** (`sloc-web`): The navigation bar displays a live server
+  ping and latency reading that updates in the background.
+- **Scroll-to-end output inputs** (`sloc-web`): Long stdout/stderr streams in the web UI
+  auto-scroll to the most recent line as output arrives.
+
+### Changed
+
+- **Windows CI runner pinned to `windows-2022`** (`.github/workflows/ci.yml`): Avoids
+  toolchain compatibility breakage introduced when `windows-latest` began resolving to
+  a VS2026 runner image.
+- **Nav max-width widened to 1720 px** (`sloc-web`): Accommodates wider viewports without
+  the nav collapsing into a crowded layout.
+- **Sticky footer layout** (`sloc-web`): Page footer is always anchored to the viewport
+  bottom, preventing content from bleeding behind it on short pages.
+- **Graceful `pick-directory` fallback** (`sloc-web`): When the native file-dialog is
+  unavailable (headless server), the endpoint returns a descriptive JSON error instead of
+  panicking.
+- **Consistent nav/footer across all pages** (`sloc-web`): Dynamic ping pill, Settings
+  cogwheel, and theme toggle are now present on every route.
+
+### Fixed
+
+- **Scan History not populated for uploaded projects** (`sloc-web`): Uploaded-archive runs
+  now appear in `/view-reports` alongside local-path scans.
+- **Upload limits, proxy trust, session cleanup, and error responses** (`sloc-web`):
+  Hardened request-size caps, corrected X-Forwarded-For trust when behind a reverse proxy,
+  fixed leaked run state on early errors, and unified JSON error shapes.
+- **Hero title to run-ID badge gap** (`sloc-web`): Increased vertical gap to 18 px so the
+  badge does not crowd the heading on narrow viewports.
+- **Jenkins Docker error detection** (`ci/jenkins/`): Replaced `docker ps` with an `if`-form
+  so `errexit` does not abort `--install-csp` before the diagnostic message prints.
+- **`serve-server.sh` non-TTY display and open-redirect** (`scripts/`): Fixed broken
+  progress output when stdout is not a terminal; patched the `next=` redirect parameter
+  to reject off-origin targets.
+- **Upload UI copy** (`sloc-web`): Corrected button label, upload-limit tooltip accuracy,
+  and inline comment synchronisation.
+- **`next=` redirect sanitisation** (`sloc-web`): The login redirect now rejects absolute
+  URLs that would redirect to a third-party origin.
+- **`redundant_pub_crate` Clippy warning** (`sloc-web`): Auth handlers reverted to
+  `pub(crate)` visibility after the module extraction that introduced the warning.
+- **Jenkins Groovy sandbox blocking `System.setProperty`** (`ci/jenkins/job-config.xml`):
+  Added `<sandbox>false</sandbox>` to `job-config.xml` and its template so the CSP
+  `System.setProperty` call in the Setup stage is not silently rejected on fresh installs.
+- **Jenkins `preflight.sh --install-csp` when no container found** (`ci/jenkins/`): The
+  script now emits a clear "can only run on the Jenkins host" message instead of a generic
+  diagnostic when no Jenkins container is detected; adds an ancestor-filter fallback before
+  the name-grep to handle non-standard container names.
+- **`#[must_use]` on Confluence renderers** (`sloc-report`): Added missing attribute to
+  `render_confluence_storage` and `render_confluence_wiki_markup` to satisfy Clippy.
+- **Cognitive-complexity violations** (`sloc-report`, `sloc-web`): Large functions split
+  into focused helpers; all new S3776 Clippy / SonarQube violations resolved.
+
+### Documentation
+
+- **Jenkins setup guide** (`docs/jenkins-manual-setup.md`): Updated for renamed
+  `publishHTML` report labels, current artifact filenames, renumbered Jenkinsfile stages,
+  removed stale `SKIP_SONAR` row from the Step 10 table, added Step 5g documenting that
+  the Groovy sandbox is on by default for SCM-defined pipelines and that the
+  `jenkins-api-token` credential is required unless the sandbox is disabled (which
+  `job-config.xml` now does automatically), and rewritten Step 6 to lead with the
+  `init.groovy.d` approach as the only reliable CSP fix.
+- **Jenkins CI/Jenkins docs** (`ci/jenkins/README.md`): Documented the job-collision
+  delete recipe; clarified Docker error detection changes and CSP escalation to warning.
+- **CI integrations doc** (`docs/ci-integrations.md`): Added `smoke:pdf` to the list of
+  parallel smoke jobs; updated `generate-dashboard.py` usage to document the optional
+  `history-file` positional argument.
+- **Jenkinsfile + Dockerfile.agent** (`ci/`): Shell steps that expand build parameters
+  (`GIT_REF`, `COMPARE_TO_REF`, `COMPARE_TO_PREV_TAG`, `OUTPUT_SUBDIR`) now use
+  `withEnv([...])` wrappers to satisfy the Groovy sandbox; updated the llvm-tools
+  component name from `llvm-tools-preview` to `llvm-tools` in both the Jenkinsfile
+  coverage step and `Dockerfile.agent`.
+
+---
+
 ## [1.5.4] — 2026-05-15
 
 ### Added

@@ -70,7 +70,7 @@ RUN set -eux; \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y \
               --default-toolchain "$TOOLCHAIN" \
-              --component rustfmt clippy \
+              --component rustfmt clippy llvm-tools \
               --no-modify-path; \
     rm /tmp/rust-toolchain.toml; \
     chmod -R a+rX /opt/rust-toolchain; \
