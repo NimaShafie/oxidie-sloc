@@ -193,8 +193,13 @@ if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
                 fi
             else
                 JENKINS_CONTAINER=$(echo "$DOCKER_PS_OUT" | grep -i jenkins | head -1 || true)
+                # If name-grep finds nothing, try by ancestor image as a fallback.
                 if [ -z "$JENKINS_CONTAINER" ]; then
-                    fail "--install-csp: no Jenkins container found in 'docker ps' output. Start your Jenkins container first."
+                    JENKINS_CONTAINER=$($DOCKER_CMD ps --filter ancestor=jenkins/jenkins \
+                        --format '{{.Names}}' 2>/dev/null | head -1 || true)
+                fi
+                if [ -z "$JENKINS_CONTAINER" ]; then
+                    fail "--install-csp can only run on the Jenkins host — no Jenkins container was found in 'docker ps'. Run this script on the machine where the Jenkins container is running, or deploy relax-csp.groovy manually (see docs/jenkins-manual-setup.md Step 6)."
                 else
                     $DOCKER_CMD exec "$JENKINS_CONTAINER" mkdir -p /var/jenkins_home/init.groovy.d
                     $DOCKER_CMD cp "$CSP_GROOVY" "${JENKINS_CONTAINER}:/var/jenkins_home/init.groovy.d/relax-csp.groovy"
