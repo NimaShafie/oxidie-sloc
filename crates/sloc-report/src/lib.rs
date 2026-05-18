@@ -607,29 +607,36 @@ fn write_pdf_via_wkhtmltopdf(html_path: &Path, pdf_path: &Path) -> Result<()> {
     }
 
     if !pdf_path.exists() {
-        anyhow::bail!("wkhtmltopdf exited successfully but {pdf_path:?} was not created");
+        anyhow::bail!(
+            "wkhtmltopdf exited successfully but {} was not created",
+            pdf_path.display()
+        );
     }
 
     eprintln!("[oxide-sloc][pdf] wkhtmltopdf wrote {}", pdf_path.display());
     Ok(())
 }
 
-/// Generate a PDF summary report directly from `AnalysisRun` data using the pure-Rust
-/// `printpdf` crate.  No external tools (Chrome, wkhtmltopdf) are required — this path
-/// is always available on both Windows and Linux server deployments.
+/// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
+///
+/// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
+/// both Windows and Linux server deployments.
 ///
 /// # Errors
 ///
 /// Returns an error if the output directory cannot be created or the PDF file cannot be written.
+// Casts throughout are for PDF layout coordinates and percentage ratios; precision loss is fine.
+// Function is long because it encodes A4 layout logic; split deferred to Tier 4 refactoring.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
 pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     use printpdf::{BuiltinFont, Color, Mm, PdfDocument, Rgb};
     use std::fs::File;
     use std::io::BufWriter;
-
-    if let Some(parent) = pdf_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create PDF directory {}", parent.display()))?;
-    }
 
     // A4 landscape: 297 mm wide x 210 mm tall (y=0 = bottom, y=210 = top).
     const W: f32 = 297.0;
@@ -639,6 +646,11 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     const HDR_H: f32 = 13.5;
     const ROW_H: f32 = 5.5;
     const TBL_HDR_H: f32 = 6.0;
+
+    if let Some(parent) = pdf_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create PDF directory {}", parent.display()))?;
+    }
 
     let tot = &run.summary_totals;
     let title = pdf_safe_str(&run.effective_configuration.reporting.report_title);
@@ -757,7 +769,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
 
     // -- Chip rows (8 chips, 4 per row) ---------------------------------------
     let chip_gap: f32 = 5.0;
-    let chip_w = (W - 2.0 * MARGIN - 3.0 * chip_gap) / 4.0; // ~65.5 mm
+    let chip_w = 3.0f32.mul_add(-chip_gap, 2.0f32.mul_add(-MARGIN, W)) / 4.0; // ~65.5 mm
     let chip_h: f32 = 17.0;
 
     // Row 1 -- line counts (warm/oxide palette)
@@ -769,7 +781,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         ("Physical Lines", tot.total_physical_lines),
     ];
     for (i, (label, value)) in row1.iter().enumerate() {
-        let cx = MARGIN + i as f32 * (chip_w + chip_gap);
+        let cx = (i as f32).mul_add(chip_w + chip_gap, MARGIN);
         pdf_fill_rect(
             &layer,
             cx,
@@ -796,7 +808,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         );
         // Exact full number at bottom-right, mirroring .stat-chip-exact in the HTML UI.
         let exact = pdf_fmt_full(*value);
-        let exact_x = (cx + chip_w - exact.len() as f32 * 1.1 - 1.5).max(cx + 4.0);
+        let exact_x = ((exact.len() as f32).mul_add(-1.1, cx + chip_w) - 1.5).max(cx + 4.0);
         layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
         layer.use_text(exact, 5.5, Mm(exact_x), Mm(row1_bot + 1.5), &font_reg);
     }
@@ -817,7 +829,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         row2_4th,
     ];
     for (i, (label, value)) in row2.iter().enumerate() {
-        let cx = MARGIN + i as f32 * (chip_w + chip_gap);
+        let cx = (i as f32).mul_add(chip_w + chip_gap, MARGIN);
         pdf_fill_rect(
             &layer,
             cx,
@@ -843,7 +855,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             &font_reg,
         );
         let exact = pdf_fmt_full(*value);
-        let exact_x = (cx + chip_w - exact.len() as f32 * 1.1 - 1.5).max(cx + 4.0);
+        let exact_x = ((exact.len() as f32).mul_add(-1.1, cx + chip_w) - 1.5).max(cx + 4.0);
         layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.60, None)));
         layer.use_text(exact, 5.5, Mm(exact_x), Mm(row2_bot + 1.5), &font_reg);
     }
@@ -975,7 +987,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     // Left : FILES + LINE COUNTS
     // Right: CODE STRUCTURE + LINE CHANGE SUMMARY
     let tbl_top = info_y - 4.0;
-    let half_w = (W - 2.0 * MARGIN - 4.0) / 2.0; // ~136.5 mm each; 4 mm gap between
+    let half_w = (2.0f32.mul_add(-MARGIN, W) - 4.0) / 2.0; // ~136.5 mm each; 4 mm gap between
     let left_x = MARGIN;
     let right_x = MARGIN + half_w + 4.0;
     let lbl_frac: f32 = 0.68; // label column = 68% of table width
@@ -1005,7 +1017,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     ];
     let files_dash_rows: [&str; 2] = ["Files modified", "Files unchanged"];
     for (ri, (lbl, val)) in files_num_rows.iter().enumerate() {
-        let ry = left_y - (ri + 1) as f32 * ROW_H;
+        let ry = ((ri + 1) as f32).mul_add(-ROW_H, left_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
@@ -1024,7 +1036,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     }
     for (ri, lbl) in files_dash_rows.iter().enumerate() {
         let ri2 = ri + files_num_rows.len();
-        let ry = left_y - (ri2 + 1) as f32 * ROW_H;
+        let ry = ((ri2 + 1) as f32).mul_add(-ROW_H, left_y);
         let bg = if ri2.is_multiple_of(2) {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
@@ -1042,7 +1054,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             &font_reg,
         );
     }
-    left_y -= 4.0 * ROW_H + 3.0; // 4 rows + gap before next table
+    left_y -= 4.0f32.mul_add(ROW_H, 3.0); // 4 rows + gap before next table
 
     // -- Left: LINE COUNTS --
     pdf_fill_rect(
@@ -1070,7 +1082,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         ("Mixed (separate)", pdf_fmt_full(tot.mixed_lines_separate)),
     ];
     for (ri, (lbl, val)) in lc_rows.iter().enumerate() {
-        let ry = left_y - (ri + 1) as f32 * ROW_H;
+        let ry = ((ri + 1) as f32).mul_add(-ROW_H, left_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
@@ -1114,7 +1126,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         ("Imports", pdf_fmt_full(tot.imports)),
     ];
     for (ri, (lbl, val)) in cs_rows.iter().enumerate() {
-        let ry = right_y - (ri + 1) as f32 * ROW_H;
+        let ry = ((ri + 1) as f32).mul_add(-ROW_H, right_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
@@ -1131,7 +1143,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             &font_bold,
         );
     }
-    right_y -= cs_rows.len() as f32 * ROW_H + 3.0;
+    right_y -= (cs_rows.len() as f32).mul_add(ROW_H, 3.0);
 
     // -- Right: LINE CHANGE SUMMARY --
     pdf_fill_rect(
@@ -1158,7 +1170,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         "Lines unmodified",
     ];
     for (ri, lbl) in lcs_labels.iter().enumerate() {
-        let ry = right_y - (ri + 1) as f32 * ROW_H;
+        let ry = ((ri + 1) as f32).mul_add(-ROW_H, right_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
@@ -1203,6 +1215,9 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     //             Functions | Classes | Variables | Imports | Tests | Assertions | Suites
     // Column left-edges (mm); widths sum to 277 = W - 2*MARGIN.
     if !run.per_file_records.is_empty() {
+        // Compact 8 mm header + 5.5 mm sub-header on per-file pages.
+        const HDR2_H: f32 = 8.0;
+        const SUB_H: f32 = 5.5;
         let col_x: [f32; 14] = [
             10.0, 72.0, 92.0, 109.0, 124.0, 144.0, 158.0, 172.0, 191.0, 206.0, 223.0, 238.0, 251.0,
             273.0,
@@ -1223,10 +1238,6 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             "Assertions",
             "Suites",
         ];
-
-        // Compact 8 mm header + 5.5 mm sub-header on per-file pages.
-        const HDR2_H: f32 = 8.0;
-        const SUB_H: f32 = 5.5;
         let rows_per_page = ((H - HDR2_H - SUB_H - TBL_HDR_H - FOOTER_H) / ROW_H).floor() as usize;
         let total_files = run.per_file_records.len();
         let page_count = total_files.div_ceil(rows_per_page);
@@ -1301,7 +1312,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
                 &pf_layer,
                 MARGIN,
                 pf_tbl_top - TBL_HDR_H,
-                W - 2.0 * MARGIN,
+                2.0f32.mul_add(-MARGIN, W),
                 TBL_HDR_H,
                 Rgb::new(0.098, 0.11, 0.15, None),
             );
@@ -1320,20 +1331,19 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             let start = page_idx * rows_per_page;
             let end = (start + rows_per_page).min(total_files);
             for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
-                let ry = pf_tbl_top - TBL_HDR_H - (ri + 1) as f32 * ROW_H;
+                let ry = ((ri + 1) as f32).mul_add(-ROW_H, pf_tbl_top - TBL_HDR_H);
                 let bg = if ri % 2 == 0 {
                     Rgb::new(0.975, 0.965, 0.95, None)
                 } else {
                     Rgb::new(1.0, 1.0, 1.0, None)
                 };
-                pdf_fill_rect(&pf_layer, MARGIN, ry, W - 2.0 * MARGIN, ROW_H, bg);
+                pdf_fill_rect(&pf_layer, MARGIN, ry, 2.0f32.mul_add(-MARGIN, W), ROW_H, bg);
                 pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
                 let file_str = pdf_safe_str(&rec.relative_path);
                 let lang_str = rec
                     .language
                     .as_ref()
-                    .map(|l| l.display_name().to_string())
-                    .unwrap_or_else(|| "--".to_string());
+                    .map_or_else(|| "--".to_string(), |l| l.display_name().to_string());
                 let raw = &rec.raw_line_categories;
                 let eff = &rec.effective_counts;
                 let cells = [
@@ -1437,10 +1447,13 @@ fn pdf_trunc(s: &str, max: usize) -> String {
     }
 }
 
+#[allow(clippy::cast_precision_loss)] // formatting large numbers; sub-million precision doesn't matter
 fn pdf_fmt_num(n: u64) -> String {
     if n >= 1_000_000 {
         let m = n as f64 / 1_000_000.0;
         let s = format!("{m:.1}M");
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        // not a file path; ".0M" is a number suffix
         if s.ends_with(".0M") {
             format!("{}M", n / 1_000_000)
         } else {
@@ -5728,7 +5741,7 @@ fn html_esc(s: &str) -> String {
 pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) -> String {
     let mut out = String::with_capacity(8192);
 
-    let project = run.input_roots.first().map_or("(unknown)", String::as_str);
+    let project = run.effective_configuration.reporting.report_title.as_str();
     let branch = run.git_branch.as_deref().unwrap_or("—");
     let commit = run.git_commit_short.as_deref().unwrap_or("—");
     let scanned = run
@@ -5816,7 +5829,7 @@ pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) ->
 pub fn render_confluence_wiki_markup(run: &AnalysisRun) -> String {
     let mut out = String::with_capacity(4096);
 
-    let project = run.input_roots.first().map_or("(unknown)", String::as_str);
+    let project = run.effective_configuration.reporting.report_title.as_str();
     let branch = run.git_branch.as_deref().unwrap_or("—");
     let commit = run.git_commit_short.as_deref().unwrap_or("—");
     let scanned = run
