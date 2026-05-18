@@ -615,7 +615,7 @@ CARGOEOF
             }
         }
 
-        // ── 3a. Coverage ──────────────────────────────────────────────────────
+        // ── 4. Coverage ───────────────────────────────────────────────────────
         // Standalone code-coverage stage.  Enabled by COVERAGE_STANDALONE.  Produces:
         //
         //   <OUTPUT_SUBDIR>/coverage/lcov.info          — LCOV (line + branch coverage)
@@ -768,7 +768,7 @@ CARGOEOF
             }
         }
 
-        // ── 4. Analyze ─────────────────────────────────────────────────────────
+        // ── 5. Analyze ─────────────────────────────────────────────────────────
         // Mirrors the web UI configuration flow end-to-end:
         //   Step 1 → target path       (SCAN_PATH)
         //   Step 2 → counting rules    (CI_PRESET, MIXED_LINE_POLICY, DOCSTRINGS_AS_CODE, …)
@@ -941,7 +941,7 @@ CARGOEOF
             }
         }
 
-        // ── 6. Deliver results ─────────────────────────────────────────────────
+        // ── 7. Deliver results ─────────────────────────────────────────────────
         // Optional webhook and/or email delivery via the `send` subcommand.
         //
         // Webhook:  set WEBHOOK_URL parameter; add SLOC_WEBHOOK_TOKEN (Secret Text)
@@ -998,7 +998,7 @@ CARGOEOF
             }
         }
 
-        // ── 7. Archive & Publish ───────────────────────────────────────────────
+        // ── 8. Archive & Publish ───────────────────────────────────────────────
         // Generates trend-chart CSV data for the Plot plugin, archives all build
         // artifacts (binary, reports, test-results, coverage), and publishes the
         // HTML report as a build sidebar link.
@@ -1102,6 +1102,7 @@ PYEOF"""
                     // Includes: result.json, report.csv, report.xlsx, report.html, report.pdf,
                     // test-results/, coverage/, and trend CSVs.
                     archiveArtifacts artifacts: "${params.OUTPUT_SUBDIR}/**",
+                        excludes: "${params.OUTPUT_SUBDIR}/**/*.css,${params.OUTPUT_SUBDIR}/**/*.js",
                         fingerprint: true,
                         allowEmptyArchive: true
 
@@ -1138,11 +1139,73 @@ PYEOF"""
                             reportName           : rptName,
                         ])
                     }
+
+                    // ── Plot plugin trend charts ──────────────────────────────────────────
+                    // Registers SLOC and coverage data points with the Plot plugin so
+                    // build-over-build trend charts appear on the job page.  At least 2
+                    // builds are required before a chart is visible.  These calls must run
+                    // BEFORE post { cleanup } wipes the workspace — cleanWs() removes the
+                    // CSV files the plot() step reads from disk.
+                    // Requires the "plot" plugin — see ci/jenkins/plugins.txt.
+                    //
+                    // csvFileName: internal Plot plugin storage key (unique per chart,
+                    //   not a workspace path — the plugin manages this file itself).
+                    // csvSeries.file: workspace-relative path to the current build's data.
+                    try {
+                        if (fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/summary.csv")) {
+                            plot(
+                                csvFileName: 'sloc-trend-summary.csv',
+                                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/summary.csv",
+                                               url: '', displayTableFlag: false,
+                                               inclusionFlag: 'OFF', exclusionValues: '']],
+                                group:       'SLOC Trends',
+                                title:       'SLOC Totals Over Time',
+                                style:       'line',
+                                yaxis:       'Lines',
+                                numBuilds:   '50',
+                                keepRecords: true,
+                                useDescr:    true
+                            )
+                        }
+                        if (fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/per_language.csv")) {
+                            plot(
+                                csvFileName: 'sloc-trend-per-language.csv',
+                                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/per_language.csv",
+                                               url: '', displayTableFlag: false,
+                                               inclusionFlag: 'OFF', exclusionValues: '']],
+                                group:       'SLOC Trends',
+                                title:       'Per-Language Code Lines',
+                                style:       'bar',
+                                yaxis:       'Code Lines',
+                                numBuilds:   '50',
+                                keepRecords: true,
+                                useDescr:    true
+                            )
+                        }
+                        if (params.COVERAGE_STANDALONE &&
+                                fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/coverage.csv")) {
+                            plot(
+                                csvFileName: 'sloc-trend-coverage.csv',
+                                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/coverage.csv",
+                                               url: '', displayTableFlag: false,
+                                               inclusionFlag: 'OFF', exclusionValues: '']],
+                                group:       'SLOC Trends',
+                                title:       'Line Coverage % Over Time',
+                                style:       'line',
+                                yaxis:       'Coverage %',
+                                numBuilds:   '50',
+                                keepRecords: true,
+                                useDescr:    true
+                            )
+                        }
+                    } catch (Exception ex) {
+                        echo "Plot trend charts skipped (install the 'plot' plugin to enable): ${ex.message}"
+                    }
                 }
             }
         }
 
-        // ── 8. Push to artifact repository ────────────────────────────────────
+        // ── 9. Push to Artifact Repository ────────────────────────────────────
         // Pushes scan artifacts (JSON, CSV, XLSX, HTML, PDF) to an external artifact repository.
         // Only runs when ARTIFACT_REPO_TYPE is not "none" and ARTIFACT_REPO_URL is set.
         //
@@ -1218,7 +1281,7 @@ PYEOF"""
             }
         }
 
-        // ── Git-ref scan ──────────────────────────────────────────────────────
+        // ── 10. Git-Ref Scan ──────────────────────────────────────────────────
         // When GIT_REF is set, scan that specific commit/tag/branch in addition
         // to the standard scan.  A temporary git worktree is used so the main
         // workspace stays clean.
@@ -1247,7 +1310,7 @@ PYEOF"""
             }
         }
 
-        // ── Git-ref comparison ─────────────────────────────────────────────────
+        // ── 11. Git-Ref Compare ────────────────────────────────────────────────
         // Compare two refs using oxide-sloc diff.  The baseline is resolved from
         // COMPARE_TO_PREV_TAG (auto-detect), COMPARE_TO_REF, or skipped if empty.
         stage('Git-Ref Compare') {
