@@ -373,7 +373,7 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `ENABLED_LANGUAGES` | _(all)_ | Comma-separated language filter, e.g. `rust,python`. |
 | `INCLUDE_GLOBS` | _(all)_ | Comma-separated include glob patterns, e.g. `src/**/*.py`. |
 | `EXCLUDE_GLOBS` | _(none)_ | Comma-separated exclude glob patterns, e.g. `vendor/**`. |
-| `GENERATE_HTML` | true | Write HTML report and publish as "SLOC Report" sidebar link. Requires HTML Publisher plugin. |
+| `GENERATE_HTML` | true | Write HTML report and publish as "OxideSLOC — Jenkins CI Report" sidebar link. Requires HTML Publisher plugin. |
 | `GENERATE_PDF` | false | Write PDF report. Pure-Rust generation — no browser or external tool required on the agent. |
 | `SKIP_QUALITY_GATES` | false | Skip fmt / clippy / unit-test stage for scan-only runs. |
 | `SKIP_WEB_CHECK` | false | Skip web UI health-check on agents without loopback / port 4317. |
@@ -436,7 +436,7 @@ See `ci/jenkins/plugins.txt` for the full list. Minimum required:
 | `git` | SCM checkout |
 | `ws-cleanup` | `cleanWs()` in `post { cleanup }` |
 | `credentials-binding` | SMTP / webhook credential bindings |
-| `htmlpublisher` | "SLOC Report" sidebar link |
+| `htmlpublisher` | "OxideSLOC — Jenkins CI Report" sidebar link |
 | `plot` | Build-over-build trend charts |
 
 #### Trend charts (Plot plugin)
@@ -565,7 +565,7 @@ stage('Publish to Confluence') {
         CONFLUENCE_SPACE = 'ENG'
         CONFLUENCE_USER  = credentials('confluence-user-email')
         CONFLUENCE_TOKEN = credentials('confluence-api-token')
-        PAGE_TITLE       = "SLOC Report — ${env.JOB_NAME}"
+        PAGE_TITLE       = "OxideSLOC — Jenkins CI Report"  // renamed from "SLOC Report — ${env.JOB_NAME}" in f96f53d; kept as example
     }
     steps {
         sh '''
