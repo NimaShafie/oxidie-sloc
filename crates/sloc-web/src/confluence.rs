@@ -517,7 +517,10 @@ pub async fn api_test_confluence(State(state): State<AppState>) -> Response {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => {
             tracing::warn!("Confluence connection test failed: {e:#}");
-            Json(serde_json::json!({ "ok": false, "error": "Connection test failed." }))
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "ok": false, "error": "Connection test failed." })),
+            )
                 .into_response()
         }
     }

@@ -699,8 +699,7 @@ async fn auth_login_get_sanitizes_nested_next_to_root() {
         &body[body.find("name=\"next\"").unwrap_or(0)
             ..body
                 .find("name=\"next\"")
-                .map(|i| (i + 60).min(body.len()))
-                .unwrap_or(60)]
+                .map_or(60, |i| (i + 60).min(body.len()))]
     );
 }
 

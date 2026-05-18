@@ -27,6 +27,10 @@ def _extract_finding(d, project_root, seen):
     code = (msg.get("code") or {}).get("code")
     if not code or not code.startswith("clippy::"):
         return None
+    # multiple_crate_versions is emitted at cargo/workspace level, not per source file;
+    # the -A flag on the lint pass does not suppress it, so filter it here instead.
+    if code == "clippy::multiple_crate_versions":
+        return None
     primary = next((s for s in (msg.get("spans") or []) if s.get("is_primary")), None)
     if not primary:
         return None
