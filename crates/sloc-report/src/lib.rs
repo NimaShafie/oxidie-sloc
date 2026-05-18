@@ -622,11 +622,14 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create PDF directory {}", parent.display()))?;
     }
 
-    // A4 landscape: 297 mm wide × 210 mm tall (y=0 = bottom, y=210 = top).
+    // A4 landscape: 297 mm wide x 210 mm tall (y=0 = bottom, y=210 = top).
     const W: f32 = 297.0;
     const H: f32 = 210.0;
     const MARGIN: f32 = 10.0;
     const FOOTER_H: f32 = 10.0;
+    const HDR_H: f32 = 13.5;
+    const ROW_H: f32 = 5.5;
+    const TBL_HDR_H: f32 = 6.0;
 
     let tot = &run.summary_totals;
     let title = pdf_safe_str(&run.effective_configuration.reporting.report_title);
@@ -647,12 +650,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
     let layer = doc.get_page(page1).get_layer(layer1);
 
-    // cursor_y: the y-coordinate of the bottom of the last-placed element.
-    // We work top-down, decrementing as we add content.
-
-    // ── Header strip ──────────────────────────────────────────────────────────
-    const HDR_H: f32 = 13.5;
-    let hdr_y = H - HDR_H; // = 196.5
+    // -- Header strip ---------------------------------------------------------
+    let hdr_y = H - HDR_H; // 196.5
     pdf_fill_rect(
         &layer,
         0.0,
@@ -679,9 +678,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         &font_reg,
     );
 
-    // ── Title row ─────────────────────────────────────────────────────────────
-    // Report title on the left; git branch+commit on the right (if available).
-    let title_text_y = hdr_y - 5.5; // = 191.0
+    // -- Title row: report title (left) | git branch+commit (right) -----------
+    let title_text_y = hdr_y - 5.5;
     layer.set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
     layer.use_text(
         pdf_trunc(&title, 55),
@@ -704,7 +702,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         if !git_parts.is_empty() {
             layer.set_fill_color(Color::Rgb(Rgb::new(0.35, 0.45, 0.35, None)));
             layer.use_text(
-                pdf_trunc(&git_parts.join("  |  "), 55),
+                pdf_trunc(&git_parts.join("  |  "), 70),
                 7.5,
                 Mm(W / 2.0),
                 Mm(title_text_y),
@@ -713,8 +711,9 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         }
     }
 
-    // ── Roots row ─────────────────────────────────────────────────────────────
-    let roots_text_y = title_text_y - 5.0; // = 186.0
+    // -- Roots row: paths (left) | OS/user/host/mode (right) -----------------
+    // Smaller font (6.5 pt) + wider truncation (85 chars) to prevent clipping.
+    let roots_text_y = title_text_y - 5.0;
     let roots: String = run
         .input_roots
         .iter()
@@ -723,13 +722,12 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         .join("  ");
     layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
     layer.use_text(
-        pdf_trunc(&roots, 60),
-        7.5,
+        pdf_trunc(&roots, 85),
+        6.5,
         Mm(MARGIN),
         Mm(roots_text_y),
         &font_reg,
     );
-    // env info on the right: OS, arch, user, host
     {
         let env_str = format!(
             "OS: {} {}  |  User: {}  |  Host: {}  |  Mode: {}",
@@ -740,22 +738,21 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             pdf_safe_str(&run.environment.runtime_mode),
         );
         layer.use_text(
-            pdf_trunc(&env_str, 60),
-            7.0,
+            pdf_trunc(&env_str, 85),
+            6.5,
             Mm(W / 2.0),
             Mm(roots_text_y),
             &font_reg,
         );
     }
 
-    // ── Chip rows (8 chips, 4 per row) ────────────────────────────────────────
-    // 4 chips × chip_w + 3 gaps = usable_w = W − 2×MARGIN = 277 mm
+    // -- Chip rows (8 chips, 4 per row) ---------------------------------------
     let chip_gap: f32 = 5.0;
-    let chip_w = (W - 2.0 * MARGIN - 3.0 * chip_gap) / 4.0; // ≈ 65.5 mm
+    let chip_w = (W - 2.0 * MARGIN - 3.0 * chip_gap) / 4.0; // ~65.5 mm
     let chip_h: f32 = 17.0;
 
-    // Row 1 — primary line counts (warm / oxide palette)
-    let row1_bot = roots_text_y - 4.0 - chip_h; // bottom of chips = ~165
+    // Row 1 -- line counts (warm/oxide palette)
+    let row1_bot = roots_text_y - 4.0 - chip_h;
     let row1: [(&str, u64); 4] = [
         ("Code Lines", tot.code_lines),
         ("Comment Lines", tot.comment_lines),
@@ -790,8 +787,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         );
     }
 
-    // Row 2 — file + symbol counts (cool / blue palette)
-    let row2_bot = row1_bot - 3.0 - chip_h; // bottom ≈ 145
+    // Row 2 -- file + symbol counts (cool/blue palette)
+    let row2_bot = row1_bot - 3.0 - chip_h;
     let row2_4th = if tot.test_count > 0 {
         ("Test Methods", tot.test_count)
     } else if tot.classes > 0 {
@@ -833,10 +830,10 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         );
     }
 
-    // ── Info lines (flexible: code composition, git, tests, warnings) ─────────
-    let mut info_y = row2_bot - 6.5; // first info line baseline ≈ 138.5
+    // -- Info lines (composition, git, tests/coverage -- no warnings) ---------
+    let mut info_y = row2_bot - 6.5;
 
-    // Code composition percentages + additional symbol counts
+    // Code composition percentages + symbol counts
     {
         let total = tot.total_physical_lines.max(1) as f64;
         let code_pct = tot.code_lines as f64 / total * 100.0;
@@ -875,7 +872,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         info_y -= 5.0;
     }
 
-    // Git details (branch, commit, tag, author, commit date)
+    // Git details -- only when git data is present
     let has_git =
         run.git_branch.is_some() || run.git_commit_short.is_some() || run.git_nearest_tag.is_some();
     if has_git {
@@ -906,7 +903,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         info_y -= 5.0;
     }
 
-    // Test metrics + coverage (only when data is present)
+    // Test metrics + coverage -- only when data is present
     let has_tests = tot.test_count > 0 || tot.test_assertion_count > 0 || tot.test_suite_count > 0;
     let has_coverage = tot.coverage_lines_found > 0;
     if has_tests || has_coverage {
@@ -924,17 +921,14 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             tc.push(format!("Suites: {}", pdf_fmt_num(tot.test_suite_count)));
         }
         if has_coverage {
-            let line_cov = if tot.coverage_lines_found > 0 {
-                format!(
-                    "{:.1}% ({}/{})",
+            if tot.coverage_lines_found > 0 {
+                tc.push(format!(
+                    "Line Cov: {:.1}% ({}/{})",
                     tot.coverage_lines_hit as f64 / tot.coverage_lines_found as f64 * 100.0,
                     pdf_fmt_num(tot.coverage_lines_hit),
                     pdf_fmt_num(tot.coverage_lines_found)
-                )
-            } else {
-                "N/A".to_string()
-            };
-            tc.push(format!("Line Cov: {line_cov}"));
+                ));
+            }
             if tot.coverage_functions_found > 0 {
                 tc.push(format!(
                     "Func Cov: {:.1}%",
@@ -959,112 +953,213 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         info_y -= 5.0;
     }
 
-    // Warnings (first warning, total count)
-    if !run.warnings.is_empty() {
-        let first = pdf_safe_str(run.warnings[0].trim());
-        let warn_str = if run.warnings.len() == 1 {
-            format!("Warning: {first}")
-        } else {
-            format!(
-                "{} warnings — first: {}",
-                run.warnings.len(),
-                pdf_trunc(&first, 80)
-            )
-        };
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.30, 0.05, None)));
-        layer.use_text(
-            pdf_trunc(&warn_str, 110),
-            7.0,
-            Mm(MARGIN),
-            Mm(info_y),
-            &font_reg,
-        );
-        info_y -= 5.0;
-    }
-
-    // ── Language breakdown table ───────────────────────────────────────────────
-    // 7 columns: Language | Files | Code | Comments | Blank | Physical | Functions
+    // -- Metric tables (two half-width columns) --------------------------------
+    // Left : FILES + LINE COUNTS
+    // Right: CODE STRUCTURE + LINE CHANGE SUMMARY
     let tbl_top = info_y - 4.0;
-    let col_x: [f32; 7] = [10.0, 76.0, 101.0, 134.0, 167.0, 200.0, 240.0];
-    let col_labels = [
-        "Language",
-        "Files",
-        "Code",
-        "Comments",
-        "Blank",
-        "Physical",
-        "Functions",
-    ];
+    let half_w = (W - 2.0 * MARGIN - 4.0) / 2.0; // ~136.5 mm each; 4 mm gap between
+    let left_x = MARGIN;
+    let right_x = MARGIN + half_w + 4.0;
+    let lbl_frac: f32 = 0.68; // label column = 68% of table width
 
-    let tbl_hdr_h: f32 = 6.0;
+    // -- Left: FILES --
+    let mut left_y = tbl_top;
     pdf_fill_rect(
         &layer,
-        MARGIN,
-        tbl_top - tbl_hdr_h,
-        W - 2.0 * MARGIN,
-        tbl_hdr_h,
+        left_x,
+        left_y - TBL_HDR_H,
+        half_w,
+        TBL_HDR_H,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
     layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    for (i, lbl) in col_labels.iter().enumerate() {
-        layer.use_text(
-            *lbl,
-            7.0,
-            Mm(col_x[i] + 1.5),
-            Mm(tbl_top - tbl_hdr_h + 1.5),
-            &font_bold,
-        );
-    }
-
-    const ROW_H: f32 = 5.5;
-    let available = tbl_top - tbl_hdr_h - FOOTER_H;
-    let max_rows = (available / ROW_H).floor() as usize;
-    let lang_rows = run.totals_by_language.len().min(max_rows);
-
-    for (ri, lang) in run.totals_by_language.iter().take(lang_rows).enumerate() {
-        let ry = tbl_top - tbl_hdr_h - (ri + 1) as f32 * ROW_H;
+    layer.use_text(
+        "FILES",
+        7.0,
+        Mm(left_x + 2.0),
+        Mm(left_y - TBL_HDR_H + 1.5),
+        &font_bold,
+    );
+    left_y -= TBL_HDR_H;
+    let files_num_rows: [(&str, u64); 2] = [
+        ("Files analyzed", tot.files_analyzed),
+        ("Files skipped", tot.files_skipped),
+    ];
+    let files_dash_rows: [&str; 2] = ["Files modified", "Files unchanged"];
+    for (ri, (lbl, val)) in files_num_rows.iter().enumerate() {
+        let ry = left_y - (ri + 1) as f32 * ROW_H;
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
             Rgb::new(1.0, 1.0, 1.0, None)
         };
-        pdf_fill_rect(&layer, MARGIN, ry, W - 2.0 * MARGIN, ROW_H, bg);
+        pdf_fill_rect(&layer, left_x, ry, half_w, ROW_H, bg);
         layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        let cells = [
-            pdf_safe_str(lang.language.display_name()),
-            pdf_fmt_num(lang.files),
-            pdf_fmt_num(lang.code_lines),
-            pdf_fmt_num(lang.comment_lines),
-            pdf_fmt_num(lang.blank_lines),
-            pdf_fmt_num(lang.total_physical_lines),
-            pdf_fmt_num(lang.functions),
-        ];
-        for (ci, cell) in cells.iter().enumerate() {
-            layer.use_text(
-                cell.clone(),
-                6.5,
-                Mm(col_x[ci] + 1.5),
-                Mm(ry + 1.5),
-                &font_reg,
-            );
-        }
-    }
-    if lang_rows < run.totals_by_language.len() {
-        let overflow_y = (tbl_top - tbl_hdr_h - (lang_rows + 1) as f32 * ROW_H).max(FOOTER_H + 1.0);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.5, 0.5, 0.5, None)));
+        layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
         layer.use_text(
-            format!(
-                "... {} more languages — open the HTML report for the full breakdown",
-                run.totals_by_language.len() - lang_rows
-            ),
+            pdf_fmt_num(*val),
             6.5,
-            Mm(MARGIN + 2.0),
-            Mm(overflow_y + 1.0),
+            Mm(left_x + half_w * lbl_frac + 2.0),
+            Mm(ry + 1.5),
+            &font_bold,
+        );
+    }
+    for (ri, lbl) in files_dash_rows.iter().enumerate() {
+        let ri2 = ri + files_num_rows.len();
+        let ry = left_y - (ri2 + 1) as f32 * ROW_H;
+        let bg = if ri2.is_multiple_of(2) {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(&layer, left_x, ry, half_w, ROW_H, bg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
+        layer.use_text(
+            "--",
+            6.5,
+            Mm(left_x + half_w * lbl_frac + 2.0),
+            Mm(ry + 1.5),
+            &font_reg,
+        );
+    }
+    left_y -= 4.0 * ROW_H + 3.0; // 4 rows + gap before next table
+
+    // -- Left: LINE COUNTS --
+    pdf_fill_rect(
+        &layer,
+        left_x,
+        left_y - TBL_HDR_H,
+        half_w,
+        TBL_HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    layer.use_text(
+        "LINE COUNTS",
+        7.0,
+        Mm(left_x + 2.0),
+        Mm(left_y - TBL_HDR_H + 1.5),
+        &font_bold,
+    );
+    left_y -= TBL_HDR_H;
+    let lc_rows: [(&str, String); 5] = [
+        ("Physical lines", pdf_fmt_num(tot.total_physical_lines)),
+        ("Code lines", pdf_fmt_num(tot.code_lines)),
+        ("Comment lines", pdf_fmt_num(tot.comment_lines)),
+        ("Blank lines", pdf_fmt_num(tot.blank_lines)),
+        ("Mixed (separate)", pdf_fmt_num(tot.mixed_lines_separate)),
+    ];
+    for (ri, (lbl, val)) in lc_rows.iter().enumerate() {
+        let ry = left_y - (ri + 1) as f32 * ROW_H;
+        let bg = if ri % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(&layer, left_x, ry, half_w, ROW_H, bg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
+        layer.use_text(
+            val.as_str(),
+            6.5,
+            Mm(left_x + half_w * lbl_frac + 2.0),
+            Mm(ry + 1.5),
+            &font_bold,
+        );
+    }
+
+    // -- Right: CODE STRUCTURE --
+    let mut right_y = tbl_top;
+    pdf_fill_rect(
+        &layer,
+        right_x,
+        right_y - TBL_HDR_H,
+        half_w,
+        TBL_HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    layer.use_text(
+        "CODE STRUCTURE",
+        7.0,
+        Mm(right_x + 2.0),
+        Mm(right_y - TBL_HDR_H + 1.5),
+        &font_bold,
+    );
+    right_y -= TBL_HDR_H;
+    let cs_rows: [(&str, String); 4] = [
+        ("Functions", pdf_fmt_num(tot.functions)),
+        ("Classes / Types", pdf_fmt_num(tot.classes)),
+        ("Variables", pdf_fmt_num(tot.variables)),
+        ("Imports", pdf_fmt_num(tot.imports)),
+    ];
+    for (ri, (lbl, val)) in cs_rows.iter().enumerate() {
+        let ry = right_y - (ri + 1) as f32 * ROW_H;
+        let bg = if ri % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(&layer, right_x, ry, half_w, ROW_H, bg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        layer.use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), &font_reg);
+        layer.use_text(
+            val.as_str(),
+            6.5,
+            Mm(right_x + half_w * lbl_frac + 2.0),
+            Mm(ry + 1.5),
+            &font_bold,
+        );
+    }
+    right_y -= cs_rows.len() as f32 * ROW_H + 3.0;
+
+    // -- Right: LINE CHANGE SUMMARY --
+    pdf_fill_rect(
+        &layer,
+        right_x,
+        right_y - TBL_HDR_H,
+        half_w,
+        TBL_HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    layer.use_text(
+        "LINE CHANGE SUMMARY",
+        7.0,
+        Mm(right_x + 2.0),
+        Mm(right_y - TBL_HDR_H + 1.5),
+        &font_bold,
+    );
+    right_y -= TBL_HDR_H;
+    let lcs_labels: [&str; 4] = [
+        "Lines added",
+        "Lines removed",
+        "Lines modified (net)",
+        "Lines unmodified",
+    ];
+    for (ri, lbl) in lcs_labels.iter().enumerate() {
+        let ry = right_y - (ri + 1) as f32 * ROW_H;
+        let bg = if ri % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(&layer, right_x, ry, half_w, ROW_H, bg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        layer.use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), &font_reg);
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
+        layer.use_text(
+            "--",
+            6.5,
+            Mm(right_x + half_w * lbl_frac + 2.0),
+            Mm(ry + 1.5),
             &font_reg,
         );
     }
 
-    // ── Footer ────────────────────────────────────────────────────────────────
+    // -- Page 1 footer --------------------------------------------------------
     pdf_fill_rect(
         &layer,
         0.0,
@@ -1076,7 +1171,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
     layer.use_text(
         format!(
-            "oxide-sloc v{version}  |  AGPL-3.0-or-later  |  github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
+            "oxide-sloc v{version}  |  AGPL-3.0-or-later  |               github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
             pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
         ),
         6.5,
@@ -1084,6 +1179,194 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         Mm(3.0),
         &font_reg,
     );
+
+    // -- Pages 2+: Per-file detail --------------------------------------------
+    // 14 columns: File | Language | Physical | Code | Comments | Blank | Mixed |
+    //             Functions | Classes | Variables | Imports | Tests | Assertions | Suites
+    // Column left-edges (mm); widths sum to 277 = W - 2*MARGIN.
+    if !run.per_file_records.is_empty() {
+        let col_x: [f32; 14] = [
+            10.0, 72.0, 92.0, 109.0, 124.0, 144.0, 158.0, 172.0, 191.0, 206.0, 223.0, 238.0, 251.0,
+            273.0,
+        ];
+        let col_labels: [&str; 14] = [
+            "File",
+            "Language",
+            "Physical",
+            "Code",
+            "Comments",
+            "Blank",
+            "Mixed",
+            "Functions",
+            "Classes",
+            "Variables",
+            "Imports",
+            "Tests",
+            "Assertions",
+            "Suites",
+        ];
+
+        // Compact 8 mm header + 5.5 mm sub-header on per-file pages.
+        const HDR2_H: f32 = 8.0;
+        const SUB_H: f32 = 5.5;
+        let rows_per_page = ((H - HDR2_H - SUB_H - TBL_HDR_H - FOOTER_H) / ROW_H).floor() as usize;
+        let total_files = run.per_file_records.len();
+        let page_count = total_files.div_ceil(rows_per_page);
+
+        for page_idx in 0..page_count {
+            let (pf_page, pf_layer_idx) = doc.add_page(Mm(W), Mm(H), "Content");
+            let pf_layer = doc.get_page(pf_page).get_layer(pf_layer_idx);
+
+            // Compact header
+            let pf_hdr_top = H - HDR2_H;
+            pdf_fill_rect(
+                &pf_layer,
+                0.0,
+                pf_hdr_top,
+                W,
+                HDR2_H,
+                Rgb::new(0.098, 0.11, 0.15, None),
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+            pf_layer.use_text(
+                "oxide-sloc",
+                9.0,
+                Mm(MARGIN),
+                Mm(pf_hdr_top + 2.5),
+                &font_bold,
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+            pf_layer.use_text(
+                "Per-File Detail",
+                8.0,
+                Mm(46.0),
+                Mm(pf_hdr_top + 2.5),
+                &font_reg,
+            );
+            pf_layer.use_text(
+                format!("Page {} of {}", page_idx + 2, page_count + 1),
+                7.0,
+                Mm(W - 40.0),
+                Mm(pf_hdr_top + 2.5),
+                &font_reg,
+            );
+
+            // Sub-header: title + file count + timestamp
+            let sub_top = pf_hdr_top - SUB_H;
+            pdf_fill_rect(
+                &pf_layer,
+                0.0,
+                sub_top,
+                W,
+                SUB_H,
+                Rgb::new(0.94, 0.93, 0.91, None),
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.3, 0.3, 0.3, None)));
+            pf_layer.use_text(
+                pdf_trunc(&title, 55),
+                6.5,
+                Mm(MARGIN),
+                Mm(sub_top + 1.0),
+                &font_reg,
+            );
+            pf_layer.use_text(
+                format!("{total_files} files  |  {ts}"),
+                6.5,
+                Mm(W - 80.0),
+                Mm(sub_top + 1.0),
+                &font_reg,
+            );
+
+            // Table header row
+            let pf_tbl_top = sub_top;
+            pdf_fill_rect(
+                &pf_layer,
+                MARGIN,
+                pf_tbl_top - TBL_HDR_H,
+                W - 2.0 * MARGIN,
+                TBL_HDR_H,
+                Rgb::new(0.098, 0.11, 0.15, None),
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+            for (i, lbl) in col_labels.iter().enumerate() {
+                pf_layer.use_text(
+                    *lbl,
+                    5.5,
+                    Mm(col_x[i] + 0.5),
+                    Mm(pf_tbl_top - TBL_HDR_H + 1.5),
+                    &font_bold,
+                );
+            }
+
+            // File rows for this page
+            let start = page_idx * rows_per_page;
+            let end = (start + rows_per_page).min(total_files);
+            for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
+                let ry = pf_tbl_top - TBL_HDR_H - (ri + 1) as f32 * ROW_H;
+                let bg = if ri % 2 == 0 {
+                    Rgb::new(0.975, 0.965, 0.95, None)
+                } else {
+                    Rgb::new(1.0, 1.0, 1.0, None)
+                };
+                pdf_fill_rect(&pf_layer, MARGIN, ry, W - 2.0 * MARGIN, ROW_H, bg);
+                pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+                let file_str = pdf_safe_str(&rec.relative_path);
+                let lang_str = rec
+                    .language
+                    .as_ref()
+                    .map(|l| l.display_name().to_string())
+                    .unwrap_or_else(|| "--".to_string());
+                let raw = &rec.raw_line_categories;
+                let eff = &rec.effective_counts;
+                let cells = [
+                    pdf_trunc(&file_str, 40),
+                    lang_str,
+                    pdf_fmt_num(raw.total_physical_lines),
+                    pdf_fmt_num(eff.code_lines),
+                    pdf_fmt_num(eff.comment_lines),
+                    pdf_fmt_num(eff.blank_lines),
+                    pdf_fmt_num(eff.mixed_lines_separate),
+                    pdf_fmt_num(raw.functions),
+                    pdf_fmt_num(raw.classes),
+                    pdf_fmt_num(raw.variables),
+                    pdf_fmt_num(raw.imports),
+                    pdf_fmt_num(raw.test_count),
+                    pdf_fmt_num(raw.test_assertion_count),
+                    pdf_fmt_num(raw.test_suite_count),
+                ];
+                for (ci, cell) in cells.iter().enumerate() {
+                    pf_layer.use_text(
+                        cell.clone(),
+                        5.5,
+                        Mm(col_x[ci] + 0.5),
+                        Mm(ry + 1.0),
+                        &font_reg,
+                    );
+                }
+            }
+
+            // Footer
+            pdf_fill_rect(
+                &pf_layer,
+                0.0,
+                0.0,
+                W,
+                FOOTER_H,
+                Rgb::new(0.93, 0.91, 0.87, None),
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+            pf_layer.use_text(
+                format!(
+                    "oxide-sloc v{version}  |  AGPL-3.0-or-later  |                       github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
+                    pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
+                ),
+                6.5,
+                Mm(MARGIN),
+                Mm(3.0),
+                &font_reg,
+            );
+        }
+    }
 
     doc.save(&mut BufWriter::new(File::create(pdf_path).with_context(
         || format!("cannot create PDF at {}", pdf_path.display()),
@@ -3538,6 +3821,42 @@ struct WarningOpportunityRow {
           ? { text: '#d4c5b8', grid: 'rgba(255,255,255,0.10)' }
           : { text: '#43342d', grid: '#e6d0bf' };
       }
+      // Inline Chart.js plugin: draws a permanent value label on each bar / bubble.
+      // fmtFn(rawValue, datasetIndex, pointIndex) → string | null
+      // anchor: 'top' = above vertical bar, 'end' = right of horizontal bar, 'bubble' = above bubble
+      function makeDlPlugin(fmtFn, anchor) {
+        return {
+          afterDatasetsDraw: function(chart) {
+            var ctx = chart.ctx;
+            var tc = clr().text;
+            chart.data.datasets.forEach(function(ds, di) {
+              var meta = chart.getDatasetMeta(di);
+              meta.data.forEach(function(el, idx) {
+                var label = fmtFn(ds.data[idx], di, idx);
+                if (label == null || label === '') return;
+                ctx.save();
+                ctx.font = '600 11px Inter,ui-sans-serif,sans-serif';
+                ctx.fillStyle = tc;
+                if (anchor === 'top') {
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'bottom';
+                  ctx.fillText(String(label), el.x, el.y - 3);
+                } else if (anchor === 'end') {
+                  ctx.textAlign = 'left';
+                  ctx.textBaseline = 'middle';
+                  ctx.fillText(String(label), el.x + 5, el.y);
+                } else {
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'bottom';
+                  var r = (el.options && el.options.radius) ? el.options.radius : 10;
+                  ctx.fillText(String(label), el.x, el.y - r - 3);
+                }
+                ctx.restore();
+              });
+            });
+          }
+        };
+      }
 
       // ── Language overview: SVG donut + horizontal stacked bars ───────────────
       (function() {
@@ -3773,6 +4092,7 @@ struct WarningOpportunityRow {
           options: {
             responsive: true, maintainAspectRatio: false,
             animation: { duration: 500, easing: 'easeOutQuart' },
+            layout: { padding: { top: 18 } },
             scales: {
               x: { grid: { color: c.grid }, ticks: { color: c.text },
                    title: { display: true, text: 'Files Analyzed', color: c.text } },
@@ -3795,7 +4115,10 @@ struct WarningOpportunityRow {
                 }
               }
             }
-          }
+          },
+          plugins: [makeDlPlugin(function(raw, di) {
+            return SCAT_D[di] ? SCAT_D[di].lang : '';
+          }, 'bubble')]
         });
         ALL_CHARTS.push(chart);
       })();
@@ -3950,6 +4273,7 @@ struct WarningOpportunityRow {
             options: {
               responsive: true, maintainAspectRatio: false,
               animation: { duration: 500, easing: 'easeOutQuart' },
+              layout: { padding: { top: 18 } },
               scales: {
                 x: { grid: { display: false }, ticks: { color: c.text } },
                 y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} } }
@@ -3971,7 +4295,8 @@ struct WarningOpportunityRow {
                   }
                 }
               }
-            }
+            },
+            plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
           });
           ALL_CHARTS.push(semChart);
         }
@@ -4004,6 +4329,7 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   responsive: true, maintainAspectRatio: false,
+                  layout: { padding: { top: 18 } },
                   scales: {
                     x: { grid: { display: false }, ticks: { color: c.text } },
                     y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} } }
@@ -4012,7 +4338,8 @@ struct WarningOpportunityRow {
                     title: function(items){return items.length?items[0].label:'';},
                     label: function(ctx){ return '  '+(SEM_LABELS[mKey]||mKey)+': '+Number(ctx.parsed.y).toLocaleString(); }
                   }}}
-                }
+                },
+                plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
               });
             }
           });
@@ -4049,6 +4376,7 @@ struct WarningOpportunityRow {
           options: {
             indexAxis: 'y', responsive: true, maintainAspectRatio: false,
             animation: { duration: 500, easing: 'easeOutQuart' },
+            layout: { padding: { right: 42 } },
             scales: {
               x: { min: 0, max: 100,
                    grid: { color: c.grid },
@@ -4069,7 +4397,8 @@ struct WarningOpportunityRow {
                 }
               }}
             }
-          }
+          },
+          plugins: [makeDlPlugin(function(v) { return (v || 0) + '%'; }, 'end')]
         });
         ALL_CHARTS.push(densChart);
       })();
@@ -4095,6 +4424,7 @@ struct WarningOpportunityRow {
           options: {
             responsive: true, maintainAspectRatio: false,
             animation: { duration: 500, easing: 'easeOutQuart' },
+            layout: { padding: { top: 18 } },
             scales: {
               x: { grid: { display: false }, ticks: { color: c.text, font: { size: 11 } } },
               y: { beginAtZero: true,
@@ -4112,7 +4442,8 @@ struct WarningOpportunityRow {
                 }
               }}
             }
-          }
+          },
+          plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
         });
         ALL_CHARTS.push(fsChart);
       })();
