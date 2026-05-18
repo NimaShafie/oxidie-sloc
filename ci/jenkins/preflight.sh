@@ -177,8 +177,11 @@ if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
             fail "--install-csp: Docker is not available on this machine."
         else
             DOCKER_CMD="${DOCKER:-docker}"
-            DOCKER_PS_OUT=$($DOCKER_CMD ps --format '{{.Names}}' 2>&1)
-            DOCKER_PS_RC=$?
+            if DOCKER_PS_OUT=$($DOCKER_CMD ps --format '{{.Names}}' 2>&1); then
+                DOCKER_PS_RC=0
+            else
+                DOCKER_PS_RC=$?
+            fi
             if [ $DOCKER_PS_RC -ne 0 ]; then
                 if echo "$DOCKER_PS_OUT" | grep -qE 'permission denied|connect: permission|Got permission denied'; then
                     fail "--install-csp: cannot reach the Docker socket as the current user. Either:
