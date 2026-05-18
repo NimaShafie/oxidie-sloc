@@ -323,7 +323,7 @@ fn spawn_upload_staging_cleanup() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
         let ttl_secs = ttl_hours * 3600;
-        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        let mut interval = tokio::time::interval(Duration::from_hours(1));
         interval.tick().await; // consume the immediate first tick
         loop {
             interval.tick().await;
@@ -338,8 +338,7 @@ fn spawn_upload_staging_cleanup() {
                     .ok()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.elapsed().ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_secs());
                 if age_secs > ttl_secs {
                     tracing::debug!(
                         event = "upload_staging_cleanup",
@@ -752,7 +751,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
                 "NOTE: SLOC_TRUST_PROXY=1 — X-Forwarded-For is trusted from proxy IPs: {}",
                 trusted_proxy_ips
                     .iter()
-                    .map(|ip| ip.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -1615,17 +1614,18 @@ struct UploadedFile {
 ///
 /// Only available in server mode; returns 404 in local mode (use the native
 /// rfd dialog instead).
+#[allow(clippy::too_many_lines)]
 async fn upload_directory_handler(
     State(state): State<AppState>,
     Json(body): Json<UploadDirRequest>,
 ) -> Response {
-    if !state.server_mode {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
     // keep in sync with the upload-limit-tip JS text in the scan-setup template
     const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024; // 500 MB (decoded)
     const MAX_FILES: usize = 50_000;
+
+    if !state.server_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
 
     if body.files.is_empty() {
         return (
@@ -1688,12 +1688,11 @@ async fn upload_directory_handler(
             continue;
         }
 
-        let data = match base64::Engine::decode(
+        let Ok(data) = base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,
             entry.content.as_bytes(),
-        ) {
-            Ok(d) => d,
-            Err(_) => continue,
+        ) else {
+            continue;
         };
 
         total_bytes += data.len();
@@ -1740,7 +1739,7 @@ async fn upload_directory_handler(
     Json(serde_json::json!({
         "tmp_path": scan_root.to_string_lossy(),
         "file_count": file_count,
-        "upload_id": upload_id.to_string()
+        "upload_id": upload_id.clone()
     }))
     .into_response()
 }
@@ -1763,24 +1762,21 @@ async fn upload_file_handler(
     State(state): State<AppState>,
     Json(body): Json<UploadFileRequest>,
 ) -> Response {
+    const MAX_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB (decoded)
+
     if !state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    const MAX_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB (decoded)
-
-    let data = match base64::Engine::decode(
+    let Ok(data) = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         body.content.as_bytes(),
-    ) {
-        Ok(d) => d,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid base64 content"})),
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid base64 content"})),
+        )
+            .into_response();
     };
 
     if data.len() > MAX_FILE_BYTES {
@@ -1794,8 +1790,7 @@ async fn upload_file_handler(
     // Sanitise: strip any directory component from the filename.
     let filename = std::path::Path::new(&body.filename)
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "upload".to_owned());
+        .map_or_else(|| "upload".to_owned(), |n| n.to_string_lossy().into_owned());
 
     let upload_id = uuid::Uuid::new_v4();
     let staging = std::env::temp_dir()
@@ -1856,10 +1851,14 @@ impl<R: std::io::Read> std::io::Read for SizeLimitReader<R> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn upload_tarball_handler(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Response {
+    use http_body_util::BodyExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
     if !state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -1910,9 +1909,6 @@ async fn upload_tarball_handler(
                 .into_response();
         }
     };
-
-    use http_body_util::BodyExt as _;
-    use tokio::io::AsyncWriteExt as _;
 
     let mut body = request.into_body();
     let mut compressed_bytes: u64 = 0;
@@ -3298,9 +3294,8 @@ async fn analyze_handler(
     let Ok(sem_permit) = Arc::clone(&state.analyze_semaphore).try_acquire_owned() else {
         let template = ErrorTemplate {
             message: format!(
-                "Server is busy — all {} analysis slots are in use. \
-             Please wait a moment and try again.",
-                MAX_CONCURRENT_ANALYSES
+                "Server is busy — all {MAX_CONCURRENT_ANALYSES} analysis slots are in use. \
+             Please wait a moment and try again."
             ),
             last_report_url: None,
             last_report_label: None,
@@ -4267,7 +4262,7 @@ async fn pdf_status_handler(
     Json(PdfStatusResponse { ready }).into_response()
 }
 
-/// GET /api/runs/:run_id/bundle
+/// GET /`api/runs/:run_id/bundle`
 ///
 /// Streams a gzip-compressed tar archive containing every artifact in the run's
 /// output directory (HTML, PDF, JSON, CSV, XLSX, scan-config JSON). The archive
@@ -4358,7 +4353,7 @@ async fn download_bundle_handler(
     }
 }
 
-/// DELETE /api/runs/:run_id
+/// DELETE /`api/runs/:run_id`
 ///
 /// Removes all on-disk artifacts for the run and purges the run from the
 /// in-memory cache and the persisted registry. Returns 204 on success.
@@ -4413,14 +4408,14 @@ async fn cleanup_runs_handler(
 ) -> Response {
     let days = body
         .get("older_than_days")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(30)
         .max(1);
 
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days.cast_signed());
 
-    // Collect stale entries from the registry.
-    let stale: Vec<(String, PathBuf)> = {
+    // Collect expired entries from the registry.
+    let expired: Vec<(String, PathBuf)> = {
         let reg = state.registry.lock().await;
         reg.entries
             .iter()
@@ -4433,7 +4428,7 @@ async fn cleanup_runs_handler(
     };
 
     let mut deleted = 0usize;
-    for (run_id, output_dir) in &stale {
+    for (run_id, output_dir) in &expired {
         // Remove from in-memory cache.
         state.artifacts.lock().await.remove(run_id);
         // Delete on-disk artifacts (non-fatal if already gone).
@@ -4449,13 +4444,13 @@ async fn cleanup_runs_handler(
         deleted += 1;
     }
 
-    // Purge stale run IDs from the registry in one pass.
-    let stale_ids: std::collections::HashSet<&str> =
-        stale.iter().map(|(id, _)| id.as_str()).collect();
+    // Purge expired run IDs from the registry in one pass.
+    let expired_ids: std::collections::HashSet<&str> =
+        expired.iter().map(|(id, _)| id.as_str()).collect();
     {
         let mut reg = state.registry.lock().await;
         reg.entries
-            .retain(|e| !stale_ids.contains(e.run_id.as_str()));
+            .retain(|e| !expired_ids.contains(e.run_id.as_str()));
         let _ = reg.save(&state.registry_path);
     }
 

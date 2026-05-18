@@ -11,7 +11,7 @@ use axum::{
     body::Bytes,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,6 @@ pub async fn api_create_schedule(
     Json(body): Json<CreateScheduleRequest>,
 ) -> impl IntoResponse {
     let schedule = build_schedule(body);
-    let schedule_id = schedule.id;
     let is_poll = schedule.kind == ScanScheduleKind::Poll;
     {
         let mut store = state.schedules.lock().await;
@@ -71,13 +70,10 @@ pub async fn api_create_schedule(
     if is_poll {
         let interval = schedule.interval_secs.unwrap_or(300);
         let st = state;
-        tokio::spawn(async move { poll_loop(st, schedule, interval).await });
+        let sc = schedule.clone();
+        tokio::spawn(async move { poll_loop(st, sc, interval).await });
     }
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": schedule_id })),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(schedule)).into_response()
 }
 
 pub async fn api_delete_schedule(
@@ -96,46 +92,87 @@ pub async fn handle_github_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    if header_str(&headers, "x-github-event") != "push" {
-        return StatusCode::OK;
+) -> Response {
+    let event_header = header_str(&headers, "x-github-event");
+    match event_header.as_str() {
+        "" => {
+            info!("github webhook received without X-GitHub-Event header — likely misconfigured sender");
+            return (StatusCode::BAD_REQUEST, "missing X-GitHub-Event header").into_response();
+        }
+        "push" => {}
+        other => {
+            info!(event = %other, "github webhook: ignoring non-push event");
+            return StatusCode::OK.into_response();
+        }
     }
-    let Ok(event) = parse_github_push(&body) else {
-        return StatusCode::BAD_REQUEST;
+    let event = match parse_github_push(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            info!(error = %e, "github webhook payload parse failed");
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid github push payload: {e}"),
+            )
+                .into_response();
+        }
     };
     let sig = header_str(&headers, "x-hub-signature-256");
     dispatch_hmac_webhook(state, event, &body, &sig, is_valid_github_sig).await;
-    StatusCode::ACCEPTED
+    StatusCode::ACCEPTED.into_response()
 }
 
 pub async fn handle_gitlab_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
+) -> Response {
     let event_type = header_str(&headers, "x-gitlab-event");
-    if event_type != "Push Hook" && event_type != "Tag Push Hook" {
-        return StatusCode::OK;
+    match event_type.as_str() {
+        "" => {
+            info!("gitlab webhook received without X-GitLab-Event header — likely misconfigured sender");
+            return (StatusCode::BAD_REQUEST, "missing X-GitLab-Event header").into_response();
+        }
+        "Push Hook" | "Tag Push Hook" => {}
+        other => {
+            info!(event = %other, "gitlab webhook: ignoring non-push event");
+            return StatusCode::OK.into_response();
+        }
     }
-    let Ok(event) = parse_gitlab_push(&body) else {
-        return StatusCode::BAD_REQUEST;
+    let event = match parse_gitlab_push(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            info!(error = %e, "gitlab webhook payload parse failed");
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid gitlab push payload: {e}"),
+            )
+                .into_response();
+        }
     };
     let token = header_str(&headers, "x-gitlab-token");
     dispatch_token_webhook(state, event, &token).await;
-    StatusCode::ACCEPTED
+    StatusCode::ACCEPTED.into_response()
 }
 
 pub async fn handle_bitbucket_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    let Ok(event) = parse_bitbucket_push(&body) else {
-        return StatusCode::BAD_REQUEST;
+) -> Response {
+    let event = match parse_bitbucket_push(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            info!(error = %e, "bitbucket webhook payload parse failed");
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid bitbucket push payload: {e}"),
+            )
+                .into_response();
+        }
     };
     let sig = header_str(&headers, "x-hub-signature");
     dispatch_hmac_webhook(state, event, &body, &sig, is_valid_bitbucket_sig).await;
-    StatusCode::ACCEPTED
+    StatusCode::ACCEPTED.into_response()
 }
 
 // ── dispatch helpers ──────────────────────────────────────────────────────────

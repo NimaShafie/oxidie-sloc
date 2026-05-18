@@ -262,12 +262,7 @@ pub(crate) async fn auth_login_get(
         return resp;
     }
     let has_error = query.error.as_deref() == Some("1");
-    let next_url = query
-        .next
-        .as_deref()
-        .map(sanitize_next)
-        .unwrap_or("/")
-        .to_string();
+    let next_url = query.next.as_deref().map_or("/", sanitize_next).to_string();
     let lockout_threshold = state.rate_limiter.auth_lockout_threshold;
     Html(
         LoginTemplate {
@@ -312,6 +307,7 @@ pub(crate) async fn auth_login_post(
         // Evict expired sessions to prevent unbounded memory growth under sustained logins.
         sessions.retain(|_, &mut exp| exp > now);
         sessions.insert(session_id.clone(), expiry);
+        drop(sessions);
         let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
         let cookie_value = format!(
             "sloc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}{secure_flag}",

@@ -361,7 +361,7 @@ struct SendArgs {
     #[arg(long, value_name = "TOKEN", env = "SLOC_WEBHOOK_TOKEN")]
     webhook_token: Option<String>,
     /// Allow HTTP scheme and private/RFC-1918 IP addresses for webhook delivery.
-    /// Also settable via SLOC_ALLOW_PRIVATE_WEBHOOK=1.
+    /// Also settable via `SLOC_ALLOW_PRIVATE_WEBHOOK=1`.
     /// Use in lab or corporate-intranet environments where the receiver is not publicly reachable.
     #[arg(long, env = "SLOC_ALLOW_PRIVATE_WEBHOOK")]
     allow_private_net: bool,

@@ -342,13 +342,11 @@ fn resolve_ref(git_dir: &Path, refname: &str) -> Option<String> {
 /// `<old-sha> <new-sha> Author Name <email> <unix-ts> <tz-offset>\t<message>`
 fn parse_last_reflog_entry(git_dir: &Path) -> (Option<String>, Option<String>) {
     let log_path = git_dir.join("logs").join("HEAD");
-    let content = match fs::read_to_string(&log_path) {
-        Ok(c) => c,
-        Err(_) => return (None, None),
+    let Ok(content) = fs::read_to_string(&log_path) else {
+        return (None, None);
     };
-    let last = match content.lines().rfind(|l| !l.trim().is_empty()) {
-        Some(l) => l,
-        None => return (None, None),
+    let Some(last) = content.lines().rfind(|l| !l.trim().is_empty()) else {
+        return (None, None);
     };
 
     // Skip the two 40-char SHAs + their separating spaces
@@ -362,19 +360,19 @@ fn parse_last_reflog_entry(git_dir: &Path) -> (Option<String>, Option<String>) {
 
     // Timestamp is the number after the closing ">"
     let date = (|| {
+        use chrono::TimeZone as _;
         let close = after_shas.find("> ")?;
         let rest = after_shas[close + 2..].trim_start();
         let mut tokens = rest.splitn(3, ' ');
-        let ts_str = tokens.next()?;
-        let tz_str = tokens.next().map(|s| s.split('\t').next().unwrap_or(s))?;
-        let ts: i64 = ts_str.parse().ok()?;
-        use chrono::TimeZone as _;
+        let unix_str = tokens.next()?;
+        let offset_str = tokens.next().map(|s| s.split('\t').next().unwrap_or(s))?;
+        let ts: i64 = unix_str.parse().ok()?;
         let dt = chrono::Utc.timestamp_opt(ts, 0).single()?;
         // Format as ISO 8601 with timezone offset, e.g. 2026-05-17T12:51:54-07:00
-        let tz_display = if tz_str.len() == 5 {
-            format!("{}:{}", &tz_str[..3], &tz_str[3..])
+        let tz_display = if offset_str.len() == 5 {
+            format!("{}:{}", &offset_str[..3], &offset_str[3..])
         } else {
-            tz_str.to_string()
+            offset_str.to_string()
         };
         Some(format!("{}{}", dt.format("%Y-%m-%dT%H:%M:%S"), tz_display))
     })();
