@@ -5738,6 +5738,7 @@ fn html_esc(s: &str) -> String {
 /// Generates Confluence storage-format XHTML for a scan result page.
 /// Includes an info panel, summary stats, per-language table, and an optional
 /// link back to the full oxide-sloc HTML report.
+#[must_use]
 pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) -> String {
     let mut out = String::with_capacity(8192);
 
@@ -5826,6 +5827,7 @@ pub fn render_confluence_storage(run: &AnalysisRun, report_url: Option<&str>) ->
 
 /// Generates Confluence wiki markup (legacy syntax) for copy/paste into a
 /// Confluence page editor.
+#[must_use]
 pub fn render_confluence_wiki_markup(run: &AnalysisRun) -> String {
     let mut out = String::with_capacity(4096);
 
