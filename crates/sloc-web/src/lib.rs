@@ -680,28 +680,17 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
     build_router(state)
 }
 
-/// # Errors
-///
-/// Returns an error if the server fails to bind to the configured address or
-/// if the TLS configuration cannot be loaded.
-///
-/// # Panics
-///
-/// Panics if the Axum router fails to build (only occurs on misconfigured routes).
-// The function coordinates TLS setup, router construction, and async listener setup in one
-// place; splitting it further would require passing many state values across function boundaries.
-#[allow(clippy::too_many_lines)]
-pub async fn serve(config: AppConfig) -> Result<()> {
-    let bind_address = config.web.bind_address.clone();
-    let server_mode = config.web.server_mode;
-    let output_root = resolve_output_root(None);
-    // SLOC_REGISTRY_PATH overrides the registry location — useful for shared drives/mounts.
-    let registry_path = std::env::var("SLOC_REGISTRY_PATH")
-        .map_or_else(|_| output_root.join("registry.json"), PathBuf::from);
-    let mut registry = ScanRegistry::load(&registry_path);
-    registry.prune_stale();
-    let _ = registry.save(&registry_path);
+struct RuntimeSecurityConfig {
+    api_keys: Vec<secrecy::Secret<String>>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    tls_enabled: bool,
+    trust_proxy: bool,
+    trusted_proxy_ips: Vec<IpAddr>,
+    rate_limiter: Arc<IpRateLimiter>,
+}
 
+fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
     let api_keys: Vec<secrecy::Secret<String>> = std::env::var("SLOC_API_KEYS")
         .or_else(|_| std::env::var("SLOC_API_KEY"))
         .unwrap_or_default()
@@ -716,7 +705,6 @@ pub async fn serve(config: AppConfig) -> Result<()> {
              unauthenticated. Set SLOC_API_KEYS (comma-separated) to enable authentication."
         );
     }
-
     let tls_cert = std::env::var("SLOC_TLS_CERT").ok();
     let tls_key = std::env::var("SLOC_TLS_KEY").ok();
     let tls_enabled = tls_cert.is_some() && tls_key.is_some();
@@ -764,14 +752,12 @@ pub async fn serve(config: AppConfig) -> Result<()> {
              enable per-client rate limiting via X-Forwarded-For."
         );
     }
-
     if std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some() {
         println!(
             "WARNING: SLOC_GIT_SSL_NO_VERIFY is set — TLS certificate verification is \
              DISABLED for all git operations. Remove this variable before production use."
         );
     }
-
     let auth_lockout_threshold = std::env::var("SLOC_AUTH_LOCKOUT_FAILS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -795,6 +781,38 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         Duration::from_secs(auth_lockout_secs),
     ));
     IpRateLimiter::spawn_pruning_task(Arc::clone(&rate_limiter));
+    RuntimeSecurityConfig {
+        api_keys,
+        tls_cert,
+        tls_key,
+        tls_enabled,
+        trust_proxy,
+        trusted_proxy_ips,
+        rate_limiter,
+    }
+}
+
+/// # Errors
+///
+/// Returns an error if the server fails to bind to the configured address or
+/// if the TLS configuration cannot be loaded.
+///
+/// # Panics
+///
+/// Panics if the Axum router fails to build (only occurs on misconfigured routes).
+#[allow(clippy::too_many_lines)]
+pub async fn serve(config: AppConfig) -> Result<()> {
+    let bind_address = config.web.bind_address.clone();
+    let server_mode = config.web.server_mode;
+    let output_root = resolve_output_root(None);
+    // SLOC_REGISTRY_PATH overrides the registry location — useful for shared drives/mounts.
+    let registry_path = std::env::var("SLOC_REGISTRY_PATH")
+        .map_or_else(|_| output_root.join("registry.json"), PathBuf::from);
+    let mut registry = ScanRegistry::load(&registry_path);
+    registry.prune_stale();
+    let _ = registry.save(&registry_path);
+
+    let sec = load_runtime_security_config(server_mode);
     spawn_upload_staging_cleanup();
 
     let git_clones_dir = resolve_git_clones_dir(&output_root);
@@ -821,11 +839,11 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         registry_path,
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode,
-        tls_enabled,
-        api_keys,
-        rate_limiter,
-        trust_proxy,
-        trusted_proxy_ips,
+        tls_enabled: sec.tls_enabled,
+        api_keys: sec.api_keys,
+        rate_limiter: sec.rate_limiter,
+        trust_proxy: sec.trust_proxy,
+        trusted_proxy_ips: sec.trusted_proxy_ips,
         git_clones_dir,
         schedules: Arc::new(Mutex::new(schedules)),
         schedules_path,
@@ -880,9 +898,13 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         );
     }
 
-    if tls_enabled {
-        let cert_path = tls_cert.expect("tls_enabled guarantees SLOC_TLS_CERT is Some");
-        let key_path = tls_key.expect("tls_enabled guarantees SLOC_TLS_KEY is Some");
+    if sec.tls_enabled {
+        let cert_path = sec
+            .tls_cert
+            .expect("tls_enabled guarantees SLOC_TLS_CERT is Some");
+        let key_path = sec
+            .tls_key
+            .expect("tls_enabled guarantees SLOC_TLS_KEY is Some");
         let tls_config = build_tls_config(&cert_path, &key_path)
             .context("failed to load TLS certificate/key")?;
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
@@ -1583,6 +1605,304 @@ fn is_sample_path(path: &Path) -> bool {
     path.starts_with(root.join("tests").join("fixtures")) || path.starts_with(root.join("samples"))
 }
 
+/// Returns the shared upload base directory: `<tmp>/oxide-sloc-uploads`.
+fn upload_base_dir() -> PathBuf {
+    std::env::temp_dir().join("oxide-sloc-uploads")
+}
+
+/// Returns the staging path for a given upload id inside the base dir.
+fn upload_staging_path(id: &str) -> PathBuf {
+    upload_base_dir().join(id)
+}
+
+/// Validate basic field constraints on a directory-upload request.
+/// Returns an error `Response` if the request should be rejected immediately.
+#[allow(clippy::result_large_err)] // axum Response is unavoidably large; boxing adds indirection
+fn validate_upload_dir_request(body: &UploadDirRequest) -> Result<(), Response> {
+    const MAX_FILES: usize = 50_000;
+    if body.files.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "No files received"})),
+        )
+            .into_response());
+    }
+    if body.files.len() > MAX_FILES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Too many files (limit 50 000)"})),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Resolve or create the staging directory for a directory upload.
+/// Reuses an existing directory when `id` is a valid UUID; otherwise mints a new one.
+fn resolve_or_create_staging(id: Option<&str>) -> (String, PathBuf) {
+    match id {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 36
+                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
+        {
+            (id.to_string(), upload_staging_path(id))
+        }
+        _ => {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let staging = upload_staging_path(&new_id);
+            (new_id, staging)
+        }
+    }
+}
+
+/// Write a batch of uploaded files into `staging`, enforcing the total-bytes cap
+/// and path-traversal guard. Returns `(file_count, project_root)` on success or
+/// an error `Response` on failure (staging dir is cleaned up before returning).
+async fn write_upload_files(
+    files: &[UploadedFile],
+    staging: &Path,
+    upload_id: &str,
+) -> Result<(usize, Option<PathBuf>), Response> {
+    const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024;
+    let mut total_bytes: usize = 0;
+    let mut project_root: Option<PathBuf> = None;
+    let mut traversal_attempts: usize = 0;
+
+    for entry in files {
+        let rel = std::path::Path::new(&entry.path);
+        if rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            traversal_attempts += 1;
+            if traversal_attempts >= 5 {
+                let _ = tokio::fs::remove_dir_all(staging).await;
+                tracing::warn!(
+                    event = "upload_path_traversal",
+                    upload_id = %upload_id,
+                    "Upload rejected: repeated path traversal attempts detected"
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Upload rejected"})),
+                )
+                    .into_response());
+            }
+            continue;
+        }
+
+        let Ok(data) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            entry.content.as_bytes(),
+        ) else {
+            continue;
+        };
+
+        total_bytes += data.len();
+        if total_bytes > MAX_TOTAL_BYTES {
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Upload exceeds the 500 MB limit"})),
+            )
+                .into_response());
+        }
+
+        if project_root.is_none() {
+            if let Some(first) = rel.components().next() {
+                project_root = Some(staging.join(first.as_os_str()));
+            }
+        }
+
+        let dest = staging.join(rel);
+        if let Some(parent) = dest.parent() {
+            if tokio::fs::create_dir_all(parent).await.is_err() {
+                let _ = tokio::fs::remove_dir_all(staging).await;
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Failed to create directory structure"})),
+                )
+                    .into_response());
+            }
+        }
+
+        if tokio::fs::write(&dest, &data).await.is_err() {
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to write uploaded file"})),
+            )
+                .into_response());
+        }
+    }
+
+    Ok((files.len(), project_root))
+}
+
+/// Read `SLOC_MAX_TARBALL_MB` and `SLOC_MAX_TARBALL_DECOMPRESSED_MB` from the
+/// environment and return `(max_compressed_bytes, max_decompressed_bytes)`.
+fn parse_tarball_size_caps() -> (u64, u64) {
+    let compressed = std::env::var("SLOC_MAX_TARBALL_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048_u64)
+        * 1024
+        * 1024;
+    let decompressed = std::env::var("SLOC_MAX_TARBALL_DECOMPRESSED_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_240_u64)
+        * 1024
+        * 1024;
+    (compressed, decompressed)
+}
+
+/// Stream `body` into `dest_path`, enforcing `max_bytes`.
+/// Returns the number of compressed bytes written, or an error `Response`.
+/// Cleans up `dest_path` on error.
+#[allow(clippy::result_large_err)] // axum Response is unavoidably large; boxing adds indirection
+async fn stream_body_to_file(
+    body: axum::body::Body,
+    dest_path: &Path,
+    max_bytes: u64,
+) -> Result<u64, Response> {
+    use http_body_util::BodyExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut file = match tokio::fs::File::create(dest_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(
+                event = "upload_io_error",
+                "failed to create tarball temp file: {e}"
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Upload initialization failed"})),
+            )
+                .into_response());
+        }
+    };
+
+    let mut body = body;
+    let mut written: u64 = 0;
+    loop {
+        match body.frame().await {
+            None => break,
+            Some(Err(e)) => {
+                let _ = tokio::fs::remove_file(dest_path).await;
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Stream error: {e}")})),
+                )
+                    .into_response());
+            }
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    written += data.len() as u64;
+                    if written > max_bytes {
+                        let _ = tokio::fs::remove_file(dest_path).await;
+                        return Err((
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(serde_json::json!({"error": "Tarball exceeds the allowed size limit"})),
+                        )
+                            .into_response());
+                    }
+                    if let Err(e) = file.write_all(&data).await {
+                        let _ = tokio::fs::remove_file(dest_path).await;
+                        tracing::error!(event = "upload_io_error", "tarball write error: {e}");
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": "Upload write failed"})),
+                        )
+                            .into_response());
+                    }
+                }
+            }
+        }
+    }
+    drop(file);
+    Ok(written)
+}
+
+/// Extract `tarball_path` (tar.gz) into `staging`, enforcing `max_decompressed_bytes`.
+/// Always removes `tarball_path` regardless of outcome. Returns an error `Response`
+/// on failure (staging dir is cleaned up before returning).
+#[allow(clippy::result_large_err)] // axum Response is unavoidably large; boxing adds indirection
+async fn extract_tarball_to_staging(
+    tarball_path: &Path,
+    staging: &Path,
+    max_decompressed_bytes: u64,
+) -> Result<(), Response> {
+    let staging_clone = staging.to_path_buf();
+    let tarball_clone = tarball_path.to_path_buf();
+    let extract_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let file = std::fs::File::open(&tarball_clone)?;
+        let gz = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+        let limited = SizeLimitReader {
+            inner: gz,
+            remaining: max_decompressed_bytes,
+        };
+        let mut archive = tar::Archive::new(limited);
+        archive.set_overwrite(true);
+        archive.set_preserve_permissions(false);
+        std::fs::create_dir_all(&staging_clone)?;
+        archive.unpack(&staging_clone)?;
+        Ok(())
+    })
+    .await;
+    let _ = tokio::fs::remove_file(tarball_path).await;
+
+    match extract_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            let is_size_limit = e.to_string().contains("decompressed size limit exceeded");
+            tracing::warn!(
+                event = "upload_extract_error",
+                "tarball extraction failed: {e:#}"
+            );
+            let (status, msg) = if is_size_limit {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Archive exceeds the decompressed size limit",
+                )
+            } else {
+                (StatusCode::BAD_REQUEST, "Failed to extract archive")
+            };
+            Err((status, Json(serde_json::json!({"error": msg}))).into_response())
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            tracing::error!(
+                event = "upload_extract_panic",
+                "tarball extraction task panicked: {e}"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Archive extraction failed"})),
+            )
+                .into_response())
+        }
+    }
+}
+
+/// If `staging` contains exactly one top-level directory, return its path
+/// (the common case when the archive was created with `webkitRelativePath`).
+/// Otherwise return `None`.
+async fn find_single_top_dir(staging: &Path) -> Option<PathBuf> {
+    let mut entries = tokio::fs::read_dir(staging).await.ok()?;
+    let first = entries.next_entry().await.ok()??;
+    if !first.path().is_dir() {
+        return None;
+    }
+    if entries.next_entry().await.unwrap_or(None).is_some() {
+        return None;
+    }
+    Some(first.path())
+}
+
 /// Request body for `POST /api/upload-directory`.
 ///
 /// Each entry carries a relative path (identical to the browser's
@@ -1614,134 +1934,31 @@ struct UploadedFile {
 ///
 /// Only available in server mode; returns 404 in local mode (use the native
 /// rfd dialog instead).
-#[allow(clippy::too_many_lines)]
 async fn upload_directory_handler(
     State(state): State<AppState>,
     Json(body): Json<UploadDirRequest>,
 ) -> Response {
-    // keep in sync with the upload-limit-tip JS text in the scan-setup template
-    const MAX_TOTAL_BYTES: usize = 500 * 1024 * 1024; // 500 MB (decoded)
-    const MAX_FILES: usize = 50_000;
-
     if !state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
-
-    if body.files.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "No files received"})),
-        )
-            .into_response();
+    if let Err(resp) = validate_upload_dir_request(&body) {
+        return resp;
     }
-    if body.files.len() > MAX_FILES {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Too many files (limit 50 000)"})),
-        )
-            .into_response();
-    }
-
     // Reuse an existing staging dir when the client sends a continuation batch,
     // otherwise create a fresh one. Validate the id to prevent path traversal.
-    let (upload_id, staging) = match body.upload_id.as_deref() {
-        Some(id)
-            if !id.is_empty()
-                && id.len() <= 36
-                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') =>
-        {
-            let s = std::env::temp_dir().join("oxide-sloc-uploads").join(id);
-            (id.to_string(), s)
+    let (upload_id, staging) = resolve_or_create_staging(body.upload_id.as_deref());
+    match write_upload_files(&body.files, &staging, &upload_id).await {
+        Ok((file_count, project_root)) => {
+            let scan_root = project_root.unwrap_or_else(|| staging.clone());
+            Json(serde_json::json!({
+                "tmp_path": scan_root.to_string_lossy(),
+                "file_count": file_count,
+                "upload_id": upload_id.clone()
+            }))
+            .into_response()
         }
-        _ => {
-            let id = uuid::Uuid::new_v4().to_string();
-            let s = std::env::temp_dir().join("oxide-sloc-uploads").join(&id);
-            (id, s)
-        }
-    };
-
-    let mut total_bytes: usize = 0;
-    let mut project_root: Option<PathBuf> = None;
-    let mut traversal_attempts: usize = 0;
-
-    for entry in &body.files {
-        // Guard against path traversal.
-        let rel = std::path::Path::new(&entry.path);
-        if rel
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            traversal_attempts += 1;
-            if traversal_attempts >= 5 {
-                let _ = tokio::fs::remove_dir_all(&staging).await;
-                tracing::warn!(
-                    event = "upload_path_traversal",
-                    upload_id = %upload_id,
-                    "Upload rejected: repeated path traversal attempts detected"
-                );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Upload rejected"})),
-                )
-                    .into_response();
-            }
-            continue;
-        }
-
-        let Ok(data) = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            entry.content.as_bytes(),
-        ) else {
-            continue;
-        };
-
-        total_bytes += data.len();
-        if total_bytes > MAX_TOTAL_BYTES {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": "Upload exceeds the 500 MB limit"})),
-            )
-                .into_response();
-        }
-
-        // Capture the top-level directory from the first component.
-        if project_root.is_none() {
-            if let Some(first) = rel.components().next() {
-                project_root = Some(staging.join(first.as_os_str()));
-            }
-        }
-
-        let dest = staging.join(rel);
-        if let Some(parent) = dest.parent() {
-            if tokio::fs::create_dir_all(parent).await.is_err() {
-                let _ = tokio::fs::remove_dir_all(&staging).await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Failed to create directory structure"})),
-                )
-                    .into_response();
-            }
-        }
-
-        if tokio::fs::write(&dest, &data).await.is_err() {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Failed to write uploaded file"})),
-            )
-                .into_response();
-        }
+        Err(resp) => resp,
     }
-
-    let file_count = body.files.len();
-    let scan_root = project_root.unwrap_or_else(|| staging.clone());
-    Json(serde_json::json!({
-        "tmp_path": scan_root.to_string_lossy(),
-        "file_count": file_count,
-        "upload_id": upload_id.clone()
-    }))
-    .into_response()
 }
 
 /// Request body for `POST /api/upload-file`.
@@ -1851,36 +2068,19 @@ impl<R: std::io::Read> std::io::Read for SizeLimitReader<R> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn upload_tarball_handler(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Response {
-    use http_body_util::BodyExt as _;
-    use tokio::io::AsyncWriteExt as _;
-
     if !state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
 
     let upload_id = uuid::Uuid::new_v4().to_string();
-    let upload_base = std::env::temp_dir().join("oxide-sloc-uploads");
+    let upload_base = upload_base_dir();
     let tarball_path = upload_base.join(format!("{upload_id}.tar.gz"));
-    let staging = upload_base.join(&upload_id);
-
-    // Configurable size caps: compressed stream and decompressed extraction.
-    let max_compressed_bytes: u64 = std::env::var("SLOC_MAX_TARBALL_MB")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2048_u64)
-        * 1024
-        * 1024;
-    let max_decompressed_bytes: u64 = std::env::var("SLOC_MAX_TARBALL_DECOMPRESSED_MB")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10_240_u64)
-        * 1024
-        * 1024;
+    let staging = upload_staging_path(&upload_id);
+    let (max_compressed_bytes, max_decompressed_bytes) = parse_tarball_size_caps();
 
     if let Err(e) = tokio::fs::create_dir_all(&upload_base).await {
         tracing::error!(
@@ -1895,128 +2095,26 @@ async fn upload_tarball_handler(
     }
 
     // ── 1. Stream the request body to a temp file (bounded RAM) ──────────────
-    let mut tarball_file = match tokio::fs::File::create(&tarball_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!(
-                event = "upload_io_error",
-                "failed to create tarball temp file: {e}"
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Upload initialization failed"})),
-            )
-                .into_response();
-        }
-    };
-
-    let mut body = request.into_body();
-    let mut compressed_bytes: u64 = 0;
-    loop {
-        match body.frame().await {
-            None => break,
-            Some(Err(e)) => {
-                let _ = tokio::fs::remove_file(&tarball_path).await;
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("Stream error: {e}")})),
-                )
-                    .into_response();
-            }
-            Some(Ok(frame)) => {
-                if let Ok(data) = frame.into_data() {
-                    compressed_bytes += data.len() as u64;
-                    if compressed_bytes > max_compressed_bytes {
-                        let _ = tokio::fs::remove_file(&tarball_path).await;
-                        return (
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            Json(serde_json::json!({"error": "Tarball exceeds the allowed size limit"})),
-                        )
-                            .into_response();
-                    }
-                    if let Err(e) = tarball_file.write_all(&data).await {
-                        let _ = tokio::fs::remove_file(&tarball_path).await;
-                        tracing::error!(event = "upload_io_error", "tarball write error: {e}");
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": "Upload write failed"})),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-        }
-    }
-    drop(tarball_file);
-
-    // ── 2. Extract the tar.gz in a blocking thread ────────────────────────────
-    let staging_clone = staging.clone();
-    let tarball_clone = tarball_path.clone();
-    let extract_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let file = std::fs::File::open(&tarball_clone)?;
-        let buf = std::io::BufReader::new(file);
-        let gz = flate2::read::GzDecoder::new(buf);
-        // Zip-bomb guard: abort extraction if decompressed bytes exceed the limit.
-        let limited = SizeLimitReader {
-            inner: gz,
-            remaining: max_decompressed_bytes,
+    let compressed_bytes =
+        match stream_body_to_file(request.into_body(), &tarball_path, max_compressed_bytes).await {
+            Ok(n) => n,
+            Err(resp) => return resp,
         };
-        let mut archive = tar::Archive::new(limited);
-        archive.set_overwrite(true);
-        archive.set_preserve_permissions(false);
-        std::fs::create_dir_all(&staging_clone)?;
-        archive.unpack(&staging_clone)?;
-        Ok(())
-    })
-    .await;
 
-    let _ = tokio::fs::remove_file(&tarball_path).await;
-
-    match extract_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            let is_size_limit = e.to_string().contains("decompressed size limit exceeded");
-            tracing::warn!(
-                event = "upload_extract_error",
-                "tarball extraction failed: {e:#}"
-            );
-            let (status, msg) = if is_size_limit {
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "Archive exceeds the decompressed size limit",
-                )
-            } else {
-                (StatusCode::BAD_REQUEST, "Failed to extract archive")
-            };
-            return (status, Json(serde_json::json!({"error": msg}))).into_response();
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            tracing::error!(
-                event = "upload_extract_panic",
-                "tarball extraction task panicked: {e}"
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Archive extraction failed"})),
-            )
-                .into_response();
-        }
+    // ── 2. Extract the tar.gz in a blocking thread; tarball_path removed inside ──
+    if let Err(resp) =
+        extract_tarball_to_staging(&tarball_path, &staging, max_decompressed_bytes).await
+    {
+        return resp;
     }
 
     // ── 3. Find the project root inside the staging dir ───────────────────────
     // If the tar contained a single top-level directory (the common case when the
     // browser uses `webkitRelativePath`), return that as the scan root so the path
     // shown in the UI is clean (e.g. staging/<uuid>/myproject, not staging/<uuid>).
-    let mut scan_root = staging.clone();
-    if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
-        if let Ok(Some(first)) = entries.next_entry().await {
-            if first.path().is_dir() && entries.next_entry().await.unwrap_or(None).is_none() {
-                scan_root = first.path();
-            }
-        }
-    }
+    let scan_root = find_single_top_dir(&staging)
+        .await
+        .unwrap_or_else(|| staging.clone());
 
     // Compute original (uncompressed) size of the extracted tree.
     let original_bytes = tokio::task::spawn_blocking({
@@ -4684,6 +4782,7 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
     }
 }
 
+#[allow(clippy::result_large_err)] // axum Response is unavoidably large; boxing adds indirection
 async fn resolve_artifact_set(
     state: &AppState,
     run_id: &str,
@@ -7899,6 +7998,40 @@ fn build_scope_entry_for_run(run: &AnalysisRun) -> serde_json::Value {
     entry
 }
 
+fn lang_test_entry_json(l: &sloc_core::LanguageSummary) -> String {
+    let name = l.language.display_name().replace('"', "\\\"");
+    #[allow(clippy::cast_precision_loss)] // ratio for density display; precision loss acceptable
+    let density = if l.code_lines > 0 {
+        l.test_count as f64 / l.code_lines as f64 * 1000.0
+    } else {
+        0.0
+    };
+    format!(
+        r#"{{"lang":"{name}","tests":{t},"assertions":{a},"suites":{s},"code":{c},"density":{d:.2},"files":{f}}}"#,
+        name = name,
+        t = l.test_count,
+        a = l.test_assertion_count,
+        s = l.test_suite_count,
+        c = l.code_lines,
+        d = density,
+        f = l.files,
+    )
+}
+
+fn build_lang_tests_json(run: Option<&AnalysisRun>) -> String {
+    let Some(r) = run else {
+        return "[]".to_string();
+    };
+    let mut langs: Vec<&sloc_core::LanguageSummary> = r
+        .totals_by_language
+        .iter()
+        .filter(|l| l.test_count > 0)
+        .collect();
+    langs.sort_by_key(|l| std::cmp::Reverse(l.test_count));
+    let parts: Vec<String> = langs.iter().map(|l| lang_test_entry_json(l)).collect();
+    format!("[{}]", parts.join(","))
+}
+
 // GET /test-metrics
 #[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
 #[allow(clippy::too_many_lines)] // test-metrics page with inline HTML; splitting would fragment the template
@@ -7925,41 +8058,7 @@ async fn test_metrics_handler(
     };
 
     // Build per-language chart JSON (kept for has_coverage derivation via cov_json).
-    let _lang_tests_json: String = latest_run.as_ref().map_or_else(
-        || "[]".to_string(),
-        |r| {
-            let mut langs: Vec<&sloc_core::LanguageSummary> = r
-                .totals_by_language
-                .iter()
-                .filter(|l| l.test_count > 0)
-                .collect();
-            langs.sort_by_key(|l| std::cmp::Reverse(l.test_count));
-            let parts: Vec<String> = langs
-                .iter()
-                .map(|l| {
-                    let name = l.language.display_name().replace('"', "\\\"");
-                    let density = if l.code_lines > 0 {
-                        // ratio for density display, precision loss acceptable
-                        #[allow(clippy::cast_precision_loss)]
-                        { l.test_count as f64 / l.code_lines as f64 * 1000.0 }
-                    } else {
-                        0.0
-                    };
-                    format!(
-                        r#"{{"lang":"{name}","tests":{t},"assertions":{a},"suites":{s},"code":{c},"density":{d:.2},"files":{f}}}"#,
-                        name = name,
-                        t = l.test_count,
-                        a = l.test_assertion_count,
-                        s = l.test_suite_count,
-                        c = l.code_lines,
-                        d = density,
-                        f = l.files,
-                    )
-                })
-                .collect();
-            format!("[{}]", parts.join(","))
-        },
-    );
+    let _lang_tests_json = build_lang_tests_json(latest_run.as_ref());
 
     // Build coverage chart JSON (per-language avg line coverage %).
     let cov_json: String = latest_run
