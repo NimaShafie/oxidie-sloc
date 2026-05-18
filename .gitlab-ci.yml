@@ -128,6 +128,15 @@ smoke:re-render:
         --html-out "${OUT_DIR}/re-rendered.html"
     - test -s "${OUT_DIR}/re-rendered.html"
 
+smoke:pdf:
+  stage: smoke
+  needs: [smoke:reports]
+  script:
+    - |
+      ./target/release/oxide-sloc report "${OUT_DIR}/result.json" \
+        --pdf-out "${OUT_DIR}/re-rendered.pdf"
+    - test -s "${OUT_DIR}/re-rendered.pdf"
+
 smoke:policies:
   stage: smoke
   needs: [build]

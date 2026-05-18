@@ -97,9 +97,7 @@ pipeline {
             name:         'GENERATE_PDF',
             defaultValue: false,
             description:  'Write a PDF report artifact. ' +
-                          'Requires a Chromium-based browser (Chrome, Edge, Brave, Vivaldi, or Opera) ' +
-                          'installed on the agent. Set the SLOC_BROWSER environment variable to ' +
-                          'specify a custom browser path, or SLOC_BROWSER_NOSANDBOX=1 for Docker.'
+                          'Pure-Rust generation — no browser or external tool required on the agent.'
         )
 
         // ── Analysis rules ─────────────────────────────────────────────────────
@@ -459,42 +457,63 @@ directory = "vendor"
 CARGOEOF
                 '''
                 // Relax artifact-viewer CSP so HTML report artifacts render with inline
-                // styles and scripts.  Calls the Jenkins Script Console via the REST API
-                // using credential 'jenkins-api-token' (Kind: Secret text, value: admin
-                // API token).  If the credential is absent this step is a no-op and falls
-                // back to the init.groovy.d approach: bash ci/jenkins/preflight.sh --install-csp
+                // styles and scripts.  Three-tier approach (each tier falls back silently):
+                //   1. Direct System.setProperty — works when the Groovy sandbox is disabled
+                //      (the default for Pipelines loaded from SCM; "Use Groovy Sandbox" is
+                //      unchecked in the job config).
+                //   2. Script Console REST API — requires credential 'jenkins-api-token'
+                //      (Kind: Secret text, value: admin API token).
+                //   3. init.groovy.d — permanent fix: bash ci/jenkins/preflight.sh --install-csp
                 script {
+                    def RELAXED_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
+                                      "img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; " +
+                                      "font-src 'self' data:;"
+                    def cspSet = false
+
+                    // Tier 1: direct property set (no credentials needed, sandbox must be off)
                     try {
-                        withCredentials([string(credentialsId: 'jenkins-api-token',
-                                                variable:      'JEN_API_TOK',
-                                                optional:      true)]) {
-                            if (env.JEN_API_TOK?.trim()) {
-                                def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
-                                if (base) {
-                                    withEnv(["SLOC_JENKINS_BASE=${base}",
-                                             'SLOC_CSP=default-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; script-src \'self\' \'unsafe-inline\'; font-src \'self\' data:;']) {
-                                        sh '''
-                                            CRUMB=$(curl -sS -u "admin:${JEN_API_TOK}" \
-                                                "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22::%22,//crumb)" \
-                                                2>/dev/null || echo "")
-                                            FIELD="${CRUMB%%::*}"
-                                            CRUMB_VAL="${CRUMB##*::}"
-                                            GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
-                                            curl -sS -u "admin:${JEN_API_TOK}" \
-                                                -H "${FIELD}: ${CRUMB_VAL}" \
-                                                --data-urlencode "script=${GROOVY}" \
-                                                "${SLOC_JENKINS_BASE}/scriptText" >/dev/null 2>&1 || true
-                                            echo "Artifact-viewer CSP relaxed for this session."
-                                        '''
-                                    }
-                                }
-                            } else {
-                                echo 'jenkins-api-token credential not configured — HTML reports may render unstyled in the artifact viewer.'
-                                echo 'To fix permanently: bash ci/jenkins/preflight.sh --install-csp'
-                            }
-                        }
+                        System.setProperty('hudson.model.DirectoryBrowserSupport.CSP', RELAXED_CSP)
+                        echo 'Artifact-viewer CSP relaxed (direct System.setProperty).'
+                        cspSet = true
                     } catch (Exception ex) {
-                        echo "CSP setup (non-fatal): ${ex.message}"
+                        echo "Direct CSP set blocked (sandbox active): ${ex.message}"
+                    }
+
+                    // Tier 2: Script Console REST API via jenkins-api-token credential
+                    if (!cspSet) {
+                        try {
+                            withCredentials([string(credentialsId: 'jenkins-api-token',
+                                                    variable:      'JEN_API_TOK',
+                                                    optional:      true)]) {
+                                if (env.JEN_API_TOK?.trim()) {
+                                    def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
+                                    if (base) {
+                                        withEnv(["SLOC_JENKINS_BASE=${base}",
+                                                 "SLOC_CSP=${RELAXED_CSP}"]) {
+                                            sh '''
+                                                CRUMB=$(curl -sS -u "admin:${JEN_API_TOK}" \
+                                                    "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22::%22,//crumb)" \
+                                                    2>/dev/null || echo "")
+                                                FIELD="${CRUMB%%::*}"
+                                                CRUMB_VAL="${CRUMB##*::}"
+                                                GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
+                                                curl -sS -u "admin:${JEN_API_TOK}" \
+                                                    -H "${FIELD}: ${CRUMB_VAL}" \
+                                                    --data-urlencode "script=${GROOVY}" \
+                                                    "${SLOC_JENKINS_BASE}/scriptText" >/dev/null 2>&1 || true
+                                                echo "Artifact-viewer CSP relaxed (Script Console API)."
+                                            '''
+                                        }
+                                    }
+                                } else {
+                                    echo 'jenkins-api-token not configured and Groovy sandbox is active.'
+                                    echo 'To fix permanently: bash ci/jenkins/preflight.sh --install-csp'
+                                    echo 'Or disable "Use Groovy Sandbox" in the pipeline job configuration.'
+                                }
+                            }
+                        } catch (Exception ex) {
+                            echo "CSP setup via API (non-fatal): ${ex.message}"
+                        }
                     }
                 }
             }
@@ -1101,7 +1120,7 @@ PYEOF"""
                                 keepAll              : true,
                                 reportDir            : params.OUTPUT_SUBDIR,
                                 reportFiles          : "dashboard_${env.SLOC_PROJECT ?: 'project'}.html",
-                                reportName           : "Graphical Report — ${env.SLOC_PROJECT ?: 'project'}",
+                                reportName           : "OxideSLOC — Jenkins CI Report",
                             ])
                         }
                     } catch (Exception ex) {
@@ -1109,7 +1128,7 @@ PYEOF"""
                     }
 
                     if (params.GENERATE_HTML) {
-                        def rptName = "SLOC Report — ${env.SLOC_PROJECT ?: 'project'}"
+                        def rptName = "OxideSLOC — Jenkins HTML Report"
                         publishHTML(target: [
                             allowMissing         : false,
                             alwaysLinkToLastBuild: true,
