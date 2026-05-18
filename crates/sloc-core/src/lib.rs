@@ -267,36 +267,38 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
             return Some(candidate);
         }
         if candidate.is_file() {
-            // Worktree / submodule: `.git` file contains "gitdir: <path>".
-            // The path uses forward slashes on all platforms (git convention).
-            // On Windows it may be an absolute Windows path such as
-            // "C:/Users/…/.git/worktrees/name" — Path::new().is_absolute()
-            // recognises both "C:/" and "C:\" prefixes on Windows.
-            if let Ok(content) = fs::read_to_string(&candidate) {
-                if let Some(ptr) = content.trim().strip_prefix("gitdir: ") {
-                    // Normalise forward-slash paths to the OS separator so that
-                    // Path operations (join, exists, canonicalize) work correctly
-                    // on Windows.
-                    let ptr_native = ptr.replace('/', std::path::MAIN_SEPARATOR_STR);
-                    let resolved = if Path::new(&ptr_native).is_absolute() {
-                        PathBuf::from(&ptr_native)
-                    } else {
-                        dir.join(&ptr_native)
-                    };
-                    // canonicalize resolves ".." components and symlinks; fall
-                    // back to the un-canonicalized path if it fails (e.g. on
-                    // some Windows configurations canonicalize returns a UNC
-                    // "\\?\" prefix that confuses later path operations).
-                    let final_path = resolved.canonicalize().unwrap_or(resolved);
-                    if final_path.is_dir() {
-                        return Some(final_path);
-                    }
-                }
+            if let Some(resolved) = resolve_git_file_pointer(&candidate, dir) {
+                return Some(resolved);
             }
         }
         current = dir.parent();
     }
     None
+}
+
+/// Resolve a `.git` *file* (worktree/submodule pointer) to the absolute path it
+/// points to. Returns `None` if the file is unreadable or lacks a `gitdir:` line,
+/// or if the resolved path is not an existing directory.
+fn resolve_git_file_pointer(file: &Path, base_dir: &Path) -> Option<PathBuf> {
+    let content = fs::read_to_string(file).ok()?;
+    let ptr = content.trim().strip_prefix("gitdir: ")?;
+    // Normalise forward-slash paths to the OS separator so that Path operations
+    // (join, exists, canonicalize) work correctly on Windows.
+    let ptr_native = ptr.replace('/', std::path::MAIN_SEPARATOR_STR);
+    let resolved = if Path::new(&ptr_native).is_absolute() {
+        PathBuf::from(&ptr_native)
+    } else {
+        base_dir.join(&ptr_native)
+    };
+    // canonicalize resolves ".." components and symlinks; fall back to the
+    // un-canonicalized path if it fails (e.g. some Windows configurations
+    // return a UNC "\\?\" prefix that confuses later path operations).
+    let final_path = resolved.canonicalize().unwrap_or(resolved);
+    if final_path.is_dir() {
+        Some(final_path)
+    } else {
+        None
+    }
 }
 
 /// Resolve a git ref name (e.g. `refs/heads/main`) to a full 40-char commit SHA.
@@ -393,18 +395,23 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
         Err(_) => return GitInfo::default(),
     };
 
-    let (branch, commit_long) = if let Some(refname) = head_raw.strip_prefix("ref: ") {
-        let branch = refname
-            .strip_prefix("refs/heads/")
-            .map(|b| b.trim().to_string());
-        let sha = resolve_ref(&git_dir, refname.trim());
-        (branch, sha)
-    } else if head_raw.len() >= 40 && head_raw.chars().all(|c| c.is_ascii_hexdigit()) {
-        // Detached HEAD — the HEAD file itself is the commit SHA
-        (None, Some(head_raw[..40].to_string()))
-    } else {
-        (None, None)
-    };
+    let (branch, commit_long) = head_raw.strip_prefix("ref: ").map_or_else(
+        || {
+            if head_raw.len() >= 40 && head_raw.chars().all(|c| c.is_ascii_hexdigit()) {
+                // Detached HEAD — the HEAD file itself is the commit SHA
+                (None, Some(head_raw[..40].to_string()))
+            } else {
+                (None, None)
+            }
+        },
+        |refname| {
+            let branch = refname
+                .strip_prefix("refs/heads/")
+                .map(|b| b.trim().to_string());
+            let sha = resolve_ref(&git_dir, refname.trim());
+            (branch, sha)
+        },
+    );
 
     let commit_short = commit_long
         .as_deref()

@@ -617,97 +617,69 @@ fn write_pdf_via_wkhtmltopdf(html_path: &Path, pdf_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
-///
-/// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
-/// both Windows and Linux server deployments.
-///
-/// # Errors
-///
-/// Returns an error if the output directory cannot be created or the PDF file cannot be written.
-// Casts throughout are for PDF layout coordinates and percentage ratios; precision loss is fine.
-// Function is long because it encodes A4 layout logic; split deferred to Tier 4 refactoring.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::too_many_lines
-)]
-pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
-    use printpdf::{BuiltinFont, Color, Mm, PdfDocument, Rgb};
-    use std::fs::File;
-    use std::io::BufWriter;
+struct PdfCtx<'a> {
+    layer: &'a printpdf::PdfLayerReference,
+    font_reg: &'a printpdf::IndirectFontRef,
+    font_bold: &'a printpdf::IndirectFontRef,
+    w: f32,
+    margin: f32,
+    row_h: f32,
+    tbl_hdr_h: f32,
+}
 
-    // A4 landscape: 297 mm wide x 210 mm tall (y=0 = bottom, y=210 = top).
-    const W: f32 = 297.0;
-    const H: f32 = 210.0;
-    const MARGIN: f32 = 10.0;
-    const FOOTER_H: f32 = 10.0;
-    const HDR_H: f32 = 13.5;
-    const ROW_H: f32 = 5.5;
-    const TBL_HDR_H: f32 = 6.0;
-
-    if let Some(parent) = pdf_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create PDF directory {}", parent.display()))?;
-    }
-
-    let tot = &run.summary_totals;
-    let title = pdf_safe_str(&run.effective_configuration.reporting.report_title);
-    let ts = run
-        .tool
-        .timestamp_utc
-        .format("%Y-%m-%d %H:%M UTC")
-        .to_string();
-    let version = env!("CARGO_PKG_VERSION");
-
-    let (doc, page1, layer1) =
-        PdfDocument::new(format!("oxide-sloc: {title}"), Mm(W), Mm(H), "Content");
-    let font_reg = doc
-        .add_builtin_font(BuiltinFont::Helvetica)
-        .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
-    let font_bold = doc
-        .add_builtin_font(BuiltinFont::HelveticaBold)
-        .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
-    let layer = doc.get_page(page1).get_layer(layer1);
-
-    // -- Header strip ---------------------------------------------------------
-    let hdr_y = H - HDR_H; // 196.5
+#[allow(clippy::cast_precision_loss)]
+fn pdf_render_page1_header(
+    ctx: &PdfCtx<'_>,
+    run: &AnalysisRun,
+    ts: &str,
+    title: &str,
+    h: f32,
+    hdr_h: f32,
+) -> f32 {
+    use printpdf::{Color, Mm, Rgb};
+    let hdr_y = h - hdr_h;
     pdf_fill_rect(
-        &layer,
+        ctx.layer,
         0.0,
         hdr_y,
-        W,
-        HDR_H,
+        ctx.w,
+        hdr_h,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
-    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    layer.use_text("oxide-sloc", 13.0, Mm(MARGIN), Mm(hdr_y + 4.5), &font_bold);
-    layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        "oxide-sloc",
+        13.0,
+        Mm(ctx.margin),
+        Mm(hdr_y + 4.5),
+        ctx.font_bold,
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    ctx.layer.use_text(
         "Code Metrics Report",
         9.5,
         Mm(54.0),
         Mm(hdr_y + 5.0),
-        &font_reg,
+        ctx.font_reg,
     );
-    layer.use_text(
-        pdf_safe_str(&ts),
+    ctx.layer.use_text(
+        pdf_safe_str(ts),
         8.0,
-        Mm(W - 70.0),
+        Mm(ctx.w - 70.0),
         Mm(hdr_y + 5.0),
-        &font_reg,
+        ctx.font_reg,
     );
-
-    // -- Title row: report title (left) | git branch+commit (right) -----------
     let title_text_y = hdr_y - 5.5;
-    layer.set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
-    layer.use_text(
-        pdf_trunc(&title, 55),
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
+    ctx.layer.use_text(
+        pdf_trunc(title, 55),
         9.5,
-        Mm(MARGIN),
+        Mm(ctx.margin),
         Mm(title_text_y),
-        &font_bold,
+        ctx.font_bold,
     );
     {
         let mut git_parts: Vec<String> = vec![];
@@ -721,19 +693,17 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             git_parts.push(format!("Tag: {}", pdf_safe_str(t)));
         }
         if !git_parts.is_empty() {
-            layer.set_fill_color(Color::Rgb(Rgb::new(0.35, 0.45, 0.35, None)));
-            layer.use_text(
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(0.35, 0.45, 0.35, None)));
+            ctx.layer.use_text(
                 pdf_trunc(&git_parts.join("  |  "), 70),
                 7.5,
-                Mm(W / 2.0),
+                Mm(ctx.w / 2.0),
                 Mm(title_text_y),
-                &font_reg,
+                ctx.font_reg,
             );
         }
     }
-
-    // -- Roots row: paths (left) | OS/user/host/mode (right) -----------------
-    // Smaller font (6.5 pt) + wider truncation (85 chars) to prevent clipping.
     let roots_text_y = title_text_y - 5.0;
     let roots: String = run
         .input_roots
@@ -741,13 +711,14 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         .map(|r| pdf_safe_str(r))
         .collect::<Vec<_>>()
         .join("  ");
-    layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    ctx.layer.use_text(
         pdf_trunc(&roots, 85),
         6.5,
-        Mm(MARGIN),
+        Mm(ctx.margin),
         Mm(roots_text_y),
-        &font_reg,
+        ctx.font_reg,
     );
     {
         let env_str = format!(
@@ -758,21 +729,24 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             pdf_safe_str(&run.environment.initiator_hostname),
             pdf_safe_str(&run.environment.runtime_mode),
         );
-        layer.use_text(
+        ctx.layer.use_text(
             pdf_trunc(&env_str, 85),
             6.5,
-            Mm(W / 2.0),
+            Mm(ctx.w / 2.0),
             Mm(roots_text_y),
-            &font_reg,
+            ctx.font_reg,
         );
     }
+    roots_text_y
+}
 
-    // -- Chip rows (8 chips, 4 per row) ---------------------------------------
+#[allow(clippy::cast_precision_loss)]
+fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f32) -> f32 {
+    use printpdf::{Color, Mm, Rgb};
+    let tot = &run.summary_totals;
     let chip_gap: f32 = 5.0;
-    let chip_w = 3.0f32.mul_add(-chip_gap, 2.0f32.mul_add(-MARGIN, W)) / 4.0; // ~65.5 mm
+    let chip_w = 3.0f32.mul_add(-chip_gap, 2.0f32.mul_add(-ctx.margin, ctx.w)) / 4.0;
     let chip_h: f32 = 17.0;
-
-    // Row 1 -- line counts (warm/oxide palette)
     let row1_bot = roots_text_y - 4.0 - chip_h;
     let row1: [(&str, u64); 4] = [
         ("Code Lines", tot.code_lines),
@@ -781,39 +755,40 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         ("Physical Lines", tot.total_physical_lines),
     ];
     for (i, (label, value)) in row1.iter().enumerate() {
-        let cx = (i as f32).mul_add(chip_w + chip_gap, MARGIN);
+        let cx = (i as f32).mul_add(chip_w + chip_gap, ctx.margin);
         pdf_fill_rect(
-            &layer,
+            ctx.layer,
             cx,
             row1_bot,
             chip_w,
             chip_h,
             Rgb::new(0.945, 0.925, 0.90, None),
         );
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.49, 0.27, 0.10, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.49, 0.27, 0.10, None)));
+        ctx.layer.use_text(
             pdf_fmt_num(*value),
             13.0,
             Mm(cx + 4.0),
             Mm(row1_bot + 9.0),
-            &font_bold,
+            ctx.font_bold,
         );
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+        ctx.layer.use_text(
             pdf_safe_str(label),
             6.5,
             Mm(cx + 4.0),
             Mm(row1_bot + 3.0),
-            &font_reg,
+            ctx.font_reg,
         );
-        // Exact full number at bottom-right, mirroring .stat-chip-exact in the HTML UI.
         let exact = pdf_fmt_full(*value);
         let exact_x = ((exact.len() as f32).mul_add(-1.1, cx + chip_w) - 1.5).max(cx + 4.0);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
-        layer.use_text(exact, 5.5, Mm(exact_x), Mm(row1_bot + 1.5), &font_reg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
+        ctx.layer
+            .use_text(exact, 5.5, Mm(exact_x), Mm(row1_bot + 1.5), ctx.font_reg);
     }
-
-    // Row 2 -- file + symbol counts (cool/blue palette)
     let row2_bot = row1_bot - 3.0 - chip_h;
     let row2_4th = if tot.test_count > 0 {
         ("Test Methods", tot.test_count)
@@ -829,41 +804,48 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         row2_4th,
     ];
     for (i, (label, value)) in row2.iter().enumerate() {
-        let cx = (i as f32).mul_add(chip_w + chip_gap, MARGIN);
+        let cx = (i as f32).mul_add(chip_w + chip_gap, ctx.margin);
         pdf_fill_rect(
-            &layer,
+            ctx.layer,
             cx,
             row2_bot,
             chip_w,
             chip_h,
             Rgb::new(0.91, 0.92, 0.96, None),
         );
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.15, 0.25, 0.55, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.25, 0.55, None)));
+        ctx.layer.use_text(
             pdf_fmt_num(*value),
             13.0,
             Mm(cx + 4.0),
             Mm(row2_bot + 9.0),
-            &font_bold,
+            ctx.font_bold,
         );
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.35, 0.35, 0.45, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.35, 0.35, 0.45, None)));
+        ctx.layer.use_text(
             pdf_safe_str(label),
             6.5,
             Mm(cx + 4.0),
             Mm(row2_bot + 3.0),
-            &font_reg,
+            ctx.font_reg,
         );
         let exact = pdf_fmt_full(*value);
         let exact_x = ((exact.len() as f32).mul_add(-1.1, cx + chip_w) - 1.5).max(cx + 4.0);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.60, None)));
-        layer.use_text(exact, 5.5, Mm(exact_x), Mm(row2_bot + 1.5), &font_reg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.60, None)));
+        ctx.layer
+            .use_text(exact, 5.5, Mm(exact_x), Mm(row2_bot + 1.5), ctx.font_reg);
     }
+    row2_bot
+}
 
-    // -- Info lines (composition, git, tests/coverage -- no warnings) ---------
+#[allow(clippy::cast_precision_loss)]
+fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> f32 {
+    use printpdf::{Color, Mm, Rgb};
+    let tot = &run.summary_totals;
     let mut info_y = row2_bot - 6.5;
-
-    // Code composition percentages + symbol counts
     {
         let total = tot.total_physical_lines.max(1) as f64;
         let code_pct = tot.code_lines as f64 / total * 100.0;
@@ -871,14 +853,13 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         let blank_pct = tot.blank_lines as f64 / total * 100.0;
         let mixed_pct = tot.mixed_lines_separate as f64 / total * 100.0;
         let mut parts = vec![
-            format!("Code {:.1}%", code_pct),
-            format!("Comments {:.1}%", cmt_pct),
-            format!("Blank {:.1}%", blank_pct),
+            format!("Code {code_pct:.1}%"),
+            format!("Comments {cmt_pct:.1}%"),
+            format!("Blank {blank_pct:.1}%"),
         ];
         if tot.mixed_lines_separate > 0 {
             parts.push(format!(
-                "Mixed {:.1}% ({} lines)",
-                mixed_pct,
+                "Mixed {mixed_pct:.1}% ({} lines)",
                 pdf_fmt_full(tot.mixed_lines_separate)
             ));
         }
@@ -891,18 +872,17 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         if tot.classes > 0 {
             parts.push(format!("Classes: {}", pdf_fmt_full(tot.classes)));
         }
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
+        ctx.layer.use_text(
             pdf_trunc(&parts.join("  |  "), 110),
             7.0,
-            Mm(MARGIN),
+            Mm(ctx.margin),
             Mm(info_y),
-            &font_reg,
+            ctx.font_reg,
         );
         info_y -= 5.0;
     }
-
-    // Git details -- only when git data is present
     let has_git =
         run.git_branch.is_some() || run.git_commit_short.is_some() || run.git_nearest_tag.is_some();
     if has_git {
@@ -922,18 +902,17 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         if let Some(ref d) = run.git_commit_date {
             git_parts.push(format!("Commit Date: {}", pdf_safe_str(d)));
         }
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.10, 0.35, 0.15, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.35, 0.15, None)));
+        ctx.layer.use_text(
             pdf_trunc(&git_parts.join("  |  "), 110),
             7.0,
-            Mm(MARGIN),
+            Mm(ctx.margin),
             Mm(info_y),
-            &font_reg,
+            ctx.font_reg,
         );
         info_y -= 5.0;
     }
-
-    // Test metrics + coverage -- only when data is present
     let has_tests = tot.test_count > 0 || tot.test_assertion_count > 0 || tot.test_suite_count > 0;
     let has_coverage = tot.coverage_lines_found > 0;
     if has_tests || has_coverage {
@@ -972,108 +951,115 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
                 ));
             }
         }
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.50, None)));
-        layer.use_text(
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.50, None)));
+        ctx.layer.use_text(
             pdf_trunc(&tc.join("  |  "), 110),
             7.0,
-            Mm(MARGIN),
+            Mm(ctx.margin),
             Mm(info_y),
-            &font_reg,
+            ctx.font_reg,
         );
         info_y -= 5.0;
     }
+    info_y
+}
 
-    // -- Metric tables (two half-width columns) --------------------------------
-    // Left : FILES + LINE COUNTS
-    // Right: CODE STRUCTURE + LINE CHANGE SUMMARY
-    let tbl_top = info_y - 4.0;
-    let half_w = (2.0f32.mul_add(-MARGIN, W) - 4.0) / 2.0; // ~136.5 mm each; 4 mm gap between
-    let left_x = MARGIN;
-    let right_x = MARGIN + half_w + 4.0;
-    let lbl_frac: f32 = 0.68; // label column = 68% of table width
+#[allow(clippy::cast_precision_loss)]
+fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
+    use printpdf::{Color, Mm, Rgb};
+    let tot = &run.summary_totals;
+    let half_w = (2.0f32.mul_add(-ctx.margin, ctx.w) - 4.0) / 2.0;
+    let left_x = ctx.margin;
+    let right_x = ctx.margin + half_w + 4.0;
+    let lbl_frac: f32 = 0.68;
 
-    // -- Left: FILES --
     let mut left_y = tbl_top;
     pdf_fill_rect(
-        &layer,
+        ctx.layer,
         left_x,
-        left_y - TBL_HDR_H,
+        left_y - ctx.tbl_hdr_h,
         half_w,
-        TBL_HDR_H,
+        ctx.tbl_hdr_h,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
-    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
         "FILES",
         7.0,
         Mm(left_x + 2.0),
-        Mm(left_y - TBL_HDR_H + 1.5),
-        &font_bold,
+        Mm(left_y - ctx.tbl_hdr_h + 1.5),
+        ctx.font_bold,
     );
-    left_y -= TBL_HDR_H;
+    left_y -= ctx.tbl_hdr_h;
     let files_num_rows: [(&str, u64); 2] = [
         ("Files analyzed", tot.files_analyzed),
         ("Files skipped", tot.files_skipped),
     ];
     let files_dash_rows: [&str; 2] = ["Files modified", "Files unchanged"];
     for (ri, (lbl, val)) in files_num_rows.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ROW_H, left_y);
+        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, left_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
             Rgb::new(1.0, 1.0, 1.0, None)
         };
-        pdf_fill_rect(&layer, left_x, ry, half_w, ROW_H, bg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
-        layer.use_text(
+        pdf_fill_rect(ctx.layer, left_x, ry, half_w, ctx.row_h, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        ctx.layer
+            .use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
+        ctx.layer.use_text(
             pdf_fmt_full(*val),
             6.5,
             Mm(left_x + half_w * lbl_frac + 2.0),
             Mm(ry + 1.5),
-            &font_bold,
+            ctx.font_bold,
         );
     }
     for (ri, lbl) in files_dash_rows.iter().enumerate() {
         let ri2 = ri + files_num_rows.len();
-        let ry = ((ri2 + 1) as f32).mul_add(-ROW_H, left_y);
+        let ry = ((ri2 + 1) as f32).mul_add(-ctx.row_h, left_y);
         let bg = if ri2.is_multiple_of(2) {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
             Rgb::new(1.0, 1.0, 1.0, None)
         };
-        pdf_fill_rect(&layer, left_x, ry, half_w, ROW_H, bg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
-        layer.use_text(
+        pdf_fill_rect(ctx.layer, left_x, ry, half_w, ctx.row_h, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        ctx.layer
+            .use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
+        ctx.layer.use_text(
             "--",
             6.5,
             Mm(left_x + half_w * lbl_frac + 2.0),
             Mm(ry + 1.5),
-            &font_reg,
+            ctx.font_reg,
         );
     }
-    left_y -= 4.0f32.mul_add(ROW_H, 3.0); // 4 rows + gap before next table
-
-    // -- Left: LINE COUNTS --
+    left_y -= 4.0f32.mul_add(ctx.row_h, 3.0);
     pdf_fill_rect(
-        &layer,
+        ctx.layer,
         left_x,
-        left_y - TBL_HDR_H,
+        left_y - ctx.tbl_hdr_h,
         half_w,
-        TBL_HDR_H,
+        ctx.tbl_hdr_h,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
-    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
         "LINE COUNTS",
         7.0,
         Mm(left_x + 2.0),
-        Mm(left_y - TBL_HDR_H + 1.5),
-        &font_bold,
+        Mm(left_y - ctx.tbl_hdr_h + 1.5),
+        ctx.font_bold,
     );
-    left_y -= TBL_HDR_H;
+    left_y -= ctx.tbl_hdr_h;
     let lc_rows: [(&str, String); 5] = [
         ("Physical lines", pdf_fmt_full(tot.total_physical_lines)),
         ("Code lines", pdf_fmt_full(tot.code_lines)),
@@ -1082,43 +1068,44 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         ("Mixed (separate)", pdf_fmt_full(tot.mixed_lines_separate)),
     ];
     for (ri, (lbl, val)) in lc_rows.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ROW_H, left_y);
+        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, left_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
             Rgb::new(1.0, 1.0, 1.0, None)
         };
-        pdf_fill_rect(&layer, left_x, ry, half_w, ROW_H, bg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        layer.use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), &font_reg);
-        layer.use_text(
+        pdf_fill_rect(ctx.layer, left_x, ry, half_w, ctx.row_h, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        ctx.layer
+            .use_text(*lbl, 6.5, Mm(left_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
+        ctx.layer.use_text(
             val.as_str(),
             6.5,
             Mm(left_x + half_w * lbl_frac + 2.0),
             Mm(ry + 1.5),
-            &font_bold,
+            ctx.font_bold,
         );
     }
-
-    // -- Right: CODE STRUCTURE --
     let mut right_y = tbl_top;
     pdf_fill_rect(
-        &layer,
+        ctx.layer,
         right_x,
-        right_y - TBL_HDR_H,
+        right_y - ctx.tbl_hdr_h,
         half_w,
-        TBL_HDR_H,
+        ctx.tbl_hdr_h,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
-    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
         "CODE STRUCTURE",
         7.0,
         Mm(right_x + 2.0),
-        Mm(right_y - TBL_HDR_H + 1.5),
-        &font_bold,
+        Mm(right_y - ctx.tbl_hdr_h + 1.5),
+        ctx.font_bold,
     );
-    right_y -= TBL_HDR_H;
+    right_y -= ctx.tbl_hdr_h;
     let cs_rows: [(&str, String); 4] = [
         ("Functions", pdf_fmt_full(tot.functions)),
         ("Classes / Types", pdf_fmt_full(tot.classes)),
@@ -1126,43 +1113,44 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         ("Imports", pdf_fmt_full(tot.imports)),
     ];
     for (ri, (lbl, val)) in cs_rows.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ROW_H, right_y);
+        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, right_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
             Rgb::new(1.0, 1.0, 1.0, None)
         };
-        pdf_fill_rect(&layer, right_x, ry, half_w, ROW_H, bg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        layer.use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), &font_reg);
-        layer.use_text(
+        pdf_fill_rect(ctx.layer, right_x, ry, half_w, ctx.row_h, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        ctx.layer
+            .use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
+        ctx.layer.use_text(
             val.as_str(),
             6.5,
             Mm(right_x + half_w * lbl_frac + 2.0),
             Mm(ry + 1.5),
-            &font_bold,
+            ctx.font_bold,
         );
     }
-    right_y -= (cs_rows.len() as f32).mul_add(ROW_H, 3.0);
-
-    // -- Right: LINE CHANGE SUMMARY --
+    right_y -= (cs_rows.len() as f32).mul_add(ctx.row_h, 3.0);
     pdf_fill_rect(
-        &layer,
+        ctx.layer,
         right_x,
-        right_y - TBL_HDR_H,
+        right_y - ctx.tbl_hdr_h,
         half_w,
-        TBL_HDR_H,
+        ctx.tbl_hdr_h,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
-    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
         "LINE CHANGE SUMMARY",
         7.0,
         Mm(right_x + 2.0),
-        Mm(right_y - TBL_HDR_H + 1.5),
-        &font_bold,
+        Mm(right_y - ctx.tbl_hdr_h + 1.5),
+        ctx.font_bold,
     );
-    right_y -= TBL_HDR_H;
+    right_y -= ctx.tbl_hdr_h;
     let lcs_labels: [&str; 4] = [
         "Lines added",
         "Lines removed",
@@ -1170,230 +1158,319 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         "Lines unmodified",
     ];
     for (ri, lbl) in lcs_labels.iter().enumerate() {
-        let ry = ((ri + 1) as f32).mul_add(-ROW_H, right_y);
+        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, right_y);
         let bg = if ri % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
             Rgb::new(1.0, 1.0, 1.0, None)
         };
-        pdf_fill_rect(&layer, right_x, ry, half_w, ROW_H, bg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-        layer.use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), &font_reg);
-        layer.set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
-        layer.use_text(
+        pdf_fill_rect(ctx.layer, right_x, ry, half_w, ctx.row_h, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        ctx.layer
+            .use_text(*lbl, 6.5, Mm(right_x + 2.0), Mm(ry + 1.5), ctx.font_reg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
+        ctx.layer.use_text(
             "--",
             6.5,
             Mm(right_x + half_w * lbl_frac + 2.0),
             Mm(ry + 1.5),
-            &font_reg,
+            ctx.font_reg,
         );
     }
+}
 
-    // -- Page 1 footer --------------------------------------------------------
+fn pdf_render_page1_footer(ctx: &PdfCtx<'_>, run: &AnalysisRun, footer_h: f32, version: &str) {
+    use printpdf::{Color, Mm, Rgb};
     pdf_fill_rect(
-        &layer,
+        ctx.layer,
         0.0,
         0.0,
-        W,
-        FOOTER_H,
+        ctx.w,
+        footer_h,
         Rgb::new(0.93, 0.91, 0.87, None),
     );
-    layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-    layer.use_text(
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    ctx.layer.use_text(
         format!(
-            "oxide-sloc v{version}  |  AGPL-3.0-or-later  |               github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
+            "oxide-sloc v{version}  |  AGPL-3.0-or-later  |               \
+             github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
             pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
         ),
         6.5,
-        Mm(MARGIN),
+        Mm(ctx.margin),
         Mm(3.0),
-        &font_reg,
+        ctx.font_reg,
     );
+}
 
-    // -- Pages 2+: Per-file detail --------------------------------------------
-    // 14 columns: File | Language | Physical | Code | Comments | Blank | Mixed |
-    //             Functions | Classes | Variables | Imports | Tests | Assertions | Suites
-    // Column left-edges (mm); widths sum to 277 = W - 2*MARGIN.
-    if !run.per_file_records.is_empty() {
-        // Compact 8 mm header + 5.5 mm sub-header on per-file pages.
-        const HDR2_H: f32 = 8.0;
-        const SUB_H: f32 = 5.5;
-        let col_x: [f32; 14] = [
-            10.0, 72.0, 92.0, 109.0, 124.0, 144.0, 158.0, 172.0, 191.0, 206.0, 223.0, 238.0, 251.0,
-            273.0,
-        ];
-        let col_labels: [&str; 14] = [
-            "File",
-            "Language",
-            "Physical",
-            "Code",
-            "Comments",
-            "Blank",
-            "Mixed",
-            "Functions",
-            "Classes",
-            "Variables",
-            "Imports",
-            "Tests",
-            "Assertions",
-            "Suites",
-        ];
-        let rows_per_page = ((H - HDR2_H - SUB_H - TBL_HDR_H - FOOTER_H) / ROW_H).floor() as usize;
-        let total_files = run.per_file_records.len();
-        let page_count = total_files.div_ceil(rows_per_page);
+// PDF per-file page renderer — all layout params are distinct and cannot be bundled further
+// without an opaque config struct that would obscure the call site in write_pdf_from_run.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_arguments
+)]
+fn pdf_render_per_file_pages(
+    doc: &printpdf::PdfDocumentReference,
+    font_reg: &printpdf::IndirectFontRef,
+    font_bold: &printpdf::IndirectFontRef,
+    run: &AnalysisRun,
+    w: f32,
+    h: f32,
+    margin: f32,
+    footer_h: f32,
+    row_h: f32,
+    tbl_hdr_h: f32,
+    title: &str,
+    ts: &str,
+    version: &str,
+) {
+    use printpdf::{Color, Mm, Rgb};
+    const HDR2_H: f32 = 8.0;
+    const SUB_H: f32 = 5.5;
+    let col_x: [f32; 14] = [
+        10.0, 72.0, 92.0, 109.0, 124.0, 144.0, 158.0, 172.0, 191.0, 206.0, 223.0, 238.0, 251.0,
+        273.0,
+    ];
+    let col_labels: [&str; 14] = [
+        "File",
+        "Language",
+        "Physical",
+        "Code",
+        "Comments",
+        "Blank",
+        "Mixed",
+        "Functions",
+        "Classes",
+        "Variables",
+        "Imports",
+        "Tests",
+        "Assertions",
+        "Suites",
+    ];
+    let rows_per_page = ((h - HDR2_H - SUB_H - tbl_hdr_h - footer_h) / row_h).floor() as usize;
+    let total_files = run.per_file_records.len();
+    let page_count = total_files.div_ceil(rows_per_page);
 
-        for page_idx in 0..page_count {
-            let (pf_page, pf_layer_idx) = doc.add_page(Mm(W), Mm(H), "Content");
-            let pf_layer = doc.get_page(pf_page).get_layer(pf_layer_idx);
-
-            // Compact header
-            let pf_hdr_top = H - HDR2_H;
-            pdf_fill_rect(
-                &pf_layer,
-                0.0,
-                pf_hdr_top,
-                W,
-                HDR2_H,
-                Rgb::new(0.098, 0.11, 0.15, None),
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    for page_idx in 0..page_count {
+        let (pf_page, pf_layer_idx) = doc.add_page(Mm(w), Mm(h), "Content");
+        let pf_layer = doc.get_page(pf_page).get_layer(pf_layer_idx);
+        let pf_hdr_top = h - HDR2_H;
+        pdf_fill_rect(
+            &pf_layer,
+            0.0,
+            pf_hdr_top,
+            w,
+            HDR2_H,
+            Rgb::new(0.098, 0.11, 0.15, None),
+        );
+        pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+        pf_layer.use_text(
+            "oxide-sloc",
+            9.0,
+            Mm(margin),
+            Mm(pf_hdr_top + 2.5),
+            font_bold,
+        );
+        pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+        pf_layer.use_text(
+            "Per-File Detail",
+            8.0,
+            Mm(46.0),
+            Mm(pf_hdr_top + 2.5),
+            font_reg,
+        );
+        pf_layer.use_text(
+            format!("Page {} of {}", page_idx + 2, page_count + 1),
+            7.0,
+            Mm(w - 40.0),
+            Mm(pf_hdr_top + 2.5),
+            font_reg,
+        );
+        let sub_top = pf_hdr_top - SUB_H;
+        pdf_fill_rect(
+            &pf_layer,
+            0.0,
+            sub_top,
+            w,
+            SUB_H,
+            Rgb::new(0.94, 0.93, 0.91, None),
+        );
+        pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.3, 0.3, 0.3, None)));
+        pf_layer.use_text(
+            pdf_trunc(title, 55),
+            6.5,
+            Mm(margin),
+            Mm(sub_top + 1.0),
+            font_reg,
+        );
+        pf_layer.use_text(
+            format!("{total_files} files  |  {ts}"),
+            6.5,
+            Mm(w - 80.0),
+            Mm(sub_top + 1.0),
+            font_reg,
+        );
+        let pf_tbl_top = sub_top;
+        pdf_fill_rect(
+            &pf_layer,
+            margin,
+            pf_tbl_top - tbl_hdr_h,
+            2.0f32.mul_add(-margin, w),
+            tbl_hdr_h,
+            Rgb::new(0.098, 0.11, 0.15, None),
+        );
+        pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+        for (i, lbl) in col_labels.iter().enumerate() {
             pf_layer.use_text(
-                "oxide-sloc",
-                9.0,
-                Mm(MARGIN),
-                Mm(pf_hdr_top + 2.5),
-                &font_bold,
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-            pf_layer.use_text(
-                "Per-File Detail",
-                8.0,
-                Mm(46.0),
-                Mm(pf_hdr_top + 2.5),
-                &font_reg,
-            );
-            pf_layer.use_text(
-                format!("Page {} of {}", page_idx + 2, page_count + 1),
-                7.0,
-                Mm(W - 40.0),
-                Mm(pf_hdr_top + 2.5),
-                &font_reg,
-            );
-
-            // Sub-header: title + file count + timestamp
-            let sub_top = pf_hdr_top - SUB_H;
-            pdf_fill_rect(
-                &pf_layer,
-                0.0,
-                sub_top,
-                W,
-                SUB_H,
-                Rgb::new(0.94, 0.93, 0.91, None),
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.3, 0.3, 0.3, None)));
-            pf_layer.use_text(
-                pdf_trunc(&title, 55),
-                6.5,
-                Mm(MARGIN),
-                Mm(sub_top + 1.0),
-                &font_reg,
-            );
-            pf_layer.use_text(
-                format!("{total_files} files  |  {ts}"),
-                6.5,
-                Mm(W - 80.0),
-                Mm(sub_top + 1.0),
-                &font_reg,
-            );
-
-            // Table header row
-            let pf_tbl_top = sub_top;
-            pdf_fill_rect(
-                &pf_layer,
-                MARGIN,
-                pf_tbl_top - TBL_HDR_H,
-                2.0f32.mul_add(-MARGIN, W),
-                TBL_HDR_H,
-                Rgb::new(0.098, 0.11, 0.15, None),
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-            for (i, lbl) in col_labels.iter().enumerate() {
-                pf_layer.use_text(
-                    *lbl,
-                    5.5,
-                    Mm(col_x[i] + 0.5),
-                    Mm(pf_tbl_top - TBL_HDR_H + 1.5),
-                    &font_bold,
-                );
-            }
-
-            // File rows for this page
-            let start = page_idx * rows_per_page;
-            let end = (start + rows_per_page).min(total_files);
-            for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
-                let ry = ((ri + 1) as f32).mul_add(-ROW_H, pf_tbl_top - TBL_HDR_H);
-                let bg = if ri % 2 == 0 {
-                    Rgb::new(0.975, 0.965, 0.95, None)
-                } else {
-                    Rgb::new(1.0, 1.0, 1.0, None)
-                };
-                pdf_fill_rect(&pf_layer, MARGIN, ry, 2.0f32.mul_add(-MARGIN, W), ROW_H, bg);
-                pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-                let file_str = pdf_safe_str(&rec.relative_path);
-                let lang_str = rec
-                    .language
-                    .as_ref()
-                    .map_or_else(|| "--".to_string(), |l| l.display_name().to_string());
-                let raw = &rec.raw_line_categories;
-                let eff = &rec.effective_counts;
-                let cells = [
-                    pdf_trunc(&file_str, 40),
-                    lang_str,
-                    pdf_fmt_full(raw.total_physical_lines),
-                    pdf_fmt_full(eff.code_lines),
-                    pdf_fmt_full(eff.comment_lines),
-                    pdf_fmt_full(eff.blank_lines),
-                    pdf_fmt_full(eff.mixed_lines_separate),
-                    pdf_fmt_full(raw.functions),
-                    pdf_fmt_full(raw.classes),
-                    pdf_fmt_full(raw.variables),
-                    pdf_fmt_full(raw.imports),
-                    pdf_fmt_full(raw.test_count),
-                    pdf_fmt_full(raw.test_assertion_count),
-                    pdf_fmt_full(raw.test_suite_count),
-                ];
-                for (ci, cell) in cells.iter().enumerate() {
-                    pf_layer.use_text(
-                        cell.clone(),
-                        5.5,
-                        Mm(col_x[ci] + 0.5),
-                        Mm(ry + 1.0),
-                        &font_reg,
-                    );
-                }
-            }
-
-            // Footer
-            pdf_fill_rect(
-                &pf_layer,
-                0.0,
-                0.0,
-                W,
-                FOOTER_H,
-                Rgb::new(0.93, 0.91, 0.87, None),
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-            pf_layer.use_text(
-                format!(
-                    "oxide-sloc v{version}  |  AGPL-3.0-or-later  |                       github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
-                    pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
-                ),
-                6.5,
-                Mm(MARGIN),
-                Mm(3.0),
-                &font_reg,
+                *lbl,
+                5.5,
+                Mm(col_x[i] + 0.5),
+                Mm(pf_tbl_top - tbl_hdr_h + 1.5),
+                font_bold,
             );
         }
+        let start = page_idx * rows_per_page;
+        let end = (start + rows_per_page).min(total_files);
+        for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
+            let ry = ((ri + 1) as f32).mul_add(-row_h, pf_tbl_top - tbl_hdr_h);
+            let bg = if ri % 2 == 0 {
+                Rgb::new(0.975, 0.965, 0.95, None)
+            } else {
+                Rgb::new(1.0, 1.0, 1.0, None)
+            };
+            pdf_fill_rect(&pf_layer, margin, ry, 2.0f32.mul_add(-margin, w), row_h, bg);
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+            let file_str = pdf_safe_str(&rec.relative_path);
+            let lang_str = rec
+                .language
+                .as_ref()
+                .map_or_else(|| "--".to_string(), |l| l.display_name().to_string());
+            let raw = &rec.raw_line_categories;
+            let eff = &rec.effective_counts;
+            let cells = [
+                pdf_trunc(&file_str, 40),
+                lang_str,
+                pdf_fmt_full(raw.total_physical_lines),
+                pdf_fmt_full(eff.code_lines),
+                pdf_fmt_full(eff.comment_lines),
+                pdf_fmt_full(eff.blank_lines),
+                pdf_fmt_full(eff.mixed_lines_separate),
+                pdf_fmt_full(raw.functions),
+                pdf_fmt_full(raw.classes),
+                pdf_fmt_full(raw.variables),
+                pdf_fmt_full(raw.imports),
+                pdf_fmt_full(raw.test_count),
+                pdf_fmt_full(raw.test_assertion_count),
+                pdf_fmt_full(raw.test_suite_count),
+            ];
+            for (ci, cell) in cells.iter().enumerate() {
+                pf_layer.use_text(
+                    cell.clone(),
+                    5.5,
+                    Mm(col_x[ci] + 0.5),
+                    Mm(ry + 1.0),
+                    font_reg,
+                );
+            }
+        }
+        pdf_fill_rect(
+            &pf_layer,
+            0.0,
+            0.0,
+            w,
+            footer_h,
+            Rgb::new(0.93, 0.91, 0.87, None),
+        );
+        pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+        pf_layer.use_text(
+            format!(
+                "oxide-sloc v{version}  |  AGPL-3.0-or-later  |                       \
+                 github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
+                pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
+            ),
+            6.5,
+            Mm(margin),
+            Mm(3.0),
+            font_reg,
+        );
+    }
+}
+
+/// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
+///
+/// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
+/// both Windows and Linux server deployments.
+///
+/// # Errors
+///
+/// Returns an error if the output directory cannot be created or the PDF file cannot be written.
+// Casts throughout are for PDF layout coordinates and percentage ratios; precision loss is fine.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
+    use printpdf::{BuiltinFont, Mm, PdfDocument};
+    use std::fs::File;
+    use std::io::BufWriter;
+
+    const W: f32 = 297.0;
+    const H: f32 = 210.0;
+    const MARGIN: f32 = 10.0;
+    const FOOTER_H: f32 = 10.0;
+    const HDR_H: f32 = 13.5;
+    const ROW_H: f32 = 5.5;
+    const TBL_HDR_H: f32 = 6.0;
+
+    if let Some(parent) = pdf_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create PDF directory {}", parent.display()))?;
+    }
+
+    let title = pdf_safe_str(&run.effective_configuration.reporting.report_title);
+    let ts = run
+        .tool
+        .timestamp_utc
+        .format("%Y-%m-%d %H:%M UTC")
+        .to_string();
+    let version = env!("CARGO_PKG_VERSION");
+
+    let (doc, page1, layer1) =
+        PdfDocument::new(format!("oxide-sloc: {title}"), Mm(W), Mm(H), "Content");
+    let font_reg = doc
+        .add_builtin_font(BuiltinFont::Helvetica)
+        .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
+    let font_bold = doc
+        .add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|e| anyhow::anyhow!("printpdf font error: {e}"))?;
+    let layer = doc.get_page(page1).get_layer(layer1);
+
+    let ctx = PdfCtx {
+        layer: &layer,
+        font_reg: &font_reg,
+        font_bold: &font_bold,
+        w: W,
+        margin: MARGIN,
+        row_h: ROW_H,
+        tbl_hdr_h: TBL_HDR_H,
+    };
+    let roots_text_y = pdf_render_page1_header(&ctx, run, &ts, &title, H, HDR_H);
+    let row2_bot = pdf_render_summary_chips(&ctx, run, roots_text_y);
+    let info_y = pdf_render_info_lines(&ctx, run, row2_bot);
+    pdf_render_metric_tables(&ctx, run, info_y - 4.0);
+    pdf_render_page1_footer(&ctx, run, FOOTER_H, version);
+
+    if !run.per_file_records.is_empty() {
+        pdf_render_per_file_pages(
+            &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, &title,
+            &ts, version,
+        );
     }
 
     doc.save(&mut BufWriter::new(File::create(pdf_path).with_context(
@@ -1549,7 +1626,7 @@ fn normalize_browser_env_path(raw: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
-fn discover_browser() -> Option<PathBuf> {
+fn discover_browser_from_env() -> Option<PathBuf> {
     for var_name in ["SLOC_BROWSER", "BROWSER"] {
         if let Ok(path) = std::env::var(var_name) {
             let candidate = normalize_browser_env_path(&path);
@@ -1557,6 +1634,13 @@ fn discover_browser() -> Option<PathBuf> {
                 return Some(candidate);
             }
         }
+    }
+    None
+}
+
+fn discover_browser() -> Option<PathBuf> {
+    if let Some(p) = discover_browser_from_env() {
+        return Some(p);
     }
 
     let names = [
