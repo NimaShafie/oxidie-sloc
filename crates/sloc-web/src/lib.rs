@@ -15333,7 +15333,7 @@ struct ScanSetupTemplate {
       <div class="hero-top">
         <div>
           <div class="soft-chip success"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>Run finished successfully</div>
-          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;">
             <h1 class="hero-title">{{ report_title }}</h1>
             <span class="run-id-short-badge" title="Short run ID — matches the ID shown in View Reports">{{ run_id_short }}</span>
           </div>
