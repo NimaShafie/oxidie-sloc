@@ -312,22 +312,46 @@ The Setup stage attempts to relax the artifact-viewer Content Security Policy vi
 config) and, as a fallback, via the Jenkins Script Console REST API.  The REST API
 path requires an admin API token bound as a Jenkins credential:
 
+**Important — sandbox is ON by default for SCM-defined pipelines.** When a Pipeline
+job pulls its `Jenkinsfile` from SCM, Jenkins enforces the Groovy sandbox by default.
+With the sandbox active, the in-pipeline `System.setProperty` call is always blocked
+("Direct CSP set blocked (sandbox active)"), so the REST API fallback becomes the only
+in-pipeline path available.  This makes the `jenkins-api-token` credential **effectively
+required** on a fresh install — unless you also disable the sandbox.
+
+Disabling the sandbox is exactly what `<sandbox>false</sandbox>` in
+`ci/jenkins/job-config.xml` and `ci/jenkins/job-config.xml.tmpl` does.  If you
+imported the job using `job-config.xml` the sandbox is already off.  If you created
+the job through the web UI, go to **Configure → Pipeline → Advanced** and uncheck
+**"Use Groovy Sandbox"** — or simply add this credential and leave the sandbox on.
+
 | Field | Value |
 |-------|-------|
 | Kind | **Secret text** |
 | Secret | Your Jenkins admin API token — see `ci/jenkins/README.md § Minting a long-lived API token` |
 | ID | `jenkins-api-token` |
 
-Without this credential and with the Groovy sandbox enabled, the pipeline still works
-but the HTML report may render with broken interactive features.  The permanent fix is
-[Step 6](#6-configure-the-csp-header-html-report-viewer) (recommended).
+Without this credential **and** with the Groovy sandbox enabled, the pipeline still
+works but the HTML report may render with broken interactive features.  The permanent
+fix is [Step 6](#6-configure-the-csp-header-html-report-viewer) — the only approach
+that is guaranteed to work regardless of sandbox state.
 
 ---
 
 ## 6. Configure the CSP header (HTML report viewer)
 
 By default, Jenkins's Content Security Policy blocks the inline styles and scripts
-in the oxide-sloc HTML report.  Fix this with an init script:
+in the oxide-sloc HTML report.  **The only reliable fix is deploying a Groovy init
+script** — do this before running any real build.
+
+> **Why not the in-pipeline `System.setProperty` approach?** The Jenkinsfile Setup
+> stage contains a `System.setProperty` call as a convenience, but it is blocked by
+> the Groovy sandbox on fresh installs (see Step 5g), and even when the sandbox is
+> off it only takes effect for the duration of that build's JVM session.  Treat the
+> in-pipeline path as a **diagnostic fallback only**.  Use the init script below for
+> all production setups — it survives restarts and requires no credentials.
+
+### Step-by-step: deploy relax-csp.groovy (init.groovy.d approach)
 
 1. Find your `$JENKINS_HOME`:
    - Docker: `/var/jenkins_home`
@@ -335,30 +359,46 @@ in the oxide-sloc HTML report.  Fix this with an init script:
 
 2. Create the `init.groovy.d` directory if it doesn't exist:
    ```bash
-   sudo mkdir -p $JENKINS_HOME/init.groovy.d
+   # Docker:
+   docker exec -u root <container-name> mkdir -p /var/jenkins_home/init.groovy.d
+   # Native:
+   sudo mkdir -p /var/lib/jenkins/init.groovy.d
    ```
 
-3. Copy the provided Groovy script:
+3. Copy the provided Groovy script into Jenkins:
    ```bash
-   sudo cp ci/jenkins/init.groovy.d/relax-csp.groovy $JENKINS_HOME/init.groovy.d/
+   # Docker (discover container name first: docker ps --format '{{.Names}}' | grep -i jenkins):
+   docker cp ci/jenkins/init.groovy.d/relax-csp.groovy <container-name>:/var/jenkins_home/init.groovy.d/
+   # Native:
+   sudo cp ci/jenkins/init.groovy.d/relax-csp.groovy /var/lib/jenkins/init.groovy.d/
    ```
-   Or paste this content into a new file at that path:
+   Or paste this content manually into a new file at that path:
    ```groovy
    // $JENKINS_HOME/init.groovy.d/relax-csp.groovy
-   import hudson.model.Hudson
    System.setProperty(
-     "hudson.model.DirectoryBrowserSupport.CSP",
-     "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+     'hudson.model.DirectoryBrowserSupport.CSP',
+     "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
+     "img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; " +
+     "font-src 'self' data:;"
    )
    ```
 
 4. **Restart Jenkins** for the init script to take effect:
-   - Docker: `docker restart jenkins`
-   - Native: `sudo systemctl restart jenkins`
+   ```bash
+   # Docker:
+   docker restart <container-name>
+   # Native:
+   sudo systemctl restart jenkins
+   ```
+
+5. Verify the CSP is set by running `bash ci/jenkins/preflight.sh` — the `[warn] CSP at default`
+   message should be gone.
 
 > **Without this step**, the "OxideSLOC — Jenkins CI Report" and "OxideSLOC — Jenkins HTML Report"
 > pages will render with broken interactive features (CSS still loads, but JS is blocked — see
-> Step 11 for full symptoms).
+> Step 11 for full symptoms).  The `preflight.sh` script also supports
+> `bash ci/jenkins/preflight.sh --install-csp` (requires Docker on the Jenkins host) to deploy
+> and restart automatically.
 
 ---
 
