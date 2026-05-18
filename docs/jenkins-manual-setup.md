@@ -305,6 +305,23 @@ If using Bitbucket as the SCM:
 | Password | A Bitbucket app password with repo-read scope |
 | ID | `bitbucket-credentials` |
 
+### 5g. Jenkins API token (optional — in-pipeline CSP relaxation)
+
+The Setup stage attempts to relax the artifact-viewer Content Security Policy via
+`System.setProperty` (requires "Use Groovy Sandbox" to be **unchecked** in the job
+config) and, as a fallback, via the Jenkins Script Console REST API.  The REST API
+path requires an admin API token bound as a Jenkins credential:
+
+| Field | Value |
+|-------|-------|
+| Kind | **Secret text** |
+| Secret | Your Jenkins admin API token — see `ci/jenkins/README.md § Minting a long-lived API token` |
+| ID | `jenkins-api-token` |
+
+Without this credential and with the Groovy sandbox enabled, the pipeline still works
+but the HTML report may render with broken interactive features.  The permanent fix is
+[Step 6](#6-configure-the-csp-header-html-report-viewer) (recommended).
+
 ---
 
 ## 6. Configure the CSP header (HTML report viewer)
@@ -423,16 +440,40 @@ From this point on, all 39 configuration parameters are visible in the build for
 
 1. Click **"Build with Parameters"** in the left sidebar.
 
-2. The build form opens with all parameters grouped by function.
+2. The build form opens with all 39 parameters grouped by function.
    Adjust at minimum:
 
-   | Parameter | What to set |
-   |-----------|------------|
-   | `REPO_URL` | URL of the repository you want to scan |
-   | `SCAN_PATH` | Path within the repository to analyze (e.g., `src` or `.`) |
-   | `REPORT_TITLE` | A descriptive title for the HTML report |
-   | `GENERATE_HTML` | Check to produce an HTML report (recommended) |
-   | `SKIP_WEB_CHECK` | Check if port 4317 is not available on the agent |
+   | Parameter | Default | What to set |
+   |-----------|---------|------------|
+   | `REPO_URL` | GitHub upstream | URL of the repository you want to scan |
+   | `SCAN_PATH` | `tests/fixtures/basic` | Path within the repository to analyze (e.g., `src` or `.`) |
+   | `REPORT_TITLE` | `oxide-sloc CI Report` | A descriptive title for the HTML report |
+   | `GENERATE_HTML` | ✓ checked | Check to produce an HTML report (recommended) |
+   | `GENERATE_PDF` | unchecked | Check to produce a PDF — **pure-Rust, no browser required on the agent** |
+   | `SKIP_WEB_CHECK` | ✓ checked | Keep checked if port 4317 is not available on the agent |
+
+   **To enable unit test results** (requires cargo-nextest on the agent — see Step 13):
+
+   | Parameter | Value |
+   |-----------|-------|
+   | `TEST_RUNNER` | `cargo-nextest` |
+   | `PUBLISH_TEST_RESULTS` | ✓ checked |
+   | `TEST_FAIL_FAST` | unchecked (see all failures) |
+
+   **To enable code coverage** (requires cargo-llvm-cov on the agent — see Step 14):
+
+   | Parameter | Value |
+   |-----------|-------|
+   | `COVERAGE_STANDALONE` | ✓ checked |
+   | `COVERAGE_THRESHOLD` | `0` (disabled) or a percentage, e.g. `60` |
+
+   **To push artifacts to an external repository**:
+
+   | Parameter | Value |
+   |-----------|-------|
+   | `ARTIFACT_REPO_TYPE` | `artifactory`, `nexus`, `s3`, `minio`, `azure-blob`, or `generic-http` |
+   | `ARTIFACT_REPO_URL` | Base URL of the repository |
+   | `ARTIFACT_PUSH_JSON` / `ARTIFACT_PUSH_HTML` / etc. | Check the artifact types to push |
 
 3. Click **Build**.
 
@@ -464,21 +505,38 @@ After a successful build, confirm each feature is wired correctly:
 
 ### Trend charts (Plot plugin)
 - The job page shows **"SLOC Trends"** charts below the build history.
-- Charts include: "SLOC totals over time", "Per-language code lines".
-- After 2+ builds, trend lines appear.
-- The "Line coverage % over time" chart appears after a build with `COVERAGE_STANDALONE` enabled.
+- Charts produced: **"SLOC Totals Over Time"** (line chart), **"Per-Language Code Lines"** (bar chart).
+- After 2+ builds, trend lines appear.  The first build registers the data point but no chart is
+  drawn until there are at least two points.
+- The **"Line Coverage % Over Time"** chart appears after a build with `COVERAGE_STANDALONE` enabled.
+- If charts are missing after 2+ builds, verify the Plot plugin is installed:
+  **Manage Jenkins → Plugins → Installed plugins** → search for `plot`.
+  The pipeline degrades gracefully when the plugin is absent (a warning is logged but the build
+  still succeeds).
 
 ### Test results (JUnit plugin — nextest only)
 - To enable: set `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`.
 - Requires cargo-nextest on the agent (see [Step 13](#13-optional-agent-setup--cargo-nextest-junit-test-results)).
-- After a nextest build, the left sidebar shows a **"Test Result"** link.
-- The job page shows a test trend chart.
+- After a nextest build, the left sidebar shows a **"Test Result"** link with pass/fail/skip counts.
+- The job page shows a test trend chart (tests over time).
+- Full stack traces on panics are always enabled via `RUST_BACKTRACE=1`.
+- Transient failures are retried once before marking as failed (`.config/nextest.toml`).
 
-### Coverage Report (HTML Publisher — cargo-llvm-cov only)
+### Coverage Report (Coverage plugin + HTML Publisher)
 - To enable: check `COVERAGE_STANDALONE`.
-- Requires cargo-llvm-cov on the agent (see [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage)).
-- After a successful coverage build, the left sidebar shows a **"Coverage Report"** link.
-- The job page shows a "Line coverage % over time" trend chart.
+- Requires cargo-llvm-cov or cargo-tarpaulin on the agent (see [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage)).
+- After a successful coverage build:
+  - The build page shows **line %, branch %, function %** from the Coverage plugin.
+  - The left sidebar shows a **"Coverage Source"** link with the annotated HTML source view.
+  - The job page shows the **"Line Coverage % Over Time"** trend chart.
+- Set `COVERAGE_THRESHOLD` (e.g., `60`) to fail the build when line coverage drops below that %.
+
+### PDF report artifact (pure-Rust)
+- To enable: check `GENERATE_PDF`.
+- **No browser, Chromium, or external tool required on the agent** — PDF generation is
+  implemented entirely in Rust.  This parameter can be enabled without any additional agent setup.
+- The PDF is archived as `ci-out/report_<slug>.pdf` and can be included in artifact repository
+  pushes via `ARTIFACT_PUSH_PDF`.
 
 ### Build description
 - The build list shows a description line like:
@@ -496,7 +554,8 @@ After a successful build, confirm each feature is wired correctly:
   - `ci-out/result_<slug>.json` (scan output, slug = `SCAN_PATH` basename)
   - `ci-out/report_<slug>.html`, `report_<slug>.css`, `report_<slug>.js`,
     `report_<slug>.xlsx`, `report_<slug>.csv` (HTML report with assets and exports)
-  - `ci-out/summary.csv`, `ci-out/per_language.csv` (trend CSVs)
+  - `ci-out/report_<slug>.pdf` (when `GENERATE_PDF = true`)
+  - `ci-out/summary.csv`, `ci-out/per_language.csv` (trend CSVs consumed by Plot plugin)
   - `ci-out/test-results/junit.xml` (when `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`)
   - `ci-out/coverage/{lcov.info,sonar-coverage.xml,html/}` (when `COVERAGE_STANDALONE = true`)
 
@@ -604,12 +663,11 @@ rustup component add llvm-tools-preview
 **What you get after enabling `COVERAGE_STANDALONE`:**
 - LCOV file (`lcov.info`) and Cobertura XML (`sonar-coverage.xml`) archived per build.
 - Browsable HTML coverage report under `coverage/html/` archived per build.
-- **"Coverage Report"** sidebar link on each build showing the HTML report.
-- "Line coverage % over time" trend chart on the job page.
+- **"Coverage Source"** sidebar link on each build (annotated source view).
+- Line %, branch %, and function % shown on the build page via the Coverage plugin.
+- **"Line Coverage % Over Time"** trend chart on the job page (Plot plugin).
 - Optional threshold gate: set `COVERAGE_THRESHOLD` to a number (e.g., `60`) to fail
   the build if line coverage drops below that percentage.
-- When `GENERATE_COVERAGE` is also enabled, the SonarQube stage reuses the coverage
-  data from this stage — tests run only once.
 
 ---
 
@@ -664,9 +722,40 @@ current Jenkinsfile.
 
 ### Plot charts not appearing
 
-The Plot plugin must be installed and the first **two** builds must complete before
+The Plot plugin must be installed and at least **two** builds must complete before
 trend data is visible (one data point does not make a chart).  Check that the plugin
 is installed: **Manage Jenkins → Plugins → Installed plugins** → filter for "plot".
+
+The pipeline logs `Plot trend charts skipped (install the 'plot' plugin to enable): ...`
+when the plugin is absent — the build still succeeds but no charts are registered.
+
+Expected chart names under the **"SLOC Trends"** group on the job page:
+- **"SLOC Totals Over Time"** (line chart, always produced)
+- **"Per-Language Code Lines"** (bar chart, always produced)
+- **"Line Coverage % Over Time"** (line chart, only when `COVERAGE_STANDALONE` is checked)
+
+### "Test Result" sidebar link missing after nextest build
+
+Check that `PUBLISH_TEST_RESULTS` is checked **and** `TEST_RUNNER` is set to `cargo-nextest`.
+The JUnit step is a no-op when `TEST_RUNNER = cargo-test` (no XML is generated).
+
+Confirm the JUnit XML was produced: in **Build Artifacts**, look for
+`ci-out/test-results/junit.xml`.  If the file is absent, the nextest run may have
+exited before writing the XML (check the Unit tests stage console output for errors).
+
+### No "Coverage Source" link or Coverage plugin metrics
+
+Verify `COVERAGE_STANDALONE` is checked and cargo-llvm-cov (or cargo-tarpaulin) is
+installed on the agent.  Look in the console output of the Coverage stage for
+`==> Generating coverage with cargo-llvm-cov` or `WARNING: Neither cargo-llvm-cov nor
+cargo-tarpaulin is installed.`  Follow [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage).
+
+### Artifact repository push stage skipped
+
+The `Push to Artifact Repository` stage is skipped when `ARTIFACT_REPO_TYPE = none` (the
+default) or `ARTIFACT_REPO_URL` is empty.  Set both parameters, then add the credentials
+`SLOC_ARTIFACT_REPO_USER` and `SLOC_ARTIFACT_REPO_PASS` via
+**Manage Jenkins → Credentials** (see [Step 5c](#5c-artifact-repository-required-for-artifact-push-stage)).
 
 ### "COVERAGE GATE FAILED" — build fails on coverage threshold
 
