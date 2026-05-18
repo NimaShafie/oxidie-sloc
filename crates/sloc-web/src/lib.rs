@@ -5984,6 +5984,26 @@ struct ProjectHistoryResponse {
     last_git_commit: Option<String>,
 }
 
+/// Return true if `entry` matches either an exact root path or an upload-staging
+/// path with the same project name (needed because each upload gets a fresh UUID dir).
+fn entry_matches_project(
+    entry: &RegistryEntry,
+    root_str: &str,
+    upload_root: &str,
+    upload_name_suffix: Option<&str>,
+) -> bool {
+    if entry.input_roots.iter().any(|r| r == root_str) {
+        return true;
+    }
+    if let Some(suffix) = upload_name_suffix {
+        return entry
+            .input_roots
+            .iter()
+            .any(|r| r.starts_with(upload_root) && r.ends_with(suffix));
+    }
+    false
+}
+
 async fn project_history_handler(
     State(state): State<AppState>,
     Query(query): Query<ProjectHistoryQuery>,
@@ -6009,23 +6029,13 @@ async fn project_history_handler(
         } else {
             None
         };
+    let suffix_ref = upload_name_suffix.as_deref();
 
     let entries: Vec<_> = {
         let reg = state.registry.lock().await;
         reg.entries
             .iter()
-            .filter(|e| {
-                if e.input_roots.iter().any(|r| r == &root_str) {
-                    return true;
-                }
-                if let Some(ref suffix) = upload_name_suffix {
-                    return e
-                        .input_roots
-                        .iter()
-                        .any(|r| r.starts_with(&upload_root) && r.ends_with(suffix.as_str()));
-                }
-                false
-            })
+            .filter(|e| entry_matches_project(e, &root_str, &upload_root, suffix_ref))
             .cloned()
             .collect()
     };
