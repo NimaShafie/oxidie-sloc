@@ -4008,6 +4008,13 @@ fn render_result_page(
         project_path: project_path.clone(),
         output_dir: display_path(&artifacts.output_dir),
         run_id: run_id.to_owned(),
+        run_id_short: run_id
+            .split('-')
+            .next_back()
+            .unwrap_or(run_id)
+            .chars()
+            .take(7)
+            .collect(),
         files_analyzed,
         files_skipped,
         physical_lines,
@@ -15150,6 +15157,8 @@ struct ScanSetupTemplate {
     .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .run-id-chip:hover .chip-tooltip { opacity:1; }
     .chip-label-icon { display:inline-block; vertical-align:middle; opacity:0.8; flex:0 0 auto; }
+    .run-id-short-badge { font-family:ui-monospace,monospace; font-size:13px; font-weight:700; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:2px 8px; letter-spacing:0.04em; white-space:nowrap; align-self:center; }
+    body.dark-theme .run-id-short-badge { color:var(--muted-2); }
     @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
     .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
     /* Meta chips row */
@@ -15324,7 +15333,10 @@ struct ScanSetupTemplate {
       <div class="hero-top">
         <div>
           <div class="soft-chip success"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>Run finished successfully</div>
-          <h1 class="hero-title">{{ report_title }}</h1>
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+            <h1 class="hero-title">{{ report_title }}</h1>
+            <span class="run-id-short-badge" title="Short run ID — matches the ID shown in View Reports">{{ run_id_short }}</span>
+          </div>
         </div>
         <div class="hero-quick-actions">
           {% if server_mode %}
@@ -15394,7 +15406,6 @@ struct ScanSetupTemplate {
       <div class="meta">
         <span class="meta-chip">Scan by <b>{{ scan_performed_by }}</b></span>
         <span class="meta-chip">Scanned <b>{{ scan_time_display }}</b></span>
-        <span class="meta-chip">Generated <b>{{ scan_time_display }}</b></span>
         <span class="meta-chip">OS <b>{{ os_display }}</b></span>
         <span class="meta-chip">Files analyzed <b>{{ files_analyzed }}</b></span>
         <span class="meta-chip">Files skipped <b>{{ files_skipped }}</b></span>
@@ -16821,6 +16832,7 @@ struct ResultTemplate {
     server_mode: bool,
     /// Header/footer identification banner, mirrored from the HTML/PDF report.
     report_header_footer: Option<String>,
+    run_id_short: String,
 }
 
 #[derive(Template)]
