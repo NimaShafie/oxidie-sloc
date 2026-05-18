@@ -374,7 +374,7 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `INCLUDE_GLOBS` | _(all)_ | Comma-separated include glob patterns, e.g. `src/**/*.py`. |
 | `EXCLUDE_GLOBS` | _(none)_ | Comma-separated exclude glob patterns, e.g. `vendor/**`. |
 | `GENERATE_HTML` | true | Write HTML report and publish as "SLOC Report" sidebar link. Requires HTML Publisher plugin. |
-| `GENERATE_PDF` | false | Write PDF report. Requires Chromium on the agent (`SLOC_BROWSER` env var to override path). |
+| `GENERATE_PDF` | false | Write PDF report. Pure-Rust generation — no browser or external tool required on the agent. |
 | `SKIP_QUALITY_GATES` | false | Skip fmt / clippy / unit-test stage for scan-only runs. |
 | `SKIP_WEB_CHECK` | false | Skip web UI health-check on agents without loopback / port 4317. |
 | `WEBHOOK_URL` | _(skip)_ | POST JSON result here after scan. Add `SLOC_WEBHOOK_TOKEN` Secret Text credential for Bearer auth. |
@@ -521,8 +521,6 @@ pipeline {
 | Variable | Purpose |
 |----------|---------|
 | `RUST_LOG` | Tracing verbosity (`warn`, `info`, `debug`) |
-| `SLOC_BROWSER` | Path to a Chromium-based browser for PDF export |
-| `SLOC_BROWSER_NOSANDBOX` | Set to `1` to pass `--no-sandbox` to Chromium (required in Docker) |
 | `SLOC_API_KEY` | API key for the web UI when deployed on a shared host |
 
 ---
@@ -1051,8 +1049,6 @@ Or via **Manage Jenkins → Credentials → System → Global credentials → Ad
 | Variable              | Used by     | Purpose                                                                |
 |-----------------------|-------------|------------------------------------------------------------------------|
 | `RUST_LOG`            | All modes   | Tracing output level: `error`, `warn`, `info`, `debug`, `trace`        |
-| `SLOC_BROWSER`        | PDF export  | Override Chromium-based browser path (e.g. `/usr/bin/chromium`)        |
-| `SLOC_BROWSER_NOSANDBOX` | PDF export | Set to `1` to pass `--no-sandbox` to Chromium (required in Docker) |
 | `SLOC_API_KEY`        | Web UI      | When set, all requests must supply `Authorization: Bearer <key>` or `X-API-Key: <key>` |
 | `SLOC_TLS_CERT`       | Web UI      | Path to PEM certificate for native TLS termination                     |
 | `SLOC_TLS_KEY`        | Web UI      | Path to PEM private key for native TLS termination                     |
@@ -1079,7 +1075,7 @@ These are the flags most commonly used in CI pipelines:
 oxide-sloc analyze ./src \
   --json-out out/result.json \       # machine-readable output for tooling
   --html-out out/report.html \       # self-contained HTML report
-  --pdf-out  out/report.pdf \        # PDF (requires Chromium on PATH)
+  --pdf-out  out/report.pdf \        # PDF (pure Rust, no browser required)
   --report-title "Sprint 42 Scan" \  # label shown in reports
   --config ci/sloc-ci-default.toml \ # use a pre-configured CI preset
   --include-glob "src/**" \          # narrow scan scope

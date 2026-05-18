@@ -22,7 +22,7 @@ use sloc_core::{
 };
 use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, get_sha};
 use sloc_report::{
-    render_html, write_csv, write_diff_csv, write_html, write_pdf_from_html, write_xlsx,
+    render_html, write_csv, write_diff_csv, write_html, write_pdf_from_run, write_xlsx,
 };
 
 // ── ANSI color helpers ────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ struct AnalyzeArgs {
     #[arg(long, short = 'H', value_name = "PATH")]
     html_out: Option<PathBuf>,
 
-    /// Write PDF report to this path (requires Chrome/Edge/Brave/Vivaldi/Opera)
+    /// Write PDF report to this path (pure Rust, no browser required)
     #[arg(long, value_name = "PATH")]
     pdf_out: Option<PathBuf>,
 
@@ -611,8 +611,7 @@ fn write_outputs(run: &AnalysisRun, args: &AnalyzeArgs, quiet: bool) -> Result<(
     }
 
     if let Some(path) = &args.pdf_out {
-        let html_for_pdf = ensure_html_for_pdf(run, args.html_out.as_deref(), path)?;
-        write_pdf_from_html(&html_for_pdf, path)?;
+        write_pdf_from_run(run, path)?;
         log_written(path, quiet);
     }
 
@@ -782,8 +781,7 @@ fn run_report(args: &ReportArgs) -> Result<()> {
     }
 
     if let Some(path) = &args.pdf_out {
-        let html_for_pdf = ensure_html_for_pdf(&run, args.html_out.as_deref(), path)?;
-        write_pdf_from_html(&html_for_pdf, path)?;
+        write_pdf_from_run(&run, path)?;
         eprintln!("wrote {}", path.display());
     }
 
@@ -1472,19 +1470,6 @@ fn apply_analysis_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
     if let Some(cov) = &args.coverage_file {
         config.analysis.coverage_file = Some(cov.clone());
     }
-}
-
-fn ensure_html_for_pdf(
-    run: &AnalysisRun,
-    html_out: Option<&Path>,
-    pdf_out: &Path,
-) -> Result<PathBuf> {
-    if let Some(html_out) = html_out {
-        return Ok(html_out.to_path_buf());
-    }
-    let html_path = pdf_out.with_extension("html");
-    write_html(run, &html_path)?;
-    Ok(html_path)
 }
 
 // ── terminal output ───────────────────────────────────────────────────────────
