@@ -208,7 +208,7 @@ pipeline {
                           'Generates LCOV, Cobertura XML, and a browsable HTML coverage report. ' +
                           'The HTML report is published as a "Coverage Report" sidebar link. ' +
                           'Requires cargo-llvm-cov (preferred) or cargo-tarpaulin on the agent:\n' +
-                          '  cargo install cargo-llvm-cov && rustup component add llvm-tools-preview\n' +
+                          '  cargo install cargo-llvm-cov && rustup component add llvm-tools\n' +
                           'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.'
         )
         string(
@@ -1290,23 +1290,28 @@ PYEOF"""
                 expression { return params.GIT_REF?.trim() != '' }
             }
             steps {
-                sh '''
-                    REF="${GIT_REF:-}"
-                    OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
-                    WT="${WORKSPACE}/.wt-ref-scan"
+                withEnv([
+                    "GIT_REF=${params.GIT_REF}",
+                    "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
+                ]) {
+                    sh '''
+                        REF="${GIT_REF:-}"
+                        OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
+                        WT="${WORKSPACE}/.wt-ref-scan"
 
-                    echo "=== Git-Ref Scan: ${REF} ==="
-                    git worktree add --detach "${WT}" "${REF}"
+                        echo "=== Git-Ref Scan: ${REF} ==="
+                        git worktree add --detach "${WT}" "${REF}"
 
-                    "${BINARY}" analyze "${WT}" \
-                        --json-out  "${OUT}/ref-scan.json" \
-                        --html-out  "${OUT}/ref-scan.html" \
-                        --csv-out   "${OUT}/ref-scan-summary.csv" \
-                        --report-title "Ref scan: ${REF}" \
-                        --plain
+                        "${BINARY}" analyze "${WT}" \
+                            --json-out  "${OUT}/ref-scan.json" \
+                            --html-out  "${OUT}/ref-scan.html" \
+                            --csv-out   "${OUT}/ref-scan-summary.csv" \
+                            --report-title "Ref scan: ${REF}" \
+                            --plain
 
-                    git worktree remove --force "${WT}" || true
-                '''
+                        git worktree remove --force "${WT}" || true
+                    '''
+                }
             }
         }
 
@@ -1320,54 +1325,61 @@ PYEOF"""
                 }
             }
             steps {
-                sh '''
-                    OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
-                    BINARY="${WORKSPACE}/target/release/oxide-sloc"
+                withEnv([
+                    "GIT_REF=${params.GIT_REF}",
+                    "COMPARE_TO_REF=${params.COMPARE_TO_REF}",
+                    "COMPARE_TO_PREV_TAG=${params.COMPARE_TO_PREV_TAG}",
+                    "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
+                ]) {
+                    sh '''
+                        OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
+                        BINARY="${WORKSPACE}/target/release/oxide-sloc"
 
-                    # Resolve baseline ref
-                    if [ "${COMPARE_TO_PREV_TAG:-false}" = "true" ]; then
-                        CURRENT_TAG=$(git tag --sort=-version:refname | head -1)
-                        BASELINE_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
-                        BASELINE_REF="${BASELINE_TAG}"
-                        echo "Auto-detected previous tag: ${BASELINE_REF} (current: ${CURRENT_TAG})"
-                    else
-                        BASELINE_REF="${COMPARE_TO_REF}"
-                    fi
+                        # Resolve baseline ref
+                        if [ "${COMPARE_TO_PREV_TAG:-false}" = "true" ]; then
+                            CURRENT_TAG=$(git tag --sort=-version:refname | head -1)
+                            BASELINE_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
+                            BASELINE_REF="${BASELINE_TAG}"
+                            echo "Auto-detected previous tag: ${BASELINE_REF} (current: ${CURRENT_TAG})"
+                        else
+                            BASELINE_REF="${COMPARE_TO_REF}"
+                        fi
 
-                    if [ -z "${BASELINE_REF}" ]; then
-                        echo "No baseline ref found — skipping comparison."
-                        exit 0
-                    fi
+                        if [ -z "${BASELINE_REF}" ]; then
+                            echo "No baseline ref found — skipping comparison."
+                            exit 0
+                        fi
 
-                    # Determine what was scanned as "current"
-                    CURRENT_JSON="${OUT}/ref-scan.json"
-                    if [ ! -f "${CURRENT_JSON}" ]; then
-                        CURRENT_JSON="${OUT}/result_${SLOC_PROJECT:-project}.json"
-                    fi
-                    if [ ! -f "${CURRENT_JSON}" ]; then
-                        echo "No current scan JSON found — cannot compare."
-                        exit 1
-                    fi
+                        # Determine what was scanned as "current"
+                        CURRENT_JSON="${OUT}/ref-scan.json"
+                        if [ ! -f "${CURRENT_JSON}" ]; then
+                            CURRENT_JSON="${OUT}/result_${SLOC_PROJECT:-project}.json"
+                        fi
+                        if [ ! -f "${CURRENT_JSON}" ]; then
+                            echo "No current scan JSON found — cannot compare."
+                            exit 1
+                        fi
 
-                    echo "=== Scanning baseline: ${BASELINE_REF} ==="
-                    WT_BASE="${WORKSPACE}/.wt-baseline"
-                    git worktree add --detach "${WT_BASE}" "${BASELINE_REF}"
+                        echo "=== Scanning baseline: ${BASELINE_REF} ==="
+                        WT_BASE="${WORKSPACE}/.wt-baseline"
+                        git worktree add --detach "${WT_BASE}" "${BASELINE_REF}"
 
-                    "${BINARY}" analyze "${WT_BASE}" \
-                        --json-out  "${OUT}/baseline-scan.json" \
-                        --report-title "Baseline: ${BASELINE_REF}" \
-                        --plain
+                        "${BINARY}" analyze "${WT_BASE}" \
+                            --json-out  "${OUT}/baseline-scan.json" \
+                            --report-title "Baseline: ${BASELINE_REF}" \
+                            --plain
 
-                    git worktree remove --force "${WT_BASE}" || true
+                        git worktree remove --force "${WT_BASE}" || true
 
-                    echo "=== Computing diff ==="
-                    "${BINARY}" diff \
-                        "${OUT}/baseline-scan.json" \
-                        "${CURRENT_JSON}" \
-                        --json-out "${OUT}/diff.json" \
-                        --csv-out  "${OUT}/diff.csv" \
-                        --plain
-                '''
+                        echo "=== Computing diff ==="
+                        "${BINARY}" diff \
+                            "${OUT}/baseline-scan.json" \
+                            "${CURRENT_JSON}" \
+                            --json-out "${OUT}/diff.json" \
+                            --csv-out  "${OUT}/diff.csv" \
+                            --plain
+                    '''
+                }
             }
         }
 

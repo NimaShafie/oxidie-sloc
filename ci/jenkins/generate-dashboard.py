@@ -7,7 +7,7 @@ no pip installs, no external JS libraries, and no Jenkins plugins beyond the cor
 
 Usage
 -----
-    python3 ci/jenkins/generate-dashboard.py <output-dir> [project-slug]
+    python3 ci/jenkins/generate-dashboard.py <output-dir> [project-slug] [history-file]
 
 Arguments
 ---------
