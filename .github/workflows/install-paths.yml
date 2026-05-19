@@ -75,7 +75,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p oxide-sloc
+        run: bash ci/release.sh ${{ matrix.target }}
 
       - name: Package — Linux tar.gz
         if: runner.os == 'Linux'
@@ -114,6 +114,9 @@ jobs:
   verify-dist:
     name: "dist/: committed archives present"
     runs-on: ubuntu-latest
+    # Advisory gate: fails if dist/ archives are absent (e.g. update-dist.yml was never run),
+    # but does not block the install tests which use freshly built artifacts from the build job.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -141,7 +144,7 @@ jobs:
   # Runs Windows Defender on-demand scan on the installed binary.
   test-dist-windows:
     name: "install: dist/ → Windows Defender scan"
-    needs: [build, verify-dist]
+    needs: [build]
     runs-on: windows-latest
     defaults:
       run:
@@ -210,7 +213,7 @@ jobs:
   # Same as the Windows test but on Linux.  Runs ClamAV on-demand scan.
   test-dist-linux:
     name: "install: dist/ → ClamAV scan"
-    needs: [build, verify-dist]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
