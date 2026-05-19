@@ -18,6 +18,6 @@ anyhow.workspace = true
 askama.workspace = true
 chrono.workspace = true
 headless_chrome = "1"
-printpdf = { version = "0.7", default-features = false }
+printpdf = { version = "0.9", default-features = false }
 serde_json.workspace = true
 sloc-core = { path = "../sloc-core", version = "1.5.6" }
