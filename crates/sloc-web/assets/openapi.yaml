@@ -1,0 +1,547 @@
+openapi: "3.1.0"
+
+info:
+  title: oxide-sloc REST API
+  version: "1.5.5"
+  description: |
+    Machine-readable code metrics API for oxide-sloc — IEEE 1045-1992 SLOC
+    analysis, unit test detection, and coverage reporting across 41 languages.
+
+    **Authentication**: When `SLOC_API_KEY` is set on the server, all endpoints
+    except `/healthz`, `/api/health`, `/api/version`, `/api/openapi.yaml`, and
+    `/badge/{metric}` require `Authorization: Bearer <key>`.
+
+    **Base URL**: defaults to `http://127.0.0.1:4317`. Override with `SLOC_BIND`
+    or the `--bind` flag when starting the server.
+  license:
+    name: AGPL-3.0-or-later
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+  contact:
+    url: https://github.com/oxide-sloc/oxide-sloc
+  x-generated-by: "Claude (claude-sonnet-4-6) — built entirely by AI"
+
+servers:
+  - url: http://127.0.0.1:4317
+    description: Default local server
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Set SLOC_API_KEY on the server to enable auth. Pass the same value as
+        a Bearer token. Public endpoints work without a token.
+
+  schemas:
+    LanguageRow:
+      type: object
+      description: Per-language metric summary for a scan run.
+      required: [name, files, code_lines, comment_lines, blank_lines]
+      properties:
+        name:
+          type: string
+          example: Rust
+        files:
+          type: integer
+          format: int64
+          example: 42
+        code_lines:
+          type: integer
+          format: int64
+          example: 8432
+        comment_lines:
+          type: integer
+          format: int64
+          example: 312
+        blank_lines:
+          type: integer
+          format: int64
+          example: 890
+        functions:
+          type: integer
+          format: int64
+          example: 87
+        classes:
+          type: integer
+          format: int64
+          example: 5
+        variables:
+          type: integer
+          format: int64
+          example: 134
+        imports:
+          type: integer
+          format: int64
+          example: 61
+        test_count:
+          type: integer
+          format: int64
+          example: 23
+
+    SummaryPayload:
+      type: object
+      description: Aggregate totals for a scan run.
+      required: [files_analyzed, code_lines, comment_lines, blank_lines, total_physical_lines]
+      properties:
+        files_analyzed:
+          type: integer
+          format: int64
+          example: 98
+        files_skipped:
+          type: integer
+          format: int64
+          example: 2
+        code_lines:
+          type: integer
+          format: int64
+          example: 12345
+        comment_lines:
+          type: integer
+          format: int64
+          example: 890
+        blank_lines:
+          type: integer
+          format: int64
+          example: 1200
+        total_physical_lines:
+          type: integer
+          format: int64
+          example: 14435
+        functions:
+          type: integer
+          format: int64
+          example: 201
+        classes:
+          type: integer
+          format: int64
+          example: 18
+        variables:
+          type: integer
+          format: int64
+          example: 347
+        imports:
+          type: integer
+          format: int64
+          example: 112
+        test_count:
+          type: integer
+          format: int64
+          example: 47
+        test_assertion_count:
+          type: integer
+          format: int64
+          example: 183
+        test_suite_count:
+          type: integer
+          format: int64
+          example: 12
+
+    MetricsResponse:
+      type: object
+      description: Full metrics payload for a single scan run.
+      required: [run_id, timestamp, project, summary, languages]
+      properties:
+        run_id:
+          type: string
+          format: uuid
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-05-18T14:32:00Z"
+        project:
+          type: string
+          description: Absolute path of the scanned root directory.
+          example: "/home/user/my-project"
+        summary:
+          $ref: "#/components/schemas/SummaryPayload"
+        languages:
+          type: array
+          items:
+            $ref: "#/components/schemas/LanguageRow"
+
+    HistoryEntry:
+      type: object
+      description: One row in the scan history time-series.
+      required: [run_id, timestamp, code_lines, comment_lines, blank_lines]
+      properties:
+        run_id:
+          type: string
+          format: uuid
+        run_id_short:
+          type: string
+          description: First 8 characters of run_id for display purposes.
+          example: "3fa85f64"
+        timestamp:
+          type: string
+          format: date-time
+        commit:
+          type: string
+          nullable: true
+          example: "abc1234"
+        branch:
+          type: string
+          nullable: true
+          example: "main"
+        tags:
+          type: array
+          items:
+            type: string
+        nearest_tag:
+          type: string
+          nullable: true
+          example: "v1.5.5"
+        code_lines:
+          type: integer
+          format: int64
+        comment_lines:
+          type: integer
+          format: int64
+        blank_lines:
+          type: integer
+          format: int64
+        functions:
+          type: integer
+          format: int64
+
+    SubmoduleEntry:
+      type: object
+      description: Per-submodule metric summary.
+      required: [name, relative_path, files_analyzed, code_lines]
+      properties:
+        name:
+          type: string
+          example: "vendor/some-lib"
+        relative_path:
+          type: string
+          example: "vendor/some-lib"
+        files_analyzed:
+          type: integer
+          format: int64
+        code_lines:
+          type: integer
+          format: int64
+        comment_lines:
+          type: integer
+          format: int64
+        blank_lines:
+          type: integer
+          format: int64
+
+    IngestResponse:
+      type: object
+      description: Result of a successful ingest operation.
+      required: [run_id, view_url]
+      properties:
+        run_id:
+          type: string
+          format: uuid
+        view_url:
+          type: string
+          format: uri
+          example: "http://127.0.0.1:4317/runs/result/3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+    AsyncRunStatus:
+      type: object
+      description: Status of an async analysis run.
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [running, complete, failed, cancelled]
+        elapsed_secs:
+          type: integer
+          description: Present when state=running.
+        run_id:
+          type: string
+          description: Present when state=complete. Use this to fetch results.
+        message:
+          type: string
+          description: Present when state=failed.
+
+    VersionResponse:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          type: string
+          example: "oxide-sloc"
+        version:
+          type: string
+          example: "1.5.5"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Returns "ok" when the server is running. No authentication required.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /api/health:
+    get:
+      operationId: apiHealthCheck
+      summary: Health check (JSON alias)
+      description: Alias for /healthz that returns JSON. No authentication required.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/version:
+    get:
+      operationId: getVersion
+      summary: Server version
+      description: Returns the running oxide-sloc version. No authentication required.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Version information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
+
+  /api/openapi.yaml:
+    get:
+      operationId: getOpenApiSpec
+      summary: OpenAPI specification
+      description: Returns this OpenAPI 3.1 spec as YAML. No authentication required.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: OpenAPI spec.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /api/metrics/latest:
+    get:
+      operationId: getMetricsLatest
+      summary: Latest scan metrics
+      description: >
+        Returns the metrics from the most recent completed scan stored on this
+        server. Returns 404 if no scans have been performed yet.
+      tags: [Metrics]
+      responses:
+        "200":
+          description: Metrics for the most recent scan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+        "404":
+          description: No scans found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/metrics/{run_id}:
+    get:
+      operationId: getMetricsByRunId
+      summary: Metrics for a specific run
+      description: Returns the metrics for a scan identified by its UUID run_id.
+      tags: [Metrics]
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the scan run.
+      responses:
+        "200":
+          description: Metrics for the requested run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+        "404":
+          description: Run not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/metrics/history:
+    get:
+      operationId: getMetricsHistory
+      summary: Scan history time-series
+      description: >
+        Returns time-ordered metrics for all stored scan runs. Useful for
+        trend analysis and charting SLOC growth over time.
+      tags: [Metrics]
+      parameters:
+        - name: root
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to runs whose input root matches this path prefix.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+          description: Maximum number of history entries to return.
+      responses:
+        "200":
+          description: Ordered list of historical metric entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryEntry"
+
+  /api/metrics/submodules:
+    get:
+      operationId: getMetricsSubmodules
+      summary: Per-submodule metrics
+      description: Returns per-submodule breakdown for the most recent scan.
+      tags: [Metrics]
+      responses:
+        "200":
+          description: List of submodule summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubmoduleEntry"
+        "404":
+          description: No scan data found.
+
+  /api/ingest:
+    post:
+      operationId: ingestResult
+      summary: Ingest an external analysis result
+      description: >
+        Accepts a complete AnalysisRun JSON document (the same format written
+        by `oxide-sloc analyze --json-out`) and stores it in the server's run
+        registry. The run then appears in /view-reports and is queryable via
+        /api/metrics/{run_id}. Useful for CI pipelines that run oxide-sloc
+        headlessly and want to push results to a shared server.
+      tags: [Ingest]
+      requestBody:
+        required: true
+        description: >
+          A serialized AnalysisRun document. Must include at minimum the
+          `tool`, `summary_totals`, `totals_by_language`, and `input_roots`
+          fields.
+        content:
+          application/json:
+            schema:
+              type: object
+              description: AnalysisRun JSON (see oxide-sloc JSON output format).
+      responses:
+        "200":
+          description: Result accepted and stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid JSON or missing required fields.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/runs/{run_id}/status:
+    get:
+      operationId: getRunStatus
+      summary: Poll async run status
+      description: >
+        Polls the status of an in-progress asynchronous scan triggered by
+        POST /analyze. Poll until state becomes "complete" or "failed", then
+        use the returned run_id to fetch results.
+      tags: [Runs]
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The wait_id returned when the scan was submitted.
+      responses:
+        "200":
+          description: Current status of the async run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncRunStatus"
+
+  /badge/{metric}:
+    get:
+      operationId: getBadge
+      summary: SVG metric badge
+      description: >
+        Returns a Shields.io-style SVG badge for the specified metric from the
+        most recent scan. Suitable for embedding in README files. No
+        authentication required.
+      security: []
+      tags: [Badges]
+      parameters:
+        - name: metric
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [code-lines, files, comment-lines, blank-lines]
+          description: The metric to display in the badge.
+      responses:
+        "200":
+          description: SVG badge image.
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+        "404":
+          description: No scan data available yet.
+
+tags:
+  - name: Health
+    description: Health checks and server information. Always public.
+  - name: Metrics
+    description: Scan result metrics — latest, by run_id, or historical.
+  - name: Ingest
+    description: Push external analysis results into the server registry.
+  - name: Runs
+    description: Manage and poll asynchronous scan runs.
+  - name: Badges
+    description: SVG badges for embedding in documentation.
