@@ -1,0 +1,54 @@
+{
+  "name": "oxide-sloc",
+  "description": "IEEE 1045-1992 SLOC analysis across 41 languages. Counts source lines, comments, blank lines, functions, classes, and unit tests. Built entirely by AI (Claude).",
+  "version": "1.5.5",
+  "homepage": "https://github.com/oxide-sloc/oxide-sloc",
+  "repository": "https://github.com/oxide-sloc/oxide-sloc",
+  "license": "AGPL-3.0-or-later",
+  "runtime": "stdio",
+  "command": "sloc-mcp",
+  "env": {
+    "SLOC_SERVER_URL": {
+      "description": "Base URL of a running oxide-sloc server (e.g. http://127.0.0.1:4317). Required for get_metrics_latest, get_metrics_history, get_run_metrics, health_check, and ingest_result. Not needed for analyze_path or compare_runs, which operate standalone via the oxide-sloc CLI.",
+      "required": false
+    },
+    "SLOC_BIN": {
+      "description": "Absolute path to the oxide-sloc binary. Defaults to 'oxide-sloc' resolved via PATH.",
+      "required": false
+    },
+    "SLOC_API_KEY": {
+      "description": "Bearer token for the oxide-sloc server when SLOC_API_KEY authentication is enabled on the server.",
+      "required": false
+    }
+  },
+  "tools": [
+    {
+      "name": "analyze_path",
+      "description": "Run oxide-sloc on a local path and return SLOC metrics (code lines, comment lines, functions, test count, per-language breakdown)."
+    },
+    {
+      "name": "get_metrics_latest",
+      "description": "Fetch the most recent scan metrics from a running oxide-sloc server."
+    },
+    {
+      "name": "get_metrics_history",
+      "description": "Fetch time-series scan history (timestamps, git info, SLOC trend) from a running server."
+    },
+    {
+      "name": "get_run_metrics",
+      "description": "Fetch metrics for a specific run_id from a running server."
+    },
+    {
+      "name": "compare_runs",
+      "description": "Compare two oxide-sloc JSON result files and return a delta summary of SLOC changes."
+    },
+    {
+      "name": "health_check",
+      "description": "Verify a running oxide-sloc server is reachable and return its version."
+    },
+    {
+      "name": "ingest_result",
+      "description": "POST an AnalysisRun JSON result into a running server's registry for storage and reporting."
+    }
+  ]
+}

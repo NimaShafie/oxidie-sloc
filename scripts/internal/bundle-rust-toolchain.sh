@@ -139,10 +139,7 @@ build_one() {
 
     # ── Authenticode-sign Windows PE binaries (optional) ─────────────────────
     # When WINDOWS_CERT_PFX and WINDOWS_CERT_PASS are set (injected by
-    # bundle-toolchain.yml), sign every .exe before packing.  Signed binaries
-    # carry a trusted identity and score significantly better in Carbon Black,
-    # Microsoft Defender, and other reputation-based EDR systems when extracted
-    # on an end user's machine.
+    # bundle-toolchain.yml), sign every .exe before packing.
     if [[ "$plat" == "windows-x64" ]] && [[ -n "${WINDOWS_CERT_PFX:-}" ]] && [[ -f "${WINDOWS_CERT_PFX}" ]]; then
         echo "  Authenticode-signing bundled Windows PE binaries..."
         _signtool=""

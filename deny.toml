@@ -23,6 +23,7 @@ exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "sloc-languages" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-report" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-web" },
+  { allow = ["AGPL-3.0-or-later"], name = "sloc-mcp" },
 ]
 
 [bans]
