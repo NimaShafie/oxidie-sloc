@@ -25,6 +25,18 @@ pub struct SummaryDelta {
     pub comment_lines_delta: i64,
     pub blank_lines_delta: i64,
     pub total_lines_delta: i64,
+    /// Lines hit delta (positive = more covered). `None` if neither run has coverage data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_lines_hit_delta: Option<i64>,
+    /// Line coverage percentage delta (positive = improved). `None` if neither run has coverage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_line_pct_delta: Option<f64>,
+    /// Baseline line coverage percentage. `None` if baseline had no coverage data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_coverage_line_pct: Option<f64>,
+    /// Current line coverage percentage. `None` if current has no coverage data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_coverage_line_pct: Option<f64>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq, Clone, Copy)]
@@ -186,6 +198,28 @@ pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanCompa
     let s = &current.summary_totals;
     let b = &baseline.summary_totals;
 
+    #[allow(clippy::cast_precision_loss)]
+    let line_pct = |hit: u64, found: u64| -> Option<f64> {
+        if found == 0 {
+            None
+        } else {
+            let pct = (hit as f64 / found as f64) * 100.0;
+            Some((pct * 10.0).round() / 10.0)
+        }
+    };
+    let baseline_cov_pct = line_pct(b.coverage_lines_hit, b.coverage_lines_found);
+    let current_cov_pct = line_pct(s.coverage_lines_hit, s.coverage_lines_found);
+    let coverage_lines_hit_delta = if b.coverage_lines_found > 0 || s.coverage_lines_found > 0 {
+        Some(s.coverage_lines_hit.cast_signed() - b.coverage_lines_hit.cast_signed())
+    } else {
+        None
+    };
+    let coverage_line_pct_delta = match (baseline_cov_pct, current_cov_pct) {
+        (Some(base_pct), Some(cur_pct)) => Some(((cur_pct - base_pct) * 10.0).round() / 10.0),
+        (None, Some(cur_pct)) => Some(cur_pct),
+        _ => None,
+    };
+
     ScanComparison {
         summary: SummaryDelta {
             baseline_run_id: baseline.tool.run_id.clone(),
@@ -206,6 +240,10 @@ pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanCompa
                 .total_physical_lines
                 .cast_signed()
                 .wrapping_sub(b.total_physical_lines.cast_signed()),
+            coverage_lines_hit_delta,
+            coverage_line_pct_delta,
+            baseline_coverage_line_pct: baseline_cov_pct,
+            current_coverage_line_pct: current_cov_pct,
         },
         file_deltas,
         files_added,

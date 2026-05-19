@@ -790,15 +790,37 @@ fn attach_coverage(config: &AppConfig, analyzed: &mut [FileRecord], warnings: &m
     else {
         return;
     };
+    tracing::debug!(path = %cov_path.display(), "loading coverage file");
     match fs::read_to_string(&cov_path) {
         Ok(content) => {
             let cov_map = coverage::parse_coverage_auto(&cov_path, &content);
+            let mut matched: u32 = 0;
+            let mut unmatched: u32 = 0;
             for record in analyzed.iter_mut() {
                 record.coverage =
                     coverage::lookup_coverage(&cov_map, &record.relative_path).cloned();
+                if record.coverage.is_some() {
+                    matched += 1;
+                } else {
+                    unmatched += 1;
+                }
+            }
+            tracing::debug!(
+                path = %cov_path.display(),
+                coverage_entries = cov_map.len(),
+                files_matched = matched,
+                files_unmatched = unmatched,
+                "coverage attached"
+            );
+            if unmatched > 0 && matched == 0 {
+                tracing::warn!(
+                    path = %cov_path.display(),
+                    "coverage file loaded but no source files could be matched — check that paths in the coverage report match the scanned directory"
+                );
             }
         }
         Err(e) => {
+            tracing::warn!(path = %cov_path.display(), error = %e, "coverage file could not be read");
             warnings.push(format!(
                 "coverage file '{}' could not be read: {e}",
                 cov_path.display()

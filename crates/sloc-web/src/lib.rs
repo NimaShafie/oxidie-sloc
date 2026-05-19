@@ -2218,6 +2218,12 @@ fn registry_entry_from_run(
             variables: run.summary_totals.variables,
             imports: run.summary_totals.imports,
             test_count: run.summary_totals.test_count,
+            coverage_lines_found: run.summary_totals.coverage_lines_found,
+            coverage_lines_hit: run.summary_totals.coverage_lines_hit,
+            coverage_functions_found: run.summary_totals.coverage_functions_found,
+            coverage_functions_hit: run.summary_totals.coverage_functions_hit,
+            coverage_branches_found: run.summary_totals.coverage_branches_found,
+            coverage_branches_hit: run.summary_totals.coverage_branches_hit,
         },
         csv_path: None,
         xlsx_path: None,
@@ -2704,6 +2710,12 @@ fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
             variables: run.summary_totals.variables,
             imports: run.summary_totals.imports,
             test_count: run.summary_totals.test_count,
+            coverage_lines_found: run.summary_totals.coverage_lines_found,
+            coverage_lines_hit: run.summary_totals.coverage_lines_hit,
+            coverage_functions_found: run.summary_totals.coverage_functions_found,
+            coverage_functions_hit: run.summary_totals.coverage_functions_hit,
+            coverage_branches_found: run.summary_totals.coverage_branches_found,
+            coverage_branches_hit: run.summary_totals.coverage_branches_hit,
         },
         git_branch: run.git_branch.clone(),
         git_commit: run.git_commit_short.clone(),
@@ -3243,6 +3255,12 @@ const fn summary_snapshot_from_run(run: &AnalysisRun) -> ScanSummarySnapshot {
         variables: run.summary_totals.variables,
         imports: run.summary_totals.imports,
         test_count: run.summary_totals.test_count,
+        coverage_lines_found: run.summary_totals.coverage_lines_found,
+        coverage_lines_hit: run.summary_totals.coverage_lines_hit,
+        coverage_functions_found: run.summary_totals.coverage_functions_found,
+        coverage_functions_hit: run.summary_totals.coverage_functions_hit,
+        coverage_branches_found: run.summary_totals.coverage_branches_found,
+        coverage_branches_hit: run.summary_totals.coverage_branches_hit,
     }
 }
 
@@ -5606,6 +5624,39 @@ fn compute_churn_stats(
     }
 }
 
+/// Build a pre-rendered HTML delta card for line coverage, or an empty string when neither
+/// scan has coverage data. Using a pre-built HTML string avoids adding multiple Askama template
+/// variables to the large CompareTemplate, which causes rustc stack overflows on Windows.
+fn build_coverage_delta_card(s: &sloc_core::SummaryDelta) -> String {
+    let has_data = s.baseline_coverage_line_pct.is_some() || s.current_coverage_line_pct.is_some();
+    if !has_data {
+        return String::new();
+    }
+    let base_str = s
+        .baseline_coverage_line_pct
+        .map(|p| format!("{p:.1}%"))
+        .unwrap_or_else(|| "\u{2014}".into());
+    let curr_str = s
+        .current_coverage_line_pct
+        .map(|p| format!("{p:.1}%"))
+        .unwrap_or_else(|| "\u{2014}".into());
+    let (delta_str, cls) = match s.coverage_line_pct_delta {
+        Some(d) if d > 0.0 => (format!("+{d:.1} pp"), "pos"),
+        Some(d) if d < 0.0 => (format!("{d:.1} pp"), "neg"),
+        Some(_) => ("\u{00b1}0.0 pp".into(), "zero"),
+        None => ("\u{2014}".into(), "zero"),
+    };
+    format!(
+        r#"<div class="delta-card">
+          <div class="dc-tip">Line coverage % from LCOV/Cobertura/JaCoCo. Positive delta = more lines instrumented and hit. Only shown when at least one scan has coverage data.</div>
+          <div class="delta-card-label">Line coverage</div>
+          <div class="delta-card-from">Before: {base_str}</div>
+          <div class="delta-card-to">{curr_str}</div>
+          <span class="delta-card-change {cls}">{delta_str}</span>
+        </div>"#
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 async fn compare_handler(
     State(state): State<AppState>,
@@ -5860,6 +5911,7 @@ async fn compare_handler(
         active_submodule,
         super_scope_active,
         csp_nonce,
+        coverage_delta_card: build_coverage_delta_card(s),
     };
 
     Html(
@@ -6001,12 +6053,27 @@ async fn badge_handler(
 // GET /api/metrics/<run_id>
 
 #[derive(Serialize)]
+struct ApiCoverageBlock {
+    lines_found: u64,
+    lines_hit: u64,
+    line_pct: f64,
+    functions_found: u64,
+    functions_hit: u64,
+    function_pct: f64,
+    branches_found: u64,
+    branches_hit: u64,
+    branch_pct: f64,
+}
+
+#[derive(Serialize)]
 struct ApiMetricsResponse {
     run_id: String,
     timestamp: String,
     project: String,
     summary: ApiSummaryPayload,
     languages: Vec<ApiLanguageRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<ApiCoverageBlock>,
 }
 
 #[derive(Serialize)]
@@ -6085,6 +6152,30 @@ fn build_metrics_response(entry: &RegistryEntry) -> Response {
         .unwrap_or_default();
 
     let s = &entry.summary;
+    let coverage = if s.coverage_lines_found > 0 {
+        let pct = |hit: u64, found: u64| -> f64 {
+            if found == 0 {
+                0.0
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                let v = (hit as f64 / found as f64) * 100.0;
+                (v * 10.0).round() / 10.0
+            }
+        };
+        Some(ApiCoverageBlock {
+            lines_found: s.coverage_lines_found,
+            lines_hit: s.coverage_lines_hit,
+            line_pct: pct(s.coverage_lines_hit, s.coverage_lines_found),
+            functions_found: s.coverage_functions_found,
+            functions_hit: s.coverage_functions_hit,
+            function_pct: pct(s.coverage_functions_hit, s.coverage_functions_found),
+            branches_found: s.coverage_branches_found,
+            branches_hit: s.coverage_branches_hit,
+            branch_pct: pct(s.coverage_branches_hit, s.coverage_branches_found),
+        })
+    } else {
+        None
+    };
     Json(ApiMetricsResponse {
         run_id: entry.run_id.clone(),
         timestamp: entry.timestamp_utc.to_rfc3339(),
@@ -6102,6 +6193,7 @@ fn build_metrics_response(entry: &RegistryEntry) -> Response {
             imports: s.imports,
         },
         languages,
+        coverage,
     })
     .into_response()
 }
@@ -6242,6 +6334,9 @@ struct MetricsHistoryEntry {
     html_url: Option<String>,
     has_pdf: bool,
     submodule_links: Vec<MetricsSubmoduleLink>,
+    /// Line coverage percentage for this scan, or `null` if no coverage data was ingested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_line_pct: Option<f64>,
 }
 
 fn build_entry_submodule_links(e: &sloc_core::history::RegistryEntry) -> Vec<MetricsSubmoduleLink> {
@@ -6362,6 +6457,15 @@ async fn api_metrics_history_handler(
                 .take(7)
                 .collect();
             let submodule_links = build_entry_submodule_links(&e);
+            #[allow(clippy::cast_precision_loss)]
+            let coverage_line_pct = if e.summary.coverage_lines_found > 0 {
+                let pct = (e.summary.coverage_lines_hit as f64
+                    / e.summary.coverage_lines_found as f64)
+                    * 100.0;
+                Some((pct * 10.0).round() / 10.0)
+            } else {
+                None
+            };
             let base = MetricsHistoryEntry {
                 run_id: e.run_id.clone(),
                 run_id_short,
@@ -6381,6 +6485,7 @@ async fn api_metrics_history_handler(
                 html_url,
                 has_pdf,
                 submodule_links,
+                coverage_line_pct,
             };
             if let Some(ref filter) = submodule_filter {
                 apply_submodule_filter(base, filter, &e)
@@ -19724,6 +19829,7 @@ struct CompareSelectTemplate {
           {% else %}<div class="delta-card-pct zero">±0%</div>
           {% endif %}
         </div>
+        {{ coverage_delta_card|safe }}
         <div class="delta-card delta-card-wide">
           <div class="dc-tip">Per-file breakdown. Modified = at least one count changed. Unchanged = identical counts in both scans. Added/Removed = only in one scan.</div>
           <div class="delta-card-label">File changes</div>
@@ -20578,6 +20684,8 @@ struct CompareTemplate {
     /// True when `scope=super` is active — viewing super-repo only (no submodule files).
     super_scope_active: bool,
     csp_nonce: String,
+    /// Pre-built HTML for the coverage delta card, or empty string when no coverage data.
+    coverage_delta_card: String,
 }
 
 // ── LoginTemplate ──────────────────────────────────────────────────────────────

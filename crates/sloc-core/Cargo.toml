@@ -23,4 +23,5 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 sloc-config = { path = "../sloc-config", version = "1.5.5" }
+tracing.workspace = true
 sloc-languages = { path = "../sloc-languages", version = "1.5.5" }

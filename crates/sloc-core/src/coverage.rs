@@ -126,6 +126,7 @@ pub fn lookup_coverage<'a>(
         if cov_components.len() >= rel_components.len()
             && cov_components[cov_components.len() - rel_components.len()..] == rel_components[..]
         {
+            tracing::debug!(file = relative_path, matched_as = %cov_path.display(), strategy = "suffix", "coverage matched");
             return Some(cov);
         }
     }
@@ -134,10 +135,12 @@ pub fn lookup_coverage<'a>(
     let filename = rel.file_name()?;
     for (cov_path, cov) in map {
         if cov_path.file_name() == Some(filename) {
+            tracing::debug!(file = relative_path, matched_as = %cov_path.display(), strategy = "filename", "coverage matched (ambiguous)");
             return Some(cov);
         }
     }
 
+    tracing::debug!(file = relative_path, "no coverage entry found");
     None
 }
 
@@ -164,20 +167,31 @@ pub fn parse_coverage_auto(path: &Path, content: &str) -> HashMap<PathBuf, FileC
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    match ext.as_str() {
+    let result = match ext.as_str() {
         "xml" => {
             let snip = &content[..content.len().min(512)];
             if snip.contains("<coverage") {
+                tracing::debug!(path = %path.display(), format = "cobertura", bytes = content.len(), "parsing coverage file");
                 parse_cobertura(content)
             } else if snip.contains("<report") {
+                tracing::debug!(path = %path.display(), format = "jacoco", bytes = content.len(), "parsing coverage file");
                 parse_jacoco(content)
             } else {
+                tracing::warn!(path = %path.display(), "coverage XML file has unrecognised root element; skipping");
                 HashMap::new()
             }
         }
-        "json" => parse_istanbul(content),
-        _ => parse_lcov(content),
-    }
+        "json" => {
+            tracing::debug!(path = %path.display(), format = "istanbul", bytes = content.len(), "parsing coverage file");
+            parse_istanbul(content)
+        }
+        _ => {
+            tracing::debug!(path = %path.display(), format = "lcov", bytes = content.len(), "parsing coverage file");
+            parse_lcov(content)
+        }
+    };
+    tracing::debug!(path = %path.display(), file_count = result.len(), "coverage parse complete");
+    result
 }
 
 /// Parse a Cobertura XML coverage file (`coverage.xml`) into a per-file coverage map.
