@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::{AnalysisRun, EffectiveCounts};
+use crate::{AnalysisRun, EffectiveCounts, FileRecord};
 
 #[derive(Debug, Serialize)]
 pub struct SummaryDelta {
@@ -75,8 +75,73 @@ pub struct ScanComparison {
     pub files_unchanged: usize,
 }
 
+fn build_modified(record: &FileRecord, base: &EffectiveCounts, lang: Option<String>) -> FileDelta {
+    let curr = &record.effective_counts;
+    let code_delta = curr.code_lines.cast_signed() - base.code_lines.cast_signed();
+    let comment_delta = curr.comment_lines.cast_signed() - base.comment_lines.cast_signed();
+    let blank_delta = curr.blank_lines.cast_signed() - base.blank_lines.cast_signed();
+    let status = if code_delta == 0 && comment_delta == 0 && blank_delta == 0 {
+        FileChangeStatus::Unchanged
+    } else {
+        FileChangeStatus::Modified
+    };
+    FileDelta {
+        relative_path: record.relative_path.clone(),
+        language: lang,
+        status,
+        baseline_code: base.code_lines.cast_signed(),
+        current_code: curr.code_lines.cast_signed(),
+        code_delta,
+        baseline_comment: base.comment_lines.cast_signed(),
+        current_comment: curr.comment_lines.cast_signed(),
+        comment_delta,
+        baseline_blank: base.blank_lines.cast_signed(),
+        current_blank: curr.blank_lines.cast_signed(),
+        blank_delta,
+        total_delta: code_delta + comment_delta + blank_delta,
+    }
+}
+
+fn build_added(record: &FileRecord, lang: Option<String>) -> FileDelta {
+    let curr = &record.effective_counts;
+    let total = (curr.code_lines + curr.comment_lines + curr.blank_lines).cast_signed();
+    FileDelta {
+        relative_path: record.relative_path.clone(),
+        language: lang,
+        status: FileChangeStatus::Added,
+        baseline_code: 0,
+        current_code: curr.code_lines.cast_signed(),
+        code_delta: curr.code_lines.cast_signed(),
+        baseline_comment: 0,
+        current_comment: curr.comment_lines.cast_signed(),
+        comment_delta: curr.comment_lines.cast_signed(),
+        baseline_blank: 0,
+        current_blank: curr.blank_lines.cast_signed(),
+        blank_delta: curr.blank_lines.cast_signed(),
+        total_delta: total,
+    }
+}
+
+fn build_removed(path: &str, base: &EffectiveCounts, lang: Option<String>) -> FileDelta {
+    let total = (base.code_lines + base.comment_lines + base.blank_lines).cast_signed();
+    FileDelta {
+        relative_path: path.to_string(),
+        language: lang,
+        status: FileChangeStatus::Removed,
+        baseline_code: base.code_lines.cast_signed(),
+        current_code: 0,
+        code_delta: -(base.code_lines.cast_signed()),
+        baseline_comment: base.comment_lines.cast_signed(),
+        current_comment: 0,
+        comment_delta: -(base.comment_lines.cast_signed()),
+        baseline_blank: base.blank_lines.cast_signed(),
+        current_blank: 0,
+        blank_delta: -(base.blank_lines.cast_signed()),
+        total_delta: -total,
+    }
+}
+
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanComparison {
     let baseline_map: HashMap<&str, &EffectiveCounts> = baseline
         .per_file_records
@@ -94,73 +159,22 @@ pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanCompa
 
     for record in &current.per_file_records {
         let path = record.relative_path.as_str();
-        let curr = &record.effective_counts;
         let lang = record.language.map(|l| l.display_name().to_string());
-
         if let Some(base) = baseline_map.get(path) {
-            let code_delta = curr.code_lines.cast_signed() - base.code_lines.cast_signed();
-            let comment_delta = curr.comment_lines.cast_signed() - base.comment_lines.cast_signed();
-            let blank_delta = curr.blank_lines.cast_signed() - base.blank_lines.cast_signed();
-            let status = if code_delta == 0 && comment_delta == 0 && blank_delta == 0 {
-                FileChangeStatus::Unchanged
-            } else {
-                FileChangeStatus::Modified
-            };
-            file_deltas.push(FileDelta {
-                relative_path: record.relative_path.clone(),
-                language: lang,
-                status,
-                baseline_code: base.code_lines.cast_signed(),
-                current_code: curr.code_lines.cast_signed(),
-                code_delta,
-                baseline_comment: base.comment_lines.cast_signed(),
-                current_comment: curr.comment_lines.cast_signed(),
-                comment_delta,
-                baseline_blank: base.blank_lines.cast_signed(),
-                current_blank: curr.blank_lines.cast_signed(),
-                blank_delta,
-                total_delta: code_delta + comment_delta + blank_delta,
-            });
+            file_deltas.push(build_modified(record, base, lang));
         } else {
-            let total = (curr.code_lines + curr.comment_lines + curr.blank_lines).cast_signed();
-            file_deltas.push(FileDelta {
-                relative_path: record.relative_path.clone(),
-                language: lang,
-                status: FileChangeStatus::Added,
-                baseline_code: 0,
-                current_code: curr.code_lines.cast_signed(),
-                code_delta: curr.code_lines.cast_signed(),
-                baseline_comment: 0,
-                current_comment: curr.comment_lines.cast_signed(),
-                comment_delta: curr.comment_lines.cast_signed(),
-                baseline_blank: 0,
-                current_blank: curr.blank_lines.cast_signed(),
-                blank_delta: curr.blank_lines.cast_signed(),
-                total_delta: total,
-            });
+            file_deltas.push(build_added(record, lang));
         }
     }
 
     for record in &baseline.per_file_records {
         if !current_paths.contains(record.relative_path.as_str()) {
-            let base = &record.effective_counts;
             let lang = record.language.map(|l| l.display_name().to_string());
-            let total = (base.code_lines + base.comment_lines + base.blank_lines).cast_signed();
-            file_deltas.push(FileDelta {
-                relative_path: record.relative_path.clone(),
-                language: lang,
-                status: FileChangeStatus::Removed,
-                baseline_code: base.code_lines.cast_signed(),
-                current_code: 0,
-                code_delta: -(base.code_lines.cast_signed()),
-                baseline_comment: base.comment_lines.cast_signed(),
-                current_comment: 0,
-                comment_delta: -(base.comment_lines.cast_signed()),
-                baseline_blank: base.blank_lines.cast_signed(),
-                current_blank: 0,
-                blank_delta: -(base.blank_lines.cast_signed()),
-                total_delta: -total,
-            });
+            file_deltas.push(build_removed(
+                &record.relative_path,
+                &record.effective_counts,
+                lang,
+            ));
         }
     }
 
