@@ -141,6 +141,16 @@ fn build_removed(path: &str, base: &EffectiveCounts, lang: Option<String>) -> Fi
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn coverage_line_pct(hit: u64, found: u64) -> Option<f64> {
+    if found == 0 {
+        None
+    } else {
+        let pct = (hit as f64 / found as f64) * 100.0;
+        Some((pct * 10.0).round() / 10.0)
+    }
+}
+
 #[must_use]
 pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanComparison {
     let baseline_map: HashMap<&str, &EffectiveCounts> = baseline
@@ -212,17 +222,8 @@ pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanCompa
     let s = &current.summary_totals;
     let b = &baseline.summary_totals;
 
-    #[allow(clippy::cast_precision_loss)]
-    let line_pct = |hit: u64, found: u64| -> Option<f64> {
-        if found == 0 {
-            None
-        } else {
-            let pct = (hit as f64 / found as f64) * 100.0;
-            Some((pct * 10.0).round() / 10.0)
-        }
-    };
-    let baseline_cov_pct = line_pct(b.coverage_lines_hit, b.coverage_lines_found);
-    let current_cov_pct = line_pct(s.coverage_lines_hit, s.coverage_lines_found);
+    let baseline_cov_pct = coverage_line_pct(b.coverage_lines_hit, b.coverage_lines_found);
+    let current_cov_pct = coverage_line_pct(s.coverage_lines_hit, s.coverage_lines_found);
     let coverage_lines_hit_delta = if b.coverage_lines_found > 0 || s.coverage_lines_found > 0 {
         Some(s.coverage_lines_hit.cast_signed() - b.coverage_lines_hit.cast_signed())
     } else {
