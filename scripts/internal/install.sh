@@ -2,17 +2,32 @@
 # oxide-sloc installer
 #
 # Usage:
-#   bash scripts/internal/install.sh           # build from source (offline, no Rust required)
-#   bash scripts/internal/install.sh --online  # download pre-built binary from GitHub Releases (Linux only)
+#   bash scripts/internal/install.sh           # auto-installs; pre-built binary preferred
+#   bash scripts/internal/install.sh --online  # explicitly download from SLOC_RELEASE_BASE_URL
+#   bash scripts/internal/install.sh --build   # compile from bundled toolchain + vendor sources
 #   bash scripts/internal/install.sh --rebuild # force a fresh build even if a binary already exists
 #   bash scripts/internal/install.sh --auto    # auto-install rustup if cargo is absent (interactive prompt)
 #
+# Environment variables:
+#   SLOC_RELEASE_BASE_URL  Base URL for pre-built binary downloads, without trailing slash
+#                          and without the version segment.  No default — must be set
+#                          explicitly by an administrator to enable network downloads.
+#                          Typically an internal artifact server (Nexus, Artifactory, JFrog):
+#                            export SLOC_RELEASE_BASE_URL=https://nexus.example.com/oxide-sloc
+#                          The installer appends /v{version}/{asset} to form the full URL.
+#                          Without this variable, --online downloads from GitHub Releases.
+#
 # Behavior:
-#   --online: downloads the pre-built binary for the host arch, verifies its SHA-256 checksum,
-#             and installs it.  Falls back to source build if the download or verification fails.
-#   default:  compiles from source using vendor.tar.xz (committed). No network access required.
-#   If cargo (Rust) is on PATH  → extract vendor sources + run cargo build --release --offline.
-#   If no cargo on PATH          → bootstrap Rust from toolchain/ archives, then build.
+#   default:  uses dist/ archive if present.  If SLOC_RELEASE_BASE_URL is set and curl is
+#             available and cargo is not on PATH, silently downloads from the configured
+#             server.  Otherwise stops with instructions — use --build to opt in to
+#             bundled toolchain extraction, or place a binary in dist/.
+#   --online: downloads explicitly from SLOC_RELEASE_BASE_URL (falls back to GitHub Releases
+#             if that variable is not set).  The user has opted in to a network fetch.
+#   --build:  extracts the bundled Rust toolchain and compiles from vendor sources.
+#             Use when no pre-built binary is available and compilation is acceptable.
+#   If cargo (Rust) is already on PATH  → extract vendor sources + cargo build (no toolchain needed).
+#   If no cargo on PATH                  → requires --build to proceed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,11 +36,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FORCE_REBUILD=false
 AUTO_RUSTUP=false
 ONLINE_MODE=false
+BUILD_MODE=false
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true ;;
         --auto) AUTO_RUSTUP=true ;;
         --online) ONLINE_MODE=true ;;
+        --build) BUILD_MODE=true ;;
     esac
 done
 
@@ -37,7 +54,6 @@ if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" ==
 else
     PLATFORM=linux
     EXE="$REPO_ROOT/oxide-sloc"
-    # Detect host architecture so we fetch the right release asset
     case "$(uname -m 2>/dev/null)" in
         aarch64|arm64) LINUX_ARCH=arm64 ;;
         *)             LINUX_ARCH=x86_64 ;;
@@ -347,90 +363,179 @@ if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == true ]]; then
     rm -f "$EXE"
 fi
 
-# ── 2. Pre-built binary from dist/ (Windows) ────────────────────────────────
-# oxide-sloc-windows-x64.zip is committed to dist/ by update-dist.yml after
-# every release.  Extracting it here skips the toolchain bootstrap entirely —
-# no unsigned PE files are written to disk, so EDR software won't block the install.
-if [[ "$PLATFORM" == windows ]] && [[ "$FORCE_REBUILD" == false ]]; then
-    DIST_WIN="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
-    if [[ -f "$DIST_WIN" ]]; then
-        echo " Pre-built Windows binary found in dist/ — extracting..."
-        _DIST_TMP="$(mktemp -d)"
-        _DIST_OK=false
-        if command -v unzip &>/dev/null; then
-            unzip -q "$DIST_WIN" -d "$_DIST_TMP" && _DIST_OK=true
-        else
-            _DIST_WIN_W="$(cygpath -w "$DIST_WIN" 2>/dev/null || echo "$DIST_WIN")"
-            _DIST_TMP_W="$(cygpath -w "$_DIST_TMP" 2>/dev/null || echo "$_DIST_TMP")"
-            powershell.exe -NoProfile -NonInteractive -Command \
-                "Expand-Archive -Path '$_DIST_WIN_W' -DestinationPath '$_DIST_TMP_W' -Force" \
-                && _DIST_OK=true
-        fi
-        if [[ "$_DIST_OK" == true ]] && [[ -f "$_DIST_TMP/oxide-sloc.exe" ]]; then
-            cp "$_DIST_TMP/oxide-sloc.exe" "$EXE"
+# ── 2. Pre-built binary from dist/ ───────────────────────────────────────────
+# update-dist.yml commits platform archives here after every release.
+if [[ "$FORCE_REBUILD" == false ]]; then
+    if [[ "$PLATFORM" == windows ]]; then
+        DIST_WIN="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
+        if [[ -f "$DIST_WIN" ]]; then
+            echo " Pre-built binary found in dist/ — extracting..."
+            _DIST_TMP="$(mktemp -d)"
+            _DIST_OK=false
+            if command -v unzip &>/dev/null; then
+                unzip -q "$DIST_WIN" -d "$_DIST_TMP" && _DIST_OK=true
+            else
+                _DIST_WIN_W="$(cygpath -w "$DIST_WIN" 2>/dev/null || echo "$DIST_WIN")"
+                _DIST_TMP_W="$(cygpath -w "$_DIST_TMP" 2>/dev/null || echo "$_DIST_TMP")"
+                powershell.exe -NoProfile -NonInteractive -Command \
+                    "Expand-Archive -Path '$_DIST_WIN_W' -DestinationPath '$_DIST_TMP_W' -Force" \
+                    && _DIST_OK=true
+            fi
+            if [[ "$_DIST_OK" == true ]] && [[ -f "$_DIST_TMP/oxide-sloc.exe" ]]; then
+                cp "$_DIST_TMP/oxide-sloc.exe" "$EXE"
+                rm -rf "$_DIST_TMP"
+                echo " [OK] oxide-sloc.exe installed from dist/"
+                trust_ca_cert
+                echo ""
+                echo " Start the web UI:  bash scripts/run.sh"
+                exit 0
+            fi
             rm -rf "$_DIST_TMP"
-            echo " [OK] oxide-sloc.exe installed from dist/"
-            trust_ca_cert
-            echo ""
-            echo " Start the web UI:  bash scripts/run.sh"
-            exit 0
+            echo " [WARN] dist/ extraction failed — falling back to source build." >&2
         fi
-        rm -rf "$_DIST_TMP"
-        echo " [WARN] dist/ extraction failed — falling back to source build." >&2
+    else
+        _DIST_LINUX="$REPO_ROOT/dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
+        if [[ -f "$_DIST_LINUX" ]]; then
+            echo " Pre-built binary found in dist/ — extracting..."
+            _DIST_OK=false
+            tar -xzf "$_DIST_LINUX" -C "$REPO_ROOT" 2>/dev/null && _DIST_OK=true
+            if [[ "$_DIST_OK" == true ]] && [[ -f "$EXE" ]]; then
+                chmod +x "$EXE"
+                echo " [OK] oxide-sloc installed from dist/"
+                echo ""
+                echo " Start the web UI:  bash scripts/run.sh"
+                exit 0
+            fi
+            echo " [WARN] dist/ extraction failed — falling back to source build." >&2
+        fi
     fi
 fi
 
-# ── 3. Online binary download (--online, Linux only) ────────────────────────
-# Fetch the pre-built binary for this platform from GitHub Releases, verify its
-# SHA-256 checksum, and install it.  Falls through to source build on any error.
-if [[ "$ONLINE_MODE" == true ]] && [[ "$PLATFORM" == linux ]]; then
-    _OV="$(grep '^version' "$REPO_ROOT/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-    _ASSET="oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
-    _BASE="https://github.com/oxide-sloc/oxide-sloc/releases/download/v${_OV}"
+# ── 3. Download pre-built binary from GitHub Releases ────────────────────────
+# When --online is set, download verbosely and fall back on any error.
+# When cargo is not on PATH (no local build environment), attempt a silent
+# download first — short timeouts ensure air-gapped machines fall through quickly.
+_do_download() {
+    local _verbose="$1"
+    local _OV _BASE _ASSET _TMP _OK=false _SUMS_OK=false _SUMS_FILE
 
-    echo " Downloading oxide-sloc v${_OV} (linux-${LINUX_ARCH})..."
+    _OV="$(grep '^version' "$REPO_ROOT/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+    [[ -z "$_OV" ]] && return 1
+
+    # Allow internal artifact servers to replace the GitHub Releases URL.
+    # Set SLOC_RELEASE_BASE_URL=https://nexus.example.com/oxide-sloc (no trailing slash).
+    # The installer appends /v{version}/{asset} to form the full download URL.
+    local _url_root="${SLOC_RELEASE_BASE_URL:-https://github.com/oxide-sloc/oxide-sloc/releases/download}"
+    _BASE="${_url_root}/v${_OV}"
+
+    if [[ "$PLATFORM" == windows ]]; then
+        _ASSET="oxide-sloc-windows-x64.zip"
+    else
+        _ASSET="oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
+    fi
+
+    [[ "$_verbose" == true ]] && echo " Downloading oxide-sloc v${_OV} (${_ASSET})..."
 
     _TMP="$(mktemp -d)"
-    _OK=false
 
-    if curl -fsSL -o "$_TMP/$_ASSET" "${_BASE}/${_ASSET}" 2>&1; then
-        if curl -fsSL -o "$_TMP/SHA256SUMS.txt" "${_BASE}/SHA256SUMS.txt" 2>&1; then
+    local _curl_opts=(-fsSL)
+    [[ "$_verbose" == false ]] && _curl_opts+=( --connect-timeout 5 --max-time 30 )
+
+    if curl "${_curl_opts[@]}" -o "$_TMP/$_ASSET" "${_BASE}/${_ASSET}" 2>/dev/null; then
+        for _sf in SHA256SUMS-dist.txt SHA256SUMS.txt; do
+            if curl "${_curl_opts[@]}" -o "$_TMP/$_sf" "${_BASE}/$_sf" 2>/dev/null; then
+                _SUMS_OK=true; _SUMS_FILE="$_sf"; break
+            fi
+        done
+
+        if [[ "$_SUMS_OK" == true ]]; then
             cd "$_TMP"
-            if grep "$_ASSET" SHA256SUMS.txt | sha256sum --check --status 2>/dev/null; then
-                tar -xzf "$_ASSET" -C "$_TMP"
-                if [[ -f "$_TMP/oxide-sloc" ]]; then
-                    cp "$_TMP/oxide-sloc" "$EXE"
-                    chmod +x "$EXE"
-                    _OK=true
+            if grep "$_ASSET" "$_SUMS_FILE" | sha256sum --check --status 2>/dev/null; then
+                if [[ "$PLATFORM" == windows ]]; then
+                    if command -v unzip &>/dev/null; then
+                        unzip -q "$_ASSET" -d "$_TMP" && _OK=true
+                    else
+                        local _aw _tw
+                        _aw="$(cygpath -w "$_TMP/$_ASSET" 2>/dev/null || echo "$_TMP/$_ASSET")"
+                        _tw="$(cygpath -w "$_TMP" 2>/dev/null || echo "$_TMP")"
+                        powershell.exe -NoProfile -NonInteractive -Command \
+                            "Expand-Archive -Path '$_aw' -DestinationPath '$_tw' -Force" \
+                            && _OK=true
+                    fi
+                    if [[ "$_OK" == true ]] && [[ -f "$_TMP/oxide-sloc.exe" ]]; then
+                        cp "$_TMP/oxide-sloc.exe" "$EXE"
+                    else
+                        _OK=false
+                    fi
+                else
+                    tar -xzf "$_ASSET" -C "$_TMP"
+                    if [[ -f "$_TMP/oxide-sloc" ]]; then
+                        cp "$_TMP/oxide-sloc" "$EXE"
+                        chmod +x "$EXE"
+                        _OK=true
+                    fi
                 fi
-            else
+            elif [[ "$_verbose" == true ]]; then
                 echo " [WARN] Checksum mismatch — falling back to source build." >&2
             fi
             cd "$REPO_ROOT"
-        else
-            echo " [WARN] Could not fetch SHA256SUMS.txt — falling back to source build." >&2
+        elif [[ "$_verbose" == true ]]; then
+            echo " [WARN] Could not fetch checksum file — falling back to source build." >&2
         fi
-    else
+    elif [[ "$_verbose" == true ]]; then
         echo " [WARN] Download failed — falling back to source build." >&2
     fi
 
     rm -rf "$_TMP"
 
     if [[ "$_OK" == true ]]; then
-        echo " Downloaded and verified."
+        [[ "$_verbose" == true ]] && echo " Downloaded and verified."
         echo " [OK] oxide-sloc v${_OV} installed → $(basename "$EXE")"
         echo ""
         echo " Start the web UI:  bash scripts/run.sh"
-        exit 0
+        return 0
     fi
+    return 1
+}
+
+if [[ "$ONLINE_MODE" == true ]]; then
+    _do_download true && exit 0
+elif [[ "$FORCE_REBUILD" == false ]] && ! command -v cargo &>/dev/null \
+    && command -v curl &>/dev/null \
+    && [[ -n "${SLOC_RELEASE_BASE_URL:-}" ]]; then
+    # SLOC_RELEASE_BASE_URL is set — an administrator has configured a trusted artifact
+    # server.  Silently attempt a download before falling through to toolchain extraction.
+    _do_download false && exit 0
 fi
 
 # ── 4. Bootstrap Rust from bundled toolchain (if cargo not on PATH) ──────────
-# If cargo is not on PATH but a toolchain archive is committed to toolchain/,
-# extract it locally into .tools/ and export the paths.
-# Archives are gzip-9 .tar.gz files split into ≤45 MB parts by
-# bundle-rust-toolchain.sh.  Parts:  rustup/  (toolchains)  and  cargo/  (bin/).
 if ! command -v cargo &>/dev/null; then
+    if [[ "$BUILD_MODE" == false ]]; then
+        _OV="$(grep '^version' "$REPO_ROOT/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+        echo "" >&2
+        echo " [ERROR] No pre-built binary found and no Rust toolchain on PATH." >&2
+        echo "" >&2
+        echo " Option 1 — place the pre-built binary in dist/ and re-run:" >&2
+        if [[ "$PLATFORM" == windows ]]; then
+        echo "   dist/oxide-sloc-windows-x64.zip" >&2
+        else
+        echo "   dist/oxide-sloc-linux-x86_64.tar.gz" >&2
+        fi
+        echo "" >&2
+        if [[ -n "${SLOC_RELEASE_BASE_URL:-}" ]]; then
+        echo "   Obtain from your configured release server:" >&2
+        echo "     ${SLOC_RELEASE_BASE_URL}/v${_OV}/" >&2
+        echo "" >&2
+        echo " Option 2 — download automatically from your release server:" >&2
+        echo "   bash scripts/internal/install.sh --online" >&2
+        fi
+        echo "" >&2
+        echo " Option 3 — compile from the bundled sources (no network required):" >&2
+        echo "   bash scripts/internal/install.sh --build" >&2
+        echo "" >&2
+        exit 1
+    fi
+    # --build flag set: proceed with toolchain extraction
     if [[ "$PLATFORM" == windows ]]; then
         TOOLCHAIN_ARCHIVE="$REPO_ROOT/toolchain/rust-toolchain-windows-x64.tar.gz"
     else

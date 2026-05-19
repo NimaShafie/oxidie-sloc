@@ -5,6 +5,7 @@
 #   bash scripts/run.sh              # localhost only  (http://127.0.0.1:4317)
 #   bash scripts/run.sh --host       # LAN server mode (http://0.0.0.0:4317)
 #   bash scripts/run.sh --lan        # alias for --host
+#   bash scripts/run.sh --build      # compile from bundled toolchain + vendor sources
 #   SLOC_HOST=1 bash scripts/run.sh  # env-var form of --host
 #
 # For a dedicated LAN-server launcher with API-key setup and IP guidance see:
@@ -15,9 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SLOC_PORT=4317
 
-# Honour SLOC_HOST env var as well as --host / --lan CLI flag
 HOST_MODE="${SLOC_HOST:-0}"
 REBUILD_MODE=false
+BUILD_MODE=false
 
 # Detect Windows (Git Bash / MSYS2 / Cygwin)
 if [[ -n "${WINDIR+x}" ]] || [[ "${OSTYPE:-}" == msys* ]] || [[ "${OSTYPE:-}" == cygwin* ]]; then
@@ -380,12 +381,11 @@ launch_cargo() {
     fi
 }
 
-# Parse flags — --rebuild/--force are passed through to install.sh; --host/--lan
-# enable LAN server mode and are not forwarded to install.
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) REBUILD_MODE=true ;;
         --host|--lan) HOST_MODE=1 ;;
+        --build) BUILD_MODE=true ;;
         *) ;;
     esac
 done
@@ -402,6 +402,7 @@ if [[ ! -f "$EXE" ]] || [[ "$REBUILD_MODE" == true ]]; then
     echo ""
     _INSTALL_FLAGS=""
     [[ "$REBUILD_MODE" == true ]] && _INSTALL_FLAGS="--rebuild"
+    [[ "$BUILD_MODE" == true ]]   && _INSTALL_FLAGS="$_INSTALL_FLAGS --build"
     # shellcheck disable=SC2086
     bash "$SCRIPT_DIR/internal/install.sh" $_INSTALL_FLAGS \
         || { printf '\n [ERROR] Install failed. See above for details.\n' >&2; exit 1; }

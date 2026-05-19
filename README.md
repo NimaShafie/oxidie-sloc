@@ -6,6 +6,8 @@
 [![Latest Release](https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?include_prereleases&label=release)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
+[![Built with Claude](https://img.shields.io/badge/built%20with-Claude%20AI-blueviolet)](./CREDITS.md)
+[![MCP Server](https://img.shields.io/badge/MCP-server-orange)](./mcp.json)
 
 **oxide-sloc** is a Rust-based local code analysis tool — IEEE 1045-1992 SLOC analysis, unit test detection, and coverage reporting.
 
@@ -648,6 +650,73 @@ scripts/internal/   # install.sh, airgap-build.sh, make-airgap-kit.sh, update-ve
 tests/
   fixtures/basic/   # Sample source files used by smoke tests
 ```
+
+---
+
+## AI Integration
+
+oxide-sloc exposes its analysis capabilities to AI agents and external endpoints via three
+complementary integration paths:
+
+### MCP Server (`sloc-mcp`)
+
+The `sloc-mcp` binary implements the [Model Context Protocol](https://modelcontextprotocol.io)
+over stdio, making oxide-sloc directly callable as a tool from Claude Desktop, Claude Code,
+and any other MCP-compatible agent host. Build it with the rest of the workspace:
+
+```bash
+cargo build -p sloc-mcp
+```
+
+**Smithery / MCP registry**: the [`mcp.json`](./mcp.json) manifest in the repo root
+enables auto-discovery by [smithery.ai](https://smithery.ai) and other MCP registries.
+
+**Configure Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "oxide-sloc": {
+      "command": "sloc-mcp",
+      "env": { "SLOC_SERVER_URL": "http://127.0.0.1:4317" }
+    }
+  }
+}
+```
+
+**Configure Claude Code** (project `.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "oxide-sloc": { "command": "sloc-mcp" }
+  }
+}
+```
+
+Available tools: `analyze_path` · `get_metrics_latest` · `get_metrics_history` ·
+`get_run_metrics` · `compare_runs` · `health_check` · `ingest_result`
+
+### REST API + OpenAPI spec
+
+The live server exposes a machine-readable REST API. The full OpenAPI 3.1 spec is available
+at [`docs/openapi.yaml`](./docs/openapi.yaml) and served live at:
+
+```
+GET http://127.0.0.1:4317/api/openapi.yaml
+```
+
+### Drop-in tool definitions
+
+Pre-built JSON schemas for embedding in agent prompts without an MCP host:
+
+| File | Format |
+|---|---|
+| [`tools/tool-definitions.json`](./tools/tool-definitions.json) | Claude API `tool_use` array |
+| [`tools/function-definitions.json`](./tools/function-definitions.json) | OpenAI `function_calling` array |
+
+### Built entirely by AI
+
+oxide-sloc was designed and implemented entirely by Claude (Anthropic). See
+[`CREDITS.md`](./CREDITS.md) for the full account.
 
 ---
 
