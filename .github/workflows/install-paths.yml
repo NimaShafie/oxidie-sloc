@@ -71,6 +71,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools
 
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p oxide-sloc
 
