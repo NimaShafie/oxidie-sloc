@@ -10,6 +10,70 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.6] — 2026-05-18
+
+### Added
+
+- **MCP stdio server** (`crates/sloc-mcp`): New `sloc-mcp` binary implements the
+  [Model Context Protocol](https://modelcontextprotocol.io) over stdio, making oxide-sloc
+  directly callable as a tool from Claude Desktop, Claude Code, and any MCP-compatible agent
+  host. Exposes 7 tools: `analyze_path`, `get_metrics_latest`, `get_metrics_history`,
+  `get_run_metrics`, `compare_runs`, `health_check`, `ingest_result`. The `mcp.json`
+  manifest at the repo root enables auto-discovery by smithery.ai and other MCP registries.
+- **Pre-built JSON tool definitions** (`tools/`): `tools/tool-definitions.json`
+  (Claude API `tool_use` array) and `tools/function-definitions.json`
+  (OpenAI `function_calling` array) — embed oxide-sloc analysis in agent prompts without
+  running an MCP host.
+- **OpenAPI 3.1 specification** (`docs/openapi.yaml`): Complete machine-readable REST API
+  spec committed to the repository and served live at `GET /api/openapi.yaml`.
+- **RPM packaging for RHEL** (`installer/rhel/`, `scripts/internal/make-rpm.sh`):
+  `oxide-sloc.spec` and `make-rpm.sh` enable building an installable `.rpm` from source on
+  RHEL 8/9 without an internet connection.
+- **Coverage metrics in scan history and delta comparison** (`sloc-core`, `sloc-web`):
+  Line, function, and branch coverage counts are now stored in `ScanSummarySnapshot` and
+  propagated to all registry entries. `SummaryDelta` gains `coverage_lines_hit_delta`,
+  `coverage_line_pct_delta`, `baseline_coverage_line_pct`, and `current_coverage_line_pct`
+  fields. The Compare Scans page shows an animated coverage delta card when at least one
+  scan has coverage data.
+- **Coverage block in the metrics API** (`sloc-web`): `GET /api/metrics/:run_id` now
+  returns a `coverage` object (`lines_found`, `lines_hit`, `line_pct`, `functions_found`,
+  `functions_hit`, `function_pct`, `branches_found`, `branches_hit`, `branch_pct`) when the
+  scan included coverage data. `GET /api/metrics/history` includes a `coverage_line_pct`
+  field per entry.
+- **CI install-path smoke tests** (`.github/workflows/install-paths.yml`): New workflow
+  exercises all `install.sh` paths — pre-built binary extraction, `--online` download, and
+  RPM — across Linux x86_64, Windows, and RHEL UBI9.
+- **Settings modal template partials** (`crates/sloc-web/templates/`):
+  `_settings_modal_css.html` and `_settings_modal_js.html` extracted from inline template
+  code into reusable partials.
+
+### Fixed
+
+- **CI: Docker musl target registration and `docs/` copy** (`.github/workflows/`): Added
+  `x86_64-unknown-linux-musl` target to the Docker builder stage; the Docker build now
+  copies `docs/` into the image so the live `GET /api/openapi.yaml` endpoint works in
+  the container.
+- **CI: musl build delegates to `ci/release.sh`** (`.github/workflows/`): The musl release
+  job now runs via `ci/release.sh` to match all other platform builds instead of calling
+  `cargo build` directly.
+- **CI: `verify-dist` warns instead of failing when Linux archive is absent**
+  (`.github/workflows/`): Changed from a hard failure to a warning so the Windows-only
+  dist-commit path does not block CI when no Linux archive was produced in the same run.
+- **Coverage attachment tracing** (`sloc-core`): Coverage loading, format detection, file
+  matching, and zero-match conditions now emit structured `tracing::debug!` / `tracing::warn!`
+  events, making it straightforward to diagnose why coverage data is not attaching to
+  expected source files.
+- **`compute_delta` cognitive complexity** (`sloc-core`): Extracted `line_pct` as a
+  standalone helper and simplified the delta computation path; SonarQube S3776 cognitive
+  complexity reduced to 14 (below the threshold) without changing behaviour.
+
+### Documentation
+
+- **README.md**: Added MCP server configuration examples for Claude Desktop and Claude Code,
+  pre-built tool definition files, OpenAPI spec location, and RPM installation instructions.
+
+---
+
 ## [1.5.5] — 2026-05-17
 
 ### Added
