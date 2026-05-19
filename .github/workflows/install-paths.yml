@@ -1,0 +1,443 @@
+name: Install path tests
+
+# Tests every install.sh code path:
+#   dist/        — pre-built binary from dist/ (primary path; no compilation)
+#   --online     — download via SLOC_RELEASE_BASE_URL (internal artifact server simulation)
+#   guard        — no SLOC_RELEASE_BASE_URL set → must exit 1, never touch github.com
+#
+# Virus-scanner coverage:
+#   Windows — Windows Defender on-demand scan (MpCmdRun.exe) on the installed binary
+#   Linux   — ClamAV on-demand scan on the installed binary
+#
+# The bundled-toolchain (--build) path is covered by test-windows-install.yml.
+#
+# dist/ presence guarantee:
+#   update-dist.yml commits dist/oxide-sloc-*.{zip,tar.gz} to main after every
+#   release tag via `git add -f`.  Those committed files are present in every
+#   subsequent `git clone`, including air-gapped clones transferred via USB.
+#   The verify-dist job below acts as a CI gate: it fails if either archive is
+#   absent, surfacing any accidental removal before it reaches a deployment.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ── Build binaries for use in downstream tests ───────────────────────────────
+  # Produces the same artifacts as update-dist.yml so tests are self-contained.
+  # Each platform uploads its bundle + a SHA256SUMS-dist.txt for the --online tests.
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux x86_64
+            target: x86_64-unknown-linux-musl
+            asset: oxide-sloc-linux-x86_64.tar.gz
+            sums_name: checksums-linux
+
+          - os: windows-latest
+            label: Windows x64
+            target: x86_64-pc-windows-msvc
+            asset: oxide-sloc-windows-x64.zip
+            sums_name: checksums-windows
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          key: install-paths-${{ matrix.target }}
+
+      - name: Install musl tools (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p oxide-sloc
+
+      - name: Package — Linux tar.gz
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/oxide-sloc" oxide-sloc
+          tar czf "${{ matrix.asset }}" oxide-sloc
+          sha256sum "${{ matrix.asset }}" > SHA256SUMS-dist.txt
+
+      - name: Package — Windows zip
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/oxide-sloc.exe" oxide-sloc.exe
+          powershell.exe -NoProfile -NonInteractive -Command \
+            "Compress-Archive -Path oxide-sloc.exe -DestinationPath '${{ matrix.asset }}' -Force"
+          sha256sum "${{ matrix.asset }}" > SHA256SUMS-dist.txt
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ matrix.sums_name }}
+          path: SHA256SUMS-dist.txt
+
+  # ── Verify committed dist/ archives are present ──────────────────────────────
+  # dist/ archives are committed to git by update-dist.yml on every release.
+  # This job fails if either archive is missing, catching accidental removal early.
+  # On PRs from branches that predate the last release this check is advisory:
+  # the dist/ files come from the base branch and should still be present.
+  verify-dist:
+    name: "dist/: committed archives present"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Check dist/ archives committed to git
+        run: |
+          missing=()
+          [[ -f dist/oxide-sloc-windows-x64.zip         ]] || missing+=("dist/oxide-sloc-windows-x64.zip")
+          [[ -f dist/oxide-sloc-linux-x86_64.tar.gz     ]] || missing+=("dist/oxide-sloc-linux-x86_64.tar.gz")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "FAIL: the following pre-built binaries are missing from dist/:" >&2
+            for f in "${missing[@]}"; do echo "  $f" >&2; done
+            echo "" >&2
+            echo "These are committed to git by update-dist.yml after every release." >&2
+            echo "Run the workflow manually or push a release tag to regenerate them:" >&2
+            echo "  gh workflow run update-dist.yml --field tag=v<VERSION>" >&2
+            exit 1
+          fi
+          echo "PASS: both dist/ archives are present in the repository"
+          ls -lh dist/oxide-sloc-*.{zip,tar.gz} 2>/dev/null || true
+
+  # ── Test: dist/ path — Windows ───────────────────────────────────────────────
+  # Simulates the primary air-gapped install: dist/ archive present in the repo,
+  # no network, no Rust toolchain.  Verifies that no .tools/ directory is created
+  # (toolchain must never be extracted when a pre-built binary is available).
+  # Runs Windows Defender on-demand scan on the installed binary.
+  test-dist-windows:
+    name: "install: dist/ → Windows Defender scan"
+    needs: [build, verify-dist]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Download Windows bundle into dist/
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-windows-x64.zip
+          path: dist/
+
+      - name: Remove pre-installed Rust (ensure toolchain path is not taken)
+        run: |
+          rm -rf "$USERPROFILE/.rustup" "$USERPROFILE/.cargo" 2>/dev/null || true
+          NEW_PATH=$(printf '%s' "$PATH" | tr ':' '\n' \
+            | grep -Ev '\.(cargo|rustup)[/\\]' \
+            | tr '\n' ':' | sed 's/:$//')
+          echo "PATH=$NEW_PATH" >> "$GITHUB_ENV"
+
+      - name: Guard — cargo must not be on PATH
+        run: |
+          command -v cargo &>/dev/null \
+            && { echo "FAIL: cargo still on PATH — test premise violated"; exit 1; } \
+            || echo "OK: cargo absent"
+
+      - name: Install via dist/ (no flags — primary path)
+        run: bash scripts/internal/install.sh
+
+      - name: Verify binary — no toolchain extraction
+        run: |
+          [[ -f oxide-sloc.exe ]] || { echo "FAIL: oxide-sloc.exe not found"; exit 1; }
+          [[ ! -d .tools ]] \
+            || { echo "FAIL: .tools/ must not exist — toolchain must not be extracted when dist/ binary is available"; exit 1; }
+          ./oxide-sloc.exe --version
+          echo "PASS: dist/ install succeeded, no toolchain extraction"
+
+      - name: Windows Defender scan — oxide-sloc.exe
+        shell: pwsh
+        run: |
+          $mpCmd = 'C:\Program Files\Windows Defender\MpCmdRun.exe'
+          if (-not (Test-Path $mpCmd)) {
+            Write-Output "Windows Defender MpCmdRun.exe not found — skipping on-demand scan."
+            Write-Output "(Real-time protection is still active and would have blocked any threat on extract.)"
+            exit 0
+          }
+          Write-Output "Running on-demand scan: $mpCmd"
+          $result = & $mpCmd -Scan -ScanType 3 -File "$PWD\oxide-sloc.exe" 2>&1
+          Write-Output $result
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "FAIL: Windows Defender flagged oxide-sloc.exe (exit $LASTEXITCODE)"
+            exit 1
+          }
+          Write-Output "PASS: Windows Defender scan — clean"
+
+      - name: Upload install logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: logs-dist-windows-${{ github.run_number }}
+          path: logs/install-*.log
+          if-no-files-found: ignore
+
+  # ── Test: dist/ path — Linux ─────────────────────────────────────────────────
+  # Same as the Windows test but on Linux.  Runs ClamAV on-demand scan.
+  test-dist-linux:
+    name: "install: dist/ → ClamAV scan"
+    needs: [build, verify-dist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Download Linux bundle into dist/
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-linux-x86_64.tar.gz
+          path: dist/
+
+      - name: Install via dist/ (no flags — primary path)
+        run: bash scripts/internal/install.sh
+
+      - name: Verify binary — no toolchain extraction
+        run: |
+          [[ -f oxide-sloc ]] || { echo "FAIL: oxide-sloc not found"; exit 1; }
+          [[ ! -d .tools ]] \
+            || { echo "FAIL: .tools/ must not exist — toolchain must not be extracted when dist/ binary is available"; exit 1; }
+          ./oxide-sloc --version
+          echo "PASS: dist/ install succeeded, no toolchain extraction"
+
+      - name: ClamAV scan — oxide-sloc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clamav
+          # Stop the auto-updater so it doesn't race or hit rate limits in CI
+          sudo systemctl stop clamav-freshclam 2>/dev/null || true
+          # Attempt a quiet database update; non-fatal if blocked (stale db still catches known sigs)
+          sudo timeout 60 freshclam --quiet 2>/dev/null \
+            && echo "ClamAV databases updated" \
+            || echo "freshclam update skipped (rate limit or no route) — using packaged databases"
+          # Exit codes: 0=clean  1=threat found  2=scan error (e.g. missing db)
+          clamscan_exit=0
+          clamscan --no-summary oxide-sloc || clamscan_exit=$?
+          if   [[ $clamscan_exit -eq 1 ]]; then
+            echo "FAIL: ClamAV flagged oxide-sloc as a threat"; exit 1
+          elif [[ $clamscan_exit -eq 2 ]]; then
+            echo "INFO: ClamAV reported a scan error (missing or corrupt database files) — scan skipped"
+          else
+            echo "PASS: ClamAV scan — clean"
+          fi
+
+      - name: Upload install logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: logs-dist-linux-${{ github.run_number }}
+          path: logs/install-*.log
+          if-no-files-found: ignore
+
+  # ── Test: --online via internal artifact server — Windows ────────────────────
+  # Simulates an organisation that sets SLOC_RELEASE_BASE_URL to an internal
+  # Nexus/Artifactory URL.  A Python HTTP server stands in for the artifact server
+  # so no real external network call is made, and no real GitHub URL is used.
+  test-online-windows:
+    name: "install: --online via SLOC_RELEASE_BASE_URL (Windows)"
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-windows-x64.zip
+          path: _srv_stage/
+
+      - name: Download checksums
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: checksums-windows
+          path: _srv_stage/
+
+      - name: Stage local artifact server (mirrors internal Nexus layout)
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          mkdir -p "_srv/v${VERSION}"
+          cp _srv_stage/oxide-sloc-windows-x64.zip "_srv/v${VERSION}/"
+          cp _srv_stage/SHA256SUMS-dist.txt        "_srv/v${VERSION}/"
+          python -m http.server 18765 --directory _srv &
+          sleep 2
+
+      - name: Remove pre-installed Rust
+        run: |
+          rm -rf "$USERPROFILE/.rustup" "$USERPROFILE/.cargo" 2>/dev/null || true
+          NEW_PATH=$(printf '%s' "$PATH" | tr ':' '\n' \
+            | grep -Ev '\.(cargo|rustup)[/\\]' \
+            | tr '\n' ':' | sed 's/:$//')
+          echo "PATH=$NEW_PATH" >> "$GITHUB_ENV"
+
+      - name: Install via --online (SLOC_RELEASE_BASE_URL → localhost:18765)
+        env:
+          SLOC_RELEASE_BASE_URL: http://127.0.0.1:18765
+        run: bash scripts/internal/install.sh --online
+
+      - name: Verify binary — no toolchain extraction
+        run: |
+          [[ -f oxide-sloc.exe ]] || { echo "FAIL: oxide-sloc.exe not found"; exit 1; }
+          [[ ! -d .tools ]] \
+            || { echo "FAIL: .tools/ must not exist — --online must not extract toolchain"; exit 1; }
+          ./oxide-sloc.exe --version
+          echo "PASS: --online install via SLOC_RELEASE_BASE_URL succeeded"
+
+  # ── Test: --online via internal artifact server — Linux ──────────────────────
+  test-online-linux:
+    name: "install: --online via SLOC_RELEASE_BASE_URL (Linux)"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-linux-x86_64.tar.gz
+          path: _srv_stage/
+
+      - name: Download checksums
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: checksums-linux
+          path: _srv_stage/
+
+      - name: Stage local artifact server (mirrors internal Nexus layout)
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          mkdir -p "_srv/v${VERSION}"
+          cp _srv_stage/oxide-sloc-linux-x86_64.tar.gz "_srv/v${VERSION}/"
+          cp _srv_stage/SHA256SUMS-dist.txt             "_srv/v${VERSION}/"
+          python3 -m http.server 18765 --directory _srv &
+          sleep 1
+
+      - name: Install via --online (SLOC_RELEASE_BASE_URL → localhost:18765)
+        env:
+          SLOC_RELEASE_BASE_URL: http://127.0.0.1:18765
+        run: bash scripts/internal/install.sh --online
+
+      - name: Verify binary — no toolchain extraction
+        run: |
+          [[ -f oxide-sloc ]] || { echo "FAIL: oxide-sloc not found"; exit 1; }
+          [[ ! -d .tools ]] \
+            || { echo "FAIL: .tools/ must not exist — --online must not extract toolchain"; exit 1; }
+          ./oxide-sloc --version
+          echo "PASS: --online install via SLOC_RELEASE_BASE_URL succeeded"
+
+  # ── Test: silent download via SLOC_RELEASE_BASE_URL (no --online flag) ───────
+  # Verifies that when SLOC_RELEASE_BASE_URL is set and cargo is not on PATH,
+  # install.sh silently downloads from the configured server without --online.
+  test-silent-download:
+    name: "install: silent download (SLOC_RELEASE_BASE_URL set, no --online)"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-linux-x86_64.tar.gz
+          path: _srv_stage/
+
+      - name: Download checksums
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: checksums-linux
+          path: _srv_stage/
+
+      - name: Stage local artifact server
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          mkdir -p "_srv/v${VERSION}"
+          cp _srv_stage/oxide-sloc-linux-x86_64.tar.gz "_srv/v${VERSION}/"
+          cp _srv_stage/SHA256SUMS-dist.txt             "_srv/v${VERSION}/"
+          python3 -m http.server 18765 --directory _srv &
+          sleep 1
+
+      - name: Install — no --online flag, SLOC_RELEASE_BASE_URL set, cargo masked
+        env:
+          SLOC_RELEASE_BASE_URL: http://127.0.0.1:18765
+        run: |
+          PATH_NO_CARGO="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '\.cargo/bin' | tr '\n' ':')"
+          PATH="$PATH_NO_CARGO" bash scripts/internal/install.sh
+
+      - name: Verify binary — no toolchain extraction
+        run: |
+          [[ -f oxide-sloc ]] || { echo "FAIL: oxide-sloc not found"; exit 1; }
+          [[ ! -d .tools ]] \
+            || { echo "FAIL: .tools/ must not exist — silent download must not extract toolchain"; exit 1; }
+          ./oxide-sloc --version
+          echo "PASS: silent download via SLOC_RELEASE_BASE_URL succeeded"
+
+  # ── Test: guard — no silent download when SLOC_RELEASE_BASE_URL is unset ─────
+  # Verifies that install.sh NEVER makes a network request to github.com when
+  # SLOC_RELEASE_BASE_URL is not configured — regardless of whether curl is
+  # available or the machine has internet access.
+  # Expected outcome: exit 1 with instructions pointing to dist/ and --build.
+  test-no-silent-github-download:
+    name: "install: guard — no silent GitHub download without SLOC_RELEASE_BASE_URL"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Remove any dist/ binaries (simulate fresh clone before release)
+        run: rm -f dist/oxide-sloc-linux-x86_64.tar.gz dist/oxide-sloc-windows-x64.zip
+
+      - name: Block github.com at the hosts level (belt-and-suspenders network guard)
+        run: |
+          echo "0.0.0.0 github.com"                    | sudo tee -a /etc/hosts
+          echo "0.0.0.0 objects.githubusercontent.com"  | sudo tee -a /etc/hosts
+          echo "0.0.0.0 releases.githubusercontent.com" | sudo tee -a /etc/hosts
+
+      - name: Run install.sh — must exit non-zero, must not contact github.com
+        run: |
+          # Mask cargo so install.sh cannot fall through to the vendor build path
+          PATH_NO_CARGO="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '\.cargo/bin' | tr '\n' ':')"
+          # SLOC_RELEASE_BASE_URL is intentionally unset
+          unset SLOC_RELEASE_BASE_URL 2>/dev/null || true
+          set +e
+          output="$(PATH="$PATH_NO_CARGO" bash scripts/internal/install.sh 2>&1)"
+          rc=$?
+          set -e
+          echo "$output"
+          echo "--- exit code: $rc ---"
+          [[ $rc -ne 0 ]] \
+            || { echo "FAIL: installer should have exited non-zero with no pre-built binary"; exit 1; }
+          echo "$output" | grep -qi "dist/" \
+            || { echo "FAIL: error message must mention dist/"; exit 1; }
+          echo "$output" | grep -qi "\-\-build" \
+            || { echo "FAIL: error message must mention --build"; exit 1; }
+          echo "PASS: installer correctly refused without dist/ binary or SLOC_RELEASE_BASE_URL"

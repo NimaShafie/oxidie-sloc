@@ -7,6 +7,7 @@ members = [
   "crates/sloc-git",
   "crates/sloc-web",
   "crates/sloc-cli",
+  "crates/sloc-mcp",
 ]
 resolver = "2"
 

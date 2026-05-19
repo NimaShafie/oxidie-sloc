@@ -585,6 +585,7 @@ fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/api/health", get(healthz))
         .route("/api/version", get(api_version_handler))
+        .route("/api/openapi.yaml", get(openapi_yaml_handler))
         .route("/badge/{metric}", get(badge_handler))
         .route("/static/chart.js", get(chart_js_handler))
         .route("/auth/login", get(auth::auth_login_get))
@@ -1360,6 +1361,15 @@ async fn api_version_handler() -> impl IntoResponse {
         "name": "oxide-sloc",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+static OPENAPI_YAML: &str = include_str!("../../../docs/openapi.yaml");
+
+async fn openapi_yaml_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/yaml")],
+        OPENAPI_YAML,
+    )
 }
 
 async fn api_docs_handler(
