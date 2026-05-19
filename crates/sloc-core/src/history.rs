@@ -27,6 +27,18 @@ pub struct ScanSummarySnapshot {
     pub imports: u64,
     #[serde(default)]
     pub test_count: u64,
+    #[serde(default)]
+    pub coverage_lines_found: u64,
+    #[serde(default)]
+    pub coverage_lines_hit: u64,
+    #[serde(default)]
+    pub coverage_functions_found: u64,
+    #[serde(default)]
+    pub coverage_functions_hit: u64,
+    #[serde(default)]
+    pub coverage_branches_found: u64,
+    #[serde(default)]
+    pub coverage_branches_hit: u64,
 }
 
 /// One entry in the scan registry — one per completed analysis run.
