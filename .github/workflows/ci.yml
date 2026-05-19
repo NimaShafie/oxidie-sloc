@@ -27,7 +27,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@65012b490220f477f20ab979e35ae732e6de4e68  # v2.9.1 + Node.js compat fixes (2026-05-12)
 
       - name: Install system dependencies (rfd / native file dialog)
         run: |
@@ -62,7 +62,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@65012b490220f477f20ab979e35ae732e6de4e68  # v2.9.1 + Node.js compat fixes (2026-05-12)
         with:
           key: windows-check
 
@@ -88,7 +88,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@65012b490220f477f20ab979e35ae732e6de4e68  # v2.9.1 + Node.js compat fixes (2026-05-12)
         with:
           prefix-key: "v1-smoke"
 

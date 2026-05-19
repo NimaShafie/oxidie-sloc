@@ -7,6 +7,9 @@ on:
 
 permissions: {}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # opt in ahead of the June 2026 forced migration
+
 # Required secrets (all optional — steps skip gracefully if not set):
 #   WINDOWS_CERTIFICATE          — base64-encoded PFX for Windows Authenticode signing
 #   WINDOWS_CERTIFICATE_PASSWORD — password for the PFX
@@ -41,7 +44,7 @@ jobs:
             artifact: oxide-sloc-linux-arm64
             binary: oxide-sloc
 
-          - os: windows-latest
+          - os: windows-2022  # windows-latest rolling to windows-2025-vs2026 breaks ncc-bundled actions; stay on 2022
             target: x86_64-pc-windows-msvc
             artifact: oxide-sloc-windows-x86_64.exe
             binary: oxide-sloc.exe
@@ -66,7 +69,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@65012b490220f477f20ab979e35ae732e6de4e68  # v2.9.1 + Node.js compat fixes (2026-05-12)
         with:
           key: ${{ matrix.target }}
 
