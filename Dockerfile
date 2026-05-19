@@ -15,6 +15,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir -p .cargo
 COPY ci/docker-cargo-config.toml .cargo/config.toml
 COPY crates/ crates/
+COPY docs/ docs/
 COPY vendor.tar.xz vendor.tar.xz.sha256 ./
 
 # Verify the vendor archive integrity and extract it.
