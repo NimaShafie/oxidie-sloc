@@ -1363,7 +1363,7 @@ async fn api_version_handler() -> impl IntoResponse {
     }))
 }
 
-static OPENAPI_YAML: &str = include_str!("../../../docs/openapi.yaml");
+static OPENAPI_YAML: &str = include_str!("../assets/openapi.yaml");
 
 async fn openapi_yaml_handler() -> impl IntoResponse {
     (
