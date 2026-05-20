@@ -176,9 +176,27 @@ jobs:
         shell: bash
         run: cp target/${{ matrix.target }}/release/${{ matrix.binary }} ${{ matrix.artifact }}
 
+      - name: Strip debug overlay from Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $strip = (Get-Command llvm-strip.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $strip) {
+            $strip = Get-ChildItem 'C:\Program Files\LLVM\bin\llvm-strip.exe' -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if ($strip) {
+            Write-Output "Using llvm-strip: $strip"
+            & $strip --strip-debug "${{ matrix.artifact }}"
+            if ($LASTEXITCODE -ne 0) { throw "llvm-strip failed with exit code $LASTEXITCODE" }
+            Write-Output "Debug overlay stripped."
+          } else {
+            Write-Output "llvm-strip not found — skipping strip step."
+          }
+
       - name: Check for signing certificate
         id: cert
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           if [ -n "$CERT" ]; then
@@ -190,7 +208,7 @@ jobs:
           CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
 
       - name: Sign Windows binary
-        if: matrix.os == 'windows-latest' && steps.cert.outputs.available == 'true'
+        if: runner.os == 'Windows' && steps.cert.outputs.available == 'true'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -795,3 +813,18 @@ jobs:
           done
           kill "$PID" 2>/dev/null || true
           exit "$FAILED"
+
+  winget:
+    name: Submit to winget
+    needs: [smoke-install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Skip pre-release tags (alpha/beta/rc) — winget only accepts stable versions
+    if: ${{ !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
+        with:
+          identifier: NimaShafie.OxideSLOC
+          installers-regex: 'oxide-sloc-windows-x64\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
