@@ -545,46 +545,6 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
-#### Windows Authenticode signing
-
-`release.yml` and `update-dist.yml` sign Windows binaries with `signtool.exe` using a PFX
-certificate stored as two GitHub Actions secrets:
-
-| Secret | Content |
-|--------|---------|
-| `WINDOWS_CERTIFICATE` | Base64-encoded PFX bundle |
-| `WINDOWS_CERTIFICATE_PASSWORD` | Password protecting the PFX |
-
-Both steps skip gracefully if the secrets are absent (unsigned build still runs).
-
-**Generating a self-signed certificate (free, no CA purchase needed):**
-
-```bash
-bash scripts/internal/gen-signing-cert.sh
-```
-
-This creates a root CA and a code-signing leaf cert, bundles them into a PFX, and prints
-exact next steps. Afterward:
-
-1. Commit the public CA cert: `git add deploy/certs/sloc-ca.crt && git commit -m "chore: add Authenticode root CA certificate"`
-2. Paste `_signing/sloc-sign.pfx.b64` as `WINDOWS_CERTIFICATE` and the chosen password as
-   `WINDOWS_CERTIFICATE_PASSWORD` in the repo's GitHub Actions secrets.
-
-**Trusting the certificate on air-gapped Windows endpoints:**
-
-Signatures from a self-signed cert are cryptographically valid but require a one-time CA
-import per endpoint:
-
-```powershell
-Import-Certificate -FilePath .\certs\sloc-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
-```
-
-After import, verify any signed binary:
-
-```powershell
-(Get-AuthenticodeSignature .\oxide-sloc.exe).Status   # Valid
-```
-
 ### Jenkins / GitLab CI
 
 A `Jenkinsfile` and `.gitlab-ci.yml` are included at the repo root. On self-hosted or air-gapped runners, `vendor.tar.xz` is committed to the repository — a `git clone` is all that is needed. The pipeline decompresses and caches `vendor/` between runs automatically.
