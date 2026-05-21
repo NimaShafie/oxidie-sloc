@@ -104,10 +104,10 @@ ExecStart=/usr/local/bin/oxide-sloc serve --server --config /etc/oxide-sloc/conf
 **Preferred — use the installer script** (automates all steps above):
 
 ```bash
-sudo bash scripts/install-systemd.sh
+sudo bash scripts/internal/install-systemd.sh
 ```
 
-To undo the install: `sudo bash scripts/install-systemd.sh --uninstall`
+To undo the install: `sudo bash scripts/internal/install-systemd.sh --uninstall`
 
 **Manual steps (equivalent to what the script does):**
 
