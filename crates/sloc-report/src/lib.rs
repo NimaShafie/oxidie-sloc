@@ -476,6 +476,51 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
+    // Read the user-configured report identification banner from the DOM (set in step 3 of
+    // the scan configuration as `report_header_footer`).  When present, pass it as Chrome's
+    // native per-page header/footer templates so it appears in the margin on every PDF page.
+    let banner_text: Option<String> = tab
+        .evaluate(
+            "(function(){\
+               var el=document.querySelector('.report-id-banner');\
+               return el?el.textContent.trim():null;\
+             })()",
+            false,
+        )
+        .ok()
+        .and_then(|r| r.value)
+        .and_then(|v| match v {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        });
+
+    if let Some(ref t) = banner_text {
+        eprintln!("[oxide-sloc][pdf] report banner detected: {t}");
+    }
+
+    let has_banner = banner_text.is_some();
+
+    // Build Chrome header/footer HTML templates from the banner text.
+    // The template is rendered in the margin area; `font-size` must be set explicitly.
+    let make_banner_tmpl = |text: &str| -> String {
+        let escaped = text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        format!(
+            r#"<div style="font-size:10px;width:100%;text-align:center;\
+color:#fff;background:#b35428;padding:5px 0;\
+font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
+-webkit-print-color-adjust:exact;print-color-adjust:exact;">{escaped}</div>"#
+        )
+    };
+
+    let (header_tmpl, footer_tmpl) = match &banner_text {
+        Some(t) => (Some(make_banner_tmpl(t)), Some(make_banner_tmpl(t))),
+        None => (None, None),
+    };
+
     let pdf_bytes = tab
         .print_to_pdf(Some(PrintToPdfOptions {
             landscape: Some(true),
@@ -483,11 +528,16 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
             scale: Some(0.82),
             paper_width: Some(11.69), // A4 landscape width (inches)
             paper_height: Some(8.27), // A4 landscape height (inches)
-            margin_top: Some(0.35),
-            margin_bottom: Some(0.35),
+            // When a banner is present widen the top/bottom margins so Chrome's
+            // header/footer templates render fully without overlapping content.
+            margin_top: Some(if has_banner { 0.55 } else { 0.35 }),
+            margin_bottom: Some(if has_banner { 0.45 } else { 0.35 }),
             margin_left: Some(0.5),
             margin_right: Some(0.5),
             prefer_css_page_size: Some(false),
+            display_header_footer: if has_banner { Some(true) } else { None },
+            header_template: header_tmpl,
+            footer_template: footer_tmpl,
             ..Default::default()
         }))
         .context("browser failed to generate PDF")?;
@@ -730,7 +780,7 @@ fn pdf_render_page1_header(
             pdf_safe_str(&run.environment.runtime_mode),
         );
         ctx.layer.use_text(
-            pdf_trunc(&env_str, 85),
+            pdf_trunc(&env_str, 100),
             6.5,
             Mm(ctx.w / 2.0),
             Mm(roots_text_y),
@@ -934,7 +984,7 @@ fn pdf_info_emit_line(ctx: &PdfCtx<'_>, y: f32, r: f32, g: f32, b: f32, text: &s
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
     ctx.layer.use_text(
-        pdf_trunc(text, 110),
+        pdf_trunc(text, 165),
         7.0,
         Mm(ctx.margin),
         Mm(y),
@@ -2165,16 +2215,17 @@ struct WarningOpportunityRow {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 40px; }
+    .page { max-width: 1720px; margin: 0 auto; padding: 32px 24px 40px; }
     .summary-grid { display:grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:10px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
     .metric { padding: 11px 12px 20px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 70px; }
     .metric:hover { transform: translateY(-3px); box-shadow: var(--shadow-strong); }
-    .metric-label, .section-kicker { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
+    .metric-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+    .section-kicker { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
     .metric-value { margin-top: 6px; }
-    .metric-big { display:block; font-size: 24px; font-weight: 800; color: var(--text); line-height: 1.15; letter-spacing: -0.02em; }
-    .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 12px; font-weight: 600; color: var(--muted-2); font-family: ui-monospace, monospace; }
+    .metric-big { display:block; font-size: 20px; font-weight: 900; color: var(--oxide); line-height: 1.15; letter-spacing: -0.02em; }
+    .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 12px; font-weight: 600; color: var(--muted); font-family: ui-monospace, monospace; }
     .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.45; white-space: normal; max-width: 220px; text-align: center; pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.22); }
     .metric-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--text); }
     .metric:hover .metric-tooltip { opacity: 1; }
@@ -2651,6 +2702,7 @@ struct WarningOpportunityRow {
     .charts-grid > .panel { margin:0; display:flex; flex-direction:column; }
     .charts-grid .chart-section > div { display:flex; flex-direction:column; flex:1; }
     .charts-grid .chart-container { flex:1; min-height:180px; }
+    .chart-pre { min-height:100px; }
     @media (max-width:820px) { .charts-grid { grid-template-columns:1fr; } }
     .r-lang-overview { display:flex; gap:40px; align-items:flex-start; justify-content:center; flex-wrap:wrap; padding:8px 0 16px; }
     .r-lang-overview-cell { display:flex; flex-direction:column; align-items:center; gap:8px; flex:1 1 280px; max-width:480px; }
@@ -2658,7 +2710,7 @@ struct WarningOpportunityRow {
     .r-lang-overview svg { display:block; max-width:100%; height:auto; }
     .rchit { cursor:pointer; transition:opacity .17s,filter .17s; }
     .rchit:hover { opacity:.75; filter:brightness(1.14); }
-    #r-tt { display:none; position:fixed; background:rgba(15,10,6,.95); color:#fff; border-radius:10px; padding:8px 13px; font-size:12px; line-height:1.5; pointer-events:none; z-index:9999; box-shadow:0 4px 20px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.1); max-width:240px; white-space:nowrap; }
+    #r-tt { display:none; position:fixed; background:rgba(15,10,6,.95); color:#fff; border-radius:10px; padding:8px 13px; font-size:12px; line-height:1.5; pointer-events:none; z-index:10001; box-shadow:0 4px 20px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.1); max-width:240px; white-space:nowrap; }
     .chart-tab-bar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
     .chart-tab { padding:5px 16px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer; transition:background 0.12s,color 0.12s,border-color 0.12s; }
     .chart-tab:hover { background:var(--surface-3); color:var(--text); }
@@ -2769,7 +2821,9 @@ struct WarningOpportunityRow {
             <h1>{{ title }}</h1>
             <span class="run-id-short-badge" title="Short run ID — matches the ID shown in View Reports">{{ run_id_short }}</span>
           </div>
-          <div class="run-id-row">
+        </div>
+      </div>
+      <div class="run-id-row">
             <span class="run-id-chip" data-copy="{{ run.tool.run_id }}">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>Run ID</span>
               <span class="run-id-chip-value">{{ run.tool.run_id }}</span>
@@ -2814,8 +2868,6 @@ struct WarningOpportunityRow {
               <span class="chip-tooltip">No commit author was found for this scan</span>
             </span>
             {% endif %}
-          </div>
-        </div>
       </div>
 
       <div class="meta">
@@ -2853,8 +2905,9 @@ struct WarningOpportunityRow {
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>Project Overview</h2></div>
-              <div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">Interactive — change axes below</span></div>
+              <button class="chart-expand-btn" id="overview-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
+            <div class="chart-pre">
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.6;">A configurable cartesian view of your codebase. Choose what to show on each axis. Historical modes (commits, tags, releases) require the web UI.</p>
             <div class="chart-controls">
               <label>Y Axis:
@@ -2877,6 +2930,7 @@ struct WarningOpportunityRow {
                 </select>
               </label>
             </div>
+            </div>
             <div id="overview-chart" class="chart-container"><div id="canvas-proj-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-proj"></canvas></div></div>
             <div class="chart-locked-card" id="overview-chart-locked">
               <h3>Historical trend requires the web UI</h3>
@@ -2889,11 +2943,14 @@ struct WarningOpportunityRow {
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>Language Composition</h2></div>
+              <button class="chart-expand-btn" id="comp-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
+            <div class="chart-pre">
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Code, comments, and blank lines as a percentage of total physical lines per language.</p>
             <div class="chart-tab-bar">
               <button type="button" class="chart-tab active" data-comp-tab="absolute">Absolute Lines</button>
               <button type="button" class="chart-tab" data-comp-tab="pct">Composition %</button>
+            </div>
             </div>
             <div id="composition-chart" class="chart-container"><div id="canvas-comp-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-comp"></canvas></div></div>
           </div>
@@ -2906,19 +2963,23 @@ struct WarningOpportunityRow {
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>File Count vs SLOC</h2></div>
+              <button class="chart-expand-btn" id="scatter-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Each bubble is a language. X&nbsp;=&nbsp;files analyzed, Y&nbsp;=&nbsp;code lines, bubble size&nbsp;∝&nbsp;total physical lines.</p>
             <div id="scatter-chart" class="chart-container" style="position:relative;height:324px;"><canvas id="canvas-scatter"></canvas></div>
           </div>
         </section>
 
-        {% if has_semantic_data %}
         <section class="panel stack chart-section">
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>Semantic Metrics</h2></div>
+              {% if has_semantic_data %}
+              <button class="chart-expand-btn" id="semantic-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+              {% endif %}
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Detected structural elements per language. Select a metric to explore.</p>
+            {% if has_semantic_data %}
             <div class="chart-controls">
               <label>Metric:
                 <select class="chart-select" id="semantic-metric">
@@ -2929,16 +2990,20 @@ struct WarningOpportunityRow {
                   <option value="tests">Tests</option>
                 </select>
               </label>
-              <button class="chart-expand-btn" id="semantic-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <div id="semantic-chart" class="chart-container" style="position:relative;height:234px;"><canvas id="canvas-semantic"></canvas></div>
+            {% else %}
+            <div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--muted);font-size:13px;text-align:center;line-height:1.6;">
+              <div>No structural metrics detected for this scan.<br>Semantic analysis covers languages with function/class detection<br>(e.g., Go, Python, Rust, Java, C++).</div>
+            </div>
+            {% endif %}
           </div>
         </section>
-        {% endif %}
         <section class="panel stack chart-section">
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>Comment Density</h2></div>
+              <button class="chart-expand-btn" id="density-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Comments as a percentage of significant lines (code + comments) per language — a proxy for documentation coverage.</p>
             <div id="density-chart" class="chart-container" style="position:relative;min-height:150px;"><canvas id="canvas-density"></canvas></div>
@@ -2949,6 +3014,7 @@ struct WarningOpportunityRow {
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>File Size Distribution</h2></div>
+              <button class="chart-expand-btn" id="filesize-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Number of files in each SLOC bucket — a quick view of whether the codebase favours small focused modules or large files.</p>
             <div id="filesize-chart" class="chart-container" style="position:relative;min-height:150px;"><canvas id="canvas-filesize"></canvas></div>
@@ -3081,7 +3147,7 @@ struct WarningOpportunityRow {
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>Submodule Breakdown</h2></div>
-              <div class="pill-row"><span class="pill info" style="font-size:11px;min-height:26px;">Change Y axis or sort order below</span></div>
+              <button class="chart-expand-btn" id="sub-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <div class="chart-controls">
               <label>Y Axis:
@@ -3108,6 +3174,7 @@ struct WarningOpportunityRow {
           <div>
             <div class="toolbar">
               <div class="toolbar-left"><h2>Submodule Composition</h2></div>
+              <button class="chart-expand-btn" id="sub-comp-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Code vs comments vs blank lines per submodule — bar width reflects relative size.</p>
             <div id="submodule-donut" style="width:100%;padding:4px 0;overflow:hidden;"></div>
@@ -3118,7 +3185,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div>
-          <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
+          <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
           <div id="report-lang-overview" style="margin:0 0 16px;"></div>
           <div class="table-shell">
             <table id="lang-breakdown-table" data-sort-table>
@@ -4031,6 +4098,97 @@ struct WarningOpportunityRow {
         ySel.addEventListener('change', renderOverview);
         xSel.addEventListener('change', renderOverview);
         renderOverview();
+
+        var overviewExpandBtn = document.getElementById('overview-expand-btn');
+        if (overviewExpandBtn) {
+          overviewExpandBtn.addEventListener('click', function() {
+            var r = getData();
+            var n = r.sorted.length || 1;
+            var modalH = Math.max(480, Math.min(860, n * 29 + 96));
+            var overlay = document.createElement('div');
+            overlay.className = 'chart-modal-overlay';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;">'
+              + '<button class="chart-modal-close" aria-label="Close">&times;</button>'
+              + '<span class="chart-modal-title">Project Overview — Full View</span>'
+              + '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;">'
+              + '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;">Y Axis:'
+              + '<select id="ov-modal-y" class="chart-select">'
+              + '<option value="code">Code Lines</option>'
+              + '<option value="comments">Comment Lines</option>'
+              + '<option value="blanks">Blank Lines</option>'
+              + '<option value="physical">Total Physical Lines</option>'
+              + '<option value="files">File Count</option>'
+              + '</select></label>'
+              + (SUB_D && SUB_D.length ? '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;">X Axis:'
+              + '<select id="ov-modal-x" class="chart-select">'
+              + '<option value="languages">Languages</option>'
+              + '<option value="submodules">Submodules</option>'
+              + '</select></label>' : '')
+              + '</div>'
+              + '<div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-proj-modal"></canvas></div></div>';
+            document.body.appendChild(overlay);
+            overlay.querySelector('.chart-modal-close').addEventListener('click', function() { document.body.removeChild(overlay); });
+            overlay.addEventListener('click', function(e) { if (e.target === overlay) document.body.removeChild(overlay); });
+            var Y_LABELS = { code:'Code Lines', comments:'Comment Lines', blanks:'Blank Lines', physical:'Physical Lines', files:'Files' };
+            var modalYSel = document.getElementById('ov-modal-y');
+            var modalXSel = document.getElementById('ov-modal-x');
+            if (modalYSel) modalYSel.value = ySel ? ySel.value : 'code';
+            if (modalXSel && xSel) modalXSel.value = (xSel.value === 'languages' || xSel.value === 'submodules') ? xSel.value : 'languages';
+            var modalCanvas = document.getElementById('canvas-proj-modal');
+            if (!modalCanvas) return;
+            var c = clr();
+            function getModalData() {
+              var yKey = modalYSel ? modalYSel.value : 'code';
+              var mode = modalXSel ? modalXSel.value : 'languages';
+              var src = mode === 'submodules' ? SUB_D : D;
+              var lKey = mode === 'submodules' ? 'name' : 'lang';
+              var sorted = src.slice().sort(function(a,b){ return (b[yKey]||0)-(a[yKey]||0); });
+              return { sorted: sorted, lKey: lKey, yKey: yKey, yLabel: Y_LABELS[yKey]||yKey };
+            }
+            var ovModalChart = null;
+            function renderOverviewModal() {
+              var r2 = getModalData();
+              if (ovModalChart) {
+                ovModalChart.data.labels = r2.sorted.map(function(d){return d[r2.lKey];});
+                ovModalChart.data.datasets[0].data = r2.sorted.map(function(d){return d[r2.yKey]||0;});
+                ovModalChart.data.datasets[0].backgroundColor = r2.sorted.map(function(_,i){return PALETTE[i%PALETTE.length];});
+                ovModalChart.data.datasets[0].label = r2.yLabel;
+                ovModalChart.options.scales.x.title.text = r2.yLabel;
+                ovModalChart.update('none'); return;
+              }
+              ovModalChart = new Chart(modalCanvas, {
+                type: 'bar',
+                data: {
+                  labels: r2.sorted.map(function(d){return d[r2.lKey];}),
+                  datasets: [{ label: r2.yLabel,
+                    data: r2.sorted.map(function(d){return d[r2.yKey]||0;}),
+                    backgroundColor: r2.sorted.map(function(_,i){return PALETTE[i%PALETTE.length];}),
+                    borderRadius: 3 }]
+                },
+                options: {
+                  indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                  layout: { padding: { right: 64 } },
+                  scales: {
+                    x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}},
+                         title:{display:true, text:r2.yLabel, color:c.text} },
+                    y: { grid:{display:false}, ticks:{color:c.text} }
+                  },
+                  plugins: {
+                    legend:{display:false},
+                    tooltip:{callbacks:{
+                      title:function(items){return items.length?items[0].label:'';},
+                      label:function(ctx){return '  '+ctx.dataset.label+': '+Number(ctx.parsed.x).toLocaleString();}
+                    }}
+                  }
+                },
+                plugins: [makeDlPlugin(function(v){ return fmt(v||0); }, 'end')]
+              });
+            }
+            renderOverviewModal();
+            if (modalYSel) modalYSel.addEventListener('change', renderOverviewModal);
+            if (modalXSel) modalXSel.addEventListener('change', renderOverviewModal);
+          });
+        }
       })();
 
       // ── Language Composition ─────────────────────────────────────────────────
@@ -4346,10 +4504,10 @@ struct WarningOpportunityRow {
           semExpandBtn.addEventListener('click', function() {
             var mKey = semSel ? semSel.value : 'functions';
             var n = SEM_D.length || 1;
-            var modalH = Math.max(320, n * 30 + 60);
+            var modalH = Math.max(672, n * 46 + 96);
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Semantic Metrics — Full View</span><div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Semantic Metrics — Full View</span><div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function() { document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e) { if (e.target === overlay) document.body.removeChild(overlay); });
@@ -4484,6 +4642,239 @@ struct WarningOpportunityRow {
           plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
         });
         ALL_CHARTS.push(fsChart);
+      })();
+
+      // ── Expand button handlers ────────────────────────────────────────────────
+      (function() {
+        function makeOverlay(title, h) {
+          var overlay = document.createElement('div');
+          overlay.className = 'chart-modal-overlay';
+          var hAttr = 'height:' + (h || 696) + 'px;';
+          overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">' + title + '</span><div style="position:relative;width:100%;' + hAttr + '"><canvas id="modal-expand-canvas"></canvas></div></div>';
+          document.body.appendChild(overlay);
+          overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
+          overlay.addEventListener('click', function(e){ if(e.target === overlay) document.body.removeChild(overlay); });
+          return document.getElementById('modal-expand-canvas');
+        }
+
+        // Language Composition
+        (function(){
+          var btn = document.getElementById('comp-expand-btn');
+          if(!btn) return;
+          btn.addEventListener('click', function(){
+            var activeTab = document.querySelector('[data-comp-tab].active');
+            var compMode = activeTab ? activeTab.getAttribute('data-comp-tab') : 'absolute';
+            var canvas = makeOverlay('Language Composition — Full View');
+            if(!canvas) return;
+            var data = D.slice(0, 15);
+            var c = clr(), isPct = compMode === 'pct';
+            var tot = function(d){ return (d.code||0)+(d.comments||0)+(d.blanks||0)||1; };
+            var codeD = data.map(function(d){ return isPct ? (d.code||0)/tot(d)*100 : d.code||0; });
+            var cmD   = data.map(function(d){ return isPct ? (d.comments||0)/tot(d)*100 : d.comments||0; });
+            var blD   = data.map(function(d){ return isPct ? (d.blanks||0)/tot(d)*100 : d.blanks||0; });
+            var tickCb = isPct ? function(v){return v.toFixed(0)+'%';} : function(v){return fmt(v);};
+            new Chart(canvas, {
+              type: 'bar',
+              data: {
+                labels: data.map(function(d){ return d.lang; }),
+                datasets: [
+                  { label:'Code',     data: codeD, backgroundColor: OX, borderRadius: 3 },
+                  { label:'Comments', data: cmD,   backgroundColor: GN, borderRadius: 3 },
+                  { label:'Blanks',   data: blD,   backgroundColor: GY, borderRadius: 3 }
+                ]
+              },
+              options: {
+                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                scales: {
+                  x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
+                  y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
+                },
+                plugins: { legend: { position: 'bottom', labels: { color: c.text } } }
+              }
+            });
+          });
+        })();
+
+        // File Count vs SLOC (Scatter)
+        (function(){
+          var btn = document.getElementById('scatter-expand-btn');
+          if(!btn || !SCAT_D || !SCAT_D.length) return;
+          btn.addEventListener('click', function(){
+            var canvas = makeOverlay('File Count vs SLOC — Full View');
+            if(!canvas) return;
+            var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
+            var c = clr();
+            new Chart(canvas, {
+              type: 'bubble',
+              data: {
+                datasets: SCAT_D.map(function(d, i) {
+                  return {
+                    label: d.lang,
+                    data: [{ x: d.files, y: d.code, r: Math.max(5, Math.round(Math.sqrt(d.physical/maxP)*20)) }],
+                    backgroundColor: PALETTE[i % PALETTE.length] + 'b8',
+                    borderColor: PALETTE[i % PALETTE.length], borderWidth: 1
+                  };
+                })
+              },
+              options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                  x: { grid: { color: c.grid }, ticks: { color: c.text }, title: { display: true, text: 'Files Analyzed', color: c.text } },
+                  y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text } }
+                },
+                plugins: {
+                  legend: { position: 'right', labels: { color: c.text } },
+                  tooltip: { callbacks: {
+                    title: function(items){ return items.length ? items[0].dataset.label : ''; },
+                    label: function(ctx){ var d = SCAT_D[ctx.datasetIndex]; return ['  Files: '+fmt(d.files), '  Code: '+Number(d.code).toLocaleString()]; }
+                  }}
+                }
+              },
+              plugins: [makeDlPlugin(function(raw, di) {
+                return SCAT_D[di] ? SCAT_D[di].lang : '';
+              }, 'bubble')]
+            });
+          });
+        })();
+
+        // Comment Density
+        (function(){
+          var btn = document.getElementById('density-expand-btn');
+          if(!btn) return;
+          btn.addEventListener('click', function(){
+            var data = D.slice().sort(function(a,b){
+              var da=(a.comments||0)/Math.max((a.code||0)+(a.comments||0),1);
+              var db=(b.comments||0)/Math.max((b.code||0)+(b.comments||0),1);
+              return db-da;
+            });
+            var h = Math.max(672, Math.min(864, data.length * 46 + 96));
+            var canvas = makeOverlay('Comment Density — Full View', h);
+            if(!canvas) return;
+            var densities = data.map(function(d){ var sig=(d.code||0)+(d.comments||0); return sig>0?Math.round((d.comments||0)/sig*1000)/10:0; });
+            var c = clr();
+            new Chart(canvas, {
+              type: 'bar',
+              data: {
+                labels: data.map(function(d){return d.lang;}),
+                datasets: [{ label: 'Comment %', data: densities,
+                  backgroundColor: data.map(function(_,i){return PALETTE[i%PALETTE.length];}), borderRadius: 4 }]
+              },
+              options: {
+                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                scales: {
+                  x: { min:0, max:100, grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return v+'%';}} },
+                  y: { grid:{display:false}, ticks:{color:c.text} }
+                },
+                plugins: { legend:{display:false}, tooltip:{callbacks:{label:function(ctx){return '  Comment %: '+ctx.parsed.x.toFixed(1)+'%';}}} }
+              }
+            });
+          });
+        })();
+
+        // File Size Distribution
+        (function(){
+          var btn = document.getElementById('filesize-expand-btn');
+          if(!btn || !HIST_D || !HIST_D.length) return;
+          btn.addEventListener('click', function(){
+            var canvas = makeOverlay('File Size Distribution — Full View');
+            if(!canvas) return;
+            var labels = HIST_D.map(function(d){return d.label;});
+            var counts = HIST_D.map(function(d){return d.count||0;});
+            var total = counts.reduce(function(a,b){return a+b;},0);
+            var c = clr();
+            new Chart(canvas, {
+              type: 'bar',
+              data: {
+                labels: labels,
+                datasets: [{ label: 'Files', data: counts,
+                  backgroundColor: ['#2A6846','#4472C4','#C45C10','#D4A017','#B23030'], borderRadius: 6 }]
+              },
+              options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                  x: { grid:{display:false}, ticks:{color:c.text} },
+                  y: { beginAtZero:true, grid:{color:c.grid}, ticks:{color:c.text, precision:0}, title:{display:true, text:'File Count', color:c.text} }
+                },
+                plugins: { legend:{display:false}, tooltip:{callbacks:{label:function(ctx){ var pct=total>0?Math.round(ctx.parsed.y/total*1000)/10:0; return ['  Files: '+ctx.parsed.y, '  Share: '+pct+'%']; }}} }
+              }
+            });
+          });
+        })();
+
+        // Submodule Breakdown
+        (function(){
+          var btn = document.getElementById('sub-expand-btn');
+          if(!btn || !SUB_D || !SUB_D.length) return;
+          btn.addEventListener('click', function(){
+            var subYSel = document.getElementById('sub-y-axis');
+            var subSortSel = document.getElementById('sub-sort');
+            var yKey = subYSel ? subYSel.value : 'code';
+            var sortMode = subSortSel ? subSortSel.value : 'desc';
+            var data = SUB_D.slice();
+            if(sortMode==='desc') data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
+            else if(sortMode==='asc') data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
+            else data.sort(function(a,b){return a.name.localeCompare(b.name);});
+            data = data.slice(0, 30);
+            var Y_LABELS = { code:'Code Lines', comment:'Comment Lines', blank:'Blank Lines', physical:'Physical Lines', files:'Files' };
+            var SUB_COLS = { code:OX, comment:GN, blank:GY, physical:'#4472C4', files:'#805099' };
+            var h = Math.max(672, Math.min(864, data.length * 36 + 96));
+            var canvas = makeOverlay('Submodule Breakdown — Full View', h);
+            if(!canvas) return;
+            var c = clr();
+            new Chart(canvas, {
+              type: 'bar',
+              data: {
+                labels: data.map(function(d){return d.name;}),
+                datasets: [{ label: Y_LABELS[yKey]||yKey, data: data.map(function(d){return d[yKey]||0;}),
+                  backgroundColor: SUB_COLS[yKey]||OX, borderRadius: 3 }]
+              },
+              options: {
+                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                scales: {
+                  x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}}, title:{display:true, text:Y_LABELS[yKey]||yKey, color:c.text} },
+                  y: { grid:{display:false}, ticks:{color:c.text} }
+                },
+                plugins: { legend:{display:false} }
+              }
+            });
+          });
+        })();
+
+        // Submodule Composition (SVG-based — clone and display)
+        (function(){
+          var btn = document.getElementById('sub-comp-expand-btn');
+          if(!btn) return;
+          btn.addEventListener('click', function(){
+            var src = document.getElementById('submodule-donut');
+            if(!src) return;
+            var overlay = document.createElement('div');
+            overlay.className = 'chart-modal-overlay';
+            overlay.innerHTML = '<div class="chart-modal"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Submodule Composition — Full View</span><div id="sub-comp-modal-wrap" style="width:100%;overflow:hidden;"></div></div>';
+            document.body.appendChild(overlay);
+            overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
+            overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
+            var wrap = document.getElementById('sub-comp-modal-wrap');
+            if(wrap) { wrap.innerHTML = src.innerHTML; }
+          });
+        })();
+
+        // Language overview (donut + line-mix) — clone both SVGs side-by-side
+        (function(){
+          var btn = document.getElementById('lang-overview-expand-btn');
+          if(!btn) return;
+          btn.addEventListener('click', function(){
+            var src = document.getElementById('report-lang-overview');
+            if(!src) return;
+            var overlay = document.createElement('div');
+            overlay.className = 'chart-modal-overlay';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Language Breakdown — Full View</span><div id="lang-overview-modal-wrap" style="width:100%;overflow:auto;"></div></div>';
+            document.body.appendChild(overlay);
+            overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
+            overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
+            var wrap = document.getElementById('lang-overview-modal-wrap');
+            if(wrap) { wrap.innerHTML = src.innerHTML; }
+          });
+        })();
       })();
 
       // ── Dark mode sync ────────────────────────────────────────────────────────

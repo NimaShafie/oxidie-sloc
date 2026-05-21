@@ -6,7 +6,6 @@
 [![Latest Release](https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?include_prereleases&label=release)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
-[![Built with Claude](https://img.shields.io/badge/built%20with-Claude%20AI-blueviolet)](./CREDITS.md)
 [![MCP Server](https://img.shields.io/badge/MCP-server-orange)](./mcp.json)
 
 **oxide-sloc** is a Rust-based local code analysis tool — IEEE 1045-1992 SLOC analysis, unit test detection, and coverage reporting.
@@ -712,11 +711,6 @@ Pre-built JSON schemas for embedding in agent prompts without an MCP host:
 |---|---|
 | [`tools/tool-definitions.json`](./tools/tool-definitions.json) | Claude API `tool_use` array |
 | [`tools/function-definitions.json`](./tools/function-definitions.json) | OpenAI `function_calling` array |
-
-### Built entirely by AI
-
-oxide-sloc was designed and implemented entirely by Claude (Anthropic). See
-[`CREDITS.md`](./CREDITS.md) for the full account.
 
 ---
 

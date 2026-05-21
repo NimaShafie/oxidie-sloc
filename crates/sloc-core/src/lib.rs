@@ -243,6 +243,9 @@ pub struct AnalysisRun {
     /// ISO 8601 author-date of the last git commit at scan time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_commit_date: Option<String>,
+    /// URL of the `origin` remote as recorded in `.git/config` at scan time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote_url: Option<String>,
 }
 
 #[derive(Default)]
@@ -254,6 +257,7 @@ struct GitInfo {
     tags: Option<String>,
     nearest_tag: Option<String>,
     commit_date: Option<String>,
+    remote_url: Option<String>,
 }
 
 /// Locate the `.git` directory by walking up from `start`.
@@ -382,6 +386,29 @@ fn parse_last_reflog_entry(git_dir: &Path) -> (Option<String>, Option<String>) {
     (author, date)
 }
 
+/// Parse `.git/config` and return the URL of the `origin` remote, if present.
+fn read_git_remote_url(git_dir: &Path) -> Option<String> {
+    let config = fs::read_to_string(git_dir.join("config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed == r#"[remote "origin"]"#;
+        } else if in_origin {
+            if let Some(rest) = trimmed.strip_prefix("url") {
+                let rest = rest.trim_start_matches([' ', '\t']);
+                if let Some(url) = rest.strip_prefix('=') {
+                    let url = url.trim();
+                    if !url.is_empty() {
+                        return Some(url.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Detect git metadata by reading `.git/` files directly — no `git` executable
 /// needed. Falls back gracefully for detached HEADs, shallow clones, and missing
 /// reflogs.
@@ -418,6 +445,7 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
         .map(|s| s.chars().take(7).collect::<String>());
 
     let (author, commit_date) = parse_last_reflog_entry(&git_dir);
+    let remote_url = read_git_remote_url(&git_dir);
 
     // Tags and nearest-tag still require git CLI — try it as a best-effort bonus
     // but don't block on it. If git isn't available these will simply be None.
@@ -437,6 +465,7 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
         tags,
         nearest_tag,
         commit_date,
+        remote_url,
     }
 }
 
@@ -700,6 +729,7 @@ fn assemble_run(
         git_tags: git.tags,
         git_nearest_tag: git.nearest_tag,
         git_commit_date: git.commit_date,
+        git_remote_url: git.remote_url,
     }
 }
 

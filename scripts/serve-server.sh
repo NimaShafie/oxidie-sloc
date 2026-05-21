@@ -59,7 +59,7 @@ for arg in "$@"; do
             printf '  --help           Show this help\n\n'
             printf 'Environment:\n'
             printf '  SLOC_API_KEY=<key>  Use a pre-set API key instead of generating one\n\n'
-            printf 'For persistent install (survives reboots): bash scripts/install-systemd.sh\n'
+            printf 'For persistent install (survives reboots): bash scripts/internal/install-systemd.sh\n'
             exit 0
             ;;
         *) ;;

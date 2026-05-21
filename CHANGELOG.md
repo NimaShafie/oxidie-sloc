@@ -10,6 +10,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.61] — 2026-05-21
+
+### Added
+
+- **Git remote URL in scan results** (`sloc-core`): `AnalysisRun` now includes a
+  `git_remote_url` field populated by reading the `origin` remote URL directly from
+  `.git/config` — no `git` executable required. Surfaced in the result page as a
+  clickable commit link when the remote is a recognized GitHub/GitLab/Bitbucket host.
+- **Clickable commit link in result page** (`sloc-web`): When a scan captures a git
+  remote URL and commit SHA, the result page now renders a hyperlink directly to the
+  commit on the hosting provider.
+- **PDF report identification banner** (`sloc-report`): When the HTML report contains
+  a `.report-id-banner` element (set via `report_header_footer` in the config), the
+  PDF export now reads that text and passes it as Chrome's native per-page
+  header/footer templates so the banner appears in the margin on every PDF page.
+  Top and bottom margins are automatically widened when a banner is present.
+
+### Fixed
+
+- **Systemd installer script moved to `scripts/internal/`**: `install-systemd.sh`
+  relocated from `scripts/` to `scripts/internal/` for consistency with the rest of
+  the internal tooling. References in `docs/server-deployment.md` and
+  `scripts/serve-server.sh` updated accordingly.
+- **Non-ASCII characters in JS strings** (`sloc-web`): Replaced literal `…` and `–`
+  characters with `…` / `–` escape sequences in inline JavaScript to prevent
+  Chrome `SyntaxError` when the page is served with a non-UTF-8 content-type header.
+- **Timestamp display on result page** (`sloc-web`): Scan time and generated-at
+  chips now use a consistent seconds-precision format with explicit timezone label;
+  the "Generated" chip wraps the timezone in parentheses to distinguish it from the
+  scan time.
+
+### Removed
+
+- **"Built with Claude AI" badge** from README — removed authorship marketing claim
+  from the project badge row and the "Built entirely by AI" prose section.
+
+---
+
 ## [1.5.6] — 2026-05-18
 
 ### Added

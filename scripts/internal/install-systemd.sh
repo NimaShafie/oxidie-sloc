@@ -5,8 +5,8 @@
 # steps documented in docs/server-deployment.md § Option B.
 #
 # Usage:
-#   sudo bash scripts/install-systemd.sh              # install
-#   sudo bash scripts/install-systemd.sh --uninstall  # remove service and files
+#   sudo bash scripts/internal/install-systemd.sh              # install
+#   sudo bash scripts/internal/install-systemd.sh --uninstall  # remove service and files
 #
 # What this script does (install):
 #   1. Copy the oxide-sloc binary to /usr/local/bin/
@@ -15,11 +15,11 @@
 #   4. Copy deploy/oxide-sloc.service to /etc/systemd/system/
 #   5. systemctl daemon-reload && systemctl enable --now oxide-sloc
 #
-# For persistent install (from serve-server.sh): bash scripts/install-systemd.sh
+# For persistent install (from serve-server.sh): bash scripts/internal/install-systemd.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 BINARY_NAME="oxide-sloc"
 INSTALL_BIN="/usr/local/bin/$BINARY_NAME"
@@ -50,12 +50,12 @@ for arg in "$@"; do
     case "$arg" in
         --uninstall) UNINSTALL=true ;;
         --help|-h)
-            printf 'Usage: sudo bash scripts/install-systemd.sh [--uninstall]\n'
+            printf 'Usage: sudo bash scripts/internal/install-systemd.sh [--uninstall]\n'
             printf '\n'
             printf '  (no flags)   Install oxide-sloc as a systemd service.\n'
             printf '  --uninstall  Stop, disable, and remove the service and its files.\n'
             printf '\n'
-            printf 'For persistent install (from serve-server.sh): bash scripts/install-systemd.sh\n'
+            printf 'For persistent install (from serve-server.sh): bash scripts/internal/install-systemd.sh\n'
             exit 0
             ;;
     esac
@@ -157,4 +157,4 @@ printf '\nInstallation complete.\n\n'
 printf '  Status:   sudo systemctl status %s\n' "$SERVICE_NAME"
 printf '  Logs:     sudo journalctl -u %s -f\n' "$SERVICE_NAME"
 printf '  Stop:     sudo systemctl stop %s\n' "$SERVICE_NAME"
-printf '  Remove:   sudo bash scripts/install-systemd.sh --uninstall\n\n'
+printf '  Remove:   sudo bash scripts/internal/install-systemd.sh --uninstall\n\n'
