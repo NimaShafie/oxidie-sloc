@@ -292,9 +292,10 @@ jobs:
   # ── Commit Linux binary to dist/ for air-gapped RHEL installs ────────────
   # Mirrors commit-dist-windows.  With dist/oxide-sloc-linux-x86_64.tar.gz
   # present, install.sh step 2b skips the bundled Rust toolchain entirely.
+  # Serialized after commit-dist-windows to avoid concurrent push conflicts.
   commit-dist-linux:
     name: Commit Linux binary to dist/
-    needs: upload-release-assets
+    needs: commit-dist-windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
