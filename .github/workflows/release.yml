@@ -822,9 +822,12 @@ jobs:
       contents: read
     # Skip pre-release tags (alpha/beta/rc) — winget only accepts stable versions
     if: ${{ !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
+    # Non-fatal until the initial PR to microsoft/winget-pkgs is merged;
+    # the action cannot create a new package — only update an existing one.
+    continue-on-error: true
     steps:
       - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
         with:
           identifier: NimaShafie.OxideSLOC
-          installers-regex: 'oxide-sloc-windows-x64\.zip$'
+          installers-regex: 'oxide-sloc-windows-x86_64\.exe$'
           token: ${{ secrets.WINGET_TOKEN }}
