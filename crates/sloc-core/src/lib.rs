@@ -14,7 +14,8 @@ pub use history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot, WatchedDirsS
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -47,6 +48,14 @@ const MINIFIED_SAMPLE_BYTES: usize = 4096;
 const MINIFIED_LINE_THRESHOLD: usize = 2000;
 /// Byte sample used to detect binary files via null-byte scan.
 const BINARY_SAMPLE_BYTES: usize = 8192;
+
+/// Atomics shared between `analyze()` and the caller so the caller can poll scan progress.
+pub struct ProgressCounters {
+    /// Number of candidate files processed so far (incremented per file, across all threads).
+    pub files_done: Arc<AtomicUsize>,
+    /// Total candidate files discovered (set before parallel analysis begins).
+    pub files_total: Arc<AtomicUsize>,
+}
 
 /// Three-way outcome for metadata-level policy checks.
 enum MetadataPolicyOutcome {
@@ -341,51 +350,6 @@ fn resolve_ref(git_dir: &Path, refname: &str) -> Option<String> {
     None
 }
 
-/// Parse the last entry of `.git/logs/HEAD` to get the commit author name and
-/// author-date in ISO 8601 format.
-///
-/// Reflog line format:
-/// `<old-sha> <new-sha> Author Name <email> <unix-ts> <tz-offset>\t<message>`
-fn parse_last_reflog_entry(git_dir: &Path) -> (Option<String>, Option<String>) {
-    let log_path = git_dir.join("logs").join("HEAD");
-    let Ok(content) = fs::read_to_string(&log_path) else {
-        return (None, None);
-    };
-    let Some(last) = content.lines().rfind(|l| !l.trim().is_empty()) else {
-        return (None, None);
-    };
-
-    // Skip the two 40-char SHAs + their separating spaces
-    // (an initial commit shows 0000... as old-sha, still 40 chars)
-    let Some(after_shas) = last.splitn(3, ' ').nth(2) else {
-        return (None, None);
-    };
-
-    // Author name ends just before " <email>"
-    let author = after_shas.find(" <").map(|i| after_shas[..i].to_string());
-
-    // Timestamp is the number after the closing ">"
-    let date = (|| {
-        use chrono::TimeZone as _;
-        let close = after_shas.find("> ")?;
-        let rest = after_shas[close + 2..].trim_start();
-        let mut tokens = rest.splitn(3, ' ');
-        let unix_str = tokens.next()?;
-        let offset_str = tokens.next().map(|s| s.split('\t').next().unwrap_or(s))?;
-        let ts: i64 = unix_str.parse().ok()?;
-        let dt = chrono::Utc.timestamp_opt(ts, 0).single()?;
-        // Format as ISO 8601 with timezone offset, e.g. 2026-05-17T12:51:54-07:00
-        let tz_display = if offset_str.len() == 5 {
-            format!("{}:{}", &offset_str[..3], &offset_str[3..])
-        } else {
-            offset_str.to_string()
-        };
-        Some(format!("{}{}", dt.format("%Y-%m-%dT%H:%M:%S"), tz_display))
-    })();
-
-    (author, date)
-}
-
 /// Parse `.git/config` and return the URL of the `origin` remote, if present.
 fn read_git_remote_url(git_dir: &Path) -> Option<String> {
     let config = fs::read_to_string(git_dir.join("config")).ok()?;
@@ -444,7 +408,8 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
         .as_deref()
         .map(|s| s.chars().take(7).collect::<String>());
 
-    let (author, commit_date) = parse_last_reflog_entry(&git_dir);
+    let author = run_git_cmd(project_path, &["log", "-1", "--format=%an", "HEAD"]);
+    let commit_date = run_git_cmd(project_path, &["log", "-1", "--format=%aI", "HEAD"]);
     let remote_url = read_git_remote_url(&git_dir);
 
     // Tags and nearest-tag still require git CLI — try it as a best-effort bonus
@@ -469,8 +434,7 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
     }
 }
 
-/// Run a git command as a best-effort supplemental source.  Not used for the
-/// core commit/branch/author fields — those come from direct file reads above.
+/// Run a git command as a best-effort supplemental source.
 fn run_git_cmd(dir: &Path, args: &[&str]) -> Option<String> {
     // Try the bare name first (works when git is on PATH), then fall back to
     // absolute paths for service accounts that run with a stripped PATH.
@@ -531,6 +495,7 @@ fn walk_root(
     skipped: &mut Vec<FileRecord>,
     warnings: &mut Vec<String>,
     cancel: Option<&AtomicBool>,
+    progress: Option<&ProgressCounters>,
 ) -> Result<()> {
     let mut builder = WalkBuilder::new(root);
     builder
@@ -547,6 +512,10 @@ fn walk_root(
         return Ok(());
     }
 
+    if let Some(p) = progress {
+        p.files_total.fetch_add(paths.len(), Ordering::Relaxed);
+    }
+
     let chunk_results = run_parallel_analysis(
         &paths,
         root,
@@ -555,6 +524,7 @@ fn walk_root(
         exclude_globs,
         enabled_languages,
         cancel,
+        progress,
     )?;
     merge_chunk_results(chunk_results, analyzed, skipped, warnings)
 }
@@ -564,22 +534,48 @@ fn collect_walk_paths(
     seen_paths: &mut HashSet<PathBuf>,
     warnings: &mut Vec<String>,
 ) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(err) => {
-                warnings.push(format!("discovery warning: {err}"));
-                continue;
+    // build_parallel() walks the directory tree across multiple threads (work-stealing
+    // internally), which is meaningfully faster for deeply nested repos with many directories.
+    // We collect results via an MPSC channel so each walker thread sends without contention.
+    let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<PathBuf, String>>();
+
+    builder.build_parallel().run(|| {
+        let tx = tx.clone();
+        Box::new(move |entry| {
+            match entry {
+                Err(e) => {
+                    let _ = tx.send(Err(format!("discovery warning: {e}")));
+                }
+                Ok(e) => {
+                    let path = e.into_path();
+                    if !path.is_dir() {
+                        let _ = tx.send(Ok(path));
+                    }
+                }
             }
-        };
-        let path = entry.into_path();
-        if path.is_dir() || !seen_paths.insert(path.clone()) {
-            continue;
-        }
-        paths.push(path);
-    }
-    paths
+            ignore::WalkState::Continue
+        })
+    });
+
+    // Drop the sender that the outer scope holds; the per-thread clones were dropped when
+    // run() returned (all threads finished). Dropping this last sender closes the channel.
+    drop(tx);
+
+    rx.into_iter()
+        .filter_map(|msg| match msg {
+            Ok(path) => {
+                if seen_paths.insert(path.clone()) {
+                    Some(path)
+                } else {
+                    None
+                }
+            }
+            Err(warn) => {
+                warnings.push(warn);
+                None
+            }
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -591,34 +587,53 @@ fn run_parallel_analysis(
     exclude_globs: Option<&GlobSet>,
     enabled_languages: Option<&BTreeSet<Language>>,
     cancel: Option<&AtomicBool>,
+    progress: Option<&ProgressCounters>,
 ) -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
     let thread_count = std::thread::available_parallelism().map_or(DEFAULT_ANALYSIS_THREADS, |n| {
         n.get().min(MAX_ANALYSIS_THREADS)
     });
-    let chunk_size = paths.len().div_ceil(thread_count);
+    // Shared work-queue index: each thread atomically claims the next path to process.
+    // This eliminates static-chunk load imbalance — threads that finish early immediately
+    // pick up more work instead of sitting idle while one overloaded chunk finishes.
+    let next_index = AtomicUsize::new(0);
+    let files_done: Option<&AtomicUsize> = progress.map(|p| p.files_done.as_ref());
+
     std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
-        paths
-            .chunks(chunk_size)
-            .map(|chunk| {
-                s.spawn(move || -> Vec<Result<Option<FileRecord>>> {
-                    let mut results = Vec::with_capacity(chunk.len());
-                    for path in chunk {
+        // IMPORTANT: collect ALL handles before joining any of them.
+        // A lazy .map(spawn).map(join).collect() chain would spawn-then-immediately-join
+        // each thread one at a time, giving zero real parallelism.
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                s.spawn(|| -> Vec<Result<Option<FileRecord>>> {
+                    let mut results = Vec::new();
+                    loop {
                         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                             results.push(Err(anyhow::anyhow!("analysis cancelled")));
                             break;
                         }
+                        let i = next_index.fetch_add(1, Ordering::Relaxed);
+                        if i >= paths.len() {
+                            break;
+                        }
                         results.push(analyze_candidate_file(
-                            path,
+                            &paths[i],
                             root,
                             config,
                             include_globs,
                             exclude_globs,
                             enabled_languages,
                         ));
+                        if let Some(fd) = files_done {
+                            fd.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     results
                 })
             })
+            .collect(); // spawns all threads NOW, before any join
+
+        handles
+            .into_iter()
             .map(|h| {
                 h.join()
                     .map_err(|_| anyhow::anyhow!("analysis thread panicked"))
@@ -742,6 +757,7 @@ pub fn analyze(
     config: &AppConfig,
     runtime_mode: &str,
     cancel: Option<&AtomicBool>,
+    progress: Option<&ProgressCounters>,
 ) -> Result<AnalysisRun> {
     config.validate()?;
 
@@ -790,6 +806,7 @@ pub fn analyze(
             &mut skipped,
             &mut warnings,
             cancel,
+            progress,
         )?;
     }
 

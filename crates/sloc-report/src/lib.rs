@@ -258,7 +258,6 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         nonce: String::new(),
         title: rep.report_title.clone(),
         browser_title: format!("Oxide-SLOC | {}", rep.report_title),
-        generated_display: format!("{} (PST)", to_pst_display(run.tool.timestamp_utc)),
         scan_performed_by: format!(
             "{} / {}",
             run.environment.initiator_username, run.environment.initiator_hostname
@@ -685,6 +684,7 @@ fn pdf_render_page1_header(
     title: &str,
     h: f32,
     hdr_h: f32,
+    banner: Option<&str>,
 ) -> f32 {
     use printpdf::{Color, Mm, Rgb};
     let hdr_y = h - hdr_h;
@@ -721,6 +721,16 @@ fn pdf_render_page1_header(
         Mm(hdr_y + 5.0),
         ctx.font_reg,
     );
+    // Report identification banner — white bold, centered between the two header items.
+    if let Some(text) = banner {
+        let safe = pdf_trunc(&pdf_safe_str(text), 40);
+        // Approximate half-width at 9pt bold Helvetica (~0.97 mm per char) for centering.
+        let text_x = (ctx.w / 2.0 - safe.len() as f32 * 0.97).max(95.0);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+        ctx.layer
+            .use_text(safe, 9.0, Mm(text_x), Mm(hdr_y + 4.5), ctx.font_bold);
+    }
     let title_text_y = hdr_y - 5.5;
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
@@ -815,7 +825,7 @@ fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f
             Rgb::new(0.945, 0.925, 0.90, None),
         );
         ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.49, 0.27, 0.10, None)));
+            .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
         ctx.layer.use_text(
             pdf_fmt_num(*value),
             13.0,
@@ -1136,7 +1146,13 @@ fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
     );
 }
 
-fn pdf_render_page1_footer(ctx: &PdfCtx<'_>, run: &AnalysisRun, footer_h: f32, version: &str) {
+fn pdf_render_page1_footer(
+    ctx: &PdfCtx<'_>,
+    run: &AnalysisRun,
+    footer_h: f32,
+    version: &str,
+    banner: Option<&str>,
+) {
     use printpdf::{Color, Mm, Rgb};
     pdf_fill_rect(
         ctx.layer,
@@ -1148,17 +1164,32 @@ fn pdf_render_page1_footer(ctx: &PdfCtx<'_>, run: &AnalysisRun, footer_h: f32, v
     );
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    // Left section.
     ctx.layer.use_text(
-        format!(
-            "oxide-sloc v{version}  |  AGPL-3.0-or-later  |               \
-             github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
-            pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
-        ),
+        format!("oxide-sloc v{version}  |  AGPL-3.0-or-later"),
         6.5,
         Mm(ctx.margin),
         Mm(3.0),
         ctx.font_reg,
     );
+    // Right section — github.com and Run ID, right-aligned (~1.27 mm per char at 6.5 pt).
+    let right_text = format!(
+        "github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
+        pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
+    );
+    let right_x = (ctx.w - ctx.margin - right_text.len() as f32 * 1.27).max(ctx.margin + 80.0);
+    ctx.layer
+        .use_text(right_text, 6.5, Mm(right_x), Mm(3.0), ctx.font_reg);
+    // Center section — banner text, no background, oxide brand color, bold.
+    if let Some(text) = banner {
+        let safe = pdf_trunc(&pdf_safe_str(text), 40);
+        // Same per-char width as the header banner (0.97 mm at 9pt bold Helvetica).
+        let text_x = (ctx.w / 2.0 - safe.len() as f32 * 0.97).max(ctx.margin + 50.0);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+        ctx.layer
+            .use_text(safe, 9.0, Mm(text_x), Mm(2.6), ctx.font_bold);
+    }
 }
 
 // PDF per-file page renderer — all layout params are distinct and cannot be bundled further
@@ -1183,15 +1214,18 @@ fn pdf_render_per_file_pages(
     title: &str,
     ts: &str,
     version: &str,
+    banner: Option<&str>,
 ) {
     use printpdf::{Color, Mm, Rgb};
     const HDR2_H: f32 = 8.0;
     const SUB_H: f32 = 5.5;
-    let col_x: [f32; 14] = [
-        10.0, 72.0, 92.0, 109.0, 124.0, 144.0, 158.0, 172.0, 191.0, 206.0, 223.0, 238.0, 251.0,
-        273.0,
+    // File column gets ~136 mm; numeric columns compressed to minimum readable width.
+    // Column widths: File=136, Lang=14, Phys=12, Code=10, Comments=13, Blank=10, Mixed=10,
+    //   Functions=13, Classes=11, Variables=13, Imports=11, Tests=10, Assertions=14  → total 277 mm
+    let col_x: [f32; 13] = [
+        10.0, 146.0, 160.0, 172.0, 182.0, 195.0, 205.0, 215.0, 228.0, 239.0, 252.0, 263.0, 273.0,
     ];
-    let col_labels: [&str; 14] = [
+    let col_labels: [&str; 13] = [
         "File",
         "Language",
         "Physical",
@@ -1205,7 +1239,6 @@ fn pdf_render_per_file_pages(
         "Imports",
         "Tests",
         "Assertions",
-        "Suites",
     ];
     let rows_per_page = ((h - HDR2_H - SUB_H - tbl_hdr_h - footer_h) / row_h).floor() as usize;
     let total_files = run.per_file_records.len();
@@ -1246,6 +1279,13 @@ fn pdf_render_per_file_pages(
             Mm(pf_hdr_top + 2.5),
             font_reg,
         );
+        // Report identification banner — white bold, centered in the per-file page header.
+        if let Some(text) = banner {
+            let safe = pdf_trunc(&pdf_safe_str(text), 40);
+            let text_x = (w / 2.0 - safe.len() as f32 * 0.97).max(80.0);
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+            pf_layer.use_text(safe, 9.0, Mm(text_x), Mm(pf_hdr_top + 2.5), font_bold);
+        }
         let sub_top = pf_hdr_top - SUB_H;
         pdf_fill_rect(
             &pf_layer,
@@ -1283,7 +1323,7 @@ fn pdf_render_per_file_pages(
         for (i, lbl) in col_labels.iter().enumerate() {
             pf_layer.use_text(
                 *lbl,
-                5.5,
+                5.0,
                 Mm(col_x[i] + 0.5),
                 Mm(pf_tbl_top - tbl_hdr_h + 1.5),
                 font_bold,
@@ -1308,7 +1348,7 @@ fn pdf_render_per_file_pages(
             let raw = &rec.raw_line_categories;
             let eff = &rec.effective_counts;
             let cells = [
-                pdf_trunc(&file_str, 40),
+                pdf_trunc_end(&file_str, 110),
                 lang_str,
                 pdf_fmt_full(raw.total_physical_lines),
                 pdf_fmt_full(eff.code_lines),
@@ -1321,7 +1361,6 @@ fn pdf_render_per_file_pages(
                 pdf_fmt_full(raw.imports),
                 pdf_fmt_full(raw.test_count),
                 pdf_fmt_full(raw.test_assertion_count),
-                pdf_fmt_full(raw.test_suite_count),
             ];
             for (ci, cell) in cells.iter().enumerate() {
                 pf_layer.use_text(
@@ -1342,17 +1381,29 @@ fn pdf_render_per_file_pages(
             Rgb::new(0.93, 0.91, 0.87, None),
         );
         pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+        // Left section.
         pf_layer.use_text(
-            format!(
-                "oxide-sloc v{version}  |  AGPL-3.0-or-later  |                       \
-                 github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
-                pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
-            ),
+            format!("oxide-sloc v{version}  |  AGPL-3.0-or-later"),
             6.5,
             Mm(margin),
             Mm(3.0),
             font_reg,
         );
+        // Right section — github.com and Run ID, right-aligned (~1.27 mm per char at 6.5 pt).
+        let right_text = format!(
+            "github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
+            pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
+        );
+        let right_x = (w - margin - right_text.len() as f32 * 1.27).max(margin + 80.0);
+        pf_layer.use_text(right_text, 6.5, Mm(right_x), Mm(3.0), font_reg);
+        // Center section — banner text, no background, oxide brand color, bold.
+        if let Some(text) = banner {
+            let safe = pdf_trunc(&pdf_safe_str(text), 40);
+            // Same per-char width as the header banner (0.97 mm at 9pt bold Helvetica).
+            let text_x = (w / 2.0 - safe.len() as f32 * 0.97).max(margin + 50.0);
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+            pf_layer.use_text(safe, 9.0, Mm(text_x), Mm(2.6), font_bold);
+        }
     }
 }
 
@@ -1395,6 +1446,11 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         .format("%Y-%m-%d %H:%M UTC")
         .to_string();
     let version = env!("CARGO_PKG_VERSION");
+    let banner = run
+        .effective_configuration
+        .reporting
+        .report_header_footer
+        .as_deref();
 
     let (doc, page1, layer1) =
         PdfDocument::new(format!("oxide-sloc: {title}"), Mm(W), Mm(H), "Content");
@@ -1415,16 +1471,16 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         row_h: ROW_H,
         tbl_hdr_h: TBL_HDR_H,
     };
-    let roots_text_y = pdf_render_page1_header(&ctx, run, &ts, &title, H, HDR_H);
+    let roots_text_y = pdf_render_page1_header(&ctx, run, &ts, &title, H, HDR_H, banner);
     let row2_bot = pdf_render_summary_chips(&ctx, run, roots_text_y);
     let info_y = pdf_render_info_lines(&ctx, run, row2_bot);
     pdf_render_metric_tables(&ctx, run, info_y - 4.0);
-    pdf_render_page1_footer(&ctx, run, FOOTER_H, version);
+    pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
 
     if !run.per_file_records.is_empty() {
         pdf_render_per_file_pages(
             &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, &title,
-            &ts, version,
+            &ts, version, banner,
         );
     }
 
@@ -1476,6 +1532,16 @@ fn pdf_trunc(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+// Show the tail of a string — prepend "..." when truncated so the meaningful end is visible.
+// Used for file paths where the filename/leaf matters more than the leading directories.
+fn pdf_trunc_end(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("...{}", &s[s.len() - max.saturating_sub(3)..])
     }
 }
 
@@ -1819,12 +1885,46 @@ fn file_row_view(file: &FileRecord) -> FileRow {
     }
 }
 
+fn is_pacific_dst_report(dt: DateTime<Utc>) -> bool {
+    use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone, Weekday};
+    let year = dt.year();
+    let nth_sun = |month: u32, n: u32, hour: u32| {
+        let mut count = 0u32;
+        let mut day = 1u32;
+        loop {
+            let d = NaiveDate::from_ymd_opt(year, month, day).expect("valid");
+            if d.weekday() == Weekday::Sun {
+                count += 1;
+                if count == n {
+                    return Utc.from_utc_datetime(
+                        &d.and_time(NaiveTime::from_hms_opt(hour, 0, 0).expect("valid")),
+                    );
+                }
+            }
+            day += 1;
+        }
+    };
+    let dst_start = nth_sun(3, 2, 10);
+    let dst_end = nth_sun(11, 1, 9);
+    dt >= dst_start && dt < dst_end
+}
+
 fn to_pst_display(dt: DateTime<Utc>) -> String {
-    // PST = UTC−8 fixed offset (no DST adjustment)
-    let pst = FixedOffset::west_opt(8 * 3600).expect("valid PST offset");
-    dt.with_timezone(&pst)
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string()
+    let (offset, label) = if is_pacific_dst_report(dt) {
+        (
+            FixedOffset::west_opt(7 * 3600).expect("valid PDT offset"),
+            "PDT",
+        )
+    } else {
+        (
+            FixedOffset::west_opt(8 * 3600).expect("valid PST offset"),
+            "PST",
+        )
+    };
+    format!(
+        "{} {label}",
+        dt.with_timezone(&offset).format("%Y-%m-%d %H:%M:%S")
+    )
 }
 
 fn build_warning_console(warnings: &[String]) -> String {
@@ -2168,7 +2268,7 @@ struct WarningOpportunityRow {
     html, body { margin: 0; min-height: 100vh; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
     body { overflow-x: hidden; transition: background 0.18s ease, color 0.18s ease; }
     .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: flex; align-items: center; position: relative; }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; flex: 0 0 auto; }
     .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
@@ -2176,14 +2276,14 @@ struct WarningOpportunityRow {
     .brand-copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
     .brand-title { margin: 0; color: #fff; font-size: 17px; font-weight: 800; line-height: 1.1; }
     .brand-subtitle { color: rgba(255,255,255,0.85); font-size: 12px; line-height: 1.2; margin-top: 2px; }
-    .nav-project-slot { position: absolute; left: 50%; transform: translateX(-50%); pointer-events: none; }
+    .nav-project-slot { display:flex; justify-content:center; min-width:0; }
     .nav-project-pill, .nav-pill, .theme-toggle, .header-button {
       display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.10); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
     }
-    .nav-project-pill { pointer-events: auto; max-width: 280px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .nav-project-pill { pointer-events: auto; width: 100%; max-width: 280px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
-    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; }
-    .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:nowrap; min-width:0; margin-left: auto; }
+    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:nowrap; min-width:0; }
     @media (max-width: 1400px) { .nav-status { gap: 6px; } .header-button, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-status { gap: 4px; } .header-button, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } }
     .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; }
@@ -2254,9 +2354,8 @@ struct WarningOpportunityRow {
     @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
     .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
     .subtitle { margin: 10px 0 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
-    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 20px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-    .meta-chip { display:inline-flex; align-items:center; gap:5px; padding:0 14px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
-    .meta-chip:first-child { padding-left:0; }
+    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 20px; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); width:100%; }
+    .meta-chip { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:5px; padding:0 10px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
     .meta-chip:last-child { border-right:none; }
     .meta-chip b { color:var(--text); font-weight:700; }
     .soft-chip { display:inline-flex; align-items:center; min-height:32px; padding:0 12px; border-radius:999px; border:1px solid var(--line); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; }
@@ -2588,9 +2687,8 @@ struct WarningOpportunityRow {
 
       .run-id-row { flex-wrap: wrap !important; gap: 4px !important; }
       .run-id-chip { font-size: 9px !important; padding: 4px 8px !important; border-left-width: 2px !important; }
-      .meta { flex-wrap: wrap !important; gap: 0 !important; padding: 4px 0 !important; border-top: 1px solid #ccc !important; border-bottom: 1px solid #ccc !important; }
-      .meta-chip { font-size: 9px !important; padding: 0 8px !important; border-right: 1px solid #ccc !important; }
-      .meta-chip:first-child { padding-left: 0 !important; }
+      .meta { flex-wrap: wrap !important; gap: 0 !important; padding: 4px 0 !important; border-top: 1px solid #ccc !important; border-bottom: 1px solid #ccc !important; width: 100% !important; }
+      .meta-chip { flex: 1 !important; justify-content: center !important; font-size: 9px !important; padding: 0 8px !important; border-right: 1px solid #ccc !important; }
       .meta-chip:last-child { border-right: none !important; }
 
       .report-footer {
@@ -2693,7 +2791,8 @@ struct WarningOpportunityRow {
     .chart-expand-btn:hover { background:var(--surface-2); color:var(--text); }
     .chart-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9999; display:flex; align-items:center; justify-content:center; padding:24px; box-sizing:border-box; }
     .chart-modal { background:var(--bg); border-radius:16px; padding:24px 28px; max-width:1000px; width:100%; max-height:88vh; overflow-y:auto; position:relative; box-shadow:0 24px 80px rgba(0,0,0,0.3); }
-    .chart-modal-title { font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin:0 0 16px; display:block; }
+    .chart-modal-title { font-size:15px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--text); margin:0 0 2px; display:block; }
+    .chart-modal-subtitle { font-size:13px; font-weight:600; color:var(--muted); margin:0 0 16px; display:block; letter-spacing:.02em; }
     .chart-modal-close { position:absolute; top:14px; right:18px; background:none; border:none; font-size:22px; cursor:pointer; color:var(--text); line-height:1; padding:0; }
     .chart-modal-close:hover { opacity:.7; }
     body.dark-theme .chart-modal { background:var(--surface); }
@@ -2748,10 +2847,42 @@ struct WarningOpportunityRow {
     .pdf-variant-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#7b675b;margin:0 0 3px;}
     .pdf-variant-img{width:100%;height:auto;display:block;border-radius:6px;border:1px solid #ddd;}
 
+    #rpt-loading-overlay{position:fixed;inset:0;z-index:9999;background:var(--bg,#f5f0eb);display:flex;align-items:center;justify-content:center;transition:opacity .6s cubic-bezier(.4,0,.2,1);}
+    #rpt-loading-overlay.fade-out{opacity:0;pointer-events:none;}
+    .rpt-load-card{display:flex;flex-direction:column;align-items:center;gap:28px;padding:52px 96px;min-width:320px;background:linear-gradient(155deg,rgba(255,254,251,.96) 0%,rgba(255,246,236,.9) 100%);border:1px solid rgba(196,110,40,.13);border-radius:28px;box-shadow:0 0 0 1px rgba(255,255,255,.75) inset,0 8px 72px rgba(150,80,20,.09),0 2px 16px rgba(0,0,0,.06);animation:rpt-card-in .55s cubic-bezier(.22,.68,0,1.12) both;}
+    @keyframes rpt-card-in{from{opacity:0;transform:translateY(14px) scale(.95);}to{opacity:1;transform:none;}}
+    .rpt-load-logo{width:52px;height:52px;object-fit:contain;filter:drop-shadow(0 3px 10px rgba(150,80,20,.22));animation:rpt-logo-in .5s cubic-bezier(.22,.68,0,1.2) .08s both,rpt-logo-bounce 1.8s cubic-bezier(.36,.07,.19,.97) .6s infinite;}
+    @keyframes rpt-logo-in{from{opacity:0;transform:scale(.75);}to{opacity:1;transform:none;}}
+    @keyframes rpt-logo-bounce{0%,100%{transform:translateY(0) scale(1);filter:drop-shadow(0 3px 10px rgba(150,80,20,.22));}40%{transform:translateY(-10px) scale(1.05);filter:drop-shadow(0 12px 16px rgba(150,80,20,.14));}55%{transform:translateY(-8px) scale(1.04);}70%{transform:translateY(0) scale(.97);filter:drop-shadow(0 2px 6px rgba(150,80,20,.28));}80%{transform:translateY(-3px) scale(1.01);}90%{transform:translateY(0) scale(.99);}}
+    .rpt-spinner-wrap{position:relative;width:62px;height:62px;}
+    .rpt-spinner-track{position:absolute;inset:0;border-radius:50%;border:3px solid rgba(196,92,16,.1);}
+    .rpt-spinner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(196,92,16,0) 0%,rgba(196,92,16,.2) 38%,#c45c10 100%);animation:rpt-spin 1.1s cubic-bezier(.4,0,.6,1) infinite;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#fff calc(100% - 3px));mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#fff calc(100% - 3px));}
+    @keyframes rpt-spin{to{transform:rotate(360deg);}}
+    .rpt-load-divider{width:36px;height:1px;background:linear-gradient(90deg,transparent,rgba(196,92,16,.18),transparent);}
+    .rpt-loading-text{font-size:13px;font-weight:500;color:var(--muted,#8a7060);letter-spacing:.06em;display:flex;align-items:baseline;gap:2px;}
+    .rpt-dot{display:inline-block;animation:rpt-bounce 1.7s ease-in-out infinite;opacity:0;}
+    .rpt-dot:nth-child(2){animation-delay:.28s;}
+    .rpt-dot:nth-child(3){animation-delay:.56s;}
+    @keyframes rpt-bounce{0%,60%,100%{opacity:0;transform:translateY(0);}30%{opacity:1;transform:translateY(-4px);}}
+    body.dark-theme #rpt-loading-overlay{background:var(--bg,#1a1410);}
+    body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(40,21,10,.9) 0%,rgba(28,13,4,.94) 100%);border-color:rgba(200,120,50,.13);box-shadow:0 0 0 1px rgba(255,200,140,.04) inset,0 8px 72px rgba(0,0,0,.48),0 2px 16px rgba(0,0,0,.32);}
+    body.dark-theme .rpt-spinner-track{border-color:rgba(196,92,16,.16);}
+    body.dark-theme .rpt-load-divider{background:linear-gradient(90deg,transparent,rgba(196,92,16,.22),transparent);}
 </style>
 <script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
 </head>
 <body{% if report_header_footer.is_some() %} class="has-report-banner"{% endif %}>
+  <div id="rpt-loading-overlay" aria-live="polite" aria-label="Loading report">
+    <div class="rpt-load-card">
+      <img src="{{ small_logo_uri }}" alt="oxide-sloc" class="rpt-load-logo" />
+      <div class="rpt-spinner-wrap">
+        <div class="rpt-spinner-track"></div>
+        <div class="rpt-spinner"></div>
+      </div>
+      <div class="rpt-load-divider"></div>
+      <div class="rpt-loading-text">Loading report<span class="rpt-dot">.</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span></div>
+    </div>
+  </div>
   <div class="background-watermarks" aria-hidden="true">
     <img src="{{ logo_text_uri }}" alt="" />
     <img src="{{ logo_text_uri }}" alt="" />
@@ -2872,8 +3003,7 @@ struct WarningOpportunityRow {
 
       <div class="meta">
         <span class="meta-chip">Scan by <b>{{ scan_performed_by }}</b></span>
-        <span class="meta-chip">Scanned <b>{{ scan_time_pst }} PST</b></span>
-        <span class="meta-chip">Generated <b>{{ generated_display }}</b></span>
+        <span class="meta-chip">Scanned <b>{{ scan_time_pst }}</b></span>
         <span class="meta-chip">OS <b>{{ run.environment.operating_system }} / {{ run.environment.architecture }}</b></span>
         <span class="meta-chip">Files analyzed <b>{{ run.summary_totals.files_analyzed }}</b></span>
         <span class="meta-chip">Files skipped <b>{{ run.summary_totals.files_skipped }}</b></span>
@@ -3842,6 +3972,7 @@ struct WarningOpportunityRow {
         if (big) big.textContent = pct.toFixed(1) + '%';
         if (exact) exact.textContent = '';
       }
+      (function(){var ov=document.getElementById('rpt-loading-overlay');if(ov){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},450);}})();
     })();
     // ── Info chip interactivity ───────────────────────────────────────────────
     (function() {
@@ -3868,11 +3999,111 @@ struct WarningOpportunityRow {
       });
     })();
     // ── Export helpers ────────────────────────────────────────────────────────
+    function _slocUnh(s){var e=document.createElement('div');e.innerHTML=s;return e.textContent;}
+    var _SLOC_META={runId:"{{ run.tool.run_id }}",gitCommit:"{% if let Some(c) = run.git_commit_long %}{{ c }}{% else %}(not detected){% endif %}",branch:_slocUnh("{% if let Some(b) = run.git_branch %}{{ b }}{% else %}(not detected){% endif %}"),lastCommitBy:_slocUnh("{% if let Some(a) = run.git_commit_author %}{{ a }}{% else %}(not detected){% endif %}"),scanBy:_slocUnh("{{ scan_performed_by }}"),scanned:"{{ scan_time_pst }}",os:"{{ run.environment.operating_system }} / {{ run.environment.architecture }}",filesAnalyzed:{{ run.summary_totals.files_analyzed }},filesSkipped:{{ run.summary_totals.files_skipped }},physicalLines:{{ run.summary_totals.total_physical_lines }},codeLines:{{ run.summary_totals.code_lines }},commentLines:{{ run.summary_totals.comment_lines }},blankLines:{{ run.summary_totals.blank_lines }},mixedSeparate:{{ run.summary_totals.mixed_lines_separate }},functions:{{ run.summary_totals.functions }},classes:{{ run.summary_totals.classes }},variables:{{ run.summary_totals.variables }},imports:{{ run.summary_totals.imports }},tests:{{ run.summary_totals.test_count }},toolVersion:"{{ tool_version }}"};
     function slocEscXml(v){return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
     function slocEscCsv(v){var s=String(v);return(s.indexOf(',')>=0||s.indexOf('"')>=0||s.indexOf('\n')>=0)?'"'+s.replace(/"/g,'""')+'"':s;}
     function slocDownload(data,name,mime){var b=new Blob([data],{type:mime});var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},200);}
     function slocCsv(fname,hdrs,rows){slocDownload([hdrs.map(slocEscCsv).join(',')].concat(rows.map(function(r){return r.map(slocEscCsv).join(',');})).join('\r\n'),fname,'text/csv;charset=utf-8;');}
     function slocXls(fname,sheet,hdrs,rows){var enc=new TextEncoder();var CT=[];for(var _n=0;_n<256;_n++){var _c=_n;for(var _k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}function crc32(d){var v=0xFFFFFFFF;for(var i=0;i<d.length;i++)v=CT[(v^d[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}function u2(n){return[n&0xFF,(n>>8)&0xFF];}function u4(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}function xe(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}var ss=[],si={};function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}var rx='<row r="1">';hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});rx+='</row>';rows.forEach(function(row,ri){var rn=ri+2;rx+='<row r="'+rn+'">';row.forEach(function(cell,c){var ref=colRef(c,rn);var num=c>=2&&cell!==''&&cell!=null&&!isNaN(Number(cell));rx+=num?'<c r="'+ref+'" s="2"><v>'+xe(cell)+'</v></c>':'<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';});rx+='</row>';});var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';var wsh='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData>'+rx+'</sheetData></worksheet>';var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><b/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';var F={'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>','_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets><sheet name="'+xe(sheet)+'" sheetId="1" r:id="rId1"/></sheets></workbook>','xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>','xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':wsh};var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'];var zparts=[],zcds=[],zoff=0,znf=0;order.forEach(function(name){var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);zoff+=entry.length;znf++;});var cdSz=zcds.reduce(function(a,c){return a+c.length;},0);var ea=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(zoff)).concat([0,0]);var tot=zoff+cdSz+ea.length,zout=new Uint8Array(tot),zpos=0;zparts.forEach(function(p){zout.set(p,zpos);zpos+=p.length;});zcds.forEach(function(c){zout.set(c,zpos);zpos+=c.length;});zout.set(new Uint8Array(ea),zpos);slocDownload(zout,fname,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}
+    function slocXlsMulti(fname,sheets){
+      var enc=new TextEncoder();
+      var CT=[];
+      for(var _n=0;_n<256;_n++){var _c=_n;for(var _k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}
+      function crc32(d){var v=0xFFFFFFFF;for(var i=0;i<d.length;i++)v=CT[(v^d[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}
+      function u2(n){return[n&0xFF,(n>>8)&0xFF];}
+      function u4(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
+      function xe(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+      var ss=[],si={};
+      function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}
+      function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}
+      var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
+      // Style indices: 0=normal 1=col-header(orange-fill/white-bold) 2=number(#,##0/right) 3=section(cream-fill/orange-bold) 4=bold-label
+      var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'">'
+        +'<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0"/></numFmts>'
+        +'<fonts count="3">'
+          +'<font><sz val="11"/><name val="Calibri"/></font>'
+          +'<font><sz val="11"/><b/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+          +'<font><sz val="11"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font>'
+        +'</fonts>'
+        +'<fills count="4">'
+          +'<fill><patternFill patternType="none"/></fill>'
+          +'<fill><patternFill patternType="gray125"/></fill>'
+          +'<fill><patternFill patternType="solid"><fgColor rgb="FFC45C10"/><bgColor indexed="64"/></patternFill></fill>'
+          +'<fill><patternFill patternType="solid"><fgColor rgb="FFFAF0E6"/><bgColor indexed="64"/></patternFill></fill>'
+        +'</fills>'
+        +'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        +'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        +'<cellXfs count="5">'
+          +'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+          +'<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+          +'<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="right"/></xf>'
+          +'<xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+          +'<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+        +'</cellXfs>'
+        +'<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        +'</styleSheet>';
+      var wsXmls=[];
+      sheets.forEach(function(sh){
+        var rx='<row r="1">';
+        sh.hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});
+        rx+='</row>';
+        var rn=2;
+        sh.rows.forEach(function(row){
+          if(!row||row.length===0){rx+='<row r="'+rn+'"/>';rn++;return;}
+          if(row.length===1&&row[0]&&typeof row[0]==='object'&&row[0]._sec){
+            rx+='<row r="'+rn+'">';
+            rx+='<c r="'+colRef(0,rn)+'" t="s" s="3"><v>'+S(row[0].v)+'</v></c>';
+            for(var ec=1;ec<sh.hdrs.length;ec++){rx+='<c r="'+colRef(ec,rn)+'" s="3"/>';}
+            rx+='</row>';rn++;return;
+          }
+          rx+='<row r="'+rn+'">';
+          row.forEach(function(cell,c){
+            var ref=colRef(c,rn);
+            if(cell===null||cell===undefined||cell===''){rx+='<c r="'+ref+'"/>';return;}
+            if(typeof cell==='object'&&cell!==null){
+              var cv=cell.v,cs=cell.s!=null?cell.s:0;
+              if(typeof cv==='number'){rx+='<c r="'+ref+'" s="'+cs+'"><v>'+xe(cv)+'</v></c>';}
+              else{rx+='<c r="'+ref+'" t="s" s="'+cs+'"><v>'+S(cv)+'</v></c>';}
+              return;
+            }
+            if(typeof cell==='number'){rx+='<c r="'+ref+'" s="2"><v>'+xe(cell)+'</v></c>';return;}
+            rx+='<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';
+          });
+          rx+='</row>';rn++;
+        });
+        var cw='';
+        if(sh.colWidths&&sh.colWidths.length>0){
+          cw='<cols>';
+          sh.colWidths.forEach(function(w,i){cw+='<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+w+'" customWidth="1"/>';});
+          cw+='</cols>';
+        }
+        wsXmls.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'">'
+          +'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+          +'<sheetFormatPr defaultRowHeight="15"/>'+cw+'<sheetData>'+rx+'</sheetData></worksheet>');
+      });
+      var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';
+      var ctOver=sheets.map(function(_,i){return'<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}).join('');
+      var ctXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+ctOver+'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>';
+      var wbSh=sheets.map(function(sh,i){return'<sheet name="'+xe(sh.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}).join('');
+      var wbXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets>'+wbSh+'</sheets></workbook>';
+      var wbR=sheets.map(function(_,i){return'<Relationship Id="rId'+(i+1)+'" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}).join('');
+      wbR+='<Relationship Id="rId'+(sheets.length+1)+'" Type="'+ons+'relationships/styles" Target="styles.xml"/>'
+        +'<Relationship Id="rId'+(sheets.length+2)+'" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/>';
+      var wbRXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships">'+wbR+'</Relationships>';
+      var F={'[Content_Types].xml':ctXml,'_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':wbXml,'xl/_rels/workbook.xml.rels':wbRXml,'xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml};
+      var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml'];
+      sheets.forEach(function(_,i){var k='xl/worksheets/sheet'+(i+1)+'.xml';F[k]=wsXmls[i];order.push(k);});
+      var zparts=[],zcds=[],zoff=0,znf=0;
+      order.forEach(function(name){var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);zoff+=entry.length;znf++;});
+      var cdSz=zcds.reduce(function(a,c){return a+c.length;},0);
+      var ea=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(zoff)).concat([0,0]);
+      var tot=zoff+cdSz+ea.length,zout=new Uint8Array(tot),zpos=0;
+      zparts.forEach(function(p){zout.set(p,zpos);zpos+=p.length;});
+      zcds.forEach(function(c){zout.set(c,zpos);zpos+=c.length;});
+      zout.set(new Uint8Array(ea),zpos);
+      slocDownload(zout,fname,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    }
     window.resetPerFileTable = function() {
       var tbl = document.getElementById('per-file-table');
       if (!tbl) return;
@@ -3890,9 +4121,71 @@ struct WarningOpportunityRow {
     var _exportSlug='per-file_'+_titleSlug+(_commitSlug?'_'+_commitSlug:'');
     function getReportExportRows(){var r=[];document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){var tds=tr.querySelectorAll('td');if(tds.length<11)return;r.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim(),tds[3].textContent.trim(),tds[4].textContent.trim(),tds[5].textContent.trim(),tds[6].textContent.trim(),tds[7].textContent.trim(),tds[8].textContent.trim(),tds[9].textContent.trim(),tds[10].textContent.trim()]);});return r;}
     window.exportReportCsv=function(){slocCsv(_exportSlug+'.csv',_rh,getReportExportRows());};
-    window.exportReportXls=function(){slocXls(_exportSlug+'.xlsx','Per-File Detail',_rh,getReportExportRows());};
+    window.exportReportXls=function(){
+      var fname='report_'+_titleSlug+(_commitSlug?'_'+_commitSlug:'')+'.xlsx';
+      function sec(v){return[{_sec:true,v:v}];}
+      function B(v){return{v:v,s:4};}
+      function N(v){return{v:typeof v==='number'?v:Number(v),s:2};}
+      var dens=_SLOC_META.physicalLines>0?(_SLOC_META.codeLines/_SLOC_META.physicalLines*100).toFixed(1)+'%':'0%';
+      var sumRows=[
+        sec('RUN INFORMATION'),
+        [B('Run ID'),_SLOC_META.runId,''],
+        [B('Git Commit'),_SLOC_META.gitCommit,''],
+        [B('Branch'),_SLOC_META.branch,''],
+        [B('Last Commit By'),_SLOC_META.lastCommitBy,''],
+        [B('Scan By'),_SLOC_META.scanBy,''],
+        [B('Scanned'),_SLOC_META.scanned,''],
+        [B('OS'),_SLOC_META.os,''],
+        [B('Files Analyzed'),N(_SLOC_META.filesAnalyzed),'Total source files included in this analysis'],
+        [B('Files Skipped'),N(_SLOC_META.filesSkipped),'Files excluded (binary, unsupported, or policy-filtered)'],
+        [],
+        sec('CODE METRICS'),
+        [B('Physical Lines'),N(_SLOC_META.physicalLines),'Total lines including code, comments, and blanks'],
+        [B('Code Lines'),N(_SLOC_META.codeLines),'Lines containing executable source code'],
+        [B('Comments'),N(_SLOC_META.commentLines),'Lines consisting entirely of comments or documentation'],
+        [B('Blank Lines'),N(_SLOC_META.blankLines),'Empty or whitespace-only lines'],
+        [B('Mixed Separate'),N(_SLOC_META.mixedSeparate),'Lines with both code and trailing comment, counted separately'],
+        [B('Functions'),N(_SLOC_META.functions),'Best-effort count of function/method definitions'],
+        [B('Classes / Types'),N(_SLOC_META.classes),'Best-effort count of class, struct, interface definitions'],
+        [B('Variables'),N(_SLOC_META.variables),'Best-effort count of variable and constant declarations'],
+        [B('Imports'),N(_SLOC_META.imports),'Best-effort count of import, include, module-use statements'],
+        [B('Tests'),N(_SLOC_META.tests),'Best-effort count of test cases (GTest, PyTest, JUnit, etc.)'],
+        [B('Code Density'),dens,'Percentage of physical lines that contain executable source code'],
+        [B('Tool Version'),'oxide-sloc '+_SLOC_META.toolVersion,''],
+      ];
+      var langHdrs=['Language','Files','Physical Lines','Code Lines','Comments','Blank Lines','Mixed','Functions','Classes','Variables','Imports','Tests','Assertions','Suites'];
+      var langRows=[];
+      document.querySelectorAll('#lang-breakdown-table tbody tr').forEach(function(tr){
+        var tds=tr.querySelectorAll('td');
+        var row=[];
+        Array.prototype.forEach.call(tds,function(td,i){var v=td.textContent.trim();row.push(i>0&&v!==''&&!isNaN(Number(v))?Number(v):v);});
+        langRows.push(row);
+      });
+      var pfHdrs=['File','Language','Physical Lines','Code Lines','Comments','Blank','Mixed','Functions','Classes','Variables','Imports','Tests','Assertions','Suites'];
+      var pfRows=[];
+      document.querySelectorAll('#per-file-table tbody tr').forEach(function(tr){
+        var tds=tr.querySelectorAll('td');
+        if(tds.length<11)return;
+        var row=[];
+        Array.prototype.forEach.call(tds,function(td,i){var v=td.textContent.trim();row.push(i>=2&&v!==''&&!isNaN(Number(v))?Number(v):v);});
+        pfRows.push(row);
+      });
+      var skHdrs=['File','Status','Warnings'];
+      var skRows=[];
+      document.querySelectorAll('#skipped-table tbody tr').forEach(function(tr){
+        var tds=tr.querySelectorAll('td');
+        if(tds.length<3)return;
+        skRows.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim()]);
+      });
+      slocXlsMulti(fname,[
+        {name:'Summary',hdrs:['Field / Metric','Value','Description'],rows:sumRows,colWidths:[22,45,55]},
+        {name:'Language Breakdown',hdrs:langHdrs,rows:langRows,colWidths:[16,8,14,12,12,12,8,10,10,10,10,8,10,8]},
+        {name:'Per-File Detail',hdrs:pfHdrs,rows:pfRows,colWidths:[50,12,12,12,12,10,8,10,10,10,10,8,10,8]},
+        {name:'Skipped Files',hdrs:skHdrs,rows:skRows,colWidths:[60,25,50]}
+      ]);
+    };
     Array.prototype.slice.call(document.querySelectorAll('[data-export-csv]')).forEach(function(btn){btn.addEventListener('click',function(){slocCsv(_exportSlug+'.csv',_rh,getReportExportRows());});});
-    Array.prototype.slice.call(document.querySelectorAll('[data-export-xls]')).forEach(function(btn){btn.addEventListener('click',function(){slocXls(_exportSlug+'.xlsx','Per-File Detail',_rh,getReportExportRows());});});
+    Array.prototype.slice.call(document.querySelectorAll('[data-export-xls]')).forEach(function(btn){btn.addEventListener('click',window.exportReportXls);});
     Array.prototype.slice.call(document.querySelectorAll('[data-reset-table]')).forEach(function(btn){btn.addEventListener('click',window.resetPerFileTable);});
     var _skippedRh=['File','Status','Warnings'];
     var _skippedSlug='skipped_'+_titleSlug+(_commitSlug?'_'+_commitSlug:'');
@@ -3900,6 +4193,9 @@ struct WarningOpportunityRow {
     (function(){var b=document.getElementById('skipped-export-csv');if(b)b.addEventListener('click',function(){slocCsv(_skippedSlug+'.csv',_skippedRh,getSkippedExportRows());});})();
     (function(){var b=document.getElementById('skipped-export-xls');if(b)b.addEventListener('click',function(){slocXls(_skippedSlug+'.xlsx','Skipped Files',_skippedRh,getSkippedExportRows());});})();
     // ── Chart.js initialization ───────────────────────────────────────────────
+    // Deferred so the browser can repaint (dismiss the loading overlay) before
+    // the canvas/SVG chart work blocks the main thread.
+    requestAnimationFrame(function() {
     (function() {
       var D = {{ lang_chart_json|safe }};
       var SUB_D = {{ submodule_chart_json|safe }};
@@ -3958,6 +4254,30 @@ struct WarningOpportunityRow {
                 }
                 ctx.restore();
               });
+            });
+          }
+        };
+      }
+      function makeStackedEndPlugin(fmtFn) {
+        return {
+          afterDatasetsDraw: function(chart) {
+            var ctx = chart.ctx;
+            var tc = clr().text;
+            var nDs = chart.data.datasets.length;
+            if (nDs === 0) return;
+            var lastMeta = chart.getDatasetMeta(nDs - 1);
+            lastMeta.data.forEach(function(el, idx) {
+              var total = 0;
+              chart.data.datasets.forEach(function(ds) { total += ds.data[idx] || 0; });
+              var label = fmtFn(total, idx);
+              if (label == null || label === '') return;
+              ctx.save();
+              ctx.font = '600 11px Inter,ui-sans-serif,sans-serif';
+              ctx.fillStyle = tc;
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(String(label), el.x + 5, el.y);
+              ctx.restore();
             });
           }
         };
@@ -4075,6 +4395,7 @@ struct WarningOpportunityRow {
             options: {
               indexAxis: 'y', responsive: true, maintainAspectRatio: false,
               animation: { duration: 500, easing: 'easeOutQuart' },
+              layout: { padding: { right: 64 } },
               scales: {
                 x: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
                      title: { display: true, text: r.yLabel, color: c.text } },
@@ -4091,7 +4412,8 @@ struct WarningOpportunityRow {
                   }
                 }
               }
-            }
+            },
+            plugins: [makeDlPlugin(function(v){ return fmt(v||0); }, 'end')]
           });
           ALL_CHARTS.push(projChart);
         }
@@ -4104,7 +4426,8 @@ struct WarningOpportunityRow {
           overviewExpandBtn.addEventListener('click', function() {
             var r = getData();
             var n = r.sorted.length || 1;
-            var modalH = Math.max(480, Math.min(860, n * 29 + 96));
+            var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
+            var modalH = Math.min(Math.max(480, n * 29 + 96), maxH);
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
             overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;">'
@@ -4227,6 +4550,7 @@ struct WarningOpportunityRow {
             options: {
               indexAxis: 'y', responsive: true, maintainAspectRatio: false,
               animation: { duration: 500, easing: 'easeOutQuart' },
+              layout: { padding: { right: 64 } },
               scales: {
                 x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
                 y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
@@ -4251,7 +4575,11 @@ struct WarningOpportunityRow {
                   }
                 }
               }
-            }
+            },
+            plugins: [makeStackedEndPlugin(function(total) {
+              if (compMode === 'pct') return '';
+              return fmt(Math.round(total));
+            })]
           });
           ALL_CHARTS.push(compChart);
         }
@@ -4504,10 +4832,13 @@ struct WarningOpportunityRow {
           semExpandBtn.addEventListener('click', function() {
             var mKey = semSel ? semSel.value : 'functions';
             var n = SEM_D.length || 1;
-            var modalH = Math.max(672, n * 46 + 96);
+            var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
+            var modalH = Math.min(Math.max(400, n * 46 + 96), maxH);
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Semantic Metrics — Full View</span><div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
+            var semLabels2 = { functions:'Functions', classes:'Classes / Types', variables:'Variables' };
+            var semSubtitle2 = semLabels2[mKey] || mKey;
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Semantic Metrics — Full View</span><span class="chart-modal-subtitle">' + semSubtitle2 + '</span><div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function() { document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e) { if (e.target === overlay) document.body.removeChild(overlay); });
@@ -4646,11 +4977,13 @@ struct WarningOpportunityRow {
 
       // ── Expand button handlers ────────────────────────────────────────────────
       (function() {
-        function makeOverlay(title, h) {
+        function makeOverlay(title, h, subtitle) {
           var overlay = document.createElement('div');
           overlay.className = 'chart-modal-overlay';
-          var hAttr = 'height:' + (h || 696) + 'px;';
-          overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">' + title + '</span><div style="position:relative;width:100%;' + hAttr + '"><canvas id="modal-expand-canvas"></canvas></div></div>';
+          var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
+          var hAttr = 'height:' + Math.min(h || 696, maxH) + 'px;';
+          var subHtml = subtitle ? '<span class="chart-modal-subtitle">' + subtitle + '</span>' : '';
+          overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">' + title + '</span>' + subHtml + '<div style="position:relative;width:100%;' + hAttr + '"><canvas id="modal-expand-canvas"></canvas></div></div>';
           document.body.appendChild(overlay);
           overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
           overlay.addEventListener('click', function(e){ if(e.target === overlay) document.body.removeChild(overlay); });
@@ -4664,7 +4997,8 @@ struct WarningOpportunityRow {
           btn.addEventListener('click', function(){
             var activeTab = document.querySelector('[data-comp-tab].active');
             var compMode = activeTab ? activeTab.getAttribute('data-comp-tab') : 'absolute';
-            var canvas = makeOverlay('Language Composition — Full View');
+            var compLabel = compMode === 'pct' ? 'Composition %' : 'Absolute Lines';
+            var canvas = makeOverlay('Language Composition — Full View', undefined, compLabel);
             if(!canvas) return;
             var data = D.slice(0, 15);
             var c = clr(), isPct = compMode === 'pct';
@@ -4685,12 +5019,17 @@ struct WarningOpportunityRow {
               },
               options: {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                layout: { padding: { right: 64 } },
                 scales: {
                   x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
                   y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
                 },
                 plugins: { legend: { position: 'bottom', labels: { color: c.text } } }
-              }
+              },
+              plugins: [makeStackedEndPlugin(function(total) {
+                if (isPct) return '';
+                return fmt(Math.round(total));
+              })]
             });
           });
         })();
@@ -4700,7 +5039,7 @@ struct WarningOpportunityRow {
           var btn = document.getElementById('scatter-expand-btn');
           if(!btn || !SCAT_D || !SCAT_D.length) return;
           btn.addEventListener('click', function(){
-            var canvas = makeOverlay('File Count vs SLOC — Full View');
+            var canvas = makeOverlay('File Count vs SLOC — Full View', undefined, 'File count vs SLOC per language');
             if(!canvas) return;
             var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
             var c = clr();
@@ -4747,8 +5086,8 @@ struct WarningOpportunityRow {
               var db=(b.comments||0)/Math.max((b.code||0)+(b.comments||0),1);
               return db-da;
             });
-            var h = Math.max(672, Math.min(864, data.length * 46 + 96));
-            var canvas = makeOverlay('Comment Density — Full View', h);
+            var h = Math.min(Math.max(672, data.length * 46 + 96), Math.max(400, Math.floor(window.innerHeight * 0.82) - 130));
+            var canvas = makeOverlay('Comment Density — Full View', h, 'Comment ratio per language');
             if(!canvas) return;
             var densities = data.map(function(d){ var sig=(d.code||0)+(d.comments||0); return sig>0?Math.round((d.comments||0)/sig*1000)/10:0; });
             var c = clr();
@@ -4761,12 +5100,14 @@ struct WarningOpportunityRow {
               },
               options: {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                layout: { padding: { right: 42 } },
                 scales: {
                   x: { min:0, max:100, grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return v+'%';}} },
                   y: { grid:{display:false}, ticks:{color:c.text} }
                 },
                 plugins: { legend:{display:false}, tooltip:{callbacks:{label:function(ctx){return '  Comment %: '+ctx.parsed.x.toFixed(1)+'%';}}} }
-              }
+              },
+              plugins: [makeDlPlugin(function(v) { return (v || 0) + '%'; }, 'end')]
             });
           });
         })();
@@ -4776,7 +5117,7 @@ struct WarningOpportunityRow {
           var btn = document.getElementById('filesize-expand-btn');
           if(!btn || !HIST_D || !HIST_D.length) return;
           btn.addEventListener('click', function(){
-            var canvas = makeOverlay('File Size Distribution — Full View');
+            var canvas = makeOverlay('File Size Distribution — Full View', undefined, 'File count per SLOC bucket');
             if(!canvas) return;
             var labels = HIST_D.map(function(d){return d.label;});
             var counts = HIST_D.map(function(d){return d.count||0;});
@@ -4791,12 +5132,14 @@ struct WarningOpportunityRow {
               },
               options: {
                 responsive: true, maintainAspectRatio: false,
+                layout: { padding: { top: 18 } },
                 scales: {
                   x: { grid:{display:false}, ticks:{color:c.text} },
                   y: { beginAtZero:true, grid:{color:c.grid}, ticks:{color:c.text, precision:0}, title:{display:true, text:'File Count', color:c.text} }
                 },
                 plugins: { legend:{display:false}, tooltip:{callbacks:{label:function(ctx){ var pct=total>0?Math.round(ctx.parsed.y/total*1000)/10:0; return ['  Files: '+ctx.parsed.y, '  Share: '+pct+'%']; }}} }
-              }
+              },
+              plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
             });
           });
         })();
@@ -4817,8 +5160,11 @@ struct WarningOpportunityRow {
             data = data.slice(0, 30);
             var Y_LABELS = { code:'Code Lines', comment:'Comment Lines', blank:'Blank Lines', physical:'Physical Lines', files:'Files' };
             var SUB_COLS = { code:OX, comment:GN, blank:GY, physical:'#4472C4', files:'#805099' };
-            var h = Math.max(672, Math.min(864, data.length * 36 + 96));
-            var canvas = makeOverlay('Submodule Breakdown — Full View', h);
+            var h = Math.min(Math.max(672, data.length * 36 + 96), Math.max(400, Math.floor(window.innerHeight * 0.82) - 130));
+            var subMetricLabels = { code:'Code Lines', comment:'Comment Lines', blank:'Blank Lines', physical:'Physical Lines', files:'Files' };
+            var subSortLabels = { desc:'Value ↓', asc:'Value ↑', name:'Name A→Z' };
+            var subLabel = (subMetricLabels[yKey]||yKey) + ' · ' + (subSortLabels[sortMode]||sortMode);
+            var canvas = makeOverlay('Submodule Breakdown — Full View', h, subLabel);
             if(!canvas) return;
             var c = clr();
             new Chart(canvas, {
@@ -4830,12 +5176,14 @@ struct WarningOpportunityRow {
               },
               options: {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                layout: { padding: { right: 64 } },
                 scales: {
                   x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}}, title:{display:true, text:Y_LABELS[yKey]||yKey, color:c.text} },
                   y: { grid:{display:false}, ticks:{color:c.text} }
                 },
                 plugins: { legend:{display:false} }
-              }
+              },
+              plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'end')]
             });
           });
         })();
@@ -4849,7 +5197,7 @@ struct WarningOpportunityRow {
             if(!src) return;
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Submodule Composition — Full View</span><div id="sub-comp-modal-wrap" style="width:100%;overflow:hidden;"></div></div>';
+            overlay.innerHTML = '<div class="chart-modal"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Submodule Composition — Full View</span><span class="chart-modal-subtitle">Code vs comments vs blank per submodule</span><div id="sub-comp-modal-wrap" style="width:100%;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
@@ -4867,7 +5215,7 @@ struct WarningOpportunityRow {
             if(!src) return;
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Language Breakdown — Full View</span><div id="lang-overview-modal-wrap" style="width:100%;overflow:auto;"></div></div>';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Language Breakdown — Full View</span><span class="chart-modal-subtitle">All languages — click any column header to sort</span><div id="lang-overview-modal-wrap" style="width:100%;overflow:auto;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
@@ -5101,6 +5449,7 @@ struct WarningOpportunityRow {
       })();
     })();
     window.oxSlocChartsReady = true;
+    }); // end requestAnimationFrame
     // ── SVG tooltip delegation ───────────────────────────────────────────────
     (function(){
       var tt = document.getElementById('r-tt');
@@ -5213,7 +5562,6 @@ struct ReportTemplate<'a> {
     nonce: String,
     title: String,
     browser_title: String,
-    generated_display: String,
     scan_performed_by: String,
     scan_time_pst: String,
     tool_version: String,

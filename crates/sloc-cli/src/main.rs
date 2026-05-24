@@ -697,7 +697,7 @@ fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
 async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     let config = resolve_analyze_config(&args)?;
     let quiet = args.quiet;
-    let run = tokio::task::spawn_blocking(move || analyze(&config, "analyze", None))
+    let run = tokio::task::spawn_blocking(move || analyze(&config, "analyze", None, None))
         .await
         .context("analysis task failed to join")??;
 
@@ -2167,7 +2167,8 @@ async fn run_git_scan(args: GitScanArgs) -> Result<()> {
     if !quiet {
         eprintln!("Scanning {} at {}…", args.repo, args.git_ref);
     }
-    let run_result = tokio::task::spawn_blocking(move || analyze(&config, "git-scan", None)).await;
+    let run_result =
+        tokio::task::spawn_blocking(move || analyze(&config, "git-scan", None, None)).await;
     let _ = destroy_worktree(&dest, &wt_path);
     let run = run_result.context("analysis task failed")??;
 
@@ -2245,7 +2246,7 @@ fn scan_at_ref(dest: &Path, ref_name: &str, clones_dir: &Path, quiet: bool) -> R
         eprintln!("Scanning ref {ref_name}…");
     }
     let config = build_git_scan_config(&wt);
-    let run = analyze(&config, "git-compare", None)?;
+    let run = analyze(&config, "git-compare", None, None)?;
     let _ = destroy_worktree(dest, &wt);
     Ok(run)
 }
@@ -2322,7 +2323,7 @@ fn run_watch_scan(
         return;
     }
     let config = build_git_scan_config(&wt);
-    match analyze(&config, "watch", None) {
+    match analyze(&config, "watch", None, None) {
         Ok(run) => {
             if !quiet {
                 print_summary(&run, false, false);
