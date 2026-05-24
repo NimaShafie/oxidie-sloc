@@ -48,7 +48,7 @@ else
         | sh -s -- -y \
             --default-toolchain "${TOOLCHAIN}" \
             --no-modify-path \
-            --component rustfmt clippy
+            --component rustfmt clippy llvm-tools
 fi
 
 JENKINS_HOME_GUESS="$(getent passwd jenkins 2>/dev/null | cut -d: -f6 || echo '/var/lib/jenkins')"

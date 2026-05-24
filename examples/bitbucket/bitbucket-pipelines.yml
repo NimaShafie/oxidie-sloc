@@ -6,16 +6,27 @@
 #   3. Posts results to Bitbucket Code Insights (native quality gate UI).
 #   4. Uploads the HTML report as a downloadable artifact.
 #   5. Optionally posts a PR comment with a SLOC summary table and delta.
+#   6. Optionally publishes all artifacts to a Sonatype Nexus repository.
 #
 # Bitbucket Code Insights docs:
 #   https://developer.atlassian.com/cloud/bitbucket/rest/api-group-reports/
 #
 # Required Repository Variables (Settings > Repository variables):
-#   BB_USER        Bitbucket username (for API auth)
+#   BB_USER          Bitbucket username (for API auth)
 #   BB_APP_PASSWORD  App password with Reports:Write scope
-#                  https://bitbucket.org/account/settings/app-passwords/
+#                    https://bitbucket.org/account/settings/app-passwords/
 #
-# Optional:
+# Optional Nexus publishing variables:
+#   NEXUS_REPO_URL           Base URL, e.g. https://nexus.example.com
+#   NEXUS_USER               Nexus username
+#   NEXUS_PASS               Nexus password or token  ← add as a secured variable
+#   NEXUS_REPO_NAME          Raw repository name (default: sloc-raw-hosted)
+#   NEXUS_REPO_PATH          Upload path prefix
+#                            (default: oxide-sloc/<repo-slug>/<build-number>)
+#   NEXUS_VERSION            "nexus2" for Nexus Repository Manager 2 (default: nexus)
+#   NEXUS_GENERATE_MANIFEST  "true" to upload a checksums.sha256 manifest
+#
+# Other optional variables:
 #   SLOC_URL       URL of your oxide-sloc server (for embed widget links)
 #   SLOC_API_KEY   API key for the server
 
@@ -85,6 +96,51 @@ pipelines:
               "${API}/oxide-sloc-sloc"
 
             echo "Code Insights report posted for commit ${COMMIT}."
+
+    - step:
+        name: Publish to Nexus
+        script:
+          - |
+            if [ -z "${NEXUS_REPO_URL:-}" ]; then
+              echo "NEXUS_REPO_URL not set — skipping Nexus publish."
+              exit 0
+            fi
+
+            STAGE_DIR="nexus-upload"
+            mkdir -p "${STAGE_DIR}"
+            FILES_TO_PUSH=""
+
+            stage_file() {
+              local src="$1" dst_name="$2"
+              if [ -f "${src}" ]; then
+                cp "${src}" "${STAGE_DIR}/${dst_name}"
+                FILES_TO_PUSH="${FILES_TO_PUSH} ${dst_name}"
+                echo "  staged: ${dst_name}"
+              fi
+            }
+
+            echo "Staging artifacts…"
+            stage_file "target/release/oxide-sloc" "oxide-sloc"
+            stage_file ".sloc-out/result.json"      "result.json"
+            stage_file ".sloc-out/report.html"      "report.html"
+
+            FILES_TO_PUSH="${FILES_TO_PUSH# }"
+
+            if [ -z "${FILES_TO_PUSH}" ]; then
+              echo "No artifact files found — skipping."
+              exit 0
+            fi
+
+            ARTIFACT_REPO_TYPE="${NEXUS_VERSION:-nexus}" \
+            ARTIFACT_REPO_URL="${NEXUS_REPO_URL}" \
+            ARTIFACT_REPO_PATH="${NEXUS_REPO_PATH:-oxide-sloc/${BITBUCKET_REPO_SLUG}/${BITBUCKET_BUILD_NUMBER}}" \
+            ARTIFACT_REPO_EXTRA="${NEXUS_REPO_NAME:-sloc-raw-hosted}" \
+            ARTIFACT_REPO_USER="${NEXUS_USER:-}" \
+            ARTIFACT_REPO_PASS="${NEXUS_PASS:-}" \
+            ARTIFACT_DIR="${STAGE_DIR}" \
+            ARTIFACT_FILES="${FILES_TO_PUSH}" \
+            ARTIFACT_GENERATE_MANIFEST="${NEXUS_GENERATE_MANIFEST:-false}" \
+            bash ci/artifact-push.sh
 
     - step:
         name: PR comment (delta summary)
@@ -162,3 +218,48 @@ ${LANG_TABLE}\\n\\n\
                 --json-out .sloc-out/result.json \
                 --html-out .sloc-out/report.html
             - echo "Artifact URLs available at the pipeline build page."
+
+      - step:
+          name: Publish to Nexus
+          script:
+            - |
+              if [ -z "${NEXUS_REPO_URL:-}" ]; then
+                echo "NEXUS_REPO_URL not set — skipping Nexus publish."
+                exit 0
+              fi
+
+              STAGE_DIR="nexus-upload"
+              mkdir -p "${STAGE_DIR}"
+              FILES_TO_PUSH=""
+
+              stage_file() {
+                local src="$1" dst_name="$2"
+                if [ -f "${src}" ]; then
+                  cp "${src}" "${STAGE_DIR}/${dst_name}"
+                  FILES_TO_PUSH="${FILES_TO_PUSH} ${dst_name}"
+                  echo "  staged: ${dst_name}"
+                fi
+              }
+
+              echo "Staging artifacts…"
+              stage_file "target/release/oxide-sloc" "oxide-sloc"
+              stage_file ".sloc-out/result.json"      "result.json"
+              stage_file ".sloc-out/report.html"      "report.html"
+
+              FILES_TO_PUSH="${FILES_TO_PUSH# }"
+
+              if [ -z "${FILES_TO_PUSH}" ]; then
+                echo "No artifact files found — skipping."
+                exit 0
+              fi
+
+              ARTIFACT_REPO_TYPE="${NEXUS_VERSION:-nexus}" \
+              ARTIFACT_REPO_URL="${NEXUS_REPO_URL}" \
+              ARTIFACT_REPO_PATH="${NEXUS_REPO_PATH:-oxide-sloc/${BITBUCKET_REPO_SLUG}/${BITBUCKET_BUILD_NUMBER}}" \
+              ARTIFACT_REPO_EXTRA="${NEXUS_REPO_NAME:-sloc-raw-hosted}" \
+              ARTIFACT_REPO_USER="${NEXUS_USER:-}" \
+              ARTIFACT_REPO_PASS="${NEXUS_PASS:-}" \
+              ARTIFACT_DIR="${STAGE_DIR}" \
+              ARTIFACT_FILES="${FILES_TO_PUSH}" \
+              ARTIFACT_GENERATE_MANIFEST="${NEXUS_GENERATE_MANIFEST:-false}" \
+              bash ci/artifact-push.sh

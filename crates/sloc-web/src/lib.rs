@@ -36,7 +36,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -588,6 +588,7 @@ fn build_router(state: AppState) -> Router {
     protected
         .route("/healthz", get(healthz))
         .route("/api/health", get(healthz))
+        .route("/metrics", get(metrics_handler))
         .route("/api/version", get(api_version_handler))
         .route("/api/openapi.yaml", get(openapi_yaml_handler))
         .route("/badge/{metric}", get(badge_handler))
@@ -1366,6 +1367,33 @@ async fn api_version_handler() -> impl IntoResponse {
         "name": "oxide-sloc",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+// ── Prometheus metrics ────────────────────────────────────────────────────────
+
+fn prom_runs_total() -> &'static prometheus::IntCounter {
+    static COUNTER: OnceLock<prometheus::IntCounter> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        prometheus::register_int_counter!(
+            "oxide_sloc_runs_total",
+            "Total number of completed analysis runs"
+        )
+        .expect("failed to register oxide_sloc_runs_total counter")
+    })
+}
+
+async fn metrics_handler() -> impl IntoResponse {
+    use prometheus::Encoder as _;
+    let mut buf = Vec::new();
+    let encoder = prometheus::TextEncoder::new();
+    let _ = encoder.encode(&prometheus::gather(), &mut buf);
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        buf,
+    )
 }
 
 static OPENAPI_YAML: &str = include_str!("../assets/openapi.yaml");
@@ -3836,6 +3864,8 @@ async fn run_analysis_task(task: AnalysisTask) {
     }
 
     spawn_pdf_background(pending_pdf, run_id.clone(), task.state.artifacts.clone());
+
+    prom_runs_total().inc();
 
     // Mark complete — client is now polling and will be redirected to /runs/result/{run_id}.
     let mut runs = task.state.async_runs.lock().await;
