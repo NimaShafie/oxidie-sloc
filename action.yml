@@ -1,0 +1,145 @@
+name: oxide-sloc SLOC Analysis
+description: Count source lines, detect tests, and report code metrics for any repository
+author: Nima Shafie
+
+branding:
+  icon: bar-chart-2
+  color: orange
+
+inputs:
+  path:
+    description: Directory to analyze
+    default: '.'
+    required: false
+  version:
+    description: oxide-sloc release tag to download (e.g. v1.5.61). Defaults to latest.
+    default: latest
+    required: false
+  json-out:
+    description: Path to write the JSON result
+    default: sloc-out/result.json
+    required: false
+  html-out:
+    description: Path to write the HTML report (optional)
+    default: ''
+    required: false
+  server-url:
+    description: Base URL of an oxide-sloc server to POST results to via /api/ingest
+    default: ''
+    required: false
+  api-key:
+    description: Bearer token for the oxide-sloc server
+    default: ''
+    required: false
+
+outputs:
+  total-lines:
+    description: Total physical lines (code + comment + blank)
+    value: ${{ steps.parse.outputs.total-lines }}
+  code-lines:
+    description: Effective code SLOC
+    value: ${{ steps.parse.outputs.code-lines }}
+  comment-lines:
+    description: Comment lines
+    value: ${{ steps.parse.outputs.comment-lines }}
+  blank-lines:
+    description: Blank lines
+    value: ${{ steps.parse.outputs.blank-lines }}
+  files-analyzed:
+    description: Number of source files analyzed
+    value: ${{ steps.parse.outputs.files-analyzed }}
+  json-path:
+    description: Absolute path to the JSON result file
+    value: ${{ steps.analyze.outputs.json-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve version
+      id: resolve
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          VERSION=$(curl -fsSL \
+            https://api.github.com/repos/oxide-sloc/oxide-sloc/releases/latest \
+            | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+        else
+          VERSION="${{ inputs.version }}"
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Download binary (Linux / macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        VERSION="${{ steps.resolve.outputs.version }}"
+        if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
+          ASSET="oxide-sloc-linux-arm64.tar.gz"
+        else
+          ASSET="oxide-sloc-linux-x86_64.tar.gz"
+        fi
+        URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/${VERSION}/${ASSET}"
+        curl -fsSL "$URL" | sudo tar -xz -C /usr/local/bin
+        chmod +x /usr/local/bin/oxide-sloc
+
+    - name: Download binary (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $VERSION = "${{ steps.resolve.outputs.version }}"
+        $URL = "https://github.com/oxide-sloc/oxide-sloc/releases/download/$VERSION/oxide-sloc-windows-x64.zip"
+        $ZIP  = "$env:RUNNER_TEMP\oxide-sloc.zip"
+        $DEST = "$env:RUNNER_TEMP\oxide-sloc-bin"
+        Invoke-WebRequest -Uri $URL -OutFile $ZIP -UseBasicParsing
+        Expand-Archive -Path $ZIP -DestinationPath $DEST -Force
+        $EXE = (Get-ChildItem $DEST -Recurse -Filter "oxide-sloc.exe" |
+                Select-Object -First 1).FullName
+        Copy-Item $EXE "$env:SystemRoot\oxide-sloc.exe"
+
+    - name: Analyze
+      id: analyze
+      shell: bash
+      run: |
+        mkdir -p "$(dirname "${{ inputs.json-out }}")"
+        EXTRA=""
+        if [ -n "${{ inputs.html-out }}" ]; then
+          EXTRA="$EXTRA --html-out ${{ inputs.html-out }}"
+        fi
+        oxide-sloc analyze "${{ inputs.path }}" \
+          --json-out "${{ inputs.json-out }}" $EXTRA
+        echo "json-path=$(realpath ${{ inputs.json-out }})" >> "$GITHUB_OUTPUT"
+
+    - name: Parse results
+      id: parse
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.json-out }}" ]; then
+          CODE=$(jq '.summary_totals.code_lines    // 0' "${{ inputs.json-out }}")
+          CMT=$(jq  '.summary_totals.comment_lines // 0' "${{ inputs.json-out }}")
+          BLK=$(jq  '.summary_totals.blank_lines   // 0' "${{ inputs.json-out }}")
+          TOT=$(jq  '.summary_totals.total_physical_lines // 0' "${{ inputs.json-out }}")
+          FLS=$(jq  '.summary_totals.files_analyzed // 0' "${{ inputs.json-out }}")
+          echo "code-lines=$CODE"    >> "$GITHUB_OUTPUT"
+          echo "comment-lines=$CMT" >> "$GITHUB_OUTPUT"
+          echo "blank-lines=$BLK"   >> "$GITHUB_OUTPUT"
+          echo "total-lines=$TOT"   >> "$GITHUB_OUTPUT"
+          echo "files-analyzed=$FLS" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Send to server
+      if: inputs.server-url != ''
+      shell: bash
+      env:
+        SLOC_API_KEY: ${{ inputs.api-key }}
+      run: |
+        oxide-sloc send "${{ inputs.json-out }}" \
+          --webhook-url "${{ inputs.server-url }}/api/ingest" \
+          ${SLOC_API_KEY:+--webhook-token "$SLOC_API_KEY"}
+
+    - name: Archive result
+      uses: actions/upload-artifact@v4
+      with:
+        name: sloc-result
+        path: ${{ inputs.json-out }}
+        if-no-files-found: warn
+        retention-days: 7

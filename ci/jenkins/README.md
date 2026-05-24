@@ -60,7 +60,7 @@ Check `COVERAGE_STANDALONE`.
 Requires `cargo-llvm-cov` on the agent (vendored in `ci/tools/Cargo.toml`):
 ```bash
 cargo install cargo-llvm-cov
-rustup component add llvm-tools-preview
+rustup component add llvm-tools
 ```
 
 What you get:

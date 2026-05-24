@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ci/artifact-push.sh — push oxide-sloc scan artifacts to an external artifact repository
+# ci/artifact-push.sh — push oxide-sloc artifacts to an external artifact repository
 #
 # All configuration is passed via environment variables (set by the Jenkinsfile,
-# a GitLab CI job, a GitHub Actions step, or by hand for local testing).
+# a GitLab CI job, a Bitbucket Pipelines step, or by hand for local testing).
 #
 # ── Required ────────────────────────────────────────────────────────────────
 #   ARTIFACT_REPO_TYPE   artifactory | nexus | nexus2 | s3 | minio | azure-blob | generic-http
@@ -17,7 +17,8 @@
 #   ARTIFACT_REPO_PATH   path prefix / key prefix for uploaded artifacts
 #                          e.g. oxide-sloc/my-job/42
 #   ARTIFACT_DIR         local directory containing the files to push
-#   ARTIFACT_FILES       space-separated filenames to push (e.g. "result.json report.html")
+#   ARTIFACT_FILES       space-separated filenames to push
+#                          e.g. "result.json report.html oxide-sloc junit.xml"
 #
 # ── Optional ────────────────────────────────────────────────────────────────
 #   ARTIFACT_REPO_USER   username or access-key ID (omit for token-only auth)
@@ -28,6 +29,20 @@
 #                          minio           MinIO endpoint URL             (e.g. https://minio.internal:9000)
 #                          s3              extra flags for aws s3 cp      (e.g. --sse aws:kms)
 #                          others          unused
+#   ARTIFACT_GENERATE_MANIFEST  true | false (default: false)
+#                          Generates checksums.sha256 in ARTIFACT_DIR listing the
+#                          SHA-256 hash of every pushed file, then uploads it too.
+#   ARTIFACT_DRY_RUN     true | false (default: false)
+#                          Prints what would be pushed without making any network calls.
+#
+# ── Artifact types supported ─────────────────────────────────────────────────
+#   Scan reports  : result_<slug>.json, report_<slug>.csv, report_<slug>.xlsx,
+#                   report_<slug>.html, report_<slug>.pdf
+#   Binary        : oxide-sloc (or oxide-sloc.exe on Windows)
+#   Test results  : junit.xml
+#   Coverage      : lcov.info, sonar-coverage.xml
+#   Diff/compare  : diff.json, diff.csv, ref-scan.json, baseline-scan.json
+#   Manifest      : checksums.sha256 (auto-generated; see ARTIFACT_GENERATE_MANIFEST)
 #
 # ── Exit codes ───────────────────────────────────────────────────────────────
 #   0   all pushes succeeded
@@ -44,6 +59,8 @@ ARTIFACT_FILES="${ARTIFACT_FILES:-result.json}"
 REPO_USER="${ARTIFACT_REPO_USER:-}"
 REPO_PASS="${ARTIFACT_REPO_PASS:-}"
 REPO_EXTRA="${ARTIFACT_REPO_EXTRA:-}"
+GENERATE_MANIFEST="${ARTIFACT_GENERATE_MANIFEST:-false}"
+DRY_RUN="${ARTIFACT_DRY_RUN:-false}"
 
 # ── Validation ───────────────────────────────────────────────────────────────
 
@@ -77,6 +94,50 @@ REPO_PATH="${REPO_PATH#/}"
 
 PUSH_FAILURES=0
 
+# ── MIME type helper ──────────────────────────────────────────────────────────
+#
+# Returns the appropriate Content-Type for a filename so Nexus and other
+# repositories store assets with the correct media type.
+
+mime_type() {
+    case "${1##*.}" in
+        json)   echo "application/json" ;;
+        html)   echo "text/html" ;;
+        pdf)    echo "application/pdf" ;;
+        csv)    echo "text/csv" ;;
+        xlsx)   echo "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ;;
+        xml)    echo "application/xml" ;;
+        txt|sha256|info) echo "text/plain" ;;
+        *)      echo "application/octet-stream" ;;
+    esac
+}
+
+# ── SHA-256 manifest generation ───────────────────────────────────────────────
+#
+# When ARTIFACT_GENERATE_MANIFEST=true, writes checksums.sha256 into ARTIFACT_DIR
+# containing one "hash  filename" line per file being pushed, then appends
+# "checksums.sha256" to ARTIFACT_FILES so it is uploaded alongside the rest.
+
+generate_manifest() {
+    local manifest="${ARTIFACT_DIR}/checksums.sha256"
+    echo "Generating SHA-256 manifest…"
+    rm -f "${manifest}"
+    local count=0
+    for f in ${ARTIFACT_FILES}; do
+        local file="${ARTIFACT_DIR}/${f}"
+        [ -f "${file}" ] || continue
+        (cd "${ARTIFACT_DIR}" && sha256sum "${f}") >> "${manifest}"
+        count=$((count + 1))
+    done
+    if [ "${count}" -gt 0 ]; then
+        echo "  Checksums: ${count} file(s) → checksums.sha256"
+        ARTIFACT_FILES="${ARTIFACT_FILES} checksums.sha256"
+    else
+        echo "  WARNING: no files found to checksum — manifest skipped." >&2
+        rm -f "${manifest}"
+    fi
+}
+
 # ── Provider: JFrog Artifactory ──────────────────────────────────────────────
 #
 # Uses the Artifactory REST API: PUT /<repo-path>/<filename>
@@ -97,6 +158,8 @@ push_artifactory() {
         fi
         local target="${REPO_URL}/${REPO_PATH}/${f}"
         echo "  PUT   ${f}  →  ${target}"
+
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
 
         local curl_auth=()
         if [ -n "${REPO_USER}" ] && [ -n "${REPO_PASS}" ]; then
@@ -144,11 +207,15 @@ push_nexus() {
             echo "  SKIP  ${f} (file not found)"
             continue
         fi
-        echo "  POST  ${f}  →  /${REPO_PATH}/${f}"
+        local content_type
+        content_type=$(mime_type "${f}")
+        echo "  POST  ${f}  →  /${REPO_PATH}/${f}  (${content_type})"
+
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
 
         if curl -sf "${curl_auth[@]}" -X POST "${api_url}" \
                 -F "raw.directory=/${REPO_PATH}" \
-                -F "raw.asset1=@${file};type=application/octet-stream" \
+                -F "raw.asset1=@${file};type=${content_type}" \
                 -F "raw.asset1.filename=${f}" \
                 --retry 3 --retry-delay 2 --retry-max-time 60; then
             echo "  OK"
@@ -186,6 +253,8 @@ push_nexus2() {
         fi
         local target="${REPO_URL}/content/repositories/${repo_name}/${REPO_PATH}/${f}"
         echo "  PUT   ${f}  →  ${target}"
+
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
 
         if curl -sf "${curl_auth[@]}" -X PUT "${target}" -T "${file}" \
                 --retry 3 --retry-delay 2 --retry-max-time 60; then
@@ -232,6 +301,8 @@ push_s3() {
         fi
         local target="${REPO_URL}/${REPO_PATH}/${f}"
         echo "  cp    ${f}  →  ${target}"
+
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
 
         # shellcheck disable=SC2086
         if aws s3 cp "${file}" "${target}" ${extra_flags}; then
@@ -284,6 +355,8 @@ push_minio() {
         fi
         local target="${REPO_URL}/${REPO_PATH}/${f}"
         echo "  cp    ${f}  →  ${target}"
+
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
 
         if aws s3 cp "${file}" "${target}" --endpoint-url "${endpoint}"; then
             echo "  OK"
@@ -338,6 +411,8 @@ push_azure_blob() {
         local blob_name="${REPO_PATH}/${f}"
         echo "  upload ${f}  →  ${container}/${blob_name}"
 
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
+
         if az storage blob upload \
                 --account-name "${account}" \
                 --container-name "${container}" \
@@ -380,6 +455,8 @@ push_generic_http() {
         local target="${REPO_URL}/${REPO_PATH}/${f}"
         echo "  PUT   ${f}  →  ${target}"
 
+        if [ "${DRY_RUN}" = "true" ]; then echo "  [DRY-RUN] skipping upload"; continue; fi
+
         if curl -sf "${curl_auth[@]}" -X PUT "${target}" -T "${file}" \
                 --retry 3 --retry-delay 2 --retry-max-time 60; then
             echo "  OK"
@@ -392,13 +469,16 @@ push_generic_http() {
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
+[ "${GENERATE_MANIFEST}" = "true" ] && generate_manifest
+
 echo ""
 echo "oxide-sloc artifact push"
 echo "  type  : ${REPO_TYPE}"
 echo "  url   : ${REPO_URL}"
 echo "  path  : ${REPO_PATH}"
-echo "  files : ${ARTIFACT_FILES}"
 echo "  dir   : ${ARTIFACT_DIR}"
+echo "  files : ${ARTIFACT_FILES}"
+[ "${DRY_RUN}" = "true" ] && echo "  mode  : DRY-RUN (no files will be uploaded)"
 echo ""
 
 case "${REPO_TYPE}" in

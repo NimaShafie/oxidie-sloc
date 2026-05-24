@@ -826,11 +826,33 @@ Store credentials in **Settings → CI/CD → Variables** as `CONFLUENCE_USER` a
 
 ## Artifact Repository Integration
 
-oxide-sloc can push scan artifacts (JSON, HTML, PDF) to an external artifact repository at the end of every CI build. The integration is implemented in `ci/artifact-push.sh` and wired into the Jenkinsfile as the **Push to Artifact Repository** stage (stage 8).
+oxide-sloc can push build artifacts to an external artifact repository at the end of every CI build. The integration is implemented in `ci/artifact-push.sh` and wired into every supported pipeline as a dedicated publish stage.
 
-All configuration is passed via the `ARTIFACT_REPO_*` build parameters described in [Build parameters](#build-parameters). The push stage is skipped entirely when `ARTIFACT_REPO_TYPE` is `none` (the default).
+**Supported artifact types:**
 
-The same script can be called from any CI system by sourcing the required environment variables directly.
+| Artifact | Filename pattern | Always generated |
+|---|---|---|
+| SLOC report (JSON) | `result_<slug>.json` | Yes |
+| SLOC report (CSV) | `report_<slug>.csv` | Yes |
+| SLOC report (XLSX) | `report_<slug>.xlsx` | Yes |
+| SLOC report (HTML) | `report_<slug>.html` | When `GENERATE_HTML=true` |
+| SLOC report (PDF) | `report_<slug>.pdf` | When `GENERATE_PDF=true` |
+| Compiled binary | `oxide-sloc` / `oxide-sloc.exe` | Yes (from build stage) |
+| Test results | `junit.xml` | When cargo-nextest is used |
+| Coverage (LCOV) | `lcov.info` | When coverage stage runs |
+| Coverage (Cobertura) | `sonar-coverage.xml` | When coverage stage runs |
+| Diff comparison | `diff.json`, `diff.csv` | When GIT_REF comparison runs |
+| SHA-256 manifest | `checksums.sha256` | When `ARTIFACT_GENERATE_MANIFEST=true` |
+
+All configuration is passed via `ARTIFACT_REPO_*` environment variables. The script can be called from Jenkins, GitLab CI, Bitbucket Pipelines, or manually.
+
+### Dry-run mode
+
+Set `ARTIFACT_DRY_RUN=true` to print exactly what would be uploaded without making any network calls — useful for verifying path and credential configuration before a real push.
+
+### Checksum manifest
+
+Set `ARTIFACT_GENERATE_MANIFEST=true` (or check the Jenkins parameter) to automatically generate `checksums.sha256` in the artifact directory and upload it alongside the other files. The manifest uses the standard `sha256sum` format: one `hash  filename` line per file.
 
 ### JFrog Artifactory
 
@@ -869,7 +891,7 @@ bash ci/artifact-push.sh
 
 ### Sonatype Nexus Repository Manager 3
 
-Uses the Nexus 3 REST API for **raw-format** repositories (`POST /service/rest/v1/components`). One multipart request is sent per file.
+Uses the Nexus 3 REST API for **raw-format** repositories (`POST /service/rest/v1/components`). One multipart `POST` is sent per file. Each file is uploaded with its correct MIME type (`application/json`, `text/html`, `application/pdf`, etc.) so Nexus stores and serves assets with accurate content types.
 
 **Prerequisites:** create a raw-format hosted repository in Nexus 3 (e.g., `sloc-raw-hosted`) under **Repositories → Create repository → raw (hosted)**.
 
@@ -887,20 +909,46 @@ Uses the Nexus 3 REST API for **raw-format** repositories (`POST /service/rest/v
 | Jenkins credential ID | Content |
 |-----------------------|---------|
 | `SLOC_ARTIFACT_REPO_USER` | Nexus username |
-| `SLOC_ARTIFACT_REPO_PASS` | Nexus password |
+| `SLOC_ARTIFACT_REPO_PASS` | Nexus password or user token |
 
-**Standalone example:**
+**Standalone example — push all artifact types:**
 
 ```bash
+# Stage everything into one directory first
+mkdir -p /tmp/nexus-stage
+cp ci-out/result_myproject.json   /tmp/nexus-stage/
+cp ci-out/report_myproject.csv    /tmp/nexus-stage/
+cp ci-out/report_myproject.xlsx   /tmp/nexus-stage/
+cp ci-out/report_myproject.html   /tmp/nexus-stage/
+cp target/release/oxide-sloc      /tmp/nexus-stage/
+cp test-results/junit.xml         /tmp/nexus-stage/
+cp coverage/lcov.info             /tmp/nexus-stage/
+
 ARTIFACT_REPO_TYPE=nexus \
 ARTIFACT_REPO_URL=https://nexus.example.com \
 ARTIFACT_REPO_PATH=oxide-sloc/my-project/42 \
 ARTIFACT_REPO_EXTRA=sloc-raw-hosted \
 ARTIFACT_REPO_USER=ci-user \
 ARTIFACT_REPO_PASS=secret \
-ARTIFACT_DIR=ci-out \
-ARTIFACT_FILES="result.json report.html" \
+ARTIFACT_DIR=/tmp/nexus-stage \
+ARTIFACT_FILES="result_myproject.json report_myproject.csv report_myproject.xlsx report_myproject.html oxide-sloc junit.xml lcov.info" \
+ARTIFACT_GENERATE_MANIFEST=true \
 bash ci/artifact-push.sh
+```
+
+**Resulting Nexus layout:**
+
+```
+sloc-raw-hosted/
+  oxide-sloc/my-project/42/
+    result_myproject.json
+    report_myproject.csv
+    report_myproject.xlsx
+    report_myproject.html
+    oxide-sloc
+    junit.xml
+    lcov.info
+    checksums.sha256
 ```
 
 ---
@@ -1044,6 +1092,52 @@ Or via **Manage Jenkins → Credentials → System → Global credentials → Ad
 
 ---
 
+### Publishing from GitLab CI
+
+The `.gitlab-ci.yml` included in this repository has a `nexus:push` job in the `publish` stage. It runs automatically when `NEXUS_REPO_URL` is set as a project variable, or can be triggered manually from the pipeline UI.
+
+**GitLab CI/CD variables to set** (Settings → CI/CD → Variables):
+
+| Variable | Required | Description |
+|---|---|---|
+| `NEXUS_REPO_URL` | Yes | Base URL, e.g. `https://nexus.example.com` |
+| `NEXUS_USER` | Yes | Nexus username |
+| `NEXUS_PASS` | Yes — mask it | Nexus password or user token |
+| `NEXUS_REPO_NAME` | No | Raw repository name (default: `sloc-raw-hosted`) |
+| `NEXUS_REPO_PATH` | No | Upload path prefix (default: `oxide-sloc/<project>/<pipeline-iid>`) |
+| `NEXUS_VERSION` | No | `nexus2` for NRM 2 (default: `nexus` for NRM 3) |
+| `NEXUS_GENERATE_MANIFEST` | No | `true` to upload `checksums.sha256` alongside |
+
+The job stages these artifacts for upload: the compiled `oxide-sloc` binary, `result.json`, `report.html`, `re-rendered.html`, and `re-rendered.pdf` (each skipped if not produced by an earlier job).
+
+**Running the job manually** when `NEXUS_REPO_URL` is not set:
+
+1. Open the pipeline in GitLab UI.
+2. Click the ▶ (play) button on the `nexus:push` job.
+3. The job has `allow_failure: true` so it will not block the pipeline even if the push fails.
+
+---
+
+### Publishing from Bitbucket Pipelines
+
+The `examples/bitbucket/bitbucket-pipelines.yml` file includes a **Publish to Nexus** step in both the `default` and `branches.main` pipelines. The step is a no-op when `NEXUS_REPO_URL` is not set, so adding this step does not break existing builds.
+
+**Repository variables to set** (Repository settings → Repository variables):
+
+| Variable | Secured | Description |
+|---|---|---|
+| `NEXUS_REPO_URL` | No | Base URL, e.g. `https://nexus.example.com` |
+| `NEXUS_USER` | No | Nexus username |
+| `NEXUS_PASS` | **Yes** | Nexus password or user token — mark as secured |
+| `NEXUS_REPO_NAME` | No | Raw repository name (default: `sloc-raw-hosted`) |
+| `NEXUS_REPO_PATH` | No | Upload path prefix (default: `oxide-sloc/<repo-slug>/<build-number>`) |
+| `NEXUS_VERSION` | No | `nexus2` for NRM 2 (default: `nexus` for NRM 3) |
+| `NEXUS_GENERATE_MANIFEST` | No | `true` to upload `checksums.sha256` alongside |
+
+The step stages the compiled binary and scan reports (`result.json`, `report.html`) from earlier steps, then calls `ci/artifact-push.sh`. Artifacts from earlier Bitbucket steps are automatically available to later steps within the same pipeline.
+
+---
+
 ## Environment variables reference
 
 | Variable              | Used by     | Purpose                                                                |
@@ -1058,12 +1152,14 @@ Or via **Manage Jenkins → Credentials → System → Global credentials → Ad
 | `SLOC_SMTP_PASS`      | `send`      | SMTP password — prefer this over `--smtp-pass` to keep creds out of process listings |
 | `SLOC_WEBHOOK_TOKEN`  | `send`      | Bearer token for webhook delivery (alternative to `--webhook-token`)   |
 | `VT_API_KEY`          | `release.yml` | VirusTotal API v3 key; enables binary scanning on every tagged release |
-| `ARTIFACT_REPO_TYPE`  | Artifact push | Backend: `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http` |
-| `ARTIFACT_REPO_URL`   | Artifact push | Base URL of the artifact repository (see [Artifact Repository Integration](#artifact-repository-integration)) |
-| `ARTIFACT_REPO_PATH`  | Artifact push | Path prefix / key prefix for uploaded artifacts |
-| `ARTIFACT_REPO_EXTRA` | Artifact push | Provider-specific config (Nexus repo name, Azure container, MinIO endpoint, S3 flags) |
-| `ARTIFACT_REPO_USER`  | Artifact push | Username or access-key ID (set via `SLOC_ARTIFACT_REPO_USER` Jenkins credential) |
-| `ARTIFACT_REPO_PASS`  | Artifact push | Password, API token, or secret key (set via `SLOC_ARTIFACT_REPO_PASS` Jenkins credential) |
+| `ARTIFACT_REPO_TYPE`         | Artifact push | Backend: `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http` |
+| `ARTIFACT_REPO_URL`          | Artifact push | Base URL of the artifact repository (see [Artifact Repository Integration](#artifact-repository-integration)) |
+| `ARTIFACT_REPO_PATH`         | Artifact push | Path prefix / key prefix for uploaded artifacts |
+| `ARTIFACT_REPO_EXTRA`        | Artifact push | Provider-specific config (Nexus repo name, Azure container, MinIO endpoint, S3 flags) |
+| `ARTIFACT_REPO_USER`         | Artifact push | Username or access-key ID (set via `SLOC_ARTIFACT_REPO_USER` Jenkins credential) |
+| `ARTIFACT_REPO_PASS`         | Artifact push | Password, API token, or secret key (set via `SLOC_ARTIFACT_REPO_PASS` Jenkins credential) |
+| `ARTIFACT_GENERATE_MANIFEST` | Artifact push | `true` → generate and upload `checksums.sha256` alongside pushed artifacts |
+| `ARTIFACT_DRY_RUN`           | Artifact push | `true` → print what would be uploaded without making any network calls |
 
 ---
 

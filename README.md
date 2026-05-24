@@ -5,6 +5,8 @@
 [![Docker](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml)
 [![Latest Release](https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?include_prereleases&label=release)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
+[![codecov](https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg)](https://codecov.io/gh/oxide-sloc/oxide-sloc)
+[![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/TODO/badge)](https://bestpractices.coreinfrastructure.org/projects/TODO)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 [![MCP Server](https://img.shields.io/badge/MCP-server-orange)](./mcp.json)
 
@@ -119,7 +121,20 @@ bash scripts/run.sh   # Windows 10/11 (Git Bash) or Linux — http://127.0.0.1:4
 - **Linux — no Rust, download from GitHub:** run `bash scripts/internal/install.sh --online` (requires `curl`) to fetch the release binary automatically.
 - **Linux — no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
 
-### Path B — Docker
+### Path B — Package managers
+
+| Manager | Command | Platform |
+|---|---|---|
+| **winget** | `winget install NimaShafie.OxideSLOC` | Windows |
+| **Chocolatey** | `choco install oxide-sloc` | Windows |
+| **Scoop** | `scoop bucket add oxide-sloc https://github.com/oxide-sloc/scoop-oxide-sloc && scoop install oxide-sloc` | Windows |
+| **Homebrew** | `brew tap oxide-sloc/oxide-sloc && brew install oxide-sloc` | macOS / Linux |
+| **Nix** | `nix run github:oxide-sloc/oxide-sloc` | Linux / macOS |
+| **cargo** | `cargo install oxide-sloc --locked` | Any (requires Rust) |
+| **DEB** | Download `oxide-sloc-*-linux-amd64.deb` from [Releases](https://github.com/oxide-sloc/oxide-sloc/releases) → `sudo dpkg -i` | Ubuntu / Debian |
+| **RPM** | Download `oxide-sloc-*.rpm` from [Releases](https://github.com/oxide-sloc/oxide-sloc/releases) → `rpm -ivh` | RHEL 8/9 |
+
+### Path C — Docker
 
 ```bash
 # Build locally from the committed Dockerfile (no registry pull needed):
@@ -143,6 +158,13 @@ docker run --rm -v /path/to/your/repo:/repo:ro \
 | `SLOC_TLS_CERT` / `SLOC_TLS_KEY` | No | Paths to PEM certificate and key for HTTPS |
 
 See [`docs/airgap.md`](./docs/airgap.md) for air-gapped setup and [`docs/server-deployment.md`](./docs/server-deployment.md) for persistent deployments.
+
+### Path D — Nix (reproducible dev shell)
+
+```bash
+nix develop github:oxide-sloc/oxide-sloc   # drops into a shell with Rust + rust-analyzer
+nix run    github:oxide-sloc/oxide-sloc -- analyze .
+```
 
 ---
 
@@ -527,14 +549,39 @@ oxide-sloc diff baseline.json current.json -c delta.csv -x delta.xlsx
 | `ci/sloc-ci-strict.toml` | Fail-fast on binary files |
 | `ci/sloc-ci-full-scope.toml` | Audit mode — counts vendor/lockfiles too |
 
-### GitHub Actions
+### Drop-in CI examples
+
+| Platform | File |
+|---|---|
+| GitHub Actions | `ci/sloc-github-action.yml` — copy to your repo's `.github/workflows/` |
+| GitHub Marketplace | `uses: NimaShafie/oxide-sloc@main` in any workflow (see [`action.yml`](./action.yml)) |
+| Jenkins | `examples/jenkins/Jenkinsfile` |
+| GitLab CI | `ci/sloc-gitlab.yml` — include via `include:` |
+| Bitbucket Pipelines | `examples/bitbucket/bitbucket-pipelines.yml` |
+| Azure Pipelines | `examples/azure/azure-pipelines.yml` |
+| CircleCI | `examples/circleci/config.yml` |
+
+**Marketplace action usage** (zero setup — downloads the binary automatically):
+
+```yaml
+- uses: NimaShafie/oxide-sloc@main
+  id: sloc
+  with:
+    path: .
+    html-out: sloc-out/report.html
+
+- run: echo "Code lines ${{ steps.sloc.outputs.code-lines }}"
+```
+
+### GitHub Actions (this repo's own workflows)
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | push to `main`, all PRs | fmt → clippy → build → tests → CLI smoke → web health check |
-| `release.yml` | `v*` tag | Cross-compile for 5 platforms → sign Windows binary → GitHub Release |
+| `ci.yml` | push to `main`, all PRs | fmt → clippy → build → tests → CLI smoke → web health check → coverage (main only) |
+| `release.yml` | `v*` tag | Cross-compile for 5 platforms → sign → SBOM → GitHub Release |
 | `docker.yml` | push to `main`, `v*` tag | Build and push Docker image to GHCR |
-| `update-dist.yml` | `v*` tag, manual | Build platform bundles and commit to `dist/` |
+| `update-dist.yml` | `v*` tag, manual | Build platform bundles (tar.gz, zip, RPM, DEB) and commit to `dist/` |
+| `docs.yml` | push to `main` (docs changed) | Build mdBook and deploy to GitHub Pages |
 
 All workflows run on Node 24.
 
@@ -669,8 +716,8 @@ Pre-built JSON schemas for embedding in agent prompts without an MCP host:
 
 | File | Format |
 |---|---|
-| [`tools/tool-definitions.json`](./tools/tool-definitions.json) | Claude API `tool_use` array |
-| [`tools/function-definitions.json`](./tools/function-definitions.json) | OpenAI `function_calling` array |
+| [`docs/mcp/tool-definitions.json`](./docs/mcp/tool-definitions.json) | Claude API `tool_use` array |
+| [`docs/mcp/function-definitions.json`](./docs/mcp/function-definitions.json) | OpenAI `function_calling` array |
 
 ---
 
