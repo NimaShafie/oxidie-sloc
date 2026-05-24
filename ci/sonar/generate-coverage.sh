@@ -10,7 +10,7 @@
 #        Vendored in ci/tools/Cargo.toml for offline install on air-gapped agents.
 #        Install (online):  cargo install cargo-llvm-cov
 #        Install (offline): cargo install --offline cargo-llvm-cov
-#        Also requires:     rustup component add llvm-tools-preview
+#        Also requires:     rustup component add llvm-tools
 #   2. cargo-tarpaulin — cross-platform fallback; produces LCOV (line coverage
 #        only — no branch data) and Cobertura XML.
 #        Install: cargo install cargo-tarpaulin

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>oxide-sloc</id>
+    <version>1.5.61</version>
+    <packageSourceUrl>https://github.com/oxide-sloc/oxide-sloc</packageSourceUrl>
+    <owners>NimaShafie</owners>
+    <title>oxide-sloc</title>
+    <authors>Nima Shafie</authors>
+    <projectUrl>https://github.com/oxide-sloc/oxide-sloc</projectUrl>
+    <licenseUrl>https://www.gnu.org/licenses/agpl-3.0.html</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/oxide-sloc/oxide-sloc</projectSourceUrl>
+    <docsUrl>https://github.com/oxide-sloc/oxide-sloc/tree/main/docs</docsUrl>
+    <bugTrackerUrl>https://github.com/oxide-sloc/oxide-sloc/issues</bugTrackerUrl>
+    <tags>sloc loc code-metrics analysis cli rust developer-tools</tags>
+    <summary>IEEE 1045-1992 SLOC analysis, test detection, HTML/PDF reports, and CI/CD integration</summary>
+    <description>
+oxide-sloc is a Rust-based local code analysis workbench.
+
+**Features:**
+- IEEE 1045-1992 source line counting across 41 languages
+- Unit test detection and coverage reporting
+- Rich HTML and PDF reports
+- Localhost web UI (no cloud required)
+- CI/CD integration for Jenkins, GitHub Actions, GitLab, Bitbucket, Azure Pipelines
+- Artifact publishing to Artifactory, Nexus, S3, MinIO, Azure Blob
+- REST API with OpenAPI specification
+- Fully offline/air-gap capable — no internet required after install
+
+**Usage:**
+```
+oxide-sloc analyze ./my-repo --plain
+oxide-sloc serve              # opens web UI at http://127.0.0.1:4317
+oxide-sloc completions powershell | Out-File -Encoding utf8 $PROFILE.d/oxide-sloc.ps1
+```
+    </description>
+    <releaseNotes>https://github.com/oxide-sloc/oxide-sloc/releases/tag/v1.5.61</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

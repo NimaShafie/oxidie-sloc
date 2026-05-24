@@ -1,0 +1,17 @@
+[book]
+title = "oxide-sloc"
+authors = ["Nima Shafie"]
+description = "IEEE 1045-1992 SLOC analysis, test detection, and code metrics workbench"
+language = "en"
+src = "docs"
+
+[output.html]
+site-url = "/oxide-sloc/"
+git-repository-url = "https://github.com/oxide-sloc/oxide-sloc"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/oxide-sloc/oxide-sloc/edit/main/docs/{path}"
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 0

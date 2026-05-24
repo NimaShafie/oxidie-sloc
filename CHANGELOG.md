@@ -58,13 +58,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   host. Exposes 7 tools: `analyze_path`, `get_metrics_latest`, `get_metrics_history`,
   `get_run_metrics`, `compare_runs`, `health_check`, `ingest_result`. The `mcp.json`
   manifest at the repo root enables auto-discovery by smithery.ai and other MCP registries.
-- **Pre-built JSON tool definitions** (`tools/`): `tools/tool-definitions.json`
-  (Claude API `tool_use` array) and `tools/function-definitions.json`
+- **Pre-built JSON tool definitions** (`docs/mcp/`): `docs/mcp/tool-definitions.json`
+  (Claude API `tool_use` array) and `docs/mcp/function-definitions.json`
   (OpenAI `function_calling` array) — embed oxide-sloc analysis in agent prompts without
   running an MCP host.
 - **OpenAPI 3.1 specification** (`docs/openapi.yaml`): Complete machine-readable REST API
   spec committed to the repository and served live at `GET /api/openapi.yaml`.
-- **RPM packaging for RHEL** (`installer/rhel/`, `scripts/internal/make-rpm.sh`):
+- **RPM packaging for RHEL** (`ci/installer/rhel/`, `scripts/internal/make-rpm.sh`):
   `oxide-sloc.spec` and `make-rpm.sh` enable building an installable `.rpm` from source on
   RHEL 8/9 without an internet connection.
 - **Coverage metrics in scan history and delta comparison** (`sloc-core`, `sloc-web`):

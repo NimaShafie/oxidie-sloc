@@ -1,0 +1,76 @@
+# oxide-sloc Azure Pipelines integration
+#
+# Drop this into your repository (or include it from your main pipeline).
+# Set SLOC_SERVER as a pipeline variable and SLOC_API_KEY as a secret variable
+# in Pipelines → Library → Variable groups or in the pipeline settings.
+#
+# Artifact repository push (optional):
+#   Set ARTIFACT_REPO_TYPE, ARTIFACT_REPO_URL, ARTIFACT_REPO_PATH as variables.
+#   For authenticated repos set ARTIFACT_REPO_USER / ARTIFACT_REPO_PASS as secrets.
+#   Supported backends: artifactory | nexus | nexus2 | s3 | minio | azure-blob | generic-http
+#   See ci/artifact-push.sh and docs/ci-integrations.md for full details.
+
+trigger:
+  branches:
+    include:
+      - '*'
+  paths:
+    exclude:
+      - '*.md'
+      - 'docs/**'
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  SLOC_OUT: sloc-out
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: Cache@2
+    displayName: Cache cargo registry
+    inputs:
+      key: 'cargo | $(Agent.OS) | $(Build.SourcesDirectory)/Cargo.lock'
+      restoreKeys: |
+        cargo | $(Agent.OS)
+      path: ~/.cargo/registry
+
+  - script: cargo install oxide-sloc --locked
+    displayName: Install oxide-sloc
+
+  - script: |
+      mkdir -p $(SLOC_OUT)
+      oxide-sloc analyze . \
+        --json-out $(SLOC_OUT)/result.json \
+        --html-out $(SLOC_OUT)/report.html
+    displayName: Analyze repository
+
+  - script: |
+      oxide-sloc send $(SLOC_OUT)/result.json \
+        --webhook-url "$(SLOC_SERVER)/api/ingest?label=$(Build.Repository.Name)" \
+        --webhook-token "$(SLOC_API_KEY)"
+    displayName: Upload to oxide-sloc server
+    condition: and(succeeded(), ne(variables['SLOC_SERVER'], ''))
+    env:
+      SLOC_API_KEY: $(SLOC_API_KEY)
+
+  - script: bash ci/artifact-push.sh
+    displayName: Push to artifact repository
+    condition: and(succeeded(), ne(variables['ARTIFACT_REPO_TYPE'], ''), ne(variables['ARTIFACT_REPO_URL'], ''))
+    env:
+      ARTIFACT_REPO_TYPE: $(ARTIFACT_REPO_TYPE)
+      ARTIFACT_REPO_URL: $(ARTIFACT_REPO_URL)
+      ARTIFACT_REPO_PATH: $(ARTIFACT_REPO_PATH)
+      ARTIFACT_REPO_USER: $(ARTIFACT_REPO_USER)
+      ARTIFACT_REPO_PASS: $(ARTIFACT_REPO_PASS)
+      ARTIFACT_DIR: $(SLOC_OUT)
+      ARTIFACT_FILES: result.json report.html
+
+  - task: PublishBuildArtifacts@1
+    displayName: Publish SLOC results
+    inputs:
+      PathtoPublish: $(SLOC_OUT)
+      ArtifactName: sloc-result
+    condition: always()

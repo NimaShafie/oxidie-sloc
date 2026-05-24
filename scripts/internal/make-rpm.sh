@@ -21,7 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SPEC="$REPO_ROOT/installer/rhel/oxide-sloc.spec"
+SPEC="$REPO_ROOT/ci/installer/rhel/oxide-sloc.spec"
 
 # ── Arguments ─────────────────────────────────────────────────────────────────
 VERSION="${1:-}"

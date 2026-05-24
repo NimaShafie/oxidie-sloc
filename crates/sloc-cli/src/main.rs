@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use lettre::{
     message::{header::ContentType, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
@@ -83,6 +83,13 @@ enum Commands {
     /// Designed to be called from Jenkins post-build steps and CI pipelines.
     #[command(name = "pr-comment")]
     PrComment(PrCommentArgs),
+    /// Print shell completion script to stdout.
+    /// Source the output to enable tab-completion for the current shell session.
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 // ── analyze ───────────────────────────────────────────────────────────────────
@@ -584,6 +591,15 @@ async fn main() -> Result<()> {
         Commands::GitCompare(args) => run_git_compare(args),
         Commands::Watch(args) => run_watch(args).await,
         Commands::PrComment(args) => run_pr_comment(args).await,
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "oxide-sloc",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
     }
 }
 

@@ -319,6 +319,36 @@ pipeline {
             description:  'Include report.xlsx (Excel workbook) in the artifact repository push. ' +
                           'XLSX is always generated — no separate output flag required.'
         )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_BINARY',
+            defaultValue: false,
+            description:  'Include the compiled oxide-sloc binary in the artifact repository push. ' +
+                          'The binary is copied from target/release/ into the artifact directory before upload.'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_JUNIT',
+            defaultValue: false,
+            description:  'Include junit.xml test results in the artifact repository push. ' +
+                          'Only applies when PUBLISH_TEST_RESULTS is checked and TEST_RUNNER is cargo-nextest.'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_COVERAGE',
+            defaultValue: false,
+            description:  'Include lcov.info and sonar-coverage.xml coverage reports in the push. ' +
+                          'Only applies when COVERAGE_STANDALONE is checked.'
+        )
+        booleanParam(
+            name:         'ARTIFACT_PUSH_DIFF',
+            defaultValue: false,
+            description:  'Include diff.json and diff.csv diff-comparison artifacts in the push. ' +
+                          'Only applies when GIT_REF is set and a comparison ref is configured.'
+        )
+        booleanParam(
+            name:         'ARTIFACT_GENERATE_MANIFEST',
+            defaultValue: false,
+            description:  'Generate and upload a SHA-256 checksum manifest (checksums.sha256) ' +
+                          'listing the hash of every pushed artifact alongside the files themselves.'
+        )
 
         // ── Pipeline-of-Pipelines chaining ─────────────────────────────────────
         string(name: 'UPSTREAM_JOB',   defaultValue: '', description: 'Name of the upstream pipeline that triggered this build (for chaining)')
@@ -1102,7 +1132,6 @@ PYEOF"""
                     // Includes: result.json, report.csv, report.xlsx, report.html, report.pdf,
                     // test-results/, coverage/, and trend CSVs.
                     archiveArtifacts artifacts: "${params.OUTPUT_SUBDIR}/**",
-                        excludes: "${params.OUTPUT_SUBDIR}/**/*.css,${params.OUTPUT_SUBDIR}/**/*.js",
                         fingerprint: true,
                         allowEmptyArchive: true
 
@@ -1249,6 +1278,51 @@ PYEOF"""
                     if (params.ARTIFACT_PUSH_HTML && params.GENERATE_HTML)   filesToPush << "report_${proj}.html"
                     if (params.ARTIFACT_PUSH_PDF  && params.GENERATE_PDF)    filesToPush << "report_${proj}.pdf"
 
+                    // Binary: copy from target/release/ into outDir so artifact-push.sh
+                    // can reference it from a single directory.
+                    if (params.ARTIFACT_PUSH_BINARY) {
+                        def binaryName = isUnix() ? 'oxide-sloc' : 'oxide-sloc.exe'
+                        def binaryPath = "${env.WORKSPACE}/target/release/${binaryName}"
+                        if (fileExists(binaryPath)) {
+                            sh "cp '${binaryPath}' '${outDir}/${binaryName}'"
+                            filesToPush << binaryName
+                        } else {
+                            echo "WARNING: binary not found at ${binaryPath} — skipping binary push."
+                        }
+                    }
+
+                    // JUnit XML: copy from test-results/ into outDir
+                    if (params.ARTIFACT_PUSH_JUNIT
+                            && params.PUBLISH_TEST_RESULTS
+                            && params.TEST_RUNNER == 'cargo-nextest') {
+                        def junitPath = "${env.WORKSPACE}/test-results/junit.xml"
+                        if (fileExists(junitPath)) {
+                            sh "cp '${junitPath}' '${outDir}/junit.xml'"
+                            filesToPush << 'junit.xml'
+                        } else {
+                            echo "WARNING: junit.xml not found at ${junitPath} — skipping junit push."
+                        }
+                    }
+
+                    // Coverage reports: copy from coverage/ into outDir
+                    if (params.ARTIFACT_PUSH_COVERAGE && params.COVERAGE_STANDALONE) {
+                        [['coverage/lcov.info', 'lcov.info'],
+                         ['coverage/sonar-coverage.xml', 'sonar-coverage.xml']].each { src, dst ->
+                            def srcPath = "${env.WORKSPACE}/${src}"
+                            if (fileExists(srcPath)) {
+                                sh "cp '${srcPath}' '${outDir}/${dst}'"
+                                filesToPush << dst
+                            }
+                        }
+                    }
+
+                    // Diff artifacts (already written into outDir by the Git-Ref Compare stage)
+                    if (params.ARTIFACT_PUSH_DIFF && params.GIT_REF?.trim()) {
+                        ['diff.json', 'diff.csv'].each { f ->
+                            if (fileExists("${outDir}/${f}")) filesToPush << f
+                        }
+                    }
+
                     if (filesToPush.isEmpty()) {
                         echo 'No artifact files selected for push — skipping.'
                         return
@@ -1273,6 +1347,7 @@ PYEOF"""
                             "ARTIFACT_FILES=${filesToPush.join(' ')}",
                             "ARTIFACT_REPO_USER=${env.SLOC_AR_USER ?: ''}",
                             "ARTIFACT_REPO_PASS=${env.SLOC_AR_PASS ?: ''}",
+                            "ARTIFACT_GENERATE_MANIFEST=${params.ARTIFACT_GENERATE_MANIFEST}",
                         ]) {
                             sh 'bash ci/artifact-push.sh'
                         }

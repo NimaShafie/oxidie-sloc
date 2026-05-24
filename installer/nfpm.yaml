@@ -1,0 +1,35 @@
+# nFPM config — used by update-dist.yml to generate DEB and RPM packages.
+# https://nfpm.goreleaser.com/configuration/
+#
+# The VERSION environment variable must be set before invoking nfpm (without the 'v' prefix):
+#   VERSION=1.5.61 nfpm pkg --packager deb --config installer/nfpm.yaml \
+#     --target oxide-sloc-linux-amd64.deb
+#
+# The working directory must contain a pre-built ./oxide-sloc binary.
+
+name: oxide-sloc
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+
+maintainer: Nima Shafie <nimzshafie@gmail.com>
+description: |-
+  IEEE 1045-1992 SLOC analysis, test detection, and code metrics workbench.
+  Provides CLI, localhost web UI, HTML/PDF reports, and CI/CD integrations.
+homepage: https://github.com/oxide-sloc/oxide-sloc
+license: AGPL-3.0-or-later
+
+contents:
+  - src: ./oxide-sloc
+    dst: /usr/bin/oxide-sloc
+    file_info:
+      mode: 0755
+
+overrides:
+  deb:
+    recommends:
+      - chromium-browser
+  rpm:
+    recommends:
+      - chromium

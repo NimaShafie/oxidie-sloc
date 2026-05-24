@@ -1,0 +1,82 @@
+# oxide-sloc CircleCI integration
+#
+# Save as .circleci/config.yml in your repository (or add these jobs to your
+# existing CircleCI config).
+#
+# Set the following in Project Settings → Environment Variables:
+#   SLOC_SERVER   — base URL of your oxide-sloc server (optional)
+#   SLOC_API_KEY  — bearer token for the server (optional)
+#
+# Artifact repository push (optional):
+#   ARTIFACT_REPO_TYPE, ARTIFACT_REPO_URL, ARTIFACT_REPO_PATH, ARTIFACT_REPO_USER,
+#   ARTIFACT_REPO_PASS — see ci/artifact-push.sh and docs/ci-integrations.md.
+
+version: 2.1
+
+orbs:
+  rust: circleci/rust@1.6
+
+executors:
+  rust-executor:
+    docker:
+      - image: cimg/rust:1.95
+    resource_class: medium
+
+jobs:
+  sloc-analysis:
+    executor: rust-executor
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - cargo-registry-v1-{{ checksum "Cargo.lock" }}
+            - cargo-registry-v1-
+
+      - run:
+          name: Install oxide-sloc
+          command: cargo install oxide-sloc --locked
+
+      - save_cache:
+          key: cargo-registry-v1-{{ checksum "Cargo.lock" }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+
+      - run:
+          name: Analyze repository
+          command: |
+            mkdir -p sloc-out
+            oxide-sloc analyze . \
+              --json-out sloc-out/result.json \
+              --html-out sloc-out/report.html
+
+      - run:
+          name: Upload to oxide-sloc server
+          command: |
+            if [ -n "$SLOC_SERVER" ]; then
+              oxide-sloc send sloc-out/result.json \
+                --webhook-url "${SLOC_SERVER}/api/ingest?label=${CIRCLE_PROJECT_REPONAME}" \
+                ${SLOC_API_KEY:+--webhook-token "${SLOC_API_KEY}"}
+            fi
+
+      - run:
+          name: Push to artifact repository
+          command: |
+            if [ -n "$ARTIFACT_REPO_TYPE" ] && [ -n "$ARTIFACT_REPO_URL" ]; then
+              ARTIFACT_DIR=sloc-out \
+              ARTIFACT_FILES="result.json report.html" \
+              bash ci/artifact-push.sh
+            fi
+
+      - store_artifacts:
+          path: sloc-out
+          destination: sloc-result
+
+workflows:
+  sloc:
+    jobs:
+      - sloc-analysis:
+          filters:
+            branches:
+              only: /.*/

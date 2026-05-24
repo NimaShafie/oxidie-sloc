@@ -48,6 +48,7 @@ stages:
   - build
   - smoke
   - archive
+  - publish
 
 # ── Quality gates ─────────────────────────────────────────────────────────────
 
@@ -172,3 +173,79 @@ archive:
       - target/release/oxide-sloc
       - ci-out/
     expire_in: 30 days
+
+# ── Publish to Nexus ──────────────────────────────────────────────────────────
+#
+# Pushes all build artifacts to a Sonatype Nexus Repository Manager instance.
+# This job is triggered automatically when NEXUS_REPO_URL is set; otherwise it
+# is available as a manual action.
+#
+# Required GitLab CI/CD variables (Settings → CI/CD → Variables, masked):
+#   NEXUS_REPO_URL    Base URL of the Nexus instance, e.g. https://nexus.example.com
+#   NEXUS_USER        Nexus username
+#   NEXUS_PASS        Nexus password or token  ← mask this variable
+#
+# Optional variables:
+#   NEXUS_REPO_NAME          Raw-format repository name (default: sloc-raw-hosted)
+#   NEXUS_REPO_PATH          Upload path prefix
+#                            (default: oxide-sloc/<project>/<pipeline-iid>)
+#   NEXUS_VERSION            "nexus2" for Nexus Repository Manager 2 (default: nexus = NRM 3)
+#   NEXUS_GENERATE_MANIFEST  Set to "true" to upload a checksums.sha256 manifest
+
+nexus:push:
+  stage: publish
+  needs:
+    - job: archive
+      artifacts: true
+    - job: build
+      artifacts: true
+  rules:
+    - if: '$NEXUS_REPO_URL'
+      when: on_success
+    - when: manual
+      allow_failure: true
+  script:
+    - |
+      if [ -z "${NEXUS_REPO_URL:-}" ]; then
+        echo "NEXUS_REPO_URL is not set — nothing to push."
+        exit 0
+      fi
+
+      # Collect all available artifacts into a single staging directory.
+      STAGE_DIR="${CI_PROJECT_DIR}/nexus-upload"
+      mkdir -p "${STAGE_DIR}"
+      FILES_TO_PUSH=""
+
+      stage_file() {
+        local src="$1" dst_name="$2"
+        if [ -f "${src}" ]; then
+          cp "${src}" "${STAGE_DIR}/${dst_name}"
+          FILES_TO_PUSH="${FILES_TO_PUSH} ${dst_name}"
+          echo "  staged: ${dst_name}"
+        fi
+      }
+
+      echo "Staging artifacts…"
+      stage_file "target/release/oxide-sloc"    "oxide-sloc"
+      stage_file "ci-out/result.json"            "result.json"
+      stage_file "ci-out/report.html"            "report.html"
+      stage_file "ci-out/re-rendered.html"       "re-rendered.html"
+      stage_file "ci-out/re-rendered.pdf"        "re-rendered.pdf"
+
+      FILES_TO_PUSH="${FILES_TO_PUSH# }"
+
+      if [ -z "${FILES_TO_PUSH}" ]; then
+        echo "No artifact files found to push — skipping."
+        exit 0
+      fi
+
+      ARTIFACT_REPO_TYPE="${NEXUS_VERSION:-nexus}" \
+      ARTIFACT_REPO_URL="${NEXUS_REPO_URL}" \
+      ARTIFACT_REPO_PATH="${NEXUS_REPO_PATH:-oxide-sloc/${CI_PROJECT_NAME}/${CI_PIPELINE_IID}}" \
+      ARTIFACT_REPO_EXTRA="${NEXUS_REPO_NAME:-sloc-raw-hosted}" \
+      ARTIFACT_REPO_USER="${NEXUS_USER:-}" \
+      ARTIFACT_REPO_PASS="${NEXUS_PASS:-}" \
+      ARTIFACT_DIR="${STAGE_DIR}" \
+      ARTIFACT_FILES="${FILES_TO_PUSH}" \
+      ARTIFACT_GENERATE_MANIFEST="${NEXUS_GENERATE_MANIFEST:-false}" \
+      bash ci/artifact-push.sh

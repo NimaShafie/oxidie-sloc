@@ -1,0 +1,29 @@
+{
+  "name": "oxide-sloc",
+  "image": "mcr.microsoft.com/devcontainers/rust:1",
+  "postCreateCommand": "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libwayland-dev libgtk-3-dev libxdo-dev && cargo build --workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.checkOnSave.command": "clippy"
+      }
+    }
+  },
+  "forwardPorts": [4317],
+  "portsAttributes": {
+    "4317": {
+      "label": "oxide-sloc web UI",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "remoteEnv": {
+    "RUST_LOG": "warn"
+  }
+}
