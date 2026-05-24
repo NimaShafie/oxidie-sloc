@@ -65,6 +65,7 @@ use sloc_git::ScheduleStore;
 pub(crate) struct CspNonce(pub(crate) String);
 
 static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
+static REPORT_CHART_JS: &[u8] = include_bytes!("../../sloc-report/assets/chart.min.js");
 
 use sloc_core::{
     analyze, compute_delta, read_json, AnalysisRun, FileChangeStatus, RegistryEntry, ScanRegistry,
@@ -370,6 +371,9 @@ enum AsyncRunState {
     Running {
         started_at: std::time::Instant,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
+        phase: Arc<std::sync::Mutex<String>>,
+        files_done: Arc<std::sync::atomic::AtomicUsize>,
+        files_total: Arc<std::sync::atomic::AtomicUsize>,
     },
     /// `run_id` so the status endpoint can redirect to /`runs/result/{run_id`}.
     Complete {
@@ -588,6 +592,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/openapi.yaml", get(openapi_yaml_handler))
         .route("/badge/{metric}", get(badge_handler))
         .route("/static/chart.js", get(chart_js_handler))
+        .route("/static/chart-report.js", get(report_chart_js_handler))
         .route("/auth/login", get(auth::auth_login_get))
         .route("/auth/login", post(auth::auth_login_post))
         // Webhook receivers are public (no API-key auth) — they use per-schedule HMAC secrets.
@@ -1390,11 +1395,27 @@ async fn api_docs_handler(
 
 async fn chart_js_handler() -> impl IntoResponse {
     (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
         CHART_JS,
+    )
+}
+
+async fn report_chart_js_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        REPORT_CHART_JS,
     )
 }
 
@@ -2180,6 +2201,8 @@ fn locate_report_error(message: impl Into<String>, csp_nonce: &str) -> Response 
         message: message.into(),
         last_report_url: Some("/view-reports".to_string()),
         last_report_label: Some("View Reports".to_string()),
+        run_id: None,
+        error_code: None,
         csp_nonce: csp_nonce.to_owned(),
         version: env!("CARGO_PKG_VERSION"),
     }
@@ -2497,6 +2520,8 @@ async fn relocate_scan_handler(
             message: format!("Run ID '{run_id}' not found in registry."),
             last_report_url: Some("/compare-scans".to_string()),
             last_report_label: Some("Compare Scans".to_string()),
+            run_id: Some(run_id.clone()),
+            error_code: Some(404),
             csp_nonce: csp_nonce.clone(),
             version: env!("CARGO_PKG_VERSION"),
         }
@@ -2922,7 +2947,7 @@ async fn open_path_handler(
     // Resolve the target directory. If the path doesn't exist yet (e.g. the output
     // dir hasn't been created by a scan), walk up to the nearest existing ancestor
     // so the file explorer still opens somewhere useful.
-    let target = match fs::canonicalize(raw) {
+    let target = match tokio::fs::canonicalize(raw).await {
         Ok(canonical) if canonical.is_file() => match canonical.parent() {
             Some(p) => p.to_path_buf(),
             None => return (StatusCode::BAD_REQUEST, "path has no parent").into_response(),
@@ -3163,6 +3188,8 @@ fn validate_server_scan_path(
                 .to_string(),
             last_report_url: None,
             last_report_label: None,
+            run_id: None,
+            error_code: Some(403),
             csp_nonce: csp_nonce.to_owned(),
             version: env!("CARGO_PKG_VERSION"),
         };
@@ -3189,6 +3216,8 @@ fn validate_server_scan_path(
             message: "The requested path is not within an allowed scan directory.".to_string(),
             last_report_url: None,
             last_report_label: None,
+            run_id: None,
+            error_code: Some(403),
             csp_nonce: csp_nonce.to_owned(),
             version: env!("CARGO_PKG_VERSION"),
         };
@@ -3379,6 +3408,41 @@ fn spawn_pdf_background(
     }
 }
 
+/// On-demand PDF generation using the pure-Rust `write_pdf_from_run` path (same as scan time).
+/// Loads the stored JSON, regenerates the PDF, and clears `pdf_path` on failure so the
+/// result page can show an error on the next visit instead of spinning indefinitely.
+fn spawn_native_pdf_background(
+    json_path: PathBuf,
+    pdf_dest: PathBuf,
+    run_id: String,
+    artifacts: Arc<Mutex<HashMap<String, RunArtifacts>>>,
+) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let run = sloc_core::read_json(&json_path)?;
+            write_pdf_from_run(&run, &pdf_dest)
+        })
+        .await;
+        let failed = match result {
+            Ok(Ok(())) => false,
+            Ok(Err(err)) => {
+                eprintln!("[oxide-sloc][pdf] on-demand PDF failed: {err}");
+                true
+            }
+            Err(err) => {
+                eprintln!("[oxide-sloc][pdf] on-demand PDF task panicked: {err}");
+                true
+            }
+        };
+        if failed {
+            let mut map = artifacts.lock().await;
+            if let Some(entry) = map.get_mut(&run_id) {
+                entry.pdf_path = None;
+            }
+        }
+    });
+}
+
 /// Sum the code lines added in this comparison (new + grown files).
 fn sum_added_code_lines(cmp: &sloc_core::ScanComparison) -> i64 {
     cmp.file_deltas
@@ -3459,6 +3523,8 @@ async fn analyze_handler(
             ),
             last_report_url: None,
             last_report_label: None,
+            run_id: None,
+            error_code: Some(503),
             csp_nonce: csp_nonce.clone(),
             version: env!("CARGO_PKG_VERSION"),
         };
@@ -3507,6 +3573,15 @@ async fn analyze_handler(
     let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let task_cancel = Arc::clone(&cancel_token);
 
+    // Phase tracker: updated by run_analysis_task at key checkpoints.
+    let phase = Arc::new(std::sync::Mutex::new("Starting".to_string()));
+    let task_phase = Arc::clone(&phase);
+
+    let files_done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let files_total = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_files_done = Arc::clone(&files_done);
+    let task_files_total = Arc::clone(&files_total);
+
     // Register Running state before building the task struct so the semaphore permit
     // (which has a significant Drop) isn't held across the async_runs lock acquisition.
     {
@@ -3516,6 +3591,9 @@ async fn analyze_handler(
             AsyncRunState::Running {
                 started_at: std::time::Instant::now(),
                 cancel_token,
+                phase,
+                files_done,
+                files_total,
             },
         );
     }
@@ -3526,6 +3604,9 @@ async fn analyze_handler(
         wait_id: wait_id.clone(),
         config,
         cancel: task_cancel,
+        phase: task_phase,
+        files_done: task_files_done,
+        files_total: task_files_total,
         git_repo: form.git_repo.clone().filter(|s| !s.is_empty()),
         git_ref: form.git_ref.clone().filter(|s| !s.is_empty()),
         generate_html: form.generate_html.is_some(),
@@ -3568,6 +3649,9 @@ struct AnalysisTask {
     wait_id: String,
     config: AppConfig,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    phase: Arc<std::sync::Mutex<String>>,
+    files_done: Arc<std::sync::atomic::AtomicUsize>,
+    files_total: Arc<std::sync::atomic::AtomicUsize>,
     git_repo: Option<String>,
     git_ref: Option<String>,
     generate_html: bool,
@@ -3594,12 +3678,30 @@ async fn run_analysis_task(task: AnalysisTask) {
         .and_then(|p| p.parent().filter(|par| is_upload_tmp_path(par)))
         .map(PathBuf::from);
     let config_sb = task.config;
+    let progress_sb = sloc_core::ProgressCounters {
+        files_done: Arc::clone(&task.files_done),
+        files_total: Arc::clone(&task.files_total),
+    };
+    if let Ok(mut p) = task.phase.lock() {
+        *p = "Scanning files".to_string();
+    }
     let analysis_result = tokio::task::spawn_blocking(move || {
-        run_analysis_blocking(config_sb, git_repo_sb, git_ref_sb, clones_dir_sb, cancel_sb)
+        run_analysis_blocking(
+            config_sb,
+            git_repo_sb,
+            git_ref_sb,
+            clones_dir_sb,
+            cancel_sb,
+            Some(progress_sb),
+        )
     })
     .await
     .map_err(|err| anyhow::anyhow!(err.to_string()))
     .and_then(|result| result);
+
+    if let Ok(mut p) = task.phase.lock() {
+        *p = "Writing reports".to_string();
+    }
 
     // If cancelled while running, discard results and mark as cancelled.
     if task.cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -3818,6 +3920,7 @@ fn run_analysis_blocking(
     git_ref: Option<String>,
     clones_dir: PathBuf,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    progress: Option<sloc_core::ProgressCounters>,
 ) -> Result<(sloc_core::AnalysisRun, String)> {
     if let (Some(repo), Some(refname)) = (git_repo, git_ref) {
         let dest = git_clone_dest(&repo, &clones_dir);
@@ -3825,7 +3928,7 @@ fn run_analysis_blocking(
         let wt = clones_dir.join(format!("wt-{}", uuid::Uuid::new_v4().simple()));
         sloc_git::create_worktree(&dest, &refname, &wt)?;
         config.discovery.root_paths = vec![wt.clone()];
-        let run = analyze(&config, "serve", Some(&cancel));
+        let run = analyze(&config, "serve", Some(&cancel), progress.as_ref());
         let _ = sloc_git::destroy_worktree(&dest, &wt);
         let mut run = run?;
         if run.git_branch.is_none() {
@@ -3834,7 +3937,7 @@ fn run_analysis_blocking(
         let html = render_html(&run)?;
         return Ok((run, html));
     }
-    let run = analyze(&config, "serve", Some(&cancel))?;
+    let run = analyze(&config, "serve", Some(&cancel), progress.as_ref())?;
     let html = render_html(&run)?;
     Ok((run, html))
 }
@@ -3875,9 +3978,18 @@ fn derive_file_stem(project_label: &str, commit_short: Option<&str>) -> String {
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum AsyncRunStatusResponse {
-    Running { elapsed_secs: u64 },
-    Complete { run_id: String },
-    Failed { message: String },
+    Running {
+        elapsed_secs: u64,
+        phase: String,
+        files_done: u64,
+        files_total: u64,
+    },
+    Complete {
+        run_id: String,
+    },
+    Failed {
+        message: String,
+    },
     Cancelled,
 }
 
@@ -3895,7 +4007,13 @@ async fn async_run_status_handler(
     };
     match run_state {
         None => error::not_found("run not found"),
-        Some(AsyncRunState::Running { started_at, .. }) => {
+        Some(AsyncRunState::Running {
+            started_at,
+            phase,
+            files_done,
+            files_total,
+            ..
+        }) => {
             // Treat runs older than 2 h as timed out (analysis should finish well under that).
             if started_at.elapsed() > std::time::Duration::from_hours(2) {
                 let mut runs = state.async_runs.lock().await;
@@ -3911,8 +4029,12 @@ async fn async_run_status_handler(
                 })
                 .into_response();
             }
+            let phase_str = phase.lock().map(|g| g.clone()).unwrap_or_default();
             Json(AsyncRunStatusResponse::Running {
                 elapsed_secs: started_at.elapsed().as_secs(),
+                phase: phase_str,
+                files_done: files_done.load(std::sync::atomic::Ordering::Relaxed) as u64,
+                files_total: files_total.load(std::sync::atomic::Ordering::Relaxed) as u64,
             })
             .into_response()
         }
@@ -3974,6 +4096,8 @@ async fn async_run_result_handler(
                 ),
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
+                run_id: Some(run_id.clone()),
+                error_code: Some(404),
                 csp_nonce: csp_nonce.clone(),
                 version: env!("CARGO_PKG_VERSION"),
             }
@@ -3990,6 +4114,8 @@ async fn async_run_result_handler(
             message: "JSON result was not saved for this run.".to_string(),
             last_report_url: Some("/view-reports".to_string()),
             last_report_label: Some("View Reports".to_string()),
+            run_id: Some(run_id.clone()),
+            error_code: Some(404),
             csp_nonce: csp_nonce.clone(),
             version: env!("CARGO_PKG_VERSION"),
         }
@@ -4155,8 +4281,7 @@ fn render_result_page(
         "{} / {}",
         run.environment.initiator_username, run.environment.initiator_hostname
     );
-    let scan_time_display = fmt_la_time_meta(run.tool.timestamp_utc, false);
-    let generated_display = fmt_la_time_meta(run.tool.timestamp_utc, true);
+    let scan_time_display = fmt_la_time_meta(run.tool.timestamp_utc);
     let os_display = format!(
         "{} / {}",
         run.environment.operating_system, run.environment.architecture
@@ -4260,7 +4385,6 @@ fn render_result_page(
         git_commit_url,
         scan_performed_by,
         scan_time_display,
-        generated_display,
         os_display,
         test_count,
         current_scan_number: prev_scan_count + 1,
@@ -4628,6 +4752,26 @@ async fn cleanup_runs_handler(
 /// Serve the HTML artifact for a run — view or download.
 /// Replace every `nonce="OLD"` attribute in a pre-generated HTML file with
 /// `nonce="NEW"` so that inline `<style>` and `<script>` blocks pass the
+/// Replace the inline Chart.js `<script>` block in `<head>` with a cacheable static URL.
+/// Only called for browser views; downloads keep the self-contained inline version.
+fn swap_inline_chart_js_for_static(html: String) -> String {
+    let Some(head_end) = html.find("</head>") else {
+        return html;
+    };
+    let Some(script_start) = html[..head_end].rfind("<script") else {
+        return html;
+    };
+    let Some(close_offset) = html[script_start..].find("</script>") else {
+        return html;
+    };
+    let block_end = script_start + close_offset + "</script>".len();
+    format!(
+        "{}<script src=\"/static/chart-report.js\"></script>{}",
+        &html[..script_start],
+        &html[block_end..]
+    )
+}
+
 /// current-request Content-Security-Policy nonce check.
 fn patch_html_nonce(html: &str, new_nonce: &str) -> String {
     // Find the first nonce value that was baked in at render time.
@@ -4656,6 +4800,7 @@ fn serve_html_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
             // Patch the saved nonce so inline styles/scripts pass CSP.
             let content = patch_html_nonce(&raw, csp_nonce);
             if wants_download {
+                // Keep the self-contained inline version for downloads (opened as file://).
                 (
                     [
                         (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -4668,7 +4813,9 @@ fn serve_html_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
                 )
                     .into_response()
             } else {
-                Html(content).into_response()
+                // Swap the 202 KB inline Chart.js block for a cacheable static URL so the
+                // browser caches it after the first view; the HTML response also shrinks.
+                Html(swap_inline_chart_js_for_static(content)).into_response()
             }
         }
         Err(err) => {
@@ -4686,6 +4833,8 @@ fn serve_html_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
                 message: msg,
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
+                run_id: None,
+                error_code: Some(404),
                 csp_nonce: csp_nonce.to_owned(),
                 version: env!("CARGO_PKG_VERSION"),
             }
@@ -4736,6 +4885,8 @@ fn serve_pdf_artifact(
                 message: msg,
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
+                run_id: Some(run_id.to_owned()),
+                error_code: Some(404),
                 csp_nonce: csp_nonce.to_owned(),
                 version: env!("CARGO_PKG_VERSION"),
             }
@@ -4785,6 +4936,8 @@ fn serve_json_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
                 message: msg,
                 last_report_url: Some("/view-reports".to_string()),
                 last_report_label: Some("View Reports".to_string()),
+                run_id: None,
+                error_code: Some(404),
                 csp_nonce: csp_nonce.to_owned(),
                 version: env!("CARGO_PKG_VERSION"),
             }
@@ -4886,6 +5039,8 @@ async fn resolve_artifact_set(
         message: format!("Report not found. \"{short_id}\" is not a recognized run ID.{hint}"),
         last_report_url: Some("/view-reports".to_string()),
         last_report_label: Some("View Reports".to_string()),
+        run_id: None,
+        error_code: Some(404),
         csp_nonce: csp_nonce.to_owned(),
         version: env!("CARGO_PKG_VERSION"),
     }
@@ -4916,20 +5071,57 @@ async fn artifact_handler(
             serve_html_artifact(&path, wants_download, &csp_nonce)
         }
         "pdf" => {
-            let Some(path) = artifact_set.pdf_path else {
-                let msg = "PDF report was not generated for this run, or was not recorded in \
-                           the scan registry. Re-run the analysis with PDF output enabled."
-                    .to_string();
-                let html = ErrorTemplate {
-                    message: msg,
-                    last_report_url: Some(format!("/runs/html/{run_id}")),
-                    last_report_label: Some("View HTML Report".to_string()),
-                    csp_nonce: csp_nonce.clone(),
-                    version: env!("CARGO_PKG_VERSION"),
+            let report_title = artifact_set.report_title.clone();
+            let json_path_opt = artifact_set.json_path.clone();
+            let output_dir = artifact_set.output_dir.clone();
+            let path = match artifact_set.pdf_path {
+                Some(p) => p,
+                None => {
+                    // PDF wasn't produced at scan time.
+                    // Regenerate from the stored JSON using the same pure-Rust path as scan time.
+                    let Some(json_src) = json_path_opt.filter(|p| p.exists()) else {
+                        let msg = "PDF report was not generated for this run. \
+                                   Re-run the analysis with PDF output enabled."
+                            .to_string();
+                        let html = ErrorTemplate {
+                            message: msg,
+                            last_report_url: Some(format!("/runs/html/{run_id}")),
+                            last_report_label: Some("View HTML Report".to_string()),
+                            run_id: Some(run_id.clone()),
+                            error_code: Some(404),
+                            csp_nonce: csp_nonce.clone(),
+                            version: env!("CARGO_PKG_VERSION"),
+                        }
+                        .render()
+                        .unwrap_or_else(|_| "<pre>PDF not available.</pre>".to_string());
+                        return (StatusCode::NOT_FOUND, Html(html)).into_response();
+                    };
+                    let pdf_filename = build_pdf_filename(&report_title, &run_id);
+                    let pdf_dest = output_dir.join(&pdf_filename);
+                    if !pdf_dest.exists() {
+                        // Record the pending path so concurrent requests show the spinner.
+                        {
+                            let mut map = state.artifacts.lock().await;
+                            if let Some(entry) = map.get_mut(&run_id) {
+                                entry.pdf_path = Some(pdf_dest.clone());
+                            }
+                        }
+                        {
+                            let mut reg = state.registry.lock().await;
+                            if let Some(e) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
+                                e.pdf_path = Some(pdf_dest.clone());
+                            }
+                            let _ = reg.save(&state.registry_path);
+                        }
+                        spawn_native_pdf_background(
+                            json_src,
+                            pdf_dest.clone(),
+                            run_id.clone(),
+                            state.artifacts.clone(),
+                        );
+                    }
+                    pdf_dest
                 }
-                .render()
-                .unwrap_or_else(|_| "<pre>PDF not available.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
             };
             // PDF path is recorded but the background task may still be writing it.
             // Return a self-refreshing "please wait" page rather than an error.
@@ -5003,12 +5195,8 @@ async fn artifact_handler(
                        </a>\
                        <div class=\"nav-right\">\
                          <a class=\"nav-pill\" href=\"/\">Home</a>\
-                         <div class=\"nav-dropdown\">\
-                           <a href=\"/view-reports\" class=\"nav-dropdown-btn\">View Reports <svg width=\"10\" height=\"10\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\"><polyline points=\"6 9 12 15 18 9\"></polyline></svg></a>\
-                           <div class=\"nav-dropdown-menu\">\
-                             <a href=\"/trend-reports\"><svg viewBox=\"0 0 24 24\"><polyline points=\"23 6 13.5 15.5 8.5 10.5 1 18\"></polyline><polyline points=\"17 6 23 6 23 12\"></polyline></svg>Trend Reports</a>\
-                           </div>\
-                         </div>\
+                         <a class=\"nav-pill\" href=\"/view-reports\">View Reports</a>\
+                         <a class=\"nav-pill\" href=\"/compare-scans\">Compare Scans</a>\
                          <button type=\"button\" class=\"theme-toggle\" id=\"theme-toggle\" aria-label=\"Toggle theme\">\
                            <svg class=\"icon-moon\" viewBox=\"0 0 24 24\"><path d=\"M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z\"></path></svg>\
                            <svg class=\"icon-sun\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"4.2\"></circle>\
@@ -5019,8 +5207,8 @@ async fn artifact_handler(
                      <div class=\"page\"><div class=\"panel\">\
                        <div class=\"spin-ring\"></div>\
                        <h1>Generating PDF\u{2026}</h1>\
-                       <p>The PDF is being rendered from the HTML report.<br>\
-                       This page refreshes automatically \u{2014} usually 15\u{2013}45 seconds.</p>\
+                       <p>The PDF is being generated from the scan results.<br>\
+                       This page refreshes automatically \u{2014} usually a few seconds.</p>\
                        <a class=\"back-link\" href=\"/runs/pdf/{run_id}\">Refresh now</a>\
                      </div></div>\
                      <script nonce=\"{csp_nonce}\">\
@@ -5038,13 +5226,7 @@ async fn artifact_handler(
                 );
                 return Html(html).into_response();
             }
-            serve_pdf_artifact(
-                &path,
-                &artifact_set.report_title,
-                &run_id,
-                wants_download,
-                &csp_nonce,
-            )
+            serve_pdf_artifact(&path, &report_title, &run_id, wants_download, &csp_nonce)
         }
         "json" => {
             let Some(path) = artifact_set.json_path else {
@@ -5055,6 +5237,8 @@ async fn artifact_handler(
                     message: msg,
                     last_report_url: Some("/view-reports".to_string()),
                     last_report_label: Some("View Reports".to_string()),
+                    run_id: Some(run_id.clone()),
+                    error_code: Some(404),
                     csp_nonce: csp_nonce.clone(),
                     version: env!("CARGO_PKG_VERSION"),
                 }
@@ -5073,6 +5257,8 @@ async fn artifact_handler(
                     message: msg,
                     last_report_url: Some(format!("/runs/html/{run_id}")),
                     last_report_label: Some("View HTML Report".to_string()),
+                    run_id: Some(run_id.clone()),
+                    error_code: Some(404),
                     csp_nonce: csp_nonce.clone(),
                     version: env!("CARGO_PKG_VERSION"),
                 }
@@ -5110,6 +5296,8 @@ async fn artifact_handler(
                     message: msg,
                     last_report_url: Some(format!("/runs/html/{run_id}")),
                     last_report_label: Some("View HTML Report".to_string()),
+                    run_id: Some(run_id.clone()),
+                    error_code: Some(404),
                     csp_nonce: csp_nonce.clone(),
                     version: env!("CARGO_PKG_VERSION"),
                 }
@@ -5189,6 +5377,8 @@ async fn artifact_handler(
                     ),
                     last_report_url: Some("/view-reports".to_string()),
                     last_report_label: Some("View Reports".to_string()),
+                    run_id: Some(run_id.clone()),
+                    error_code: Some(404),
                     csp_nonce: csp_nonce.clone(),
                     version: env!("CARGO_PKG_VERSION"),
                 }
@@ -5282,10 +5472,8 @@ fn fmt_la_time(dt: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
-/// Format a timestamp for the result-page meta row, matching the seconds-precision
-/// style used in the saved HTML report.  When `parens` is true the timezone label
-/// is wrapped in parentheses (used for the "Generated" chip).
-fn fmt_la_time_meta(dt: chrono::DateTime<chrono::Utc>, parens: bool) -> String {
+/// Format a timestamp for the result-page meta row (seconds precision, PDT/PST label).
+fn fmt_la_time_meta(dt: chrono::DateTime<chrono::Utc>) -> String {
     let (offset, tz) = if is_pacific_dst(dt) {
         (
             chrono::FixedOffset::west_opt(7 * 3600).expect("PDT offset valid"),
@@ -5297,15 +5485,10 @@ fn fmt_la_time_meta(dt: chrono::DateTime<chrono::Utc>, parens: bool) -> String {
             "PST",
         )
     };
-    let t = dt
-        .with_timezone(&offset)
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
-    if parens {
-        format!("{t} ({tz})")
-    } else {
-        format!("{t} {tz}")
-    }
+    format!(
+        "{} {tz}",
+        dt.with_timezone(&offset).format("%Y-%m-%d %H:%M:%S")
+    )
 }
 
 fn fmt_git_date(iso: &str) -> Option<String> {
@@ -5586,6 +5769,8 @@ fn load_scan_for_compare(
                     ),
                     last_report_url: Some("/compare-scans".to_string()),
                     last_report_label: Some("Compare Scans".to_string()),
+                    run_id: Some(run_id.to_owned()),
+                    error_code: Some(404),
                     csp_nonce: csp_nonce.to_owned(),
                     version: env!("CARGO_PKG_VERSION"),
                 }
@@ -5719,6 +5904,8 @@ async fn compare_handler(
                 .to_string(),
             last_report_url: Some("/compare-scans".to_string()),
             last_report_label: Some("Compare Scans".to_string()),
+            run_id: None,
+            error_code: None,
             csp_nonce: csp_nonce.clone(),
             version: env!("CARGO_PKG_VERSION"),
         }
@@ -5756,6 +5943,8 @@ async fn compare_handler(
                 .to_string(),
             last_report_url: Some("/compare-scans".to_string()),
             last_report_label: Some("Compare Scans".to_string()),
+            run_id: None,
+            error_code: None,
             csp_nonce: csp_nonce.clone(),
             version: env!("CARGO_PKG_VERSION"),
         }
@@ -6569,7 +6758,7 @@ async fn api_metrics_submodules_handler(
     let mut result: Vec<SubmoduleEntry> = Vec::new();
 
     for path in &json_paths {
-        let Ok(json_str) = std::fs::read_to_string(path) else {
+        let Ok(json_str) = tokio::fs::read_to_string(path).await else {
             continue;
         };
         let Ok(run): Result<sloc_core::AnalysisRun, _> = serde_json::from_str(&json_str) else {
@@ -7458,7 +7647,7 @@ async fn trend_report_handler(
       wrap.innerHTML=
         '<div class="chart-section-header">SCAN HISTORY</div>'+
         '<div class="filter-row">'+
-          '<input class="filter-input" id="sh-proj-filter" type="text" placeholder="Filter by project\u2026">'+
+          '<input class="filter-input" id="sh-proj-filter" type="text" placeholder="Filter by path or name\u2026">'+
           '<select class="filter-select" id="sh-branch-filter">'+branchOpts+'</select>'+
           '<button type="button" class="btn" id="sh-reset-btn">\u21bb Reset view</button>'+
         '</div>'+
@@ -8230,16 +8419,18 @@ async fn test_metrics_handler(
         wd.dirs.iter().map(|p| p.display().to_string()).collect()
     };
     let latest_run: Option<AnalysisRun> = {
-        let reg = state.registry.lock().await;
-        let json_str: Option<String> = reg
-            .entries
-            .first()
-            .and_then(|e| e.json_path.as_ref())
-            .and_then(|p| std::fs::read_to_string(p).ok());
-        drop(reg);
-        json_str
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
+        let json_path = {
+            let reg = state.registry.lock().await;
+            reg.entries.first().and_then(|e| e.json_path.clone())
+        };
+        if let Some(p) = json_path {
+            let json_str = tokio::fs::read_to_string(&p).await.ok();
+            json_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+        } else {
+            None
+        }
     };
 
     // Build per-language chart JSON (kept for has_coverage derivation via cov_json).
@@ -8426,18 +8617,20 @@ async fn test_metrics_handler(
                 .collect()
         };
         for root in &all_roots {
-            let run_for_root: Option<AnalysisRun> = {
+            let json_path = {
                 let reg = state.registry.lock().await;
-                let json_str = reg
-                    .entries
+                reg.entries
                     .iter()
                     .find(|e| e.input_roots.iter().any(|r| r == root))
-                    .and_then(|e| e.json_path.as_ref())
-                    .and_then(|p| std::fs::read_to_string(p).ok());
-                drop(reg);
+                    .and_then(|e| e.json_path.clone())
+            };
+            let run_for_root: Option<AnalysisRun> = if let Some(p) = json_path {
+                let json_str = tokio::fs::read_to_string(&p).await.ok();
                 json_str
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
+            } else {
+                None
             };
             if let Some(ref run) = run_for_root {
                 scope_map.insert(root.clone(), build_scope_entry_for_run(run));
@@ -9675,7 +9868,7 @@ pub(crate) fn scan_path_to_artifacts(
     let mut config = base_config.clone();
     config.discovery.root_paths = vec![scan_path.to_path_buf()];
     label.clone_into(&mut config.reporting.report_title);
-    let run = analyze(&config, "git", None)?;
+    let run = analyze(&config, "git", None, None)?;
     let html = render_html(&run)?;
     let run_id = run.tool.run_id.clone();
     let project_label = sanitize_project_label(label);
@@ -11179,6 +11372,12 @@ struct SubmoduleRow {
     .tree-status-cell { display:flex; justify-content:flex-start; }
     .preview-error { color: var(--danger-text); background: var(--danger-bg); border:1px solid #efc2c2; padding: 12px; border-radius: 12px; }
     .preview-hint { color: var(--muted); background: var(--surface-2); border:1px solid var(--line); padding: 18px 20px; border-radius: 12px; font-size:14px; text-align:center; }
+    .preview-loading { display:flex; align-items:center; gap:12px; padding:14px 16px; border-radius:12px; background:var(--surface-2); border:1px solid var(--line); }
+    .preview-spinner { width:18px; height:18px; border:2.5px solid var(--line); border-top-color:var(--oxide); border-radius:50%; animation:prevSpin 0.75s linear infinite; flex:0 0 18px; }
+    @keyframes prevSpin { to { transform:rotate(360deg); } }
+    .preview-loading-text { flex:1; min-width:0; }
+    .preview-loading-msg { font-size:13px; color:var(--text); font-weight:600; }
+    .preview-loading-elapsed { font-size:11px; color:var(--muted); margin-top:2px; }
     .scope-preview-divider { height:1px; background:var(--line); opacity:0.5; margin-top:22px; margin-bottom:22px; }
     .cov-scan-status { border-radius:10px; font-size:12.5px; margin-top:10px; }
     .cov-scan-idle { display:none; }
@@ -11364,11 +11563,12 @@ struct SubmoduleRow {
     <div class="loading-card">
       <div class="lc-badge" id="lc-badge"><span class="lc-dot"></span>Analysis running</div>
       <h2 class="lc-title" id="lc-title">Analyzing your project…</h2>
-      <p class="lc-sub">Results are saved automatically — you can leave this page.</p>
+      <p class="lc-sub">Scanning files, detecting languages, and counting lines — stay for a live view of the results.</p>
       <div class="lc-path" id="lc-path"></div>
       <div class="lc-metrics" id="lc-metrics">
         <div class="lc-metric"><div class="lc-metric-label">Elapsed</div><div class="lc-metric-value" id="lc-elapsed">0s</div></div>
         <div class="lc-metric"><div class="lc-metric-label">Phase</div><div class="lc-metric-value" id="lc-phase">Starting</div></div>
+        <div class="lc-metric hidden" id="lc-files-card"><div class="lc-metric-label">Files</div><div class="lc-metric-value" id="lc-files">0</div></div>
       </div>
       <div class="progress-bar" id="lc-progress-bar"><span></span></div>
       <div class="lc-warn hidden" id="lc-warn">This is taking longer than usual. Large repositories can take several minutes — the analysis is still running.</div>
@@ -11706,8 +11906,7 @@ pytest --cov --cov-report=xml
                 <div class="section-kicker">Step 2</div>
                 <h2>Choose counting behavior</h2>
                 <p class="card-subtitle counting-intro">These settings decide how mixed code-plus-comment lines and Python docstrings are classified. Pure comment lines, block comments, physical lines, and blank lines are still tracked by supported analyzers even when they do not share a line with executable code.</p>
-                <div class="ieee-note">Counting methodology follows IEEE Std 1045-1992 physical SLOC.</div>
-                <div class="subsection-bar">Primary line classification</div>
+<div class="subsection-bar">Primary line classification</div>
                 <div class="preset-kv-row">
                   <div class="toggle-card mixed-line-card" style="margin:0;">
                     <div class="field-help-title" style="margin-bottom:10px;">Primary line classification</div>
@@ -12258,6 +12457,8 @@ int main() { … }   ← code
 
         var warnShown = false, pollRetries = 0, activeWaitId = null;
 
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+
         function lcSetPhase(txt) { var el = document.getElementById("lc-phase"); if (el) el.textContent = txt; }
 
         function lcShowCancelled() {
@@ -12322,7 +12523,14 @@ int main() { … }   ← code
                   var w = document.getElementById("lc-warn");
                   if (w) w.classList.remove("hidden");
                 }
-                lcSetPhase(s < 10 ? "Starting" : s < 30 ? "Scanning files" : "Analyzing");
+                lcSetPhase(data.phase || "Running");
+                var fd = data.files_done || 0, ft = data.files_total || 0;
+                if (ft > 0) {
+                  var card = document.getElementById("lc-files-card");
+                  if (card) card.classList.remove("hidden");
+                  var el = document.getElementById("lc-files");
+                  if (el) el.textContent = fmt(fd) + " / " + fmt(ft);
+                }
                 setTimeout(function() { lcPoll(waitId); }, 1500);
               }
             })
@@ -13066,13 +13274,44 @@ int main() { … }   ← code
         }
         var includeValue = includeGlobsInput ? includeGlobsInput.value : "";
         var excludeValue = excludeGlobsInput ? excludeGlobsInput.value : "";
-        previewPanel.innerHTML = '<div class="preview-error">Refreshing preview...</div>';
+        if (window._previewInterval) { clearInterval(window._previewInterval); window._previewInterval = null; }
+        if (window._previewElapsedTimer) { clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null; }
+        var _prevMsgs = [
+          'Scanning directory structure…',
+          'Detecting file types…',
+          'Applying include / exclude filters…',
+          'Estimating file counts…',
+          'Building scope preview…',
+          'Almost there…'
+        ];
+        var _prevMsgIdx = 0;
+        var _prevStart = Date.now();
+        previewPanel.innerHTML =
+          '<div class="preview-loading">' +
+          '<div class="preview-spinner"></div>' +
+          '<div class="preview-loading-text">' +
+          '<div class="preview-loading-msg" id="plm">' + _prevMsgs[0] + '</div>' +
+          '<div class="preview-loading-elapsed" id="ple">0s elapsed</div>' +
+          '</div></div>';
+        var _sizeTextEl = document.getElementById('project-size-text');
+        if (_sizeTextEl) _sizeTextEl.textContent = 'Project size: Detecting…';
+        window._previewInterval = setInterval(function() {
+          _prevMsgIdx = (_prevMsgIdx + 1) % _prevMsgs.length;
+          var ml = document.getElementById('plm');
+          if (ml) ml.textContent = _prevMsgs[_prevMsgIdx];
+        }, 1500);
+        window._previewElapsedTimer = setInterval(function() {
+          var el = document.getElementById('ple');
+          if (el) el.textContent = Math.round((Date.now() - _prevStart) / 1000) + 's elapsed';
+        }, 1000);
         var previewUrl = "/preview?path=" + encodeURIComponent(path)
           + "&include_globs=" + encodeURIComponent(includeValue)
           + "&exclude_globs=" + encodeURIComponent(excludeValue);
         fetch(previewUrl)
           .then(function (response) { return response.text(); })
           .then(function (html) {
+            clearInterval(window._previewInterval); window._previewInterval = null;
+            clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null;
             previewPanel.innerHTML = html;
             attachPreviewInteractions();
             syncPythonVisibility();
@@ -13109,6 +13348,8 @@ int main() { … }   ← code
             }
           })
           .catch(function (err) {
+            clearInterval(window._previewInterval); window._previewInterval = null;
+            clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null;
             previewPanel.innerHTML = '<div class="preview-error">Preview request failed: ' + String(err) + '</div>';
           });
       }
@@ -15570,9 +15811,8 @@ struct ScanSetupTemplate {
     @keyframes chip-flash { 0%{background:var(--accent);color:#fff;} 80%{background:var(--accent);color:#fff;} 100%{background:var(--surface-2);color:var(--text);} }
     .chip-copied-flash { animation:chip-flash 0.9s ease forwards; }
     /* Meta chips row */
-    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 0; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-    .meta-chip { display:inline-flex; align-items:center; gap:5px; padding:0 14px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
-    .meta-chip:first-child { padding-left:0; }
+    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:0; margin:14px 0 0; padding:10px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); width:100%; }
+    .meta-chip { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:5px; padding:0 10px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
     .meta-chip:last-child { border-right:none; }
     .meta-chip b { color:var(--text); font-weight:700; }
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
@@ -15642,7 +15882,8 @@ struct ScanSetupTemplate {
     .r-expand-btn:hover{background:var(--surface);color:var(--text);}
     .r-chart-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}
     .r-chart-modal{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:960px;width:100%;max-height:85vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}
-    .r-chart-modal-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 16px;display:block;}
+    .r-chart-modal-title{font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--text);margin:0 0 2px;display:block;}
+    .r-chart-modal-subtitle{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 16px;display:block;letter-spacing:.02em;}
     .r-chart-modal-close{position:absolute;top:14px;right:18px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--text);line-height:1;padding:0;}
     .r-chart-modal-close:hover{opacity:.7;}
     body.dark-theme .r-chart-modal{background:var(--surface);}
@@ -15823,7 +16064,6 @@ struct ScanSetupTemplate {
       <div class="meta">
         <span class="meta-chip">Scan by <b>{{ scan_performed_by }}</b></span>
         <span class="meta-chip">Scanned <b>{{ scan_time_display }}</b></span>
-        <span class="meta-chip">Generated <b>{{ generated_display }}</b></span>
         <span class="meta-chip">OS <b>{{ os_display }}</b></span>
         <span class="meta-chip">Files analyzed <b>{{ files_analyzed }}</b></span>
         <span class="meta-chip">Files skipped <b>{{ files_skipped }}</b></span>
@@ -16002,12 +16242,9 @@ struct ScanSetupTemplate {
                 {% endif %}
               {% when None %}
                 {% match html_url %}
-                  {% when Some with (hurl) %}
-                    <a class="button" href="{{ hurl }}?autoprint=1" target="_blank" rel="noopener" id="pdf-open-btn">Generate PDF</a>
-                    <p class="action-empty-note" style="margin-top:6px;font-size:11px;">
-                      No PDF renderer found on the server. Opens the HTML report in your browser
-                      with the print dialog ready — choose <strong>Save as PDF</strong>.
-                    </p>
+                  {% when Some with (_hurl) %}
+                    <a class="button" href="/runs/pdf/{{ run_id }}" target="_blank" rel="noopener" id="pdf-open-btn">Generate PDF</a>
+                    <p class="action-empty-note" style="margin-top:6px;font-size:11px;">Generates the PDF report from the scan results. Usually completes within a few seconds.</p>
                   {% when None %}
                     <p class="action-empty-note" style="color:var(--muted);font-size:12px;background:rgba(0,0,0,0.04);border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
                       PDF and HTML reports were not generated for this run. Re-run with HTML or PDF output enabled.
@@ -16764,11 +17001,11 @@ struct ScanSetupTemplate {
         // the old vertical column layout on wide containers.
         function renderSemanticInEl(el,key,sh){
           if(!el||!SEM_D||!SEM_D.length)return;
-          var LW=112,SH=sh||224;
+          var n2=SEM_D.length||1;
+          var LW=112,SH=sh||Math.max(180,n2*28+26);
           var svgW=Math.max(320,el.offsetWidth||480);
           var BW=Math.max(120,svgW-LW-80);
           var topPad=4,botPad=14;
-          var n2=SEM_D.length||1;
           var rowTotal2=Math.floor((SH-topPad-botPad)/n2);
           var bH=Math.min(22,Math.max(10,Math.floor(rowTotal2*0.65)));
           var maxV=Math.max.apply(null,SEM_D.map(function(d){return d[key]||0;}))||1;
@@ -16782,18 +17019,21 @@ struct ScanSetupTemplate {
           s+='</svg>';
           el.innerHTML=s;
         }
-        function renderSemantic(key){renderSemanticInEl(document.getElementById('r-semantic-chart'),key,224);}
+        function renderSemantic(key){renderSemanticInEl(document.getElementById('r-semantic-chart'),key,0);}
         var semSel=document.getElementById('r-semantic-metric');
-        if(semSel){renderSemantic('functions');semSel.addEventListener('change',function(){renderSemantic(semSel.value);});}
+        if(semSel){renderSemantic('functions');semSel.addEventListener('change',function(){renderSemantic(semSel.value);syncRowHeights();});}
         var semExpand=document.getElementById('r-semantic-expand');
         if(semExpand){
           semExpand.addEventListener('click',function(){
             var key=semSel?semSel.value:'functions';
+            var semLabels={'functions':'Functions','classes':'Classes / Types','variables':'Variables'};
+            var semSubtitle=semLabels[key]||key;
             var n=SEM_D.length||1;
-            var modalH=Math.max(624,n*62+96);
+            var maxH=Math.max(360,Math.floor(window.innerHeight*0.82)-130);
+            var modalH=Math.min(Math.max(360,n*38+60),maxH);
             var overlay=document.createElement('div');
             overlay.className='r-chart-modal-overlay';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">Semantic Metrics — Full View</span><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">Semantic Metrics — Full View</span><span class="r-chart-modal-subtitle">'+semSubtitle+'</span><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
@@ -16804,44 +17044,50 @@ struct ScanSetupTemplate {
 
         // ── Expand buttons: re-render charts at large size inside modal ──────────
         (function(){
-          function makeExpandModal(title,mH){
+          function makeExpandModal(title,mH,subtitle){
             var overlay=document.createElement('div');
             overlay.className='r-chart-modal-overlay';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">'+title+' — Full View</span><div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
+            var subHtml=subtitle?'<span class="r-chart-modal-subtitle">'+subtitle+'</span>':'';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">'+title+' — Full View</span>'+subHtml+'<div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
             return overlay.querySelector('.r-expand-modal-chart');
           }
+          function capH(h){return Math.min(h,Math.max(360,Math.floor(window.innerHeight*0.82)-130));}
           var compExpandBtn=document.getElementById('r-composition-expand');
           if(compExpandBtn){compExpandBtn.addEventListener('click',function(){
             var mode=document.querySelector('[data-rcomp].active');var modeKey=mode?mode.getAttribute('data-rcomp'):'abs';
-            var n=LANG_D.length||1;var mH=Math.max(624,n*62+96);
-            var wrap=makeExpandModal('Language Composition',mH);
+            var modeLabel=modeKey==='pct'?'Composition %':'Absolute Lines';
+            var n=LANG_D.length||1;var mH=capH(Math.max(360,n*38+60));
+            var wrap=makeExpandModal('Language Composition',mH,modeLabel);
             if(wrap)setTimeout(function(){renderCompositionInEl(wrap,modeKey,mH);},30);
           });}
           var scatExpandBtn=document.getElementById('r-scatter-expand');
           if(scatExpandBtn){scatExpandBtn.addEventListener('click',function(){
-            var wrap=makeExpandModal('Files vs Code Lines',672);
+            var wrap=makeExpandModal('Files vs Code Lines',capH(672),'File count vs SLOC per language');
             if(wrap)setTimeout(function(){renderScatterInEl(wrap,560);},30);
           });}
           var densExpandBtn=document.getElementById('r-density-expand');
           if(densExpandBtn){densExpandBtn.addEventListener('click',function(){
-            var n=LANG_D.length||1;var mH=Math.max(624,n*62+96);
-            var wrap=makeExpandModal('Comment Density',mH);
+            var n=LANG_D.length||1;var mH=capH(Math.max(360,n*38+60));
+            var wrap=makeExpandModal('Comment Density',mH,'Comment ratio per language');
             if(wrap)setTimeout(function(){renderDensityInEl(wrap,mH);},30);
           });}
           var avgExpandBtn=document.getElementById('r-avglines-expand');
           if(avgExpandBtn){avgExpandBtn.addEventListener('click',function(){
-            var n=LANG_D.filter(function(d){return(d.files||0)>0;}).length||1;var mH=Math.max(624,n*62+96);
-            var wrap=makeExpandModal('Avg Lines per File',mH);
+            var n=LANG_D.filter(function(d){return(d.files||0)>0;}).length||1;var mH=capH(Math.max(360,n*38+60));
+            var wrap=makeExpandModal('Avg Lines per File',mH,'Average code lines per file');
             if(wrap)setTimeout(function(){renderAvgLinesInEl(wrap,mH);},30);
           });}
           var subExpandBtn=document.getElementById('r-submodule-expand');
           if(subExpandBtn){subExpandBtn.addEventListener('click',function(){
             var key=subSel?subSel.value:'code';var sort=sortSel?sortSel.value:'desc';
-            var n=(SUB_D.length+1)||1;var mH=Math.max(624,n*43+96);
-            var wrap=makeExpandModal('Repository Overview',mH);
+            var metricLabels={'code':'Code Lines','comment':'Comments','blank':'Blank Lines','physical':'Physical Lines','files':'Files'};
+            var sortLabels={'desc':'Value ↓','asc':'Value ↑','name':'Name A→Z'};
+            var subLabel=(metricLabels[key]||key)+' · '+(sortLabels[sort]||sort);
+            var n=(SUB_D.length+1)||1;var mH=capH(Math.max(360,n*32+100));
+            var wrap=makeExpandModal('Repository Overview',mH,subLabel);
             if(wrap)setTimeout(function(){renderSubmoduleInEl(wrap,key,sort,mH);},30);
           });}
         })();
@@ -16849,11 +17095,11 @@ struct ScanSetupTemplate {
         // ── Comment Density: comments / (code + comments) per language ───────────
         function renderDensityInEl(el,shOvr){
           if(!el||!LANG_D||!LANG_D.length)return;
-          var LW=112,SH=shOvr||224;
+          var n=LANG_D.length||1;
+          var LW=112,SH=shOvr||Math.max(180,n*28+26);
           var svgW=Math.max(320,el.offsetWidth||480);
           var BW=Math.max(120,svgW-LW-80);
           var topPad=4,botPad=26;
-          var n=LANG_D.length||1;
           var rowTotal=Math.floor((SH-topPad-botPad)/n);
           var bH=Math.min(22,Math.max(10,Math.floor(rowTotal*0.65)));
           var densities=LANG_D.map(function(d){
@@ -16871,7 +17117,7 @@ struct ScanSetupTemplate {
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
             s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+pct+'%</text>';
           });
-          s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.5">comment ratio (higher = more documented)</text>';
+          s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" fill="currentColor" opacity="0.75">comment ratio (higher = more documented)</text>';
           s+='</svg>';
           el.innerHTML=s;
         }
@@ -16883,11 +17129,11 @@ struct ScanSetupTemplate {
           if(!el||!LANG_D||!LANG_D.length)return;
           var data=LANG_D.filter(function(d){return(d.files||0)>0;}).slice();
           data.sort(function(a,b){return(b.code/b.files)-(a.code/a.files);});
-          var LW=112,SH=shOvr||224;
+          var n=data.length||1;
+          var LW=112,SH=shOvr||Math.max(180,n*28+26);
           var svgW=Math.max(320,el.offsetWidth||480);
           var BW=Math.max(120,svgW-LW-80);
           var topPad=4,botPad=26;
-          var n=data.length||1;
           var rowTotal=Math.floor((SH-topPad-botPad)/n);
           var bH=Math.min(22,Math.max(10,Math.floor(rowTotal*0.65)));
           var avgs=data.map(function(d){return(d.code||0)/(d.files||1);});
@@ -16901,7 +17147,7 @@ struct ScanSetupTemplate {
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
             s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(Math.round(avg))+'</text>';
           });
-          s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.5">avg code lines per file (higher = larger files)</text>';
+          s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" fill="currentColor" opacity="0.75">avg code lines per file (higher = larger files)</text>';
           s+='</svg>';
           el.innerHTML=s;
         }
@@ -16954,9 +17200,42 @@ struct ScanSetupTemplate {
         var sortSel=document.getElementById('r-sub-sort');
         renderSubmodule('code','desc');
         if(subSel){
-          subSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel?sortSel.value:'desc');});
-          if(sortSel)sortSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel.value);});
+          subSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel?sortSel.value:'desc');syncRowHeights();});
+          if(sortSel)sortSel.addEventListener('change',function(){renderSubmodule(subSel.value,sortSel.value);syncRowHeights();});
         }
+
+        // Equalise heights within each chart row: if one chart in a grid row is taller
+        // than its neighbour, re-render the shorter one at the taller height so bars fill
+        // the available vertical space instead of leaving a gap.
+        function syncRowHeights(){
+          var avgEl=document.getElementById('r-avglines-chart');
+          var subEl=document.getElementById('r-submodule-chart');
+          if(avgEl&&subEl){
+            var avgSvg=avgEl.querySelector('svg');
+            var subSvg=subEl.querySelector('svg');
+            if(avgSvg&&subSvg){
+              var avgH=parseInt(avgSvg.getAttribute('height')||'0',10);
+              var subH=parseInt(subSvg.getAttribute('height')||'0',10);
+              var key=subSel?subSel.value||'code':'code';
+              var sort=sortSel?sortSel.value:'desc';
+              if(subH>avgH+10){renderAvgLinesInEl(avgEl,subH);}
+              else if(avgH>subH+10){renderSubmoduleInEl(subEl,key,sort,avgH);}
+            }
+          }
+          var semEl=document.getElementById('r-semantic-chart');
+          var denEl=document.getElementById('r-density-chart');
+          if(semEl&&denEl){
+            var semSvg=semEl.querySelector('svg');
+            var denSvg=denEl.querySelector('svg');
+            if(semSvg&&denSvg){
+              var semH2=parseInt(semSvg.getAttribute('height')||'0',10);
+              var denH2=parseInt(denSvg.getAttribute('height')||'0',10);
+              if(denH2>semH2+10){renderSemanticInEl(semEl,semSel?semSel.value:'functions',denH2);}
+              else if(semH2>denH2+10){renderDensityInEl(denEl,semH2);}
+            }
+          }
+        }
+        syncRowHeights();
 
         // Re-render all SVG charts when the window is resized so bars fill the card.
         var _rResizeTimer;
@@ -16970,6 +17249,7 @@ struct ScanSetupTemplate {
             renderDensity();
             renderAvgLines();
             renderSubmodule(subSel?subSel.value||'code':'code',sortSel?sortSel.value:'desc');
+            syncRowHeights();
           },120);
         });
       })();
@@ -17320,7 +17600,6 @@ struct ResultTemplate {
     // scan metadata for hero section
     scan_performed_by: String,
     scan_time_display: String,
-    generated_display: String,
     os_display: String,
     test_count: u64,
     // history
@@ -17482,7 +17761,7 @@ struct ResultTemplate {
     <div class="wait-panel">
       <div class="wait-badge"><span class="pulse-dot"></span>Analysis running</div>
       <h2 class="wait-title">Analyzing your project…</h2>
-      <p class="wait-sub">This may take a few minutes for large repositories. You can leave this page — results are saved automatically.</p>
+      <p class="wait-sub">Scanning files, detecting languages, and counting lines — stay for a live view of the results.</p>
       <div class="path-block">{{ project_path }}</div>
       <div class="metrics-row">
         <div class="metric-card">
@@ -17492,6 +17771,10 @@ struct ResultTemplate {
         <div class="metric-card">
           <div class="metric-label">Phase</div>
           <div class="metric-value" id="phase">Starting</div>
+        </div>
+        <div class="metric-card hidden" id="files-card">
+          <div class="metric-label">Files</div>
+          <div class="metric-value" id="files-progress">0</div>
         </div>
       </div>
       <div class="progress-bar-wrap"><div class="progress-bar"></div></div>
@@ -17516,6 +17799,8 @@ struct ResultTemplate {
       var retries = 0;
       var maxRetries = 5;
       var warnShown = false;
+
+      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
 
       function elapsed() {
         return Math.floor((Date.now() - startTime) / 1000);
@@ -17557,7 +17842,14 @@ struct ResultTemplate {
                 warnShown = true;
                 document.getElementById('warn-slow').classList.remove('hidden');
               }
-              setPhase(s < 10 ? 'Starting' : s < 30 ? 'Scanning files' : 'Analyzing');
+              setPhase(data.phase || 'Running');
+              var fd = data.files_done || 0, ft = data.files_total || 0;
+              if (ft > 0) {
+                var card = document.getElementById('files-card');
+                if (card) card.classList.remove('hidden');
+                var fp = document.getElementById('files-progress');
+                if (fp) fp.textContent = fmt(fd) + ' / ' + fmt(ft);
+              }
               setTimeout(poll, pollInterval);
             }
           })
@@ -17716,6 +18008,23 @@ struct ScanWaitTemplate {
     .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid rgba(111,144,255,0.30);text-decoration:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);}
     .btn-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid var(--line-strong);text-decoration:none;color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;}
     .btn-secondary:hover{background:var(--line);}
+    .bug-report-wrap{margin-top:22px;border-top:1px solid var(--line);padding-top:16px;}
+    .bug-report-wrap summary{cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);list-style:none;display:inline-flex;align-items:center;gap:6px;user-select:none;padding:2px 0;}
+    .bug-report-wrap summary::-webkit-details-marker{display:none;}
+    .bug-report-arrow{display:inline-block;font-size:9px;transition:transform .15s ease;}
+    .bug-report-wrap[open] .bug-report-arrow{transform:rotate(90deg);}
+    .bug-report-wrap summary:hover{color:var(--text);}
+    .bug-report-body{margin-top:12px;display:flex;flex-direction:column;gap:10px;}
+    .bug-report-pre{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto;}
+    .bug-report-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+    .btn-sm{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 12px;border-radius:10px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;text-decoration:none;transition:background .15s ease;}
+    .btn-sm:hover{background:var(--line);}
+    .btn-sm svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;}
+    .bug-report-hint{font-size:11px;color:var(--muted);line-height:1.5;}
+    .bug-report-hint a{color:var(--oxide);text-decoration:none;font-weight:700;}
+    .bug-report-hint a:hover{text-decoration:underline;}
+    .site-footer{margin-top:auto;padding:16px 24px;text-align:center;font-size:11px;color:var(--muted);border-top:1px solid var(--line);position:relative;z-index:1;}
+    .site-footer a{color:var(--muted);text-decoration:none;}.site-footer a:hover{color:var(--oxide);}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
@@ -17783,7 +18092,11 @@ struct ScanWaitTemplate {
   <div class="page">
     <div class="panel">
       <h1>Error</h1>
-      <div class="error-box">{{ message }}</div>
+      <div class="error-box" id="error-msg-text">{{ message }}</div>
+      <div id="br-meta" hidden
+        data-version="{{ version }}"
+        data-run-id="{% if let Some(rid) = run_id %}{{ rid }}{% endif %}"
+        data-error-code="{% if let Some(code) = error_code %}{{ code }}{% endif %}"></div>
       <div class="actions">
         <a class="btn-primary" href="/scan">Back to setup</a>
         {% if let Some(report_url) = last_report_url %}
@@ -17793,8 +18106,85 @@ struct ScanWaitTemplate {
         <a class="btn-secondary" href="/view-reports">View Reports</a>
         {% endif %}
       </div>
+      <details class="bug-report-wrap" id="bug-report-wrap">
+        <summary><span class="bug-report-arrow">&#9658;</span>&nbsp;Generate bug report</summary>
+        <div class="bug-report-body">
+          <pre class="bug-report-pre" id="bug-report-pre">Collecting info&hellip;</pre>
+          <div class="bug-report-btns">
+            <button type="button" class="btn-sm" id="bug-report-copy">
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy to clipboard
+            </button>
+            <a class="btn-sm" href="https://github.com/oxide-sloc/oxide-sloc/issues/new" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              Open GitHub Issue
+            </a>
+          </div>
+          <p class="bug-report-hint">Copy the report above and paste it into a new GitHub issue. Remove any file paths or project names you prefer not to share before posting.</p>
+        </div>
+      </details>
     </div>
   </div>
+  <footer class="site-footer">
+    oxide-sloc v{{ version }} &mdash; local code metrics workbench &nbsp;&middot;&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;&middot;&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;&middot;&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;&middot;&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
+  <script nonce="{{ csp_nonce }}">(function(){
+    var meta=document.getElementById('br-meta');
+    var pre=document.getElementById('bug-report-pre');
+    var copyBtn=document.getElementById('bug-report-copy');
+    if(!meta||!pre)return;
+    var ver=meta.getAttribute('data-version')||'';
+    var runId=meta.getAttribute('data-run-id')||'';
+    var code=meta.getAttribute('data-error-code')||'';
+    var msgEl=document.getElementById('error-msg-text');
+    var msg=msgEl?msgEl.textContent.trim():'';
+    function getBrowser(){
+      var ua=navigator.userAgent;
+      var m=ua.match(/(Edg|OPR|Chrome|Firefox|Safari)\/(\d+)/);
+      if(!m)return 'Unknown browser';
+      var n={'Edg':'Edge','OPR':'Opera'}[m[1]]||m[1];
+      return n+' '+m[2];
+    }
+    var lines=['oxide-sloc Bug Report','==============================',''];
+    lines.push('App version:  v'+ver);
+    if(code)lines.push('HTTP status:  '+code);
+    if(runId)lines.push('Run ID:       '+runId);
+    lines.push('Page:         '+window.location.pathname+(window.location.search||''));
+    lines.push('Timestamp:    '+new Date().toISOString());
+    lines.push('Browser:      '+getBrowser());
+    lines.push('Viewport:     '+window.innerWidth+'x'+window.innerHeight);
+    lines.push('');
+    lines.push('Error message:');
+    lines.push(msg);
+    lines.push('');
+    lines.push('Steps to reproduce:');
+    lines.push('  1. ');
+    lines.push('');
+    lines.push('Expected behavior:');
+    lines.push('  ');
+    pre.textContent=lines.join('\n');
+    if(copyBtn){
+      copyBtn.addEventListener('click',function(){
+        var txt=pre.textContent;
+        if(navigator.clipboard&&navigator.clipboard.writeText){
+          navigator.clipboard.writeText(txt).then(function(){
+            copyBtn.textContent='[OK] Copied!';
+            setTimeout(function(){copyBtn.innerHTML='<svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy to clipboard';},2000);
+          });
+        }else{
+          var ta=document.createElement('textarea');
+          ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
+          document.body.appendChild(ta);ta.select();
+          try{document.execCommand('copy');copyBtn.textContent='[OK] Copied!';}catch(e){}
+          document.body.removeChild(ta);
+        }
+      });
+    }
+  })();</script>
   <script nonce="{{ csp_nonce }}">
     (function(){var k="oxide-theme",b=document.body,s=localStorage.getItem(k);if(s==="dark")b.classList.add("dark-theme");document.getElementById("theme-toggle").addEventListener("click",function(){var d=b.classList.toggle("dark-theme");localStorage.setItem(k,d?"dark":"light");});})();
     (function spawnCodeParticles() {
@@ -17867,6 +18257,10 @@ struct ErrorTemplate {
     last_report_url: Option<String>,
     /// Label for the secondary action button; defaults to "View last report" when None.
     last_report_label: Option<String>,
+    /// Run ID to surface in the bug report; `None` when not applicable.
+    run_id: Option<String>,
+    /// HTTP status code to surface in the bug report; `None` when unknown.
+    error_code: Option<u16>,
     csp_nonce: String,
     version: &'static str,
 }
@@ -18395,7 +18789,7 @@ struct RelocateScanTemplate {
       </div>
       {% else %}
       <div class="filter-row">
-        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project\u2026">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by path or name&hellip;">
         <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
         <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
       </div>
@@ -19098,7 +19492,7 @@ struct HistoryTemplate {
       </div>
       {% else %}
       <div class="filter-row">
-        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by project\u2026">
+        <input class="filter-input" id="project-filter" type="text" placeholder="Filter by path or name&hellip;">
         <select class="filter-select" id="branch-filter"><option value="">All branches</option></select>
         <button type="button" class="btn" id="reset-view-btn">&#8635; Reset view</button>
       </div>
