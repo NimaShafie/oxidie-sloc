@@ -257,6 +257,12 @@ def runAnalyze() {
     }
 
     // b. Main artifact run — JSON, CSV, XLSX always written; HTML and PDF are optional.
+    // Pass --git-branch explicitly so the report shows the correct branch name even
+    // when Jenkins performs a detached-HEAD checkout (GIT_BRANCH = "origin/main").
+    def rawBranch  = env.GIT_BRANCH ?: ''
+    def branchName = rawBranch.replaceAll('^origin/', '').replaceAll('^refs/heads/', '').trim()
+    def branchArg  = branchName ? "--git-branch '${branchName}'" : ''
+
     withEnv([
         "SCAN_PATH=${params.SCAN_PATH}",
         "REPORT_TITLE=${params.REPORT_TITLE}",
@@ -267,7 +273,7 @@ def runAnalyze() {
                 --report-title "${REPORT_TITLE}" \
                 --mixed-line-policy "${MIXED_LINE_POLICY}" \
                 ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg}" + ''' \
-                ''' + "${langArgs} ${includeArgs} ${excludeArgs}" + ''' \
+                ''' + "${langArgs} ${includeArgs} ${excludeArgs} ${branchArg}" + ''' \
                 ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + '''
         '''
     }

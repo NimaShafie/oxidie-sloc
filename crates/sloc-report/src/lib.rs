@@ -61,7 +61,7 @@ fn base64_encode(data: &[u8]) -> String {
 ///
 /// Returns an error if template rendering or configuration serialization fails.
 pub fn render_html(run: &AnalysisRun) -> Result<String> {
-    render_html_inner(run, false)
+    render_html_inner(run, false, None)
 }
 
 /// Render an embedded sub-report HTML fragment for the given analysis run.
@@ -70,7 +70,7 @@ pub fn render_html(run: &AnalysisRun) -> Result<String> {
 ///
 /// Returns an error if template rendering or configuration serialization fails.
 pub fn render_sub_report_html(run: &AnalysisRun) -> Result<String> {
-    render_html_inner(run, true)
+    render_html_inner(run, true, None)
 }
 
 fn load_custom_logo(path: &std::path::Path) -> Option<String> {
@@ -234,7 +234,11 @@ fn format_test_density(code_lines: u64, test_count: u64) -> String {
 // ── Main renderer ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)] // large HTML renderer; splitting would obscure the template structure
-fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
+fn render_html_inner(
+    run: &AnalysisRun,
+    is_sub_report: bool,
+    pdf_url: Option<&str>,
+) -> Result<String> {
     let config_json = serde_json::to_string_pretty(&run.effective_configuration)
         .context("failed to serialize effective configuration")?;
 
@@ -373,6 +377,7 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
             .chars()
             .take(7)
             .collect(),
+        standalone_pdf_url: pdf_url.map(str::to_string),
     };
 
     template.render().context("failed to render HTML report")
@@ -384,7 +389,32 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
 ///
 /// Returns an error if rendering fails or the file cannot be written.
 pub fn write_html(run: &AnalysisRun, output_path: &Path) -> Result<()> {
-    let html = render_html(run)?;
+    let html = render_html_inner(run, false, None)?;
+    fs::write(output_path, html)
+        .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
+}
+
+/// Write an HTML report that embeds a relative link to a pre-generated PDF.
+///
+/// When `pdf_path` is in the same directory as `output_path`, the "View PDF"
+/// button in the report opens the PDF directly (e.g. from a Jenkins HTML
+/// Publisher artifact directory) instead of calling the oxide-sloc server route.
+/// Pass `pdf_path = None` to get the same behaviour as [`write_html`].
+pub fn write_html_with_pdf_link(
+    run: &AnalysisRun,
+    output_path: &Path,
+    pdf_path: Option<&Path>,
+) -> Result<()> {
+    let pdf_relative = pdf_path.and_then(|pdf| {
+        let html_dir = output_path.parent()?;
+        let pdf_dir = pdf.parent()?;
+        if html_dir == pdf_dir {
+            pdf.file_name().map(|n| n.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    });
+    let html = render_html_inner(run, false, pdf_relative.as_deref())?;
     fs::write(output_path, html)
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
@@ -787,7 +817,7 @@ fn pdf_render_page1_header(
             .environment
             .ci_name
             .as_deref()
-            .unwrap_or_else(|| run.environment.initiator_username.as_str());
+            .unwrap_or(run.environment.initiator_username.as_str());
         let env_str = format!(
             "OS: {} {}  |  User: {}  |  Host: {}  |  Mode: {}",
             pdf_safe_str(&run.environment.operating_system),
@@ -2274,27 +2304,28 @@ struct WarningOpportunityRow {
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100vh; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
     body { overflow-x: hidden; transition: background 0.18s ease, color 0.18s ease; }
-    .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
+    .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 2px solid rgba(255,255,255,0.18); box-shadow: 0 6px 28px rgba(0,0,0,0.28), inset 0 -1px 0 rgba(255,255,255,0.06); }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 6px 28px; min-height: 64px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; flex: 0 0 auto; }
-    .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
+    .brand-logo { width: 44px; height: 48px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.3)); }
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
     .background-watermarks img { position: absolute; opacity: 0.15; filter: blur(0.3px); user-select: none; max-width: none; }
     .brand-copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
-    .brand-title { margin: 0; color: #fff; font-size: 17px; font-weight: 800; line-height: 1.1; }
-    .brand-subtitle { color: rgba(255,255,255,0.85); font-size: 12px; line-height: 1.2; margin-top: 2px; }
+    .brand-title { margin: 0; color: #fff; font-size: 18px; font-weight: 800; line-height: 1.1; letter-spacing: -0.01em; }
+    .brand-subtitle { color: rgba(255,255,255,0.72); font-size: 11px; line-height: 1.2; margin-top: 3px; letter-spacing: 0.01em; }
     .nav-project-slot { display:flex; justify-content:center; min-width:0; }
     .nav-project-pill, .nav-pill, .theme-toggle, .header-button {
-      display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.10); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+      display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.26); color: #fff; background: rgba(255,255,255,0.13); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 2px 6px rgba(0,0,0,0.14);
     }
-    .nav-project-pill { pointer-events: auto; width: 100%; max-width: 280px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .nav-project-label { color: rgba(255,255,255,0.78); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; font-weight: 800; }
-    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .nav-project-pill { pointer-events: auto; width: 100%; max-width: 300px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .nav-project-label { color: rgba(255,255,255,0.72); text-transform: uppercase; letter-spacing: 0.09em; font-size: 10px; font-weight: 800; }
+    .nav-project-value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size: 13px; }
     .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:nowrap; min-width:0; }
     @media (max-width: 1400px) { .nav-status { gap: 6px; } .header-button, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-status { gap: 4px; } .header-button, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } }
-    .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; }
-    .theme-toggle { width: 38px; justify-content:center; padding:0; }
+    .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.10); text-decoration:none; transition: background 0.15s ease, box-shadow 0.15s ease; }
+    .theme-toggle:hover, .header-button:hover { background: rgba(255,255,255,0.22); box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 4px 12px rgba(0,0,0,0.18); }
+    .theme-toggle { width: 40px; justify-content:center; padding:0; }
     .nav-dropdown-wrap { position: relative; }
     .nav-dropdown-wrap::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 6px; }
     .nav-dropdown-trigger { }
@@ -2937,7 +2968,7 @@ struct WarningOpportunityRow {
             <button type="button" class="nav-dropdown-item" data-export-xls>Export Excel</button>
           </div>
         </div>
-        <a id="nav-view-pdf-btn" href="/runs/pdf/{{ run.tool.run_id }}" target="_blank" rel="noopener" class="header-button" style="text-decoration:none;">View PDF</a>
+        <a id="nav-view-pdf-btn" href="/runs/pdf/{{ run.tool.run_id }}" target="_blank" rel="noopener" class="header-button" style="text-decoration:none;"{% if let Some(purl) = standalone_pdf_url %} data-standalone-pdf="{{ purl }}"{% endif %}>View PDF</a>
         <button type="button" class="header-button" data-print-report>Save / Print</button>
         <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -3639,27 +3670,38 @@ struct WarningOpportunityRow {
         });
       });
 
-      // "View PDF" nav button — tries the server-side PDF route first.
-      // When the report is served from a context other than the oxide-sloc web
-      // server (e.g. Jenkins HTML Publisher), the route returns a non-200 status
-      // or errors, so we fall back to the browser's built-in print-to-PDF dialog.
+      // "View PDF" nav button.
+      // Priority order:
+      //  1. data-standalone-pdf attr — pre-generated PDF in the same directory
+      //     (set when oxide-sloc CLI was invoked with both --html-out and
+      //     --pdf-out). Opens the file directly; works in Jenkins HTML Publisher.
+      //  2. Server route (/runs/pdf/<id>) — oxide-sloc web server generates
+      //     the PDF on demand via headless Chrome. Checked via HEAD request.
+      //  3. Neither available — inform the user how to generate a PDF via CLI.
       var pdfNavBtn = document.getElementById('nav-view-pdf-btn');
       if (pdfNavBtn) {
         pdfNavBtn.addEventListener('click', function (e) {
           e.preventDefault();
-          var pdfUrl = pdfNavBtn.getAttribute('href');
+          var standaloneUrl = pdfNavBtn.getAttribute('data-standalone-pdf');
+          if (standaloneUrl) {
+            window.open(standaloneUrl, '_blank', 'noopener');
+            return;
+          }
+          var serverUrl = pdfNavBtn.getAttribute('href');
           var xhr = new XMLHttpRequest();
-          xhr.open('HEAD', pdfUrl, true);
+          xhr.open('HEAD', serverUrl, true);
           xhr.onreadystatechange = function () {
             if (xhr.readyState === 4) {
               if (xhr.status >= 200 && xhr.status < 300) {
-                window.open(pdfUrl, '_blank', 'noopener');
+                window.open(serverUrl, '_blank', 'noopener');
               } else {
-                window.print();
+                alert('PDF not available.\n\nTo generate one, run:\n  oxide-sloc report result.json --pdf-out report.pdf\n\nOr enable GENERATE_PDF in your Jenkins pipeline.');
               }
             }
           };
-          xhr.onerror = function () { window.print(); };
+          xhr.onerror = function () {
+            alert('PDF not available.\n\nTo generate one, run:\n  oxide-sloc report result.json --pdf-out report.pdf\n\nOr enable GENERATE_PDF in your Jenkins pipeline.');
+          };
           xhr.send();
         });
       }
@@ -5642,6 +5684,10 @@ struct ReportTemplate<'a> {
     report_header_footer: Option<String>,
     chart_js: &'static str,
     run_id_short: String,
+    /// When the HTML was generated alongside a PDF (e.g. via CLI with both
+    /// `--html-out` and `--pdf-out`), this holds the relative URL to that PDF.
+    /// The "View PDF" button navigates directly to it instead of the server route.
+    standalone_pdf_url: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

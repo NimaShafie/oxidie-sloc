@@ -381,19 +381,32 @@ fn read_git_remote_url(git_dir: &Path) -> Option<String> {
 /// needed. Falls back gracefully for detached HEADs, shallow clones, and missing
 /// reflogs.
 fn detect_git_for_run(project_path: &Path) -> GitInfo {
+    // Resolve the CI branch early so it can fill in any gap in git metadata.
+    let ci_branch = ci_branch_from_env();
+
     let Some(git_dir) = find_git_dir(project_path) else {
-        return GitInfo::default();
+        // No .git directory (e.g. scanning a non-repo path in CI). Use whatever
+        // the CI system tells us about the branch.
+        return GitInfo {
+            branch: ci_branch,
+            ..GitInfo::default()
+        };
     };
 
     let head_raw = match fs::read_to_string(git_dir.join("HEAD")) {
         Ok(s) => s.trim().to_string(),
-        Err(_) => return GitInfo::default(),
+        Err(_) => {
+            return GitInfo {
+                branch: ci_branch,
+                ..GitInfo::default()
+            }
+        }
     };
 
     let (branch_from_head, commit_long) = head_raw.strip_prefix("ref: ").map_or_else(
         || {
             if head_raw.len() >= 40 && head_raw.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Detached HEAD — the HEAD file itself is the commit SHA
+                // Detached HEAD — HEAD file is the commit SHA (common in CI checkouts).
                 (None, Some(head_raw[..40].to_string()))
             } else {
                 (None, None)
@@ -407,9 +420,9 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
             (branch, sha)
         },
     );
-    // Detached HEAD is common in CI (Jenkins, GitHub Actions, …). Fall back to
-    // the branch name exposed via CI-specific environment variables.
-    let branch = branch_from_head.or_else(ci_branch_from_env);
+    // Prefer the branch name derived from the HEAD ref; fall back to the CI
+    // env var (covers detached-HEAD checkouts done by Jenkins, GitHub Actions, etc.).
+    let branch = branch_from_head.or(ci_branch);
 
     let commit_short = commit_long
         .as_deref()

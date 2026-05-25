@@ -705,7 +705,7 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
             f"&#8592; Back to Jenkins build</a>"
         )
 
-    header_meta_html = " &nbsp;&middot;&nbsp; ".join(header_meta_parts)
+    header_meta_html = "".join(header_meta_parts)
 
     # ── Assemble the full HTML page ─────────────────────────────────────────
     page_title = f"oxide-sloc Graphical Report — {slug}"
@@ -728,55 +728,88 @@ body {{
 
 /* ── Header ────────────────────────────────────────────────────────────── */
 .site-header {{
-  background: #2d1a0e;
+  background: linear-gradient(180deg, #3a2010 0%, #2d1a0e 100%);
+  border-bottom: 2px solid rgba(224,112,56,0.55);
+  box-shadow: 0 4px 22px rgba(0,0,0,0.38);
   color: #f9f5f0;
-  padding: 18px 32px 16px;
+  padding: 0 32px;
+}}
+.site-header-row {{
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 12px 20px;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0 10px;
+  flex-wrap: nowrap;
 }}
 .site-header .brand {{
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 900;
   color: #e07038;
   letter-spacing: -0.02em;
   white-space: nowrap;
+  flex-shrink: 0;
+  text-shadow: 0 0 20px rgba(224,112,56,0.4);
+}}
+.header-div {{
+  width: 1px;
+  height: 22px;
+  background: rgba(255,255,255,0.22);
+  flex-shrink: 0;
 }}
 .site-header .dash-title {{
-  font-size: 16px;
-  font-weight: 700;
-  color: #f9f5f0;
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(249,245,240,0.88);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }}
+.header-fill {{ flex: 1; }}
 .site-header .meta {{
-  font-size: 12px;
-  color: #c8a882;
-  flex: 1 1 100%;
-  margin-top: 4px;
   display: flex;
   flex-wrap: wrap;
-  gap: 0 6px;
+  gap: 6px;
   align-items: center;
+  padding-bottom: 12px;
 }}
-.site-header .meta code {{
-  background: rgba(255,255,255,0.1);
-  border-radius: 3px;
-  padding: 1px 4px;
+.site-header .meta > span {{
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 20px;
+  padding: 3px 11px;
   font-size: 11px;
-}}
-.back-link {{
-  display: inline-block;
-  margin-left: auto;
-  font-size: 12px;
-  color: #e07038;
-  text-decoration: none;
-  border: 1px solid #e07038;
-  border-radius: 4px;
-  padding: 3px 10px;
+  color: #c8a882;
   white-space: nowrap;
 }}
-.back-link:hover {{ background: rgba(224,112,56,0.15); }}
+.site-header .meta code {{
+  background: rgba(255,255,255,0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: #d4a060;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}}
+.back-link {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(224,112,56,0.18);
+  border: 1px solid rgba(224,112,56,0.5);
+  border-radius: 8px;
+  padding: 7px 16px;
+  color: #f09060;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}}
+.back-link:hover {{
+  background: rgba(224,112,56,0.32);
+  box-shadow: 0 0 14px rgba(224,112,56,0.28);
+}}
 
 /* ── Main layout ───────────────────────────────────────────────────────── */
 .main {{
@@ -939,7 +972,9 @@ body {{
 @media (max-width: 640px) {{
   .summary-strip {{ grid-template-columns: repeat(2, 1fr); }}
   .summary-strip-5 {{ grid-template-columns: repeat(2, 1fr); }}
-  .site-header {{ padding: 14px 16px 12px; }}
+  .site-header {{ padding: 0 16px; }}
+  .site-header-row {{ padding: 12px 0 8px; gap: 10px; }}
+  .site-header .meta {{ padding-bottom: 10px; }}
   .main {{ margin: 16px auto; }}
 }}
 </style>
@@ -948,11 +983,15 @@ body {{
 
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header class="site-header">
-  <span class="brand">oxide-sloc</span>
-  <span class="dash-title">Graphical Report &mdash; {html.escape(slug)}</span>
+  <div class="site-header-row">
+    <span class="brand">oxide-sloc</span>
+    <span class="header-div"></span>
+    <span class="dash-title">Graphical Report &mdash; {html.escape(slug)}</span>
+    <div class="header-fill"></div>
+    {back_link}
+  </div>
   <div class="meta">
     {header_meta_html}
-    {back_link}
   </div>
 </header>
 
