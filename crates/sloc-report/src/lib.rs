@@ -258,10 +258,12 @@ fn render_html_inner(run: &AnalysisRun, is_sub_report: bool) -> Result<String> {
         nonce: String::new(),
         title: rep.report_title.clone(),
         browser_title: format!("Oxide-SLOC | {}", rep.report_title),
-        scan_performed_by: format!(
-            "{} / {}",
-            run.environment.initiator_username, run.environment.initiator_hostname
-        ),
+        scan_performed_by: run.environment.ci_name.clone().unwrap_or_else(|| {
+            format!(
+                "{} / {}",
+                run.environment.initiator_username, run.environment.initiator_hostname
+            )
+        }),
         scan_time_pst: to_pst_display(run.tool.timestamp_utc),
         tool_version: run.tool.version.clone(),
         is_sub_report,
@@ -781,11 +783,16 @@ fn pdf_render_page1_header(
         ctx.font_reg,
     );
     {
+        let initiator = run
+            .environment
+            .ci_name
+            .as_deref()
+            .unwrap_or_else(|| run.environment.initiator_username.as_str());
         let env_str = format!(
             "OS: {} {}  |  User: {}  |  Host: {}  |  Mode: {}",
             pdf_safe_str(&run.environment.operating_system),
             pdf_safe_str(&run.environment.architecture),
-            pdf_safe_str(&run.environment.initiator_username),
+            pdf_safe_str(initiator),
             pdf_safe_str(&run.environment.initiator_hostname),
             pdf_safe_str(&run.environment.runtime_mode),
         );
@@ -3631,6 +3638,31 @@ struct WarningOpportunityRow {
           window.print();
         });
       });
+
+      // "View PDF" nav button — tries the server-side PDF route first.
+      // When the report is served from a context other than the oxide-sloc web
+      // server (e.g. Jenkins HTML Publisher), the route returns a non-200 status
+      // or errors, so we fall back to the browser's built-in print-to-PDF dialog.
+      var pdfNavBtn = document.getElementById('nav-view-pdf-btn');
+      if (pdfNavBtn) {
+        pdfNavBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          var pdfUrl = pdfNavBtn.getAttribute('href');
+          var xhr = new XMLHttpRequest();
+          xhr.open('HEAD', pdfUrl, true);
+          xhr.onreadystatechange = function () {
+            if (xhr.readyState === 4) {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                window.open(pdfUrl, '_blank', 'noopener');
+              } else {
+                window.print();
+              }
+            }
+          };
+          xhr.onerror = function () { window.print(); };
+          xhr.send();
+        });
+      }
 
       var copyConfigBtn = document.querySelector('[data-copy-config]');
       var downloadConfigBtn = document.querySelector('[data-download-config]');
