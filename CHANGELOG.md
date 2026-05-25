@@ -10,6 +10,38 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.62] — 2026-05-25
+
+### Added
+
+- **Multi-platform installer configs** (`installer/`): Added Scoop manifest, nfpm configuration
+  for DEB/RPM packaging, and devcontainer definition for consistent dev environments.
+- **CI-aware environment metadata** (`sloc-core`): Analysis runs now capture CI environment
+  variables (branch name, build number, pipeline URL) and embed them in the `AnalysisRun`
+  JSON for richer CI/CD integration.
+- **CI/Jenkins PDF and report integration** (`sloc-report`, `Jenkinsfile`): Jenkins pipeline
+  now archives PDF reports as build artifacts and publishes HTML reports via GitHub Pages.
+- **Modular Jenkins helper scripts** (`ci/jenkins/`): Jenkinsfile refactored into discrete
+  helper scripts for each pipeline stage, reducing cognitive complexity and improving
+  maintainability.
+- **GitHub Pages publishing** (`ci.yml`): GitHub Actions workflow now enables Pages via the
+  `configure-pages` action and uploads HTML reports as Pages artifacts.
+
+### Fixed
+
+- **GitHub CI docs job** (`.github/workflows/`): Resolved workflow failure in the `docs` job
+  caused by a missing Pages enablement step.
+- **CI parameter and credential binding docs** (`docs/ci-integrations.md`): Synced parameter
+  counts, defaults, and credential binding guidance to match the current Jenkinsfile.
+
+### Refactored
+
+- **Cognitive complexity reduction** (`sloc-core`, `sloc-languages`): Restructured several
+  analysis functions to satisfy the SonarQube S3776 cognitive complexity gate — no behaviour
+  change, only structural simplification.
+
+---
+
 ## [1.5.61] — 2026-05-21
 
 ### Added
