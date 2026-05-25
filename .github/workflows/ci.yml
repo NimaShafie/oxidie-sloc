@@ -40,6 +40,12 @@ jobs:
       - name: Lint
         run: bash ci/lint.sh
 
+      - name: Security audit
+        run: cargo install cargo-audit --locked && cargo audit
+
+      - name: Dependency licenses & bans
+        run: cargo install cargo-deny --locked && cargo deny check
+
       - name: Build
         run: bash ci/build.sh
 
