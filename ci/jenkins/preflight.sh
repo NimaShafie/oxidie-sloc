@@ -123,12 +123,27 @@ for p in plugins:
 print('missing')
 " 2>/dev/null || echo "missing")
 
+            # Lines whose inline comment contains "(optional)" are non-blocking.
+            if echo "$line" | grep -qi '(optional)'; then
+                is_optional=1
+            else
+                is_optional=0
+            fi
+
             if [ "$is_active" == "yes" ]; then
                 ok "Plugin ${plugin_id} is installed and enabled"
             elif [ "$is_active" == "disabled" ]; then
-                fail "Plugin ${plugin_id} is installed but disabled — enable it in Manage Jenkins → Plugins."
+                if [ "$is_optional" -eq 1 ]; then
+                    warn "Plugin ${plugin_id} installed but disabled (optional — enable for Bitbucket integration)"
+                else
+                    fail "Plugin ${plugin_id} is installed but disabled — enable it in Manage Jenkins → Plugins."
+                fi
             else
-                fail "Plugin ${plugin_id} is NOT installed. Install it before running the bootstrap."
+                if [ "$is_optional" -eq 1 ]; then
+                    warn "Plugin ${plugin_id} NOT installed (optional — needed only for Bitbucket integration)"
+                else
+                    fail "Plugin ${plugin_id} is NOT installed. Install it before running the bootstrap."
+                fi
             fi
         done < "$PLUGINS_FILE"
     fi

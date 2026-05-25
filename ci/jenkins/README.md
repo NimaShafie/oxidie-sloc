@@ -30,6 +30,17 @@ On a network-connected agent, step 2 is optional.
 > committed to the repository root.  Run `bash ci/jenkins/bundle-jenkins-plugins.sh`
 > once on a networked + Docker machine, then commit both output files before deploying.
 
+## Pipeline entry-point reference
+
+| File | Role |
+|------|------|
+| `Jenkinsfile` (repo root) | **Canonical full-featured pipeline.** 39 parameters, all stages, trend charts, artifact push. Referenced by `ci/jenkins/job-config.xml` and `ci/jenkins/seed-job.groovy`. This is the one you should use. |
+| `ci/jenkins/pipeline-helpers.groovy` | Loaded at runtime by the canonical Jenkinsfile via `load`. Contains all helper functions extracted to stay under the JVM 64 KB per-method bytecode limit. Not a standalone pipeline — do not point a Jenkins job at it. |
+| `examples/jenkins/Jenkinsfile` | Minimal 5-stage demo (~170 lines). No build parameters, no trend CSVs, no artifact push. Copy and adapt for a new project; do not use it as-is for oxide-sloc CI. |
+| `ci/sloc-jenkins.groovy` | Shared-library step template. Copy to `vars/slocAnalyze.groovy` in a Jenkins shared library (see its header comments). Not a standalone Jenkinsfile. |
+
+---
+
 ## New pipeline features
 
 The Jenkinsfile now supports three additional capability tiers beyond the basic SLOC scan.
