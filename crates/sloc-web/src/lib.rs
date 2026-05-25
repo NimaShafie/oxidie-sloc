@@ -4307,10 +4307,12 @@ fn render_result_page(
         .as_deref()
         .zip(run.git_commit_long.as_deref())
         .and_then(|(remote, sha)| remote_to_commit_url(remote, sha));
-    let scan_performed_by = format!(
-        "{} / {}",
-        run.environment.initiator_username, run.environment.initiator_hostname
-    );
+    let scan_performed_by = run.environment.ci_name.clone().unwrap_or_else(|| {
+        format!(
+            "{} / {}",
+            run.environment.initiator_username, run.environment.initiator_hostname
+        )
+    });
     let scan_time_display = fmt_la_time_meta(run.tool.timestamp_utc);
     let os_display = format!(
         "{} / {}",
