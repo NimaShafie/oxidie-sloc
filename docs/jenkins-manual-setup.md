@@ -477,7 +477,7 @@ once.  The first build must run **without parameters** to register them.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 
-From this point on, all 39 configuration parameters are visible in the build form.
+From this point on, all 44 configuration parameters are visible in the build form.
 
 ---
 
@@ -485,7 +485,7 @@ From this point on, all 39 configuration parameters are visible in the build for
 
 1. Click **"Build with Parameters"** in the left sidebar.
 
-2. The build form opens with all 39 parameters grouped by function.
+2. The build form opens with all 44 parameters grouped by function.
    Adjust at minimum:
 
    | Parameter | Default | What to set |
@@ -494,7 +494,7 @@ From this point on, all 39 configuration parameters are visible in the build for
    | `SCAN_PATH` | `tests/fixtures/basic` | Path within the repository to analyze (e.g., `src` or `.`) |
    | `REPORT_TITLE` | `oxide-sloc CI Report` | A descriptive title for the HTML report |
    | `GENERATE_HTML` | ✓ checked | Check to produce an HTML report (recommended) |
-   | `GENERATE_PDF` | unchecked | Check to produce a PDF — **pure-Rust, no browser required on the agent** |
+   | `GENERATE_PDF` | ✓ checked | PDF is produced by default; uncheck to skip. **Pure-Rust — no browser required on the agent** |
    | `SKIP_WEB_CHECK` | ✓ checked | Keep checked if port 4317 is not available on the agent |
 
    **To enable unit test results** (requires cargo-nextest on the agent — see Step 13):
@@ -599,7 +599,7 @@ After a successful build, confirm each feature is wired correctly:
   - `ci-out/result_<slug>.json` (scan output, slug = `SCAN_PATH` basename)
   - `ci-out/report_<slug>.html`, `report_<slug>.css`, `report_<slug>.js`,
     `report_<slug>.xlsx`, `report_<slug>.csv` (HTML report with assets and exports)
-  - `ci-out/report_<slug>.pdf` (when `GENERATE_PDF = true`)
+  - `ci-out/report_<slug>.pdf` (produced by default; suppressed when `GENERATE_PDF = false`)
   - `ci-out/summary.csv`, `ci-out/per_language.csv` (trend CSVs consumed by Plot plugin)
   - `ci-out/test-results/junit.xml` (when `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`)
   - `ci-out/coverage/{lcov.info,sonar-coverage.xml,html/}` (when `COVERAGE_STANDALONE = true`)
