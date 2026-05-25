@@ -7,6 +7,9 @@
 [![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
 [![codecov](https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg)](https://codecov.io/gh/oxide-sloc/oxide-sloc)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12976/badge)](https://www.bestpractices.dev/en/projects/12976)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/oxide-sloc/oxide-sloc/badge)](https://securityscorecards.dev/viewer/?uri=github.com/oxide-sloc/oxide-sloc)
+[![docs.rs](https://img.shields.io/docsrs/oxide-sloc)](https://docs.rs/oxide-sloc)
 [![MCP Server](https://img.shields.io/badge/MCP-server-orange)](./mcp.json)
 
 **oxide-sloc** is a Rust-based local code analysis tool — IEEE 1045-1992 SLOC analysis, unit test detection, and coverage reporting.
