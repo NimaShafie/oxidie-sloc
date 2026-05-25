@@ -829,5 +829,5 @@ jobs:
       - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
         with:
           identifier: NimaShafie.OxideSLOC
-          installers-regex: 'oxide-sloc-windows-x86_64\.exe$'
+          installers-regex: 'oxide-sloc-windows-x64\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}

@@ -37,15 +37,11 @@ jobs:
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
-        continue-on-error: true
 
       - name: Build docs
         run: mdbook build
 
       - name: Upload pages artifact
-        if: steps.pages.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
           path: book
@@ -53,8 +49,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    # Skip silently if the build job could not configure Pages
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ success() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
