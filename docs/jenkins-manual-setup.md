@@ -463,10 +463,15 @@ Jenkins discovers the `parameters {}` block in the Jenkinsfile only after runnin
 once.  The first build must run **without parameters** to register them.
 
 1. On the job page, click **"Build Now"** in the left sidebar.
-   The first build runs with defaults (`SKIP_WEB_CHECK` defaults to true for a fresh
-   install). It should complete successfully — Analyze runs against
-   `tests/fixtures/basic` which exists in the repository, and the Web UI check stage
-   is skipped by default.
+   The first build runs with defaults (`SKIP_WEB_CHECK` defaults to `true` for a
+   fresh install).  The build executes these stages in order:
+   **Checkout → Load helpers → Setup → Quality Gates → Build → Analyze → Archive & Publish**,
+   then succeeds.  Analyze targets `tests/fixtures/basic` which exists in the repository,
+   and the Web UI check is skipped by default.
+
+   > **If the build fails** with `MethodTooLargeException` at compile time (before any
+   > stage runs), see the [Troubleshooting → MethodTooLargeException](#methodtoolarge
+   > exception-at-pipeline-compile-time) section below.
 
 2. Wait for the build to complete. It should be **green** on the first run with default settings.
 
@@ -712,6 +717,38 @@ rustup component add llvm-tools-preview
 ---
 
 ## 15. Troubleshooting
+
+### MethodTooLargeException at pipeline compile time
+
+If the build console shows:
+
+```
+org.codehaus.groovy.control.MultipleCompilationErrorsException: startup failed:
+General error during class generation: Method too large: WorkflowScript.___cps___N
+groovyjarjarasm.asm.MethodTooLargeException: Method too large: WorkflowScript.___cps___N
+```
+
+this error occurs **at compile time** (before any stage runs) and means the JVM has
+rejected the CPS-transformed pipeline because one generated method exceeds the 64 KB
+bytecode limit.  No Jenkins configuration can work around it — the fix is in the
+Jenkinsfile itself.
+
+**This should not occur with the current Jenkinsfile** — all helper functions have been
+extracted to `ci/jenkins/pipeline-helpers.groovy` and are loaded at runtime via
+`load 'ci/jenkins/pipeline-helpers.groovy'`.  Each function in the loaded file compiles
+as a separate class method with its own 64 KB budget, keeping the main `WorkflowScript`
+class well under the limit.
+
+If you see this error after editing the Jenkinsfile, you have re-inflated the compiled
+size.  Remedies:
+
+- Do **not** add `def` helper functions directly to the Jenkinsfile — put them in
+  `ci/jenkins/pipeline-helpers.groovy` instead.
+- Extract any new large `sh '''…'''` heredocs to a `ci/jenkins/*.sh` script and call
+  it with `sh 'bash ci/jenkins/my-step.sh'`.
+- The declarative linter (`Manage Jenkins → Validate Declarative Pipeline`) catches
+  syntax errors but does **not** detect `MethodTooLargeException` — only a real build
+  triggers the JVM class-generation check.
 
 ### "Build with Parameters" not showing after first build
 

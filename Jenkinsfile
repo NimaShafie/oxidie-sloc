@@ -1,4 +1,14 @@
 /*
+ * oxide-sloc canonical Jenkins pipeline.
+ *
+ * This is the entry point used by ci/jenkins/job-config.xml and seed-job.groovy.
+ * It is intentionally kept thin: helper logic lives in ci/jenkins/pipeline-helpers.groovy
+ * and is loaded after checkout so that each function compiles as a separate class,
+ * keeping every generated method well under the JVM 64 KB bytecode limit.
+ *
+ * Do NOT add def functions or large sh-heredocs here — put them in pipeline-helpers.groovy
+ * or in a dedicated ci/jenkins/*.sh script and call it with sh 'bash ci/jenkins/script.sh'.
+ *
  * Pipeline-of-Pipelines usage:
  *   From an orchestrator pipeline, trigger this job with:
  *     build job: 'oxide-sloc', parameters: [
@@ -9,6 +19,10 @@
  *   This pipeline will trigger DOWNSTREAM_JOB on success, passing back
  *   UPSTREAM_JOB, UPSTREAM_BUILD, and ARTIFACT_PATH.
  */
+
+def h   // loaded after Checkout; all runXxx() calls below delegate here
+
+// ── Pipeline ───────────────────────────────────────────────────────────────
 pipeline {
     agent any
 
@@ -386,6 +400,17 @@ pipeline {
             }
         }
 
+        // ── 0b. Load helpers ───────────────────────────────────────────────────
+        // Loads ci/jenkins/pipeline-helpers.groovy as a separate compiled class so
+        // its methods get their own 64 KB bytecode budget, keeping this script lean.
+        stage('Load helpers') {
+            steps {
+                script {
+                    h = load 'ci/jenkins/pipeline-helpers.groovy'
+                }
+            }
+        }
+
         // ── 1. Setup ───────────────────────────────────────────────────────────
         // Installs the Rust toolchain (cached persistently across builds) and
         // decompresses the vendor archive so all cargo commands run fully offline.
@@ -393,175 +418,18 @@ pipeline {
         // Toolchain resolution order (stops at first match):
         //   1. Toolchain already in RUSTUP_HOME persistent cache      → no network
         //   2. rust-toolchain-bundle.tar.xz in workspace              → air-gapped
-        //      (run ci/jenkins/bundle-rust-toolchain.sh once, commit both output files)
         //   3. /opt/rust-toolchain baked into the agent image         → air-gapped
-        //      (rebuild ci/jenkins/Dockerfile.agent; toolchain installed at build time)
         //   4. rustup-init binary at ${RUSTUP_HOME}/../rustup-init    → semi-offline
         //   5. curl sh.rustup.rs                                       → requires internet
-        //
-        // Preferred air-gapped paths: #2 (bundle committed to repo) or #3 (Dockerfile).
-        // Cargo crate sources are always served from vendor.tar.xz — no crates.io needed.
         stage('Setup') {
             steps {
-                sh '''
-                    TOOLCHAIN=$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)
-                    if rustup toolchain list 2>/dev/null | grep -q "${TOOLCHAIN}"; then
-                        echo "Rust ${TOOLCHAIN} already in persistent cache — skipping install."
-                    elif [ -f rust-toolchain-bundle.tar.xz ]; then
-                        echo "Extracting rust-toolchain-bundle.tar.xz (air-gapped workspace bundle)..."
-                        sha256sum -c rust-toolchain-bundle.tar.xz.sha256
-                        tar -xJf rust-toolchain-bundle.tar.xz -C "${CARGO_HOME}/.."
-                    elif [ -d /opt/rust-toolchain/rustup/toolchains ]; then
-                        echo "Seeding toolchain from agent image (/opt/rust-toolchain)..."
-                        cp -a /opt/rust-toolchain/cargo/. "${CARGO_HOME}/"
-                        cp -a /opt/rust-toolchain/rustup/. "${RUSTUP_HOME}/"
-                    elif [ -x "${RUSTUP_HOME}/../rustup-init" ]; then
-                        echo "Using bundled rustup-init (semi-offline)..."
-                        "${RUSTUP_HOME}/../rustup-init" -y \
-                            --default-toolchain "${TOOLCHAIN}" \
-                            --no-modify-path
-                    else
-                        echo "============================================================"
-                        echo "WARNING: This build is NOT air-gapped."
-                        echo "  Neither /opt/rust-toolchain (Dockerfile.agent layout) nor"
-                        echo "  the pre-seeded rustup-init binary was found on this agent."
-                        echo "  Falling back to internet rustup. To make this air-gap-safe,"
-                        echo "  rebuild the agent image: see docs/ci-integrations.md"
-                        echo "  § Rebuilding the agent image."
-                        echo "============================================================"
-                        echo "Downloading rustup installer (requires internet access)..."
-                        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-                            | sh -s -- -y --default-toolchain "${TOOLCHAIN}" --no-modify-path
-                    fi
-                    rustup show
-                    cargo --version
-                '''
-                sh '''
-                    # vendor.tar.xz is committed to git and will always be present after
-                    # checkout.  The agent-cache fallback handles the rare case where an
-                    # older clone or a manually reset workspace is used instead.
-                    AGENT_ARCHIVE="${CARGO_HOME}/../vendor.tar.xz"
-                    AGENT_SHA="${CARGO_HOME}/../vendor.tar.xz.sha256"
-
-                    # Stale vendor/ from a recycled workspace (cleanWs only runs in
-                    # post{}; a prior session may have crashed before cleanup).  If
-                    # vendor.tar.xz is alongside it, the tarball is authoritative —
-                    # re-extract to guarantee Cargo.lock-aligned versions.
-                    if [ -d vendor ] && [ -f vendor.tar.xz ]; then
-                        echo "vendor/ exists alongside a tarball — wiping and re-extracting for freshness."
-                        rm -rf vendor
-                    fi
-                    if [ -d vendor ]; then
-                        echo "vendor/ already present — skipping extraction."
-                    elif [ -f vendor.tar.xz ]; then
-                        echo "Verifying vendor.tar.xz integrity..."
-                        sha256sum -c vendor.tar.xz.sha256
-                        echo "Decompressing vendor.tar.xz..."
-                        tar -xJf vendor.tar.xz
-                    elif [ -f "${AGENT_ARCHIVE}" ]; then
-                        echo "vendor.tar.xz not in workspace — falling back to agent cache..."
-                        cp "${AGENT_ARCHIVE}" vendor.tar.xz
-                        if [ -f "${AGENT_SHA}" ]; then
-                            cp "${AGENT_SHA}" vendor.tar.xz.sha256
-                            echo "Verifying vendor.tar.xz integrity..."
-                            sha256sum -c vendor.tar.xz.sha256
-                        else
-                            echo "WARNING: No .sha256 in agent cache — skipping checksum verification."
-                        fi
-                        echo "Decompressing vendor.tar.xz..."
-                        tar -xJf vendor.tar.xz
-                    else
-                        echo "ERROR: vendor.tar.xz not found in workspace or agent cache." >&2
-                        echo "       Ensure the repository was cloned from the correct branch/tag." >&2
-                        exit 1
-                    fi
-
-                    echo "Writing .cargo/config.toml for fully offline builds..."
-                    mkdir -p .cargo
-                    cat > .cargo/config.toml << 'CARGOEOF'
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"
-CARGOEOF
-                '''
-                // Relax artifact-viewer CSP so HTML report artifacts render with inline
-                // styles and scripts.  Three-tier approach (each tier falls back silently):
-                //   1. Direct System.setProperty — works when the Groovy sandbox is disabled
-                //      (the default for Pipelines loaded from SCM; "Use Groovy Sandbox" is
-                //      unchecked in the job config).
-                //   2. Script Console REST API — requires credential 'jenkins-api-token'
-                //      (Kind: Secret text, value: admin API token).
-                //   3. init.groovy.d — permanent fix: bash ci/jenkins/preflight.sh --install-csp
-                script {
-                    def RELAXED_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
-                                      "img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; " +
-                                      "font-src 'self' data:;"
-                    def cspSet = false
-
-                    // Tier 1: direct property set (no credentials needed, sandbox must be off)
-                    try {
-                        System.setProperty('hudson.model.DirectoryBrowserSupport.CSP', RELAXED_CSP)
-                        echo 'Artifact-viewer CSP relaxed (direct System.setProperty).'
-                        cspSet = true
-                    } catch (Exception ex) {
-                        echo "Direct CSP set blocked (sandbox active): ${ex.message}"
-                    }
-
-                    // Tier 2: Script Console REST API via jenkins-api-token credential
-                    if (!cspSet) {
-                        try {
-                            withCredentials([string(credentialsId: 'jenkins-api-token',
-                                                    variable:      'JEN_API_TOK',
-                                                    optional:      true)]) {
-                                if (env.JEN_API_TOK?.trim()) {
-                                    def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
-                                    if (base) {
-                                        withEnv(["SLOC_JENKINS_BASE=${base}",
-                                                 "SLOC_CSP=${RELAXED_CSP}"]) {
-                                            sh '''
-                                                CRUMB=$(curl -sS -u "admin:${JEN_API_TOK}" \
-                                                    "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22::%22,//crumb)" \
-                                                    2>/dev/null || echo "")
-                                                FIELD="${CRUMB%%::*}"
-                                                CRUMB_VAL="${CRUMB##*::}"
-                                                GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
-                                                curl -sS -u "admin:${JEN_API_TOK}" \
-                                                    -H "${FIELD}: ${CRUMB_VAL}" \
-                                                    --data-urlencode "script=${GROOVY}" \
-                                                    "${SLOC_JENKINS_BASE}/scriptText" >/dev/null 2>&1 || true
-                                                echo "Artifact-viewer CSP relaxed (Script Console API)."
-                                            '''
-                                        }
-                                    }
-                                } else {
-                                    echo 'jenkins-api-token not configured and Groovy sandbox is active.'
-                                    echo 'To fix permanently: bash ci/jenkins/preflight.sh --install-csp'
-                                    echo 'Or disable "Use Groovy Sandbox" in the pipeline job configuration.'
-                                }
-                            }
-                        } catch (Exception ex) {
-                            echo "CSP setup via API (non-fatal): ${ex.message}"
-                        }
-                    }
-                }
+                script { h.runSetup() }
             }
         }
 
         // ── 2. Quality Gates ───────────────────────────────────────────────────
         // Format and Lint run in parallel; Unit tests follow.
         // All skipped when SKIP_QUALITY_GATES is checked for faster scan-only runs.
-        //
-        // TEST_RUNNER controls which test harness is used:
-        //   cargo-test    — standard stable runner; console output only
-        //   cargo-nextest — faster parallel runner; produces JUnit XML at
-        //                   <OUTPUT_SUBDIR>/test-results/junit.xml for the
-        //                   Jenkins "Test Result" sidebar link (requires
-        //                   PUBLISH_TEST_RESULTS + cargo-nextest on the agent).
-        //
-        // TEST_FAIL_FAST — stop on first failure (default: run all)
-        // RUST_BACKTRACE=1 is always set so panics include full stack traces.
         stage('Quality Gates') {
             when { expression { !params.SKIP_QUALITY_GATES } }
             stages {
@@ -588,50 +456,10 @@ CARGOEOF
                 }
                 stage('Unit tests') {
                     environment {
-                        // Full backtraces on panics — essential for diagnosing test failures.
                         RUST_BACKTRACE = '1'
                     }
                     steps {
-                        script {
-                            def outDir     = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                            def resultsDir = "${outDir}/test-results"
-                            sh "mkdir -p '${resultsDir}'"
-
-                            if (params.TEST_RUNNER == 'cargo-nextest') {
-                                // cargo-nextest: parallel runner with JUnit XML output.
-                                // JUnit XML is written by the CI profile defined in
-                                // .config/nextest.toml (junit.path = "junit.xml").
-                                // The file lands at the workspace root; we move it into
-                                // the output directory so archiveArtifacts picks it up.
-                                sh """
-                                    if ! cargo nextest --version >/dev/null 2>&1; then
-                                        echo "ERROR: cargo-nextest not found on this agent."
-                                        echo "  Install: cargo install cargo-nextest"
-                                        echo "  Or set TEST_RUNNER to 'cargo-test'."
-                                        exit 1
-                                    fi
-                                """
-                                def failFastFlag = params.TEST_FAIL_FAST ? '--fail-fast' : '--no-fail-fast'
-                                sh """
-                                    cargo nextest run --workspace ${failFastFlag} --profile ci \
-                                        2>&1 | tee '${resultsDir}/nextest-output.txt'
-                                """
-                                // Move JUnit XML written by .config/nextest.toml CI profile
-                                sh "mv -f junit.xml '${resultsDir}/junit.xml' 2>/dev/null || true"
-
-                                if (params.PUBLISH_TEST_RESULTS) {
-                                    junit testResults:         "${params.OUTPUT_SUBDIR}/test-results/junit.xml",
-                                          allowEmptyResults:   true,
-                                          skipPublishingChecks: false
-                                }
-                            } else {
-                                // cargo test (stable default) — no JUnit XML, console output only.
-                                def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
-                                sh """
-                                    cargo test --workspace ${failFastFlag}
-                                """
-                            }
-                        }
+                        script { h.runUnitTests() }
                     }
                 }
             }
@@ -640,31 +468,13 @@ CARGOEOF
         // ── 3. Build ───────────────────────────────────────────────────────────
         stage('Build') {
             steps {
-                // retry once on transient network or registry errors
                 retry(2) { sh 'cargo build --release -p oxide-sloc' }
             }
         }
 
-        // ── 4. Coverage ───────────────────────────────────────────────────────
-        // Standalone code-coverage stage.  Enabled by COVERAGE_STANDALONE.  Produces:
-        //
-        //   <OUTPUT_SUBDIR>/coverage/lcov.info          — LCOV (line + branch coverage)
-        //   <OUTPUT_SUBDIR>/coverage/cobertura.xml      — Cobertura XML
-        //   <OUTPUT_SUBDIR>/coverage/html/index.html    — browsable HTML source view
-        //
-        // Jenkins integration via the Coverage plugin (recordCoverage step):
-        //   • Line %, branch %, function % shown on every build page
-        //   • Build-over-build coverage trend chart (no Plot CSV needed)
-        //   • Per-file drill-down from the Jenkins UI
-        //   • Quality-gate enforcement via COVERAGE_THRESHOLD (no shell math needed)
-        //   Install: see ci/jenkins/plugins.txt — plugin ID: coverage
-        //
-        // Prerequisites:
-        //   cargo-llvm-cov (preferred, vendored in ci/tools/Cargo.toml) — produces
-        //     LCOV with line + branch data and an HTML source report.
-        //   cargo-tarpaulin — fallback; produces LCOV (line coverage only).
-        //   genhtml (lcov system package) — fallback HTML when cargo-llvm-cov absent.
-        //   llvm-tools rustup component — required by cargo-llvm-cov (in rust-toolchain.toml).
+        // ── 4. Coverage ────────────────────────────────────────────────────────
+        // Produces LCOV, Cobertura XML, and browsable HTML via cargo-llvm-cov.
+        // Enabled by COVERAGE_STANDALONE; threshold enforced by COVERAGE_THRESHOLD.
         stage('Coverage') {
             when {
                 allOf {
@@ -673,274 +483,15 @@ CARGOEOF
                 }
             }
             steps {
-                script {
-                    def outDir      = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                    def coverageDir = "${outDir}/coverage"
-                    sh "mkdir -p '${coverageDir}'"
-
-                    // ── 1. Ensure cargo-llvm-cov is available ─────────────────
-                    // Installs from the vendored source tree (no internet needed).
-                    // llvm-tools component is declared in rust-toolchain.toml and
-                    // will already be present in any toolchain bundle built from it.
-                    sh '''
-                        if ! cargo llvm-cov --version >/dev/null 2>&1; then
-                            echo "Installing cargo-llvm-cov from vendor (offline)..."
-                            cargo install --offline cargo-llvm-cov || \
-                                echo "WARNING: cargo-llvm-cov unavailable; tarpaulin fallback will be used."
-                        fi
-                        rustup component add llvm-tools 2>/dev/null || true
-                    '''
-
-                    // ── 2. Generate LCOV + Cobertura XML ─────────────────────
-                    // ci/sonar/generate-coverage.sh tries cargo-llvm-cov first
-                    // (LCOV includes branch data: BRH/BRF lines), then falls back
-                    // to cargo-tarpaulin (line coverage only, no branch data).
-                    sh "bash ci/sonar/generate-coverage.sh '${coverageDir}'"
-
-                    // ── 3. Generate browsable HTML source report ──────────────
-                    // Priority:
-                    //   a) cargo-llvm-cov --html  — annotated source view with
-                    //      line + branch hit/miss highlighting
-                    //   b) genhtml (lcov package)  — standard LCOV HTML; works
-                    //      even when cargo-llvm-cov is absent (tarpaulin case)
-                    sh """
-                        if cargo llvm-cov --version >/dev/null 2>&1; then
-                            echo "==> Generating HTML report with cargo-llvm-cov"
-                            cargo llvm-cov --workspace --all-features \
-                                --html --output-dir '${coverageDir}/html'
-                        elif command -v genhtml >/dev/null 2>&1; then
-                            echo "==> Generating HTML report with genhtml (lcov fallback)"
-                            genhtml '${coverageDir}/lcov.info' \
-                                --output-directory '${coverageDir}/html' \
-                                --legend \
-                                --branch-coverage \
-                                --title 'oxide-sloc coverage' \
-                                2>&1 | tail -20
-                        else
-                            echo "HTML coverage report: skipped (install cargo-llvm-cov or lcov package)."
-                        fi
-                    """
-
-                    // ── 4. Feed LCOV + Cobertura into the Jenkins Coverage plugin
-                    // recordCoverage provides native Jenkins UI integration:
-                    //   • Coverage summary badge on the build page
-                    //   • Line / branch / function percentages
-                    //   • Per-file source drill-down
-                    //   • Build-over-build trend chart (built into the plugin)
-                    //   • Quality-gate enforcement (COVERAGE_THRESHOLD)
-                    //
-                    // Both parsers are registered; Jenkins shows the union of what
-                    // each file finds — LCOV is the primary source (it carries branch
-                    // data), Cobertura provides the function-level metric.
-                    //
-                    // Requires the "coverage" plugin — see ci/jenkins/plugins.txt.
-                    script {
-                        def threshold = params.COVERAGE_THRESHOLD?.trim()?.isDouble()
-                                            ? params.COVERAGE_THRESHOLD.trim().toDouble()
-                                            : (params.COVERAGE_THRESHOLD?.trim()?.isInteger()
-                                                ? params.COVERAGE_THRESHOLD.trim().toInteger() as Double
-                                                : 0.0)
-
-                        def lcovFile     = "${params.OUTPUT_SUBDIR}/coverage/lcov.info"
-                        def coberturaFile = "${params.OUTPUT_SUBDIR}/coverage/sonar-coverage.xml"
-
-                        def tools = []
-                        if (fileExists("${env.WORKSPACE}/${lcovFile}")) {
-                            tools << [parser: 'LCOV', pattern: lcovFile]
-                        }
-                        if (fileExists("${env.WORKSPACE}/${coberturaFile}")) {
-                            tools << [parser: 'COBERTURA', pattern: coberturaFile]
-                        }
-
-                        if (tools.isEmpty()) {
-                            echo 'WARNING: No coverage data files found — recordCoverage skipped.'
-                        } else {
-                            // Quality gates: line coverage threshold is user-configured;
-                            // branch coverage is advisory (UNSTABLE, not FAILURE) because
-                            // tarpaulin may not emit branch data.
-                            def gates = []
-                            if (threshold > 0) {
-                                gates << [threshold: threshold, metric: 'LINE',
-                                          baseline: 'PROJECT', criticality: 'FAILURE']
-                                gates << [threshold: threshold * 0.7, metric: 'BRANCH',
-                                          baseline: 'PROJECT', criticality: 'UNSTABLE']
-                            }
-
-                            recordCoverage(
-                                tools:               tools,
-                                id:                  'oxide-sloc-coverage',
-                                name:                'Coverage',
-                                // Keep source snapshots on every build so drill-down
-                                // works on historical builds, not just the latest.
-                                sourceCodeRetention: 'EVERY_BUILD',
-                                qualityGates:        gates
-                            )
-                        }
-                    }
-
-                    // ── 5. Publish HTML source report as a sidebar link ───────
-                    // The Coverage plugin provides its own trend view; this sidebar
-                    // link gives direct access to the annotated source HTML produced
-                    // by cargo-llvm-cov or genhtml.
-                    if (fileExists("${coverageDir}/html/index.html")) {
-                        publishHTML(target: [
-                            allowMissing         : false,
-                            alwaysLinkToLastBuild: true,
-                            keepAll              : true,
-                            reportDir            : "${params.OUTPUT_SUBDIR}/coverage/html",
-                            reportFiles          : 'index.html',
-                            reportName           : 'Coverage Source',
-                        ])
-                    } else {
-                        echo 'Annotated HTML source report not available for this run.'
-                    }
-                }
+                script { h.runCoverage() }
             }
         }
 
         // ── 5. Analyze ─────────────────────────────────────────────────────────
-        // Mirrors the web UI configuration flow end-to-end:
-        //   Step 1 → target path       (SCAN_PATH)
-        //   Step 2 → counting rules    (CI_PRESET, MIXED_LINE_POLICY, DOCSTRINGS_AS_CODE, …)
-        //   Step 3 → output artifacts  (GENERATE_HTML / PDF; JSON + CSV + XLSX always written)
-        //   Step 4 → run + validate
-        //   Step 5 → mixed-line policy matrix (spot-checks all four policies)
+        // Mirrors the web UI configuration flow end-to-end.
         stage('Analyze') {
             steps {
-                script {
-                    // CSP is set via ci/jenkins/init.groovy.d/relax-csp.groovy (drop into $JENKINS_HOME/init.groovy.d/)
-
-                    // Allowlist-check choice and free-text parameters before use.
-                    // Free-text values are passed to the shell via withEnv (environment
-                    // variables), not Groovy string interpolation.
-                    def allowedPolicies = ['code-only', 'code-and-comment', 'comment-only', 'separate-mixed-category']
-                    def allowedPresets  = ['none', 'default', 'strict', 'full-scope']
-                    if (!allowedPolicies.contains(params.MIXED_LINE_POLICY)) {
-                        error("Invalid MIXED_LINE_POLICY value: ${params.MIXED_LINE_POLICY}")
-                    }
-                    if (!allowedPresets.contains(params.CI_PRESET)) {
-                        error("Invalid CI_PRESET value: ${params.CI_PRESET}")
-                    }
-                    if (params.OUTPUT_SUBDIR && !(params.OUTPUT_SUBDIR ==~ /^[a-zA-Z0-9_\-\/]+$/)) {
-                        error("OUTPUT_SUBDIR contains invalid characters: ${params.OUTPUT_SUBDIR}")
-                    }
-                    def safeGlob = /^[a-zA-Z0-9_\-\.\*\?\[\]\/\\]+$/
-                    if (params.INCLUDE_GLOBS) {
-                        params.INCLUDE_GLOBS.tokenize(',').each { g ->
-                            if (!(g.trim() ==~ safeGlob)) { error("INCLUDE_GLOBS contains invalid pattern: ${g.trim()}") }
-                        }
-                    }
-                    if (params.EXCLUDE_GLOBS) {
-                        params.EXCLUDE_GLOBS.tokenize(',').each { g ->
-                            if (!(g.trim() ==~ safeGlob)) { error("EXCLUDE_GLOBS contains invalid pattern: ${g.trim()}") }
-                        }
-                    }
-                    // Language names: alphanumeric plus # and + (for C# and C++).
-                    if (params.ENABLED_LANGUAGES) {
-                        params.ENABLED_LANGUAGES.tokenize(',').each { l ->
-                            if (!(l.trim() ==~ /^[a-zA-Z0-9\+\#]+$/)) {
-                                error("ENABLED_LANGUAGES contains invalid value: ${l.trim()}")
-                            }
-                        }
-                    }
-
-                    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                    sh "mkdir -p '${outDir}'"
-
-                    // Derive a URL-safe slug from the scan-path basename for named artifacts.
-                    // e.g. "tests/fixtures/basic" → "basic", "src/my repo" → "my-repo"
-                    def scanParts   = params.SCAN_PATH.trim().split('[/\\\\]') as List
-                    def projectSlug = (scanParts ? scanParts[-1] : params.SCAN_PATH.trim())
-                                        .replaceAll(/[^a-zA-Z0-9_\-]/, '-')
-                                        .replaceAll(/-+/, '-')
-                                        .replaceAll(/^-|-$/, '') ?: 'project'
-                    env.SLOC_PROJECT = projectSlug
-
-                    def configArg   = (params.CI_PRESET != 'none')
-                                        ? "--config 'ci/sloc-ci-${params.CI_PRESET}.toml'"
-                                        : ''
-                    // JSON, CSV, and XLSX are always written.
-                    // HTML and PDF are optional (controlled by GENERATE_HTML / GENERATE_PDF).
-                    def jsonArg     = "--json-out  '${outDir}/result_${projectSlug}.json'"
-                    def csvArg      = "--csv-out   '${outDir}/report_${projectSlug}.csv'"
-                    def xlsxArg     = "--xlsx-out  '${outDir}/report_${projectSlug}.xlsx'"
-                    def htmlArg     = params.GENERATE_HTML       ? "--html-out '${outDir}/report_${projectSlug}.html'" : ''
-                    def pdfArg      = params.GENERATE_PDF        ? "--pdf-out  '${outDir}/report_${projectSlug}.pdf'"  : ''
-                    def docArg      = params.DOCSTRINGS_AS_CODE  ? '--python-docstrings-as-code'        : ''
-                    def symlinkArg  = params.FOLLOW_SYMLINKS     ? '--follow-symlinks'                  : ''
-                    def noIgnoreArg = params.NO_IGNORE_FILES     ? '--no-ignore-files'                  : ''
-                    def submodArg   = params.SUBMODULE_BREAKDOWN ? '--submodule-breakdown'              : ''
-
-                    def includeArgs = params.INCLUDE_GLOBS
-                        ? params.INCLUDE_GLOBS.tokenize(',').collect { "--include-glob '${it.trim()}'" }.join(' ')
-                        : ''
-                    def excludeArgs = params.EXCLUDE_GLOBS
-                        ? params.EXCLUDE_GLOBS.tokenize(',').collect { "--exclude-glob '${it.trim()}'" }.join(' ')
-                        : ''
-                    def langArgs    = params.ENABLED_LANGUAGES
-                        ? params.ENABLED_LANGUAGES.tokenize(',').collect { "--enabled-language '${it.trim()}'" }.join(' ')
-                        : ''
-
-                    // a. Quick plain summary
-                    withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
-                        sh '''
-                            "${BINARY}" analyze "${SCAN_PATH}" --plain ''' + configArg + '''
-                        '''
-                    }
-
-                    // b. Main artifact run — JSON, CSV, XLSX always written; HTML and PDF are optional.
-                    withEnv([
-                        "SCAN_PATH=${params.SCAN_PATH}",
-                        "REPORT_TITLE=${params.REPORT_TITLE}",
-                        "MIXED_LINE_POLICY=${params.MIXED_LINE_POLICY}",
-                    ]) {
-                        sh '''
-                            "${BINARY}" analyze "${SCAN_PATH}" \
-                                --report-title "${REPORT_TITLE}" \
-                                --mixed-line-policy "${MIXED_LINE_POLICY}" \
-                                ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg}" + ''' \
-                                ''' + "${langArgs} ${includeArgs} ${excludeArgs}" + ''' \
-                                ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + '''
-                        '''
-                    }
-
-                    sh "test -s '${outDir}/result_${projectSlug}.json'"
-                    sh "test -s '${outDir}/report_${projectSlug}.csv'"
-                    sh "test -s '${outDir}/report_${projectSlug}.xlsx'"
-                    if (params.GENERATE_HTML) { sh "test -s '${outDir}/report_${projectSlug}.html'" }
-
-                    // c. Per-file breakdown
-                    withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
-                        sh '''
-                            "${BINARY}" analyze "${SCAN_PATH}" --per-file --plain ''' + configArg + '''
-                        '''
-                    }
-
-                    // d. HTML content sanity checks
-                    if (params.GENERATE_HTML) {
-                        withEnv(["REPORT_TITLE=${params.REPORT_TITLE}"]) {
-                            sh '''
-                                grep -q 'OxideSLOC' "''' + outDir + '''/report_''' + projectSlug + '''.html"
-                                grep -qF "${REPORT_TITLE}" "''' + outDir + '''/report_''' + projectSlug + '''.html"
-                            '''
-                        }
-                    }
-
-                    // e. Extract inline CSS/JS from the HTML report to companion files so
-                    //    it renders under Jenkins's default CSP (which blocks unsafe-inline).
-                    if (params.GENERATE_HTML) {
-                        sh "python3 ci/jenkins/extract-report-assets.py '${outDir}/report_${projectSlug}.html' || true"
-                    }
-
-                    // f. Mixed-line policy matrix — spot-checks all four policies
-                    for (def policy in ['code-only', 'code-and-comment', 'comment-only', 'separate-mixed-category']) {
-                        withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
-                            sh '''
-                                "${BINARY}" analyze "${SCAN_PATH}" --plain --mixed-line-policy ''' + policy + '''
-                            '''
-                        }
-                    }
-                }
+                script { h.runAnalyze() }
             }
         }
 
@@ -948,36 +499,12 @@ CARGOEOF
         stage('Web UI health check') {
             when { expression { !params.SKIP_WEB_CHECK } }
             steps {
-                sh '''
-                    "${BINARY}" serve &
-                    SERVER_PID=$!
-
-                    HTTP_CODE="000"
-                    for _ in $(seq 1 30); do
-                        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4317/ 2>/dev/null || echo "000")
-                        [ "${HTTP_CODE}" = "200" ] && break
-                        sleep 1
-                    done
-
-                    kill "${SERVER_PID}" 2>/dev/null || true
-                    wait "${SERVER_PID}" 2>/dev/null || true
-
-                    if [ "${HTTP_CODE}" != "200" ]; then
-                        echo "Web UI returned HTTP ${HTTP_CODE} — expected 200"
-                        exit 1
-                    fi
-                    echo "Web UI responded with HTTP 200 — OK"
-                '''
+                sh 'bash ci/jenkins/run-web-check.sh'
             }
         }
 
         // ── 7. Deliver results ─────────────────────────────────────────────────
         // Optional webhook and/or email delivery via the `send` subcommand.
-        //
-        // Webhook:  set WEBHOOK_URL parameter; add SLOC_WEBHOOK_TOKEN (Secret Text)
-        //           credential in Jenkins for Bearer-token auth (optional).
-        // Email:    set EMAIL_RECIPIENTS parameter; add three Secret Text credentials:
-        //           SLOC_SMTP_HOST, SLOC_SMTP_USER, SLOC_SMTP_PASS.
         stage('Deliver results') {
             when {
                 expression {
@@ -1029,224 +556,15 @@ CARGOEOF
         }
 
         // ── 8. Archive & Publish ───────────────────────────────────────────────
-        // Generates trend-chart CSV data for the Plot plugin, archives all build
-        // artifacts (binary, reports, test-results, coverage), and publishes the
-        // HTML report as a build sidebar link.
-        //
-        // Prerequisite plugins — see ci/jenkins/plugins.txt:
-        //   htmlpublisher  → "SLOC Report" and "Coverage Report" sidebar links
-        //   plot           → build-over-build trend charts on the job page
-        //   junit          → "Test Result" sidebar link (cargo-nextest runs only)
-        //
-        // CSV files written here (consumed by post { always } plot() calls):
-        //   summary.csv      — aggregate totals: code / comment / blank / files
-        //   per_language.csv — per-language code-line counts
-        //   coverage.csv     — line coverage % (when COVERAGE_STANDALONE is enabled)
+        // Writes Plot-plugin trend CSVs, archives artifacts, publishes HTML reports.
         stage('Archive & Publish') {
             steps {
-                script {
-                    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-
-                    // Write CSV trend data consumed by the Plot plugin.
-                    def proj     = env.SLOC_PROJECT ?: 'project'
-                    def jobSlug  = (env.JOB_NAME?.replaceAll('[^a-zA-Z0-9_\\-]', '_') ?: 'oxide-sloc')
-                    def histFile = "${env.HOME}/.oxide-sloc-history/${jobSlug}.csv"
-                    sh """python3 - <<'PYEOF'
-import json, csv, os, sys, re, time
-
-out = "${outDir}"
-
-# ── SLOC summary CSV ─────────────────────────────────────────────────────
-result_path = out + "/result_${proj}.json"
-if os.path.exists(result_path):
-    data   = json.load(open(result_path))
-    totals = data["summary_totals"]
-
-    # summary.csv — one aggregate row per build for trend line charts
-    with open(out + "/summary.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["code_lines", "comment_lines", "blank_lines", "files_analyzed"])
-        w.writerow([totals["code_lines"], totals["comment_lines"],
-                    totals["blank_lines"], totals["files_analyzed"]])
-
-    # per_language.csv — one row per language for the per-language bar chart
-    langs = data.get("totals_by_language", [])
-    with open(out + "/per_language.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["language", "code_lines"])
-        for lang in langs:
-            display = lang.get("language", {})
-            name = display if isinstance(display, str) else str(display)
-            w.writerow([name, lang["code_lines"]])
-
-    print("SLOC trend CSVs written to:", out)
-else:
-    print("result.json not found — skipping SLOC CSV generation")
-
-# ── Coverage CSV ─────────────────────────────────────────────────────────
-lcov_path = out + "/coverage/lcov.info"
-if os.path.exists(lcov_path):
-    total = hit = 0
-    for line in open(lcov_path):
-        line = line.strip()
-        if line.startswith("LF:"):
-            total += int(line[3:])
-        elif line.startswith("LH:"):
-            hit += int(line[3:])
-    pct = round(hit / total * 100, 1) if total > 0 else 0.0
-    with open(out + "/coverage.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["line_coverage_pct"])
-        w.writerow([pct])
-    print(f"Coverage trend CSV: {pct}% line coverage ({hit}/{total} lines hit)")
-else:
-    print("lcov.info not found — skipping coverage CSV")
-
-# ── Persistent trend history ─────────────────────────────────────────────
-# Written to agent home (outside workspace) so it survives cleanWs().
-# Read by generate-dashboard.py to render a build-over-build sparkline.
-history_file = "${histFile}"
-if history_file and os.path.exists(result_path):
-    ts        = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    build_num = os.environ.get('BUILD_NUMBER', '0')
-    hist_dir  = os.path.dirname(history_file)
-    if hist_dir:
-        os.makedirs(hist_dir, exist_ok=True)
-    header = 'timestamp,build,code_lines,comment_lines,blank_lines,files_analyzed\\n'
-    if not os.path.exists(history_file):
-        open(history_file, 'w').write(header)
-    with open(history_file, 'a') as hf:
-        hf.write(f"{ts},{build_num},{totals['code_lines']},"
-                 f"{totals['comment_lines']},{totals['blank_lines']},"
-                 f"{totals['files_analyzed']}\\n")
-    with open(history_file) as hf:
-        lines = hf.readlines()
-    if len(lines) > 51:
-        with open(history_file, 'w') as hf:
-            hf.write(lines[0])
-            hf.writelines(lines[-50:])
-    print(f"Trend history updated: {history_file} ({len(lines)} entries)")
-PYEOF"""
-
-                    // Archive binary + all output subdirectory contents.
-                    // Includes: result.json, report.csv, report.xlsx, report.html, report.pdf,
-                    // test-results/, coverage/, and trend CSVs.
-                    archiveArtifacts artifacts: "${params.OUTPUT_SUBDIR}/**",
-                        fingerprint: true,
-                        allowEmptyArchive: true
-
-                    // ── Graphical Report (published first → top of sidebar) ───
-                    // generate-dashboard.py reads result_<slug>.json and produces
-                    // a self-contained HTML page with SVG charts and tables.
-                    // CSS is extracted to an external file so it renders correctly
-                    // under Jenkins's default artifact-viewer CSP.
-                    try {
-                        sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}' '${histFile}'"
-                        def dashFile = "${outDir}/dashboard_${proj}.html"
-                        if (fileExists(dashFile)) {
-                            publishHTML(target: [
-                                allowMissing         : true,
-                                alwaysLinkToLastBuild: true,
-                                keepAll              : true,
-                                reportDir            : params.OUTPUT_SUBDIR,
-                                reportFiles          : "dashboard_${env.SLOC_PROJECT ?: 'project'}.html",
-                                reportName           : "OxideSLOC — Jenkins CI Report",
-                            ])
-                        }
-                    } catch (Exception ex) {
-                        echo "generate-dashboard.py did not run (Python 3 unavailable or script error): ${ex.message}"
-                    }
-
-                    if (params.GENERATE_HTML) {
-                        def rptName = "OxideSLOC — Jenkins HTML Report"
-                        publishHTML(target: [
-                            allowMissing         : false,
-                            alwaysLinkToLastBuild: true,
-                            keepAll              : true,
-                            reportDir            : params.OUTPUT_SUBDIR,
-                            reportFiles          : "report_${env.SLOC_PROJECT ?: 'project'}.html",
-                            reportName           : rptName,
-                        ])
-                    }
-
-                    // ── Plot plugin trend charts ──────────────────────────────────────────
-                    // Registers SLOC and coverage data points with the Plot plugin so
-                    // build-over-build trend charts appear on the job page.  At least 2
-                    // builds are required before a chart is visible.  These calls must run
-                    // BEFORE post { cleanup } wipes the workspace — cleanWs() removes the
-                    // CSV files the plot() step reads from disk.
-                    // Requires the "plot" plugin — see ci/jenkins/plugins.txt.
-                    //
-                    // csvFileName: internal Plot plugin storage key (unique per chart,
-                    //   not a workspace path — the plugin manages this file itself).
-                    // csvSeries.file: workspace-relative path to the current build's data.
-                    try {
-                        if (fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/summary.csv")) {
-                            plot(
-                                csvFileName: 'sloc-trend-summary.csv',
-                                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/summary.csv",
-                                               url: '', displayTableFlag: false,
-                                               inclusionFlag: 'OFF', exclusionValues: '']],
-                                group:       'SLOC Trends',
-                                title:       'SLOC Totals Over Time',
-                                style:       'line',
-                                yaxis:       'Lines',
-                                numBuilds:   '50',
-                                keepRecords: true,
-                                useDescr:    true
-                            )
-                        }
-                        if (fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/per_language.csv")) {
-                            plot(
-                                csvFileName: 'sloc-trend-per-language.csv',
-                                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/per_language.csv",
-                                               url: '', displayTableFlag: false,
-                                               inclusionFlag: 'OFF', exclusionValues: '']],
-                                group:       'SLOC Trends',
-                                title:       'Per-Language Code Lines',
-                                style:       'bar',
-                                yaxis:       'Code Lines',
-                                numBuilds:   '50',
-                                keepRecords: true,
-                                useDescr:    true
-                            )
-                        }
-                        if (params.COVERAGE_STANDALONE &&
-                                fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/coverage.csv")) {
-                            plot(
-                                csvFileName: 'sloc-trend-coverage.csv',
-                                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/coverage.csv",
-                                               url: '', displayTableFlag: false,
-                                               inclusionFlag: 'OFF', exclusionValues: '']],
-                                group:       'SLOC Trends',
-                                title:       'Line Coverage % Over Time',
-                                style:       'line',
-                                yaxis:       'Coverage %',
-                                numBuilds:   '50',
-                                keepRecords: true,
-                                useDescr:    true
-                            )
-                        }
-                    } catch (Exception ex) {
-                        echo "Plot trend charts skipped (install the 'plot' plugin to enable): ${ex.message}"
-                    }
-                }
+                script { h.runArchivePublish() }
             }
         }
 
         // ── 9. Push to Artifact Repository ────────────────────────────────────
-        // Pushes scan artifacts (JSON, CSV, XLSX, HTML, PDF) to an external artifact repository.
-        // Only runs when ARTIFACT_REPO_TYPE is not "none" and ARTIFACT_REPO_URL is set.
-        //
-        // The push is delegated to ci/artifact-push.sh which handles all provider
-        // differences.  Credentials are bound via withCredentials using optional: true
-        // so the stage does not fail when the credential IDs are not yet registered —
-        // the script will simply perform an unauthenticated push (or fail with a 401
-        // if the repository requires auth, which surfaces as a clear error).
-        //
-        // Jenkins credential IDs to pre-register (Kind: Secret Text):
-        //   SLOC_ARTIFACT_REPO_USER  — username or access key ID
-        //   SLOC_ARTIFACT_REPO_PASS  — password, API token, or secret key
+        // Pushes scan artifacts to an external repository via ci/artifact-push.sh.
         stage('Push to Artifact Repository') {
             when {
                 allOf {
@@ -1255,111 +573,11 @@ PYEOF"""
                 }
             }
             steps {
-                script {
-                    def allowedTypes = [
-                        'artifactory', 'nexus', 'nexus2', 's3', 'minio', 'azure-blob', 'generic-http'
-                    ]
-                    if (!allowedTypes.contains(params.ARTIFACT_REPO_TYPE)) {
-                        error("Invalid ARTIFACT_REPO_TYPE: ${params.ARTIFACT_REPO_TYPE}")
-                    }
-
-                    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-
-                    // Substitute runtime tokens in the repo path
-                    def repoPath = params.ARTIFACT_REPO_PATH
-                        .replace('${JOB_NAME}',    env.JOB_NAME    ?: 'unknown-job')
-                        .replace('${BUILD_NUMBER}', env.BUILD_NUMBER ?: '0')
-
-                    def filesToPush = []
-                    def proj = env.SLOC_PROJECT ?: 'project'
-                    if (params.ARTIFACT_PUSH_JSON)                           filesToPush << "result_${proj}.json"
-                    if (params.ARTIFACT_PUSH_CSV)                            filesToPush << "report_${proj}.csv"
-                    if (params.ARTIFACT_PUSH_XLSX)                           filesToPush << "report_${proj}.xlsx"
-                    if (params.ARTIFACT_PUSH_HTML && params.GENERATE_HTML)   filesToPush << "report_${proj}.html"
-                    if (params.ARTIFACT_PUSH_PDF  && params.GENERATE_PDF)    filesToPush << "report_${proj}.pdf"
-
-                    // Binary: copy from target/release/ into outDir so artifact-push.sh
-                    // can reference it from a single directory.
-                    if (params.ARTIFACT_PUSH_BINARY) {
-                        def binaryName = isUnix() ? 'oxide-sloc' : 'oxide-sloc.exe'
-                        def binaryPath = "${env.WORKSPACE}/target/release/${binaryName}"
-                        if (fileExists(binaryPath)) {
-                            sh "cp '${binaryPath}' '${outDir}/${binaryName}'"
-                            filesToPush << binaryName
-                        } else {
-                            echo "WARNING: binary not found at ${binaryPath} — skipping binary push."
-                        }
-                    }
-
-                    // JUnit XML: copy from test-results/ into outDir
-                    if (params.ARTIFACT_PUSH_JUNIT
-                            && params.PUBLISH_TEST_RESULTS
-                            && params.TEST_RUNNER == 'cargo-nextest') {
-                        def junitPath = "${env.WORKSPACE}/test-results/junit.xml"
-                        if (fileExists(junitPath)) {
-                            sh "cp '${junitPath}' '${outDir}/junit.xml'"
-                            filesToPush << 'junit.xml'
-                        } else {
-                            echo "WARNING: junit.xml not found at ${junitPath} — skipping junit push."
-                        }
-                    }
-
-                    // Coverage reports: copy from coverage/ into outDir
-                    if (params.ARTIFACT_PUSH_COVERAGE && params.COVERAGE_STANDALONE) {
-                        [['coverage/lcov.info', 'lcov.info'],
-                         ['coverage/sonar-coverage.xml', 'sonar-coverage.xml']].each { src, dst ->
-                            def srcPath = "${env.WORKSPACE}/${src}"
-                            if (fileExists(srcPath)) {
-                                sh "cp '${srcPath}' '${outDir}/${dst}'"
-                                filesToPush << dst
-                            }
-                        }
-                    }
-
-                    // Diff artifacts (already written into outDir by the Git-Ref Compare stage)
-                    if (params.ARTIFACT_PUSH_DIFF && params.GIT_REF?.trim()) {
-                        ['diff.json', 'diff.csv'].each { f ->
-                            if (fileExists("${outDir}/${f}")) filesToPush << f
-                        }
-                    }
-
-                    if (filesToPush.isEmpty()) {
-                        echo 'No artifact files selected for push — skipping.'
-                        return
-                    }
-
-                    // Bind credentials as optional so the stage does not abort when
-                    // the credential IDs are absent (Credentials Binding plugin ≥ 1.27).
-                    withCredentials([
-                        string(credentialsId: 'SLOC_ARTIFACT_REPO_USER',
-                               variable:      'SLOC_AR_USER',
-                               optional:      true),
-                        string(credentialsId: 'SLOC_ARTIFACT_REPO_PASS',
-                               variable:      'SLOC_AR_PASS',
-                               optional:      true),
-                    ]) {
-                        withEnv([
-                            "ARTIFACT_REPO_TYPE=${params.ARTIFACT_REPO_TYPE}",
-                            "ARTIFACT_REPO_URL=${params.ARTIFACT_REPO_URL}",
-                            "ARTIFACT_REPO_PATH=${repoPath}",
-                            "ARTIFACT_REPO_EXTRA=${params.ARTIFACT_REPO_EXTRA ?: ''}",
-                            "ARTIFACT_DIR=${outDir}",
-                            "ARTIFACT_FILES=${filesToPush.join(' ')}",
-                            "ARTIFACT_REPO_USER=${env.SLOC_AR_USER ?: ''}",
-                            "ARTIFACT_REPO_PASS=${env.SLOC_AR_PASS ?: ''}",
-                            "ARTIFACT_GENERATE_MANIFEST=${params.ARTIFACT_GENERATE_MANIFEST}",
-                        ]) {
-                            sh 'bash ci/artifact-push.sh'
-                        }
-                    }
-                }
+                script { h.runPushArtifacts() }
             }
         }
 
         // ── 10. Git-Ref Scan ──────────────────────────────────────────────────
-        // When GIT_REF is set, scan that specific commit/tag/branch in addition
-        // to the standard scan.  A temporary git worktree is used so the main
-        // workspace stays clean.
         stage('Git-Ref Scan') {
             when {
                 expression { return params.GIT_REF?.trim() != '' }
@@ -1369,30 +587,13 @@ PYEOF"""
                     "GIT_REF=${params.GIT_REF}",
                     "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
                 ]) {
-                    sh '''
-                        REF="${GIT_REF:-}"
-                        OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
-                        WT="${WORKSPACE}/.wt-ref-scan"
-
-                        echo "=== Git-Ref Scan: ${REF} ==="
-                        git worktree add --detach "${WT}" "${REF}"
-
-                        "${BINARY}" analyze "${WT}" \
-                            --json-out  "${OUT}/ref-scan.json" \
-                            --html-out  "${OUT}/ref-scan.html" \
-                            --csv-out   "${OUT}/ref-scan-summary.csv" \
-                            --report-title "Ref scan: ${REF}" \
-                            --plain
-
-                        git worktree remove --force "${WT}" || true
-                    '''
+                    sh 'bash ci/jenkins/run-git-ref-scan.sh'
                 }
             }
         }
 
         // ── 11. Git-Ref Compare ────────────────────────────────────────────────
-        // Compare two refs using oxide-sloc diff.  The baseline is resolved from
-        // COMPARE_TO_PREV_TAG (auto-detect), COMPARE_TO_REF, or skipped if empty.
+        // Compare two refs using oxide-sloc diff.
         stage('Git-Ref Compare') {
             when {
                 expression {
@@ -1400,61 +601,7 @@ PYEOF"""
                 }
             }
             steps {
-                withEnv([
-                    "GIT_REF=${params.GIT_REF}",
-                    "COMPARE_TO_REF=${params.COMPARE_TO_REF}",
-                    "COMPARE_TO_PREV_TAG=${params.COMPARE_TO_PREV_TAG}",
-                    "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
-                ]) {
-                    sh '''
-                        OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
-                        BINARY="${WORKSPACE}/target/release/oxide-sloc"
-
-                        # Resolve baseline ref
-                        if [ "${COMPARE_TO_PREV_TAG:-false}" = "true" ]; then
-                            CURRENT_TAG=$(git tag --sort=-version:refname | head -1)
-                            BASELINE_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
-                            BASELINE_REF="${BASELINE_TAG}"
-                            echo "Auto-detected previous tag: ${BASELINE_REF} (current: ${CURRENT_TAG})"
-                        else
-                            BASELINE_REF="${COMPARE_TO_REF}"
-                        fi
-
-                        if [ -z "${BASELINE_REF}" ]; then
-                            echo "No baseline ref found — skipping comparison."
-                            exit 0
-                        fi
-
-                        # Determine what was scanned as "current"
-                        CURRENT_JSON="${OUT}/ref-scan.json"
-                        if [ ! -f "${CURRENT_JSON}" ]; then
-                            CURRENT_JSON="${OUT}/result_${SLOC_PROJECT:-project}.json"
-                        fi
-                        if [ ! -f "${CURRENT_JSON}" ]; then
-                            echo "No current scan JSON found — cannot compare."
-                            exit 1
-                        fi
-
-                        echo "=== Scanning baseline: ${BASELINE_REF} ==="
-                        WT_BASE="${WORKSPACE}/.wt-baseline"
-                        git worktree add --detach "${WT_BASE}" "${BASELINE_REF}"
-
-                        "${BINARY}" analyze "${WT_BASE}" \
-                            --json-out  "${OUT}/baseline-scan.json" \
-                            --report-title "Baseline: ${BASELINE_REF}" \
-                            --plain
-
-                        git worktree remove --force "${WT_BASE}" || true
-
-                        echo "=== Computing diff ==="
-                        "${BINARY}" diff \
-                            "${OUT}/baseline-scan.json" \
-                            "${CURRENT_JSON}" \
-                            --json-out "${OUT}/diff.json" \
-                            --csv-out  "${OUT}/diff.csv" \
-                            --plain
-                    '''
-                }
+                script { h.runGitRefCompare() }
             }
         }
 
@@ -1463,124 +610,20 @@ PYEOF"""
     post {
         success {
             script {
-                // Set build description and display name from JSON totals + optional
-                // test-result and coverage stats.  Runs before cleanup so all output
-                // files are still on disk.
-                try {
-                    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                    def proj   = env.SLOC_PROJECT
-                                    ?: (params.SCAN_PATH?.trim()?.split('[/\\\\]') as List)?.last()
-                                    ?: 'project'
-                    def result = readJSON file: "${outDir}/result_${proj}.json"
-                    def t      = result.summary_totals
-
-                    // Compact number formatter (matches CLAUDE.md canonical spec)
-                    def fmtN = { n ->
-                        long v = n as long
-                        long a = Math.abs(v)
-                        if (a >= 1_000_000L) {
-                            String s = String.format('%.1f', v / 1_000_000.0) + 'M'
-                            return s.replace('.0M', 'M')
-                        }
-                        if (a >= 10_000L) return "${Math.round(v / 1_000.0)}K"
-                        return String.format('%,d', v)
-                    }
-                    // Build description uses plain text so it renders correctly under
-                    // any Jenkins markup formatter (Escaped HTML is the default).
-                    def desc = "${fmtN(t.code_lines)} code · " +
-                               "${fmtN(t.comment_lines)} cmts · " +
-                               "${fmtN(t.blank_lines)} blank · " +
-                               "${fmtN(t.files_analyzed)} files | ${params.SCAN_PATH}"
-
-                    // Append test-result stats (cargo-nextest JUnit XML)
-                    def junitPath = "${outDir}/test-results/junit.xml"
-                    if (fileExists(junitPath)) {
-                        try {
-                            def junit      = readFile(junitPath)
-                            def tm = junit =~ /tests="(\d+)"/
-                            def fm = junit =~ /failures="(\d+)"/
-                            def em = junit =~ /errors="(\d+)"/
-                            def totalTests = tm ? (tm[0][1] as long) : 0L
-                            def failCount  = fm ? (fm[0][1] as long) : 0L
-                            def errCount   = em ? (em[0][1] as long) : 0L
-                            def passCount  = Math.max(0L, totalTests - failCount - errCount)
-                            def testStatus = (failCount == 0 && errCount == 0) ? 'OK' : "FAIL(${fmtN(failCount)})"
-                            desc += " · ${fmtN(passCount)}/${fmtN(totalTests)} tests ${testStatus}"
-                        } catch (Exception ex) {
-                            echo "Could not parse JUnit XML for description: ${ex.message}"
-                        }
-                    }
-
-                    // Append coverage percentage (from LCOV lcov.info)
-                    def lcovPath = "${outDir}/coverage/lcov.info"
-                    if (fileExists(lcovPath)) {
-                        try {
-                            def pct = sh(
-                                script: """
-                                    TOTAL=\$(grep -E '^LF:' '${lcovPath}' | awk -F: '{s+=\$2} END{print s+0}')
-                                    HIT=\$(grep -E '^LH:' '${lcovPath}'   | awk -F: '{s+=\$2} END{print s+0}')
-                                    [ "\${TOTAL}" -gt 0 ] && \\
-                                        awk "BEGIN { printf \\"%.1f\\", (\${HIT}/\${TOTAL})*100 }" || echo "N/A"
-                                """,
-                                returnStdout: true
-                            ).trim()
-                            if (pct != 'N/A') {
-                                desc += " · ${pct}% cov"
-                            }
-                        } catch (Exception ex) {
-                            echo "Could not read coverage for description: ${ex.message}"
-                        }
-                    }
-
-                    currentBuild.description = desc
-                    currentBuild.displayName = "#${env.BUILD_NUMBER} — ${params.SCAN_PATH}"
-                } catch (Exception ex) {
-                    echo "Could not set build metadata: ${ex.message}"
-                }
-                echo 'All stages passed. Artifacts and reports archived.'
-
-                // Pipeline-of-Pipelines: trigger downstream job if configured.
-                script {
-                    if (params.DOWNSTREAM_JOB?.trim()) {
-                        build job: params.DOWNSTREAM_JOB,
-                              parameters: [
-                                  string(name: 'UPSTREAM_JOB',   value: env.JOB_NAME),
-                                  string(name: 'UPSTREAM_BUILD',  value: env.BUILD_NUMBER),
-                                  string(name: 'ARTIFACT_PATH',   value: env.ARTIFACT_PATH ?: '')
-                              ],
-                              wait: false,
-                              propagate: false
-                    }
-                }
+                if (h != null) { h.runPostSuccess() }
             }
         }
         failure {
             echo 'Build failed — review the stage output above for details.'
         }
         always {
-            // Bitbucket build status notification (no-op when plugin is absent).
             script {
-                if (env.BITBUCKET_SOURCE_BRANCH || env.GIT_COMMIT) {
-                    def state = currentBuild.result == 'SUCCESS' ? 'SUCCESSFUL' :
-                                currentBuild.result == 'FAILURE'  ? 'FAILED' : 'STOPPED'
-                    // Requires Bitbucket Build Status Notifier plugin
-                    try {
-                        bitbucketStatusNotify(
-                            buildState: state,
-                            buildKey:   env.JOB_NAME,
-                            buildName:  "oxide-sloc CI #${env.BUILD_NUMBER}",
-                            buildUrl:   env.BUILD_URL
-                        )
-                    } catch (e) {
-                        echo "Bitbucket status notify skipped (plugin not installed): ${e.message}"
-                    }
-                }
+                if (h != null) { h.runBitbucketNotify() }
             }
         }
         cleanup {
             // cleanup runs LAST — after success/failure/always — guaranteeing that
             // post { success } can still read result.json before the workspace is wiped.
-            // cleanWs() removes the entire workspace so agents don't accumulate stale workspaces.
             script {
                 try {
                     cleanWs()
