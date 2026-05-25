@@ -37,6 +37,9 @@ jobs:
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5
+        with:
+          # Auto-enable Pages (GitHub Actions source) if not yet configured for this repo
+          enablement: true
 
       - name: Build docs
         run: mdbook build
