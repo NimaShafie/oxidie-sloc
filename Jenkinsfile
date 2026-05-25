@@ -109,9 +109,10 @@ pipeline {
         )
         booleanParam(
             name:         'GENERATE_PDF',
-            defaultValue: false,
-            description:  'Write a PDF report artifact. ' +
-                          'Pure-Rust generation — no browser or external tool required on the agent.'
+            defaultValue: true,
+            description:  'Write a PDF report artifact alongside the HTML report. ' +
+                          'Pure-Rust generation — no browser or external tool required on the agent. ' +
+                          'When enabled, the "View PDF" button in the HTML report opens the archived PDF directly.'
         )
 
         // ── Analysis rules ─────────────────────────────────────────────────────
