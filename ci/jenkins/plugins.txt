@@ -62,5 +62,10 @@ job-dsl                     # Executes ci/jenkins/seed-job.groovy to create the 
 copyartifact                # Copies artifacts to/from downstream jobs in Pipeline-of-Pipelines
 
 # ── SCM integrations (optional) ───────────────────────────────────────────────
-bitbucket                   # Bitbucket Branch Source (optional — Bitbucket SCM only)
-bitbucket-build-status-notifier  # Posts commit statuses to Bitbucket (optional)
+# These two plugins are genuinely optional — the pipeline degrades gracefully
+# when they are absent (the post{always} bitbucketStatusNotify call is wrapped
+# in try/catch).  preflight.sh prints [warn] instead of [fail] for lines whose
+# comment contains "(optional)", so a missing Bitbucket plugin will NOT block
+# the bootstrap.  Install them only when using Bitbucket as the SCM source.
+bitbucket                        # Bitbucket Branch Source (optional — Bitbucket SCM only)
+bitbucket-build-status-notifier  # Posts commit statuses to Bitbucket (optional — Bitbucket SCM only)
