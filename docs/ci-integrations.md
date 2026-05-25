@@ -362,9 +362,9 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 |-----------|---------|-------------|
 | `REPO_URL` | `https://github.com/oxide-sloc/oxide-sloc.git` | Git repository URL. Use `file:///path/to/repo` for air-gapped repos. |
 | `SCAN_PATH` | `tests/fixtures/basic` | Directory or space-separated paths to scan (relative to workspace or absolute). |
-| `REPORT_TITLE` | `CI Smoke Run` | Title embedded in HTML and PDF reports. |
+| `REPORT_TITLE` | `oxide-sloc CI Report` | Title embedded in HTML and PDF reports. |
 | `OUTPUT_SUBDIR` | `ci-out` | Sub-directory for all generated artifacts (relative to workspace). Created automatically. Contains `report.html`, `result.json`, `report.pdf`, and trend CSVs. |
-| `CI_PRESET` | `none` | Preset config file: `none` / `default` / `strict` / `full-scope`. |
+| `CI_PRESET` | `default` | Preset config file: `none` / `default` / `strict` / `full-scope`. |
 | `MIXED_LINE_POLICY` | `code-only` | How lines with inline comments are classified. |
 | `DOCSTRINGS_AS_CODE` | false | Count Python triple-quoted docstrings as code instead of comments. |
 | `SUBMODULE_BREAKDOWN` | false | Emit per-submodule stats when `.gitmodules` is present. |
@@ -374,9 +374,9 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `INCLUDE_GLOBS` | _(all)_ | Comma-separated include glob patterns, e.g. `src/**/*.py`. |
 | `EXCLUDE_GLOBS` | _(none)_ | Comma-separated exclude glob patterns, e.g. `vendor/**`. |
 | `GENERATE_HTML` | true | Write HTML report and publish as "OxideSLOC — Jenkins CI Report" sidebar link. Requires HTML Publisher plugin. |
-| `GENERATE_PDF` | false | Write PDF report. Pure-Rust generation — no browser or external tool required on the agent. |
+| `GENERATE_PDF` | true | Write PDF report. Pure-Rust generation — no browser or external tool required on the agent. |
 | `SKIP_QUALITY_GATES` | false | Skip fmt / clippy / unit-test stage for scan-only runs. |
-| `SKIP_WEB_CHECK` | false | Skip web UI health-check on agents without loopback / port 4317. |
+| `SKIP_WEB_CHECK` | true | Skip web UI health-check on agents without loopback / port 4317. |
 | `WEBHOOK_URL` | _(skip)_ | POST JSON result here after scan. Add `SLOC_WEBHOOK_TOKEN` Secret Text credential for Bearer auth. |
 | `EMAIL_RECIPIENTS` | _(skip)_ | Comma-separated recipients. Requires `SLOC_SMTP_HOST`, `SLOC_SMTP_USER`, `SLOC_SMTP_PASS` credentials. |
 | `ARTIFACT_REPO_TYPE` | `none` | Artifact repository backend: `none` / `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http`. |
@@ -1059,7 +1059,7 @@ Sends each artifact via `curl -X PUT` to `<ARTIFACT_REPO_URL>/<ARTIFACT_REPO_PAT
 
 ### Registering artifact repo credentials
 
-Register the following Secret Text credentials in Jenkins before triggering a push build. The Jenkinsfile binds them with `optional: true` (Credentials Binding plugin ≥ 1.27), so builds without these credentials will attempt an unauthenticated push rather than aborting.
+Register the following Secret Text credentials in Jenkins before triggering a push build. The pipeline wraps the credential binding in a try/catch, so builds where these credentials are absent will log a warning and attempt an unauthenticated push rather than aborting.
 
 ```bash
 set -a; source ci/jenkins/.env; set +a
