@@ -5081,84 +5081,69 @@ async fn resolve_artifact_set(
     Err((StatusCode::NOT_FOUND, Html(error_html)).into_response())
 }
 
-#[allow(clippy::too_many_lines)] // bulk is an inline HTML string for the PDF-waiting page
-async fn artifact_handler(
-    State(state): State<AppState>,
-    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
-    AxumPath((artifact, run_id)): AxumPath<(String, String)>,
-    Query(query): Query<ArtifactQuery>,
-) -> Response {
-    let artifact_set = match resolve_artifact_set(&state, &run_id, &csp_nonce).await {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-
-    let wants_download = matches!(query.download.as_deref(), Some("1" | "true" | "yes"));
-
-    match artifact.as_str() {
-        "html" => {
-            let Some(path) = artifact_set.html_path else {
-                return StatusCode::NOT_FOUND.into_response();
-            };
-            serve_html_artifact(&path, wants_download, &csp_nonce)
+/// Return the path to a run's PDF, queuing background generation when it is missing.
+///
+/// Returns `Ok(path)` when the PDF is known (it may still be generating).
+/// Returns `Err(response)` when there is no JSON source to regenerate from.
+async fn resolve_or_queue_pdf(
+    state: &AppState,
+    pdf_path: Option<PathBuf>,
+    json_path: Option<PathBuf>,
+    output_dir: PathBuf,
+    run_id: &str,
+    report_title: &str,
+    csp_nonce: &str,
+) -> Result<PathBuf, Response> {
+    if let Some(p) = pdf_path {
+        return Ok(p);
+    }
+    let Some(json_src) = json_path.filter(|p| p.exists()) else {
+        let msg = "PDF report was not generated for this run. \
+                   Re-run the analysis with PDF output enabled."
+            .to_string();
+        let html = ErrorTemplate {
+            message: msg,
+            last_report_url: Some(format!("/runs/html/{run_id}")),
+            last_report_label: Some("View HTML Report".to_string()),
+            run_id: Some(run_id.to_string()),
+            error_code: Some(404),
+            csp_nonce: csp_nonce.to_string(),
+            version: env!("CARGO_PKG_VERSION"),
         }
-        "pdf" => {
-            let report_title = artifact_set.report_title.clone();
-            let json_path_opt = artifact_set.json_path.clone();
-            let output_dir = artifact_set.output_dir.clone();
-            let path = match artifact_set.pdf_path {
-                Some(p) => p,
-                None => {
-                    // PDF wasn't produced at scan time.
-                    // Regenerate from the stored JSON using the same pure-Rust path as scan time.
-                    let Some(json_src) = json_path_opt.filter(|p| p.exists()) else {
-                        let msg = "PDF report was not generated for this run. \
-                                   Re-run the analysis with PDF output enabled."
-                            .to_string();
-                        let html = ErrorTemplate {
-                            message: msg,
-                            last_report_url: Some(format!("/runs/html/{run_id}")),
-                            last_report_label: Some("View HTML Report".to_string()),
-                            run_id: Some(run_id.clone()),
-                            error_code: Some(404),
-                            csp_nonce: csp_nonce.clone(),
-                            version: env!("CARGO_PKG_VERSION"),
-                        }
-                        .render()
-                        .unwrap_or_else(|_| "<pre>PDF not available.</pre>".to_string());
-                        return (StatusCode::NOT_FOUND, Html(html)).into_response();
-                    };
-                    let pdf_filename = build_pdf_filename(&report_title, &run_id);
-                    let pdf_dest = output_dir.join(&pdf_filename);
-                    if !pdf_dest.exists() {
-                        // Record the pending path so concurrent requests show the spinner.
-                        {
-                            let mut map = state.artifacts.lock().await;
-                            if let Some(entry) = map.get_mut(&run_id) {
-                                entry.pdf_path = Some(pdf_dest.clone());
-                            }
-                        }
-                        {
-                            let mut reg = state.registry.lock().await;
-                            if let Some(e) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
-                                e.pdf_path = Some(pdf_dest.clone());
-                            }
-                            let _ = reg.save(&state.registry_path);
-                        }
-                        spawn_native_pdf_background(
-                            json_src,
-                            pdf_dest.clone(),
-                            run_id.clone(),
-                            state.artifacts.clone(),
-                        );
-                    }
-                    pdf_dest
-                }
-            };
-            // PDF path is recorded but the background task may still be writing it.
-            // Return a self-refreshing "please wait" page rather than an error.
-            if !path.exists() {
-                let html = format!(
+        .render()
+        .unwrap_or_else(|_| "<pre>PDF not available.</pre>".to_string());
+        return Err((StatusCode::NOT_FOUND, Html(html)).into_response());
+    };
+    let pdf_filename = build_pdf_filename(report_title, run_id);
+    let pdf_dest = output_dir.join(&pdf_filename);
+    if !pdf_dest.exists() {
+        // Record the pending path so concurrent requests show the spinner.
+        {
+            let mut map = state.artifacts.lock().await;
+            if let Some(entry) = map.get_mut(run_id) {
+                entry.pdf_path = Some(pdf_dest.clone());
+            }
+        }
+        {
+            let mut reg = state.registry.lock().await;
+            if let Some(e) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
+                e.pdf_path = Some(pdf_dest.clone());
+            }
+            let _ = reg.save(&state.registry_path);
+        }
+        spawn_native_pdf_background(
+            json_src,
+            pdf_dest.clone(),
+            run_id.to_string(),
+            state.artifacts.clone(),
+        );
+    }
+    Ok(pdf_dest)
+}
+
+/// Self-refreshing "please wait" page shown while the background PDF task is still running.
+fn pdf_generating_response(run_id: &str, csp_nonce: &str) -> Response {
+    let html = format!(
                     "<!doctype html><html lang=\"en\"><head>\
                      <meta charset=utf-8>\
                      <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
@@ -5255,8 +5240,50 @@ async fn artifact_handler(
                      }})();\
                      </script>\
                      </body></html>"
-                );
-                return Html(html).into_response();
+    );
+    Html(html).into_response()
+}
+
+async fn artifact_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+    AxumPath((artifact, run_id)): AxumPath<(String, String)>,
+    Query(query): Query<ArtifactQuery>,
+) -> Response {
+    let artifact_set = match resolve_artifact_set(&state, &run_id, &csp_nonce).await {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+
+    let wants_download = matches!(query.download.as_deref(), Some("1" | "true" | "yes"));
+
+    match artifact.as_str() {
+        "html" => {
+            let Some(path) = artifact_set.html_path else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            serve_html_artifact(&path, wants_download, &csp_nonce)
+        }
+        "pdf" => {
+            let report_title = artifact_set.report_title.clone();
+            let path = match resolve_or_queue_pdf(
+                &state,
+                artifact_set.pdf_path,
+                artifact_set.json_path.clone(),
+                artifact_set.output_dir.clone(),
+                &run_id,
+                &report_title,
+                &csp_nonce,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(r) => return r,
+            };
+            // PDF path is recorded but the background task may still be writing it.
+            // Return a self-refreshing "please wait" page rather than an error.
+            if !path.exists() {
+                return pdf_generating_response(&run_id, &csp_nonce);
             }
             serve_pdf_artifact(&path, &report_title, &run_id, wants_download, &csp_nonce)
         }
@@ -8438,6 +8465,54 @@ fn build_lang_tests_json(run: Option<&AnalysisRun>) -> String {
     format!("[{}]", parts.join(","))
 }
 
+/// Build the per-root scope JSON used by the test-metrics page JS scope switcher.
+async fn build_scope_data_json(state: &AppState, latest_run: Option<&AnalysisRun>) -> String {
+    let mut scope_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    scope_map.insert(
+        "__all__".to_string(),
+        latest_run.map_or_else(
+            || {
+                serde_json::json!({"totals":{"test_count":0,"assertions":0,"suites":0,
+                    "test_files":0,"total_files":0,"density_str":"0.0","most_tested":"\u{2014}",
+                    "langs_with_tests":0,"cov_line":"0","cov_fn":"0","cov_branch":"0"},
+                    "lang_tests":[],"cov":[],"cov_tiers":{"high":0,"mid":0,"low":0},
+                    "has_coverage":false,"submodules":{}})
+            },
+            build_test_scope_entry,
+        ),
+    );
+    let all_roots: Vec<String> = {
+        let reg = state.registry.lock().await;
+        let mut seen = std::collections::BTreeSet::new();
+        reg.entries
+            .iter()
+            .flat_map(|e| e.input_roots.iter().cloned())
+            .filter(|r| seen.insert(r.clone()))
+            .collect()
+    };
+    for root in &all_roots {
+        let json_path = {
+            let reg = state.registry.lock().await;
+            reg.entries
+                .iter()
+                .find(|e| e.input_roots.iter().any(|r| r == root))
+                .and_then(|e| e.json_path.clone())
+        };
+        let run_for_root: Option<AnalysisRun> = if let Some(p) = json_path {
+            let json_str = tokio::fs::read_to_string(&p).await.ok();
+            json_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+        } else {
+            None
+        };
+        if let Some(ref run) = run_for_root {
+            scope_map.insert(root.clone(), build_scope_entry_for_run(run));
+        }
+    }
+    serde_json::to_string(&scope_map).unwrap_or_else(|_| "{}".to_string())
+}
+
 // GET /test-metrics
 #[allow(clippy::cast_precision_loss)] // ratio/percentage display, precision loss acceptable
 #[allow(clippy::too_many_lines)] // test-metrics page with inline HTML; splitting would fragment the template
@@ -8624,52 +8699,7 @@ async fn test_metrics_handler(
     };
 
     // Build per-root SCOPE_DATA for instant JS scope switching (no API fetch on selection change).
-    let scope_data_json: String = {
-        let mut scope_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-        scope_map.insert(
-            "__all__".to_string(),
-            latest_run.as_ref().map_or_else(
-                || {
-                    serde_json::json!({"totals":{"test_count":0,"assertions":0,"suites":0,
-                        "test_files":0,"total_files":0,"density_str":"0.0","most_tested":"—",
-                        "langs_with_tests":0,"cov_line":"0","cov_fn":"0","cov_branch":"0"},
-                        "lang_tests":[],"cov":[],"cov_tiers":{"high":0,"mid":0,"low":0},
-                        "has_coverage":false,"submodules":{}})
-                },
-                build_test_scope_entry,
-            ),
-        );
-        let all_roots: Vec<String> = {
-            let reg = state.registry.lock().await;
-            let mut seen = std::collections::BTreeSet::new();
-            reg.entries
-                .iter()
-                .flat_map(|e| e.input_roots.iter().cloned())
-                .filter(|r| seen.insert(r.clone()))
-                .collect()
-        };
-        for root in &all_roots {
-            let json_path = {
-                let reg = state.registry.lock().await;
-                reg.entries
-                    .iter()
-                    .find(|e| e.input_roots.iter().any(|r| r == root))
-                    .and_then(|e| e.json_path.clone())
-            };
-            let run_for_root: Option<AnalysisRun> = if let Some(p) = json_path {
-                let json_str = tokio::fs::read_to_string(&p).await.ok();
-                json_str
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-            } else {
-                None
-            };
-            if let Some(ref run) = run_for_root {
-                scope_map.insert(root.clone(), build_scope_entry_for_run(run));
-            }
-        }
-        serde_json::to_string(&scope_map).unwrap_or_else(|_| "{}".to_string())
-    };
+    let scope_data_json = build_scope_data_json(&state, latest_run.as_ref()).await;
 
     let html = format!(
         r#"<!doctype html>
