@@ -102,6 +102,10 @@ pub struct EnvironmentMetadata {
     pub runtime_mode: String,
     pub initiator_username: String,
     pub initiator_hostname: String,
+    /// CI system name when the scan runs inside a known CI environment (Jenkins,
+    /// GitHub Actions, GitLab CI, …). `None` for interactive / local runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -386,7 +390,7 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
         Err(_) => return GitInfo::default(),
     };
 
-    let (branch, commit_long) = head_raw.strip_prefix("ref: ").map_or_else(
+    let (branch_from_head, commit_long) = head_raw.strip_prefix("ref: ").map_or_else(
         || {
             if head_raw.len() >= 40 && head_raw.chars().all(|c| c.is_ascii_hexdigit()) {
                 // Detached HEAD — the HEAD file itself is the commit SHA
@@ -403,6 +407,9 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
             (branch, sha)
         },
     );
+    // Detached HEAD is common in CI (Jenkins, GitHub Actions, …). Fall back to
+    // the branch name exposed via CI-specific environment variables.
+    let branch = branch_from_head.or_else(ci_branch_from_env);
 
     let commit_short = commit_long
         .as_deref()
@@ -469,6 +476,61 @@ fn run_git_cmd(dir: &Path, args: &[&str]) -> Option<String> {
     None
 }
 
+/// Return the name of the CI system if the process is running inside one.
+fn detect_ci_system() -> Option<&'static str> {
+    let ev = |k: &str| std::env::var(k).is_ok();
+    let ev_true = |k: &str| std::env::var(k).as_deref() == Ok("true");
+    if ev("JENKINS_URL") || ev("JENKINS_HOME") || ev("BUILD_URL") {
+        return Some("Jenkins");
+    }
+    if ev_true("GITHUB_ACTIONS") {
+        return Some("GitHub Actions");
+    }
+    if ev_true("GITLAB_CI") {
+        return Some("GitLab CI");
+    }
+    if ev_true("CIRCLECI") {
+        return Some("CircleCI");
+    }
+    if ev_true("TRAVIS") {
+        return Some("Travis CI");
+    }
+    if ev_true("TF_BUILD") {
+        return Some("Azure DevOps");
+    }
+    if ev("TEAMCITY_VERSION") {
+        return Some("TeamCity");
+    }
+    None
+}
+
+/// Read the current branch name from well-known CI environment variables.
+/// Called as a fallback when the git HEAD is detached (common in CI checkouts).
+fn ci_branch_from_env() -> Option<String> {
+    const VARS: &[&str] = &[
+        "BRANCH_NAME",        // Jenkins Pipeline
+        "GIT_BRANCH",         // Jenkins Freestyle (may carry "origin/<branch>")
+        "GITHUB_REF_NAME",    // GitHub Actions
+        "CI_COMMIT_BRANCH",   // GitLab CI
+        "CIRCLE_BRANCH",      // CircleCI
+        "TRAVIS_BRANCH",      // Travis CI
+        "BUILD_SOURCEBRANCH", // Azure DevOps (may carry "refs/heads/<branch>")
+    ];
+    for &var in VARS {
+        if let Ok(val) = std::env::var(var) {
+            let val = val.trim();
+            let val = val
+                .strip_prefix("refs/heads/")
+                .or_else(|| val.strip_prefix("origin/"))
+                .unwrap_or(val);
+            if !val.is_empty() && val != "HEAD" {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn get_current_username() -> String {
     std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
@@ -476,6 +538,32 @@ fn get_current_username() -> String {
 }
 
 fn get_hostname() -> String {
+    // In CI environments prefer a human-readable agent/runner identifier over
+    // whatever hostname the container was assigned.
+    if std::env::var("JENKINS_URL").is_ok()
+        || std::env::var("JENKINS_HOME").is_ok()
+        || std::env::var("BUILD_URL").is_ok()
+    {
+        if let Ok(n) = std::env::var("NODE_NAME") {
+            if !n.is_empty() {
+                return n;
+            }
+        }
+    }
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        if let Ok(r) = std::env::var("RUNNER_NAME") {
+            if !r.is_empty() {
+                return r;
+            }
+        }
+    }
+    if std::env::var("GITLAB_CI").as_deref() == Ok("true") {
+        if let Ok(r) = std::env::var("CI_RUNNER_DESCRIPTION") {
+            if !r.is_empty() {
+                return r;
+            }
+        }
+    }
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
@@ -723,6 +811,7 @@ fn assemble_run(
             runtime_mode: runtime_mode.into(),
             initiator_username: get_current_username(),
             initiator_hostname: get_hostname(),
+            ci_name: detect_ci_system().map(str::to_string),
         },
         effective_configuration: config.clone(),
         input_roots: config
