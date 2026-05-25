@@ -34,8 +34,7 @@ def runSetup() {
     if (!cspSet) {
         try {
             withCredentials([string(credentialsId: 'jenkins-api-token',
-                                    variable:      'JEN_API_TOK',
-                                    optional:      true)]) {
+                                    variable:      'JEN_API_TOK')]) {
                 if (env.JEN_API_TOK?.trim()) {
                     def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
                     if (base) {
@@ -473,14 +472,27 @@ def runPushArtifacts() {
         return
     }
 
-    withCredentials([
-        string(credentialsId: 'SLOC_ARTIFACT_REPO_USER',
-               variable:      'SLOC_AR_USER',
-               optional:      true),
-        string(credentialsId: 'SLOC_ARTIFACT_REPO_PASS',
-               variable:      'SLOC_AR_PASS',
-               optional:      true),
-    ]) {
+    try {
+        withCredentials([
+            string(credentialsId: 'SLOC_ARTIFACT_REPO_USER', variable: 'SLOC_AR_USER'),
+            string(credentialsId: 'SLOC_ARTIFACT_REPO_PASS', variable: 'SLOC_AR_PASS'),
+        ]) {
+            withEnv([
+                "ARTIFACT_REPO_TYPE=${params.ARTIFACT_REPO_TYPE}",
+                "ARTIFACT_REPO_URL=${params.ARTIFACT_REPO_URL}",
+                "ARTIFACT_REPO_PATH=${repoPath}",
+                "ARTIFACT_REPO_EXTRA=${params.ARTIFACT_REPO_EXTRA ?: ''}",
+                "ARTIFACT_DIR=${outDir}",
+                "ARTIFACT_FILES=${filesToPush.join(' ')}",
+                "ARTIFACT_REPO_USER=${env.SLOC_AR_USER ?: ''}",
+                "ARTIFACT_REPO_PASS=${env.SLOC_AR_PASS ?: ''}",
+                "ARTIFACT_GENERATE_MANIFEST=${params.ARTIFACT_GENERATE_MANIFEST}",
+            ]) {
+                sh 'bash ci/artifact-push.sh'
+            }
+        }
+    } catch (Exception ex) {
+        echo "WARNING: Artifact repo credentials (SLOC_ARTIFACT_REPO_USER / SLOC_ARTIFACT_REPO_PASS) not found in Jenkins credential store — attempting unauthenticated push. (${ex.message})"
         withEnv([
             "ARTIFACT_REPO_TYPE=${params.ARTIFACT_REPO_TYPE}",
             "ARTIFACT_REPO_URL=${params.ARTIFACT_REPO_URL}",
@@ -488,8 +500,8 @@ def runPushArtifacts() {
             "ARTIFACT_REPO_EXTRA=${params.ARTIFACT_REPO_EXTRA ?: ''}",
             "ARTIFACT_DIR=${outDir}",
             "ARTIFACT_FILES=${filesToPush.join(' ')}",
-            "ARTIFACT_REPO_USER=${env.SLOC_AR_USER ?: ''}",
-            "ARTIFACT_REPO_PASS=${env.SLOC_AR_PASS ?: ''}",
+            "ARTIFACT_REPO_USER=",
+            "ARTIFACT_REPO_PASS=",
             "ARTIFACT_GENERATE_MANIFEST=${params.ARTIFACT_GENERATE_MANIFEST}",
         ]) {
             sh 'bash ci/artifact-push.sh'
