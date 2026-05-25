@@ -22,7 +22,8 @@ use sloc_core::{
 };
 use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, get_sha};
 use sloc_report::{
-    render_html, write_csv, write_diff_csv, write_html, write_pdf_from_run, write_xlsx,
+    render_html, write_csv, write_diff_csv, write_html, write_html_with_pdf_link,
+    write_pdf_from_run, write_xlsx,
 };
 
 // ── ANSI color helpers ────────────────────────────────────────────────────────
@@ -116,6 +117,11 @@ struct AnalyzeArgs {
     /// Write PDF report to this path (pure Rust, no browser required)
     #[arg(long, value_name = "PATH")]
     pdf_out: Option<PathBuf>,
+
+    /// Override the git branch recorded in the report (useful in CI where HEAD
+    /// is detached and automatic detection yields nothing)
+    #[arg(long, value_name = "BRANCH")]
+    git_branch: Option<String>,
 
     /// Write CSV summary to this path
     #[arg(long, short = 'c', value_name = "PATH")]
@@ -619,7 +625,10 @@ fn write_outputs(run: &AnalysisRun, args: &AnalyzeArgs, quiet: bool) -> Result<(
     }
 
     if let Some(path) = &args.html_out {
-        write_html(run, path)?;
+        // Embed a relative link to the PDF when both outputs land in the same
+        // directory — lets "View PDF" open the pre-generated file from Jenkins
+        // HTML Publisher (or any static host) without a live oxide-sloc server.
+        write_html_with_pdf_link(run, path, args.pdf_out.as_deref())?;
         log_written(path, quiet);
         if args.open {
             open_path(path);
@@ -713,9 +722,17 @@ fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
 async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     let config = resolve_analyze_config(&args)?;
     let quiet = args.quiet;
-    let run = tokio::task::spawn_blocking(move || analyze(&config, "analyze", None, None))
+    let mut run = tokio::task::spawn_blocking(move || analyze(&config, "analyze", None, None))
         .await
         .context("analysis task failed to join")??;
+
+    // Allow explicit CI override of the git branch when auto-detection yields
+    // nothing (e.g. detached HEAD checkouts in Jenkins with no env vars set).
+    if let Some(ref branch) = args.git_branch {
+        if !branch.is_empty() {
+            run.git_branch = Some(branch.clone());
+        }
+    }
 
     if !quiet {
         print_summary(&run, args.per_file, args.plain);
