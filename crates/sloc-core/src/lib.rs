@@ -354,6 +354,18 @@ fn resolve_ref(git_dir: &Path, refname: &str) -> Option<String> {
     None
 }
 
+/// Extract the URL value from a `url = <value>` git-config line, returning `None` if absent or empty.
+fn parse_url_line(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("url")?;
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let url = rest.strip_prefix('=')?.trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 /// Parse `.git/config` and return the URL of the `origin` remote, if present.
 fn read_git_remote_url(git_dir: &Path) -> Option<String> {
     let config = fs::read_to_string(git_dir.join("config")).ok()?;
@@ -363,14 +375,8 @@ fn read_git_remote_url(git_dir: &Path) -> Option<String> {
         if trimmed.starts_with('[') {
             in_origin = trimmed == r#"[remote "origin"]"#;
         } else if in_origin {
-            if let Some(rest) = trimmed.strip_prefix("url") {
-                let rest = rest.trim_start_matches([' ', '\t']);
-                if let Some(url) = rest.strip_prefix('=') {
-                    let url = url.trim();
-                    if !url.is_empty() {
-                        return Some(url.to_owned());
-                    }
-                }
+            if let Some(url) = parse_url_line(trimmed) {
+                return Some(url.to_owned());
             }
         }
     }
@@ -550,31 +556,37 @@ fn get_current_username() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+fn non_empty_env(var: &str) -> Option<String> {
+    let v = std::env::var(var).ok()?;
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+fn is_jenkins_env() -> bool {
+    std::env::var("JENKINS_URL").is_ok()
+        || std::env::var("JENKINS_HOME").is_ok()
+        || std::env::var("BUILD_URL").is_ok()
+}
+
 fn get_hostname() -> String {
     // In CI environments prefer a human-readable agent/runner identifier over
     // whatever hostname the container was assigned.
-    if std::env::var("JENKINS_URL").is_ok()
-        || std::env::var("JENKINS_HOME").is_ok()
-        || std::env::var("BUILD_URL").is_ok()
-    {
-        if let Ok(n) = std::env::var("NODE_NAME") {
-            if !n.is_empty() {
-                return n;
-            }
+    if is_jenkins_env() {
+        if let Some(n) = non_empty_env("NODE_NAME") {
+            return n;
         }
     }
     if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
-        if let Ok(r) = std::env::var("RUNNER_NAME") {
-            if !r.is_empty() {
-                return r;
-            }
+        if let Some(r) = non_empty_env("RUNNER_NAME") {
+            return r;
         }
     }
     if std::env::var("GITLAB_CI").as_deref() == Ok("true") {
-        if let Ok(r) = std::env::var("CI_RUNNER_DESCRIPTION") {
-            if !r.is_empty() {
-                return r;
-            }
+        if let Some(r) = non_empty_env("CI_RUNNER_DESCRIPTION") {
+            return r;
         }
     }
     std::env::var("COMPUTERNAME")
@@ -679,6 +691,44 @@ fn collect_walk_paths(
         .collect()
 }
 
+/// Inner work loop executed by each analysis thread.
+#[allow(clippy::too_many_arguments)]
+fn worker_loop(
+    paths: &[PathBuf],
+    root: &Path,
+    config: &AppConfig,
+    include_globs: Option<&GlobSet>,
+    exclude_globs: Option<&GlobSet>,
+    enabled_languages: Option<&BTreeSet<Language>>,
+    cancel: Option<&AtomicBool>,
+    next_index: &AtomicUsize,
+    files_done: Option<&AtomicUsize>,
+) -> Vec<Result<Option<FileRecord>>> {
+    let mut results = Vec::new();
+    loop {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            results.push(Err(anyhow::anyhow!("analysis cancelled")));
+            break;
+        }
+        let i = next_index.fetch_add(1, Ordering::Relaxed);
+        if i >= paths.len() {
+            break;
+        }
+        results.push(analyze_candidate_file(
+            &paths[i],
+            root,
+            config,
+            include_globs,
+            exclude_globs,
+            enabled_languages,
+        ));
+        if let Some(fd) = files_done {
+            fd.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    results
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_parallel_analysis(
     paths: &[PathBuf],
@@ -701,38 +751,23 @@ fn run_parallel_analysis(
 
     std::thread::scope(|s| -> Result<Vec<Vec<Result<Option<FileRecord>>>>> {
         // IMPORTANT: collect ALL handles before joining any of them.
-        // A lazy .map(spawn).map(join).collect() chain would spawn-then-immediately-join
-        // each thread one at a time, giving zero real parallelism.
-        let handles: Vec<_> = (0..thread_count)
-            .map(|_| {
-                s.spawn(|| -> Vec<Result<Option<FileRecord>>> {
-                    let mut results = Vec::new();
-                    loop {
-                        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                            results.push(Err(anyhow::anyhow!("analysis cancelled")));
-                            break;
-                        }
-                        let i = next_index.fetch_add(1, Ordering::Relaxed);
-                        if i >= paths.len() {
-                            break;
-                        }
-                        results.push(analyze_candidate_file(
-                            &paths[i],
-                            root,
-                            config,
-                            include_globs,
-                            exclude_globs,
-                            enabled_languages,
-                        ));
-                        if let Some(fd) = files_done {
-                            fd.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    results
-                })
-            })
-            .collect(); // spawns all threads NOW, before any join
-
+        // A lazy spawn-then-join chain would serialize threads one at a time.
+        let mut handles = Vec::with_capacity(thread_count);
+        for _ in 0..thread_count {
+            handles.push(s.spawn(|| {
+                worker_loop(
+                    paths,
+                    root,
+                    config,
+                    include_globs,
+                    exclude_globs,
+                    enabled_languages,
+                    cancel,
+                    &next_index,
+                    files_done,
+                )
+            }));
+        }
         handles
             .into_iter()
             .map(|h| {
