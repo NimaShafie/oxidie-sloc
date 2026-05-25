@@ -6,7 +6,6 @@
 [![Latest Release](https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?include_prereleases&label=release)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
 [![codecov](https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg)](https://codecov.io/gh/oxide-sloc/oxide-sloc)
-[![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/TODO/badge)](https://bestpractices.coreinfrastructure.org/projects/TODO)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 [![MCP Server](https://img.shields.io/badge/MCP-server-orange)](./mcp.json)
 
