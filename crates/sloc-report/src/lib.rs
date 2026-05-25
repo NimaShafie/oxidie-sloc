@@ -419,6 +419,83 @@ pub fn write_html_with_pdf_link(
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
 
+/// Launch a headless Chromium browser, falling back to `--no-sandbox` when the sandbox fails.
+fn launch_cdp_browser(
+    browser_path: std::path::PathBuf,
+    no_sandbox: bool,
+) -> Result<headless_chrome::Browser> {
+    use headless_chrome::{Browser, LaunchOptions};
+
+    if no_sandbox {
+        return Browser::new(LaunchOptions {
+            headless: true,
+            path: Some(browser_path),
+            window_size: Some((1122, 794)),
+            sandbox: false,
+            ..Default::default()
+        })
+        .context("failed to launch browser via CDP (no-sandbox)");
+    }
+
+    // Try with sandbox first; on VMs/containers without user namespaces, retry without.
+    match Browser::new(LaunchOptions {
+        headless: true,
+        path: Some(browser_path.clone()),
+        window_size: Some((1122, 794)),
+        sandbox: true,
+        ..Default::default()
+    }) {
+        Ok(b) => Ok(b),
+        Err(e) => {
+            eprintln!(
+                "[oxide-sloc][pdf] sandboxed launch failed ({e:#}), retrying with --no-sandbox"
+            );
+            Browser::new(LaunchOptions {
+                headless: true,
+                path: Some(browser_path),
+                window_size: Some((1122, 794)),
+                sandbox: false,
+                ..Default::default()
+            })
+            .context("failed to launch browser via CDP (sandboxed and no-sandbox both failed)")
+        }
+    }
+}
+
+/// Poll `window.oxSlocChartsReady` for up to 15 s so Chart.js canvases finish rendering.
+fn wait_for_charts_ready(tab: &headless_chrome::Tab) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if let Ok(r) = tab.evaluate("!!window.oxSlocChartsReady", false) {
+            if matches!(r.value, Some(serde_json::Value::Bool(true))) {
+                break;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!("[oxide-sloc][pdf] chart readiness timed out — capturing anyway");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// Read the `.report-id-banner` text from the loaded page, if present and non-empty.
+fn extract_banner_text(tab: &headless_chrome::Tab) -> Option<String> {
+    let result = tab
+        .evaluate(
+            "(function(){\
+               var el=document.querySelector('.report-id-banner');\
+               return el?el.textContent.trim():null;\
+             })()",
+            false,
+        )
+        .ok()?;
+    match result.value? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// Use Chrome `DevTools` Protocol to render `html_path` as a PDF at `output_path`.
 ///
 /// Launches a headless Chromium-based browser at A4-landscape viewport (1122 × 794 px),
@@ -426,7 +503,6 @@ pub fn write_html_with_pdf_link(
 /// `window.oxSlocChartsReady`, then captures the page using `Page.printToPDF` via CDP.
 fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
     use headless_chrome::types::PrintToPdfOptions;
-    use headless_chrome::{Browser, LaunchOptions};
 
     let browser_path = discover_browser().context(
         "no supported Chromium-based browser found; \
@@ -439,43 +515,7 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
         eprintln!("[oxide-sloc][pdf] --no-sandbox enabled via SLOC_BROWSER_NOSANDBOX=1");
     }
 
-    let browser = if no_sandbox {
-        Browser::new(LaunchOptions {
-            headless: true,
-            path: Some(browser_path),
-            window_size: Some((1122, 794)),
-            sandbox: false,
-            ..Default::default()
-        })
-        .context("failed to launch browser via CDP (no-sandbox)")?
-    } else {
-        // Try with sandbox first; on VMs/containers without user namespaces, retry without.
-        match Browser::new(LaunchOptions {
-            headless: true,
-            path: Some(browser_path.clone()),
-            window_size: Some((1122, 794)),
-            sandbox: true,
-            ..Default::default()
-        }) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!(
-                    "[oxide-sloc][pdf] sandboxed launch failed ({e:#}), retrying with --no-sandbox"
-                );
-                Browser::new(LaunchOptions {
-                    headless: true,
-                    path: Some(browser_path),
-                    window_size: Some((1122, 794)),
-                    sandbox: false,
-                    ..Default::default()
-                })
-                .context(
-                    "failed to launch browser via CDP (sandboxed and no-sandbox both failed)",
-                )?
-            }
-        }
-    };
-
+    let browser = launch_cdp_browser(browser_path, no_sandbox)?;
     let tab = browser.new_tab().context("failed to open browser tab")?;
 
     let html_for_url = PathBuf::from(
@@ -492,38 +532,12 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
     tab.wait_until_navigated()
         .context("browser navigation did not complete")?;
 
-    // Poll until the Chart.js init IIFE sets window.oxSlocChartsReady = true (max 15 s).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    loop {
-        if let Ok(r) = tab.evaluate("!!window.oxSlocChartsReady", false) {
-            if matches!(r.value, Some(serde_json::Value::Bool(true))) {
-                break;
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            eprintln!("[oxide-sloc][pdf] chart readiness timed out — capturing anyway");
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    wait_for_charts_ready(&tab);
 
     // Read the user-configured report identification banner from the DOM (set in step 3 of
     // the scan configuration as `report_header_footer`).  When present, pass it as Chrome's
     // native per-page header/footer templates so it appears in the margin on every PDF page.
-    let banner_text: Option<String> = tab
-        .evaluate(
-            "(function(){\
-               var el=document.querySelector('.report-id-banner');\
-               return el?el.textContent.trim():null;\
-             })()",
-            false,
-        )
-        .ok()
-        .and_then(|r| r.value)
-        .and_then(|v| match v {
-            serde_json::Value::String(s) if !s.is_empty() => Some(s),
-            _ => None,
-        });
+    let banner_text = extract_banner_text(&tab);
 
     if let Some(ref t) = banner_text {
         eprintln!("[oxide-sloc][pdf] report banner detected: {t}");
@@ -1229,6 +1243,14 @@ fn pdf_render_page1_footer(
     }
 }
 
+fn per_file_row_bg(ri: usize) -> printpdf::Rgb {
+    if ri.is_multiple_of(2) {
+        printpdf::Rgb::new(0.975, 0.965, 0.95, None)
+    } else {
+        printpdf::Rgb::new(1.0, 1.0, 1.0, None)
+    }
+}
+
 // PDF per-file page renderer — all layout params are distinct and cannot be bundled further
 // without an opaque config struct that would obscure the call site in write_pdf_from_run.
 #[allow(
@@ -1370,11 +1392,7 @@ fn pdf_render_per_file_pages(
         let end = (start + rows_per_page).min(total_files);
         for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
             let ry = ((ri + 1) as f32).mul_add(-row_h, pf_tbl_top - tbl_hdr_h);
-            let bg = if ri % 2 == 0 {
-                Rgb::new(0.975, 0.965, 0.95, None)
-            } else {
-                Rgb::new(1.0, 1.0, 1.0, None)
-            };
+            let bg = per_file_row_bg(ri);
             pdf_fill_rect(&pf_layer, margin, ry, 2.0f32.mul_add(-margin, w), row_h, bg);
             pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
             let file_str = pdf_safe_str(&rec.relative_path);
