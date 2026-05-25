@@ -65,7 +65,7 @@ use sloc_git::ScheduleStore;
 pub(crate) struct CspNonce(pub(crate) String);
 
 static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
-static REPORT_CHART_JS: &[u8] = include_bytes!("../../sloc-report/assets/chart.min.js");
+static REPORT_CHART_JS: &[u8] = include_bytes!("../static/chart.min.js");
 
 use sloc_core::{
     analyze, compute_delta, read_json, AnalysisRun, FileChangeStatus, RegistryEntry, ScanRegistry,
