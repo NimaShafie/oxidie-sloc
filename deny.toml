@@ -18,6 +18,10 @@ allow = [
   "Zlib",
   "CC0-1.0",
   "MPL-2.0",
+  # BSD Zero Clause — more permissive than MIT, used by quoted_printable
+  "0BSD",
+  # Community Data License Agreement Permissive 2.0 — used by webpki-roots
+  "CDLA-Permissive-2.0",
 ]
 exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "oxide-sloc" },
@@ -27,6 +31,8 @@ exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "sloc-report" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-web" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-mcp" },
+  # Transitive dep of headless_chrome (PDF generation); not distributed as a library
+  { allow = ["GPL-3.0"], name = "auto_generate_cdp" },
 ]
 
 [bans]
