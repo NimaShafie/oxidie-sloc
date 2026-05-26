@@ -10038,6 +10038,7 @@ fn build_sub_run(
         git_tags: parent.git_tags.clone(),
         git_nearest_tag: parent.git_nearest_tag.clone(),
         git_remote_url: parent.git_remote_url.clone(),
+        style_summary: None,
     }
 }
 

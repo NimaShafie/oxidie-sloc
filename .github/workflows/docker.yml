@@ -8,10 +8,7 @@ on:
       - 'v*'
   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write  # required for SLSA provenance attestation and cosign OIDC signing
+permissions: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # opt in ahead of the June 2026 forced migration
@@ -20,6 +17,10 @@ jobs:
   build-push:
     name: Build and push Docker image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # required for SLSA provenance attestation and cosign OIDC signing
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

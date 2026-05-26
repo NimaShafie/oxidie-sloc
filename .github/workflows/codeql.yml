@@ -2,20 +2,20 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
   pull_request:
   schedule:
     - cron: '20 7 * * 1'  # weekly Monday
 
-permissions:
-  actions: read
-  contents: read
-  security-events: write
+permissions: {}
 
 jobs:
   analyze:
     name: Analyze (rust)
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
 
     steps:
       - name: Checkout
@@ -30,13 +30,13 @@ jobs:
             libxdo-dev
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa  # v4
         with:
           languages: rust
           # Rust does not support autobuild; 'none' lets CodeQL analyse without a build step
           build-mode: none
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa  # v4
         with:
           category: /language:rust
