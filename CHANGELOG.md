@@ -10,6 +10,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.63] — 2026-05-25
+
+### Fixed
+
+- **deny.toml license/advisory hygiene** (`ci/`): Restored transitive-dep license entries and
+  fixed stale `bans`, `skip`, and `exception` entries that caused `cargo deny check` to fail.
+- **Dependency advisories** (`Cargo.toml`): Upgraded `lettre` to resolve outstanding security
+  advisories; suppressed unresolvable transitive advisories via `cargo-audit` configuration.
+
+### Changed
+
+- **Dependency bumps**: `prometheus` 0.13.4 → 0.14.0; GitHub Actions — `deploy-pages` 4 → 5,
+  `upload-pages-artifact` 3 → 5, `docker/metadata-action` 6.0.0 → 6.1.0,
+  `ossf/scorecard-action` 2.4.1 → 2.4.3, `codecov/codecov-action` 4 → 6,
+  `CodeQL` v3 → v4 with Rust autobuild.
+
+---
+
 ## [1.5.62] — 2026-05-25
 
 ### Added

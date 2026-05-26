@@ -2,7 +2,7 @@
 # https://nfpm.goreleaser.com/configuration/
 #
 # The VERSION environment variable must be set before invoking nfpm (without the 'v' prefix):
-#   VERSION=1.5.62 nfpm pkg --packager deb --config installer/nfpm.yaml \
+#   VERSION=1.5.63 nfpm pkg --packager deb --config installer/nfpm.yaml \
 #     --target oxide-sloc-linux-amd64.deb
 #
 # The working directory must contain a pre-built ./oxide-sloc binary.
