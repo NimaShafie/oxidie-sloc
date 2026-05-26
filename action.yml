@@ -12,7 +12,7 @@ inputs:
     default: '.'
     required: false
   version:
-    description: oxide-sloc release tag to download (e.g. v1.5.62). Defaults to latest.
+    description: oxide-sloc release tag to download (e.g. v1.5.63). Defaults to latest.
     default: latest
     required: false
   json-out:
