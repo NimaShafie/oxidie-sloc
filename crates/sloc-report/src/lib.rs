@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use askama::Template;
 use chrono::{DateTime, FixedOffset, Utc};
-use sloc_core::{AnalysisRun, FileRecord, SummaryTotals};
+use sloc_core::{AnalysisRun, FileRecord, StyleSummary, SummaryTotals};
 
 // Embed logo images at compile time so every generated HTML report is fully
 // self-contained.  Server-relative paths like /images/logo/... break when the
@@ -187,6 +187,70 @@ fn build_file_size_histogram_json(run: &AnalysisRun) -> String {
         .map(|((label, _, _), count)| {
             format!(r#"{{"label":"{}","count":{}}}"#, json_escape(label), count)
         })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Build JSON for the multi-language style-guide adherence chart.
+/// Returns a per-language-family array, each with its sorted guide scores.
+fn build_style_chart_json(summary: &StyleSummary) -> String {
+    let groups: Vec<String> = summary
+        .by_language
+        .iter()
+        .map(|grp| {
+            let guides: Vec<String> = grp
+                .guide_avg_scores
+                .iter()
+                .map(|(name, score)| {
+                    format!(r#"{{"guide":"{}","score":{}}}"#, json_escape(name), score)
+                })
+                .collect();
+            format!(
+                r#"{{"family":"{}","files":{},"indent":"{}","dominant":"{}","score":{},"guides":[{}]}}"#,
+                json_escape(&grp.language_family),
+                grp.files_count,
+                json_escape(&grp.common_indent_style),
+                json_escape(&grp.dominant_guide),
+                grp.dominant_score_pct,
+                guides.join(","),
+            )
+        })
+        .collect();
+    format!("[{}]", groups.join(","))
+}
+
+/// Build JSON for the per-file style breakdown table (up to 500 rows).
+fn build_style_file_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .per_file_records
+        .iter()
+        .filter_map(|f| {
+            let s = f.style_analysis.as_ref()?;
+            // Collect key signals for display (up to 3).
+            let sigs: Vec<String> = s
+                .signals
+                .iter()
+                .take(3)
+                .map(|sig| {
+                    format!(
+                        r#"{{"k":"{}","v":"{}"}}"#,
+                        json_escape(&sig.name),
+                        json_escape(&sig.value),
+                    )
+                })
+                .collect();
+            Some(format!(
+                r#"{{"path":"{}","lang":"{}","family":"{}","indent":"{}","guide":"{}","score":{},"signals":[{}]}}"#,
+                json_escape(&f.relative_path),
+                json_escape(f.language.map(|l| l.display_name()).unwrap_or("\u{2014}")),
+                json_escape(&s.language_family),
+                json_escape(s.indent_style.display()),
+                json_escape(&s.dominant_guide),
+                s.dominant_score_pct,
+                sigs.join(","),
+            ))
+        })
+        .take(500)
         .collect();
     format!("[{}]", entries.join(","))
 }
@@ -378,6 +442,23 @@ fn render_html_inner(
             .take(7)
             .collect(),
         standalone_pdf_url: pdf_url.map(str::to_string),
+        has_style_data: run.style_summary.is_some(),
+        style_lang_count: run
+            .style_summary
+            .as_ref()
+            .map(|ss| ss.by_language.len())
+            .unwrap_or(0),
+        style_chart_json: run
+            .style_summary
+            .as_ref()
+            .map(build_style_chart_json)
+            .unwrap_or_default(),
+        style_file_json: if run.style_summary.is_some() {
+            build_style_file_json(run)
+        } else {
+            String::new()
+        },
+        style_summary: run.style_summary.clone(),
     };
 
     template.render().context("failed to render HTML report")
@@ -2924,6 +3005,40 @@ struct WarningOpportunityRow {
     body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(40,21,10,.9) 0%,rgba(28,13,4,.94) 100%);border-color:rgba(200,120,50,.13);box-shadow:0 0 0 1px rgba(255,200,140,.04) inset,0 8px 72px rgba(0,0,0,.48),0 2px 16px rgba(0,0,0,.32);}
     body.dark-theme .rpt-spinner-track{border-color:rgba(196,92,16,.16);}
     body.dark-theme .rpt-load-divider{background:linear-gradient(90deg,transparent,rgba(196,92,16,.22),transparent);}
+    /* ── C++ Style Analysis section ── */
+    .style-guide-grid{display:grid;gap:10px;}
+    .style-guide-row{display:grid;grid-template-columns:90px 1fr 44px;align-items:center;gap:10px;}
+    .style-guide-label{font-size:12px;font-weight:800;color:var(--text);text-align:right;white-space:nowrap;}
+    .style-guide-track{background:var(--surface-3);border-radius:6px;height:20px;overflow:hidden;position:relative;}
+    .style-guide-fill{height:100%;border-radius:6px;background:linear-gradient(90deg,var(--oxide),var(--oxide-2));transition:width .5s ease;position:relative;}
+    .style-guide-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,rgba(255,255,255,.18) 0%,rgba(255,255,255,.04) 100%);border-radius:6px;}
+    .style-guide-score{font-size:12px;font-weight:800;color:var(--oxide);text-align:right;white-space:nowrap;}
+    .style-guide-desc{font-size:10px;color:var(--muted);margin-top:2px;grid-column:2/3;}
+    .style-metrics-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0 0;}
+    @media(max-width:800px){.style-metrics-strip{grid-template-columns:repeat(2,1fr);}}
+    .style-chip{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:center;}
+    .style-chip-val{font-size:18px;font-weight:900;color:var(--oxide);}
+    .style-chip-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:3px;}
+    .style-file-table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;}
+    .style-file-table th{background:var(--surface-3);padding:7px 10px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);text-align:left;border-bottom:2px solid var(--line);}
+    .style-file-table td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .style-file-table tr:hover td{background:var(--surface-2);}
+    .style-score-bar{display:inline-block;width:48px;height:8px;border-radius:4px;background:var(--surface-3);vertical-align:middle;position:relative;margin-right:4px;}
+    .style-score-fill{position:absolute;left:0;top:0;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--oxide),var(--oxide-2));}
+    .style-badge{display:inline-block;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700;background:var(--surface-3);color:var(--oxide);border:1px solid var(--line);}
+    .style-heuristic-note{background:var(--info-bg);color:var(--info-text);border-radius:8px;padding:8px 14px;font-size:11px;font-weight:600;margin-top:12px;}
+    .style-lang-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+    .style-lang-tab{padding:4px 12px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:11px;font-weight:700;cursor:pointer;color:var(--text);transition:background .15s;}
+    .style-lang-tab:hover{background:var(--surface-2);}
+    .style-lang-tab.active{background:var(--oxide);color:#fff;border-color:var(--oxide);}
+    .style-sig-chip{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line);margin-right:3px;}
+    body.dark-theme .style-guide-track{background:var(--surface-3);}
+    body.dark-theme .style-chip{background:var(--surface-2);}
+    body.dark-theme .style-file-table th{background:var(--surface-3);}
+    body.dark-theme .style-heuristic-note{background:var(--info-bg);color:var(--info-text);}
+    body.dark-theme .style-lang-tab{background:var(--surface-2);color:var(--text);}
+    body.dark-theme .style-lang-tab.active{background:var(--oxide);color:#fff;}
+    body.dark-theme .style-sig-chip{background:var(--surface-3);color:var(--muted);}
 </style>
 <script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
 </head>
@@ -3325,6 +3440,69 @@ struct WarningOpportunityRow {
           {% endif %}
         </div>
       </section>
+
+      <!-- ── Multi-Language Code Style Analysis ───────────────────────── -->
+      {% if has_style_data %}
+      {% if let Some(ss) = style_summary %}
+      <section class="panel stack">
+        <div>
+          <div class="toolbar">
+            <div class="toolbar-left"><h2>Code Style Analysis</h2></div>
+            <div class="pill-row"><span class="pill info">{{ style_lang_count }} language group(s) &#xB7; Lexical heuristics</span></div>
+          </div>
+          <div class="style-heuristic-note">
+            &#x2139;&#xFE0F; Scores are lexical approximations based on indentation, line length, brace placement, and language-specific signals &#x2014; not a full parse. Use as a directional signal.
+          </div>
+          <!-- Summary chips -->
+          <div class="style-metrics-strip">
+            <div class="style-chip">
+              <div class="style-chip-val">{{ ss.files_analyzed }}</div>
+              <div class="style-chip-label">Files Analyzed</div>
+            </div>
+            <div class="style-chip">
+              <div class="style-chip-val">{{ style_lang_count }}</div>
+              <div class="style-chip-label">Language Groups</div>
+            </div>
+            <div class="style-chip">
+              <div class="style-chip-val">{{ ss.common_indent_style }}</div>
+              <div class="style-chip-label">Common Indent</div>
+            </div>
+            <div class="style-chip">
+              <div class="style-chip-val">{{ ss.line80_compliant_pct }}%</div>
+              <div class="style-chip-label">80-Col Compliant</div>
+            </div>
+          </div>
+          <!-- Language selector tab strip -->
+          <div style="margin-top:20px;">
+            <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:10px;">Style Guide Adherence by Language</div>
+            <div id="style-lang-tabs" class="style-lang-tabs"></div>
+            <div class="style-guide-grid" id="style-guide-bars"></div>
+          </div>
+          <!-- Per-file style table -->
+          <div style="margin-top:22px;">
+            <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px;">Per-File Style Details</div>
+            <div class="table-scroll-wrap">
+              <table class="style-file-table" id="style-file-table">
+                <thead>
+                  <tr>
+                    <th style="width:35%;">File</th>
+                    <th style="width:10%;">Language</th>
+                    <th style="width:12%;">Indent</th>
+                    <th style="width:20%;">Best Match Guide</th>
+                    <th style="width:10%;">Score</th>
+                    <th style="width:13%;">Signals</th>
+                  </tr>
+                </thead>
+                <tbody id="style-file-tbody">
+                  <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">Loading...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+      {% endif %}
 
       <!-- ── Submodule Breakdown (2-column, conditional) ─────────────── -->
       {% if has_submodule_data %}
@@ -5606,6 +5784,87 @@ struct WarningOpportunityRow {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  {% if has_style_data %}
+  <script nonce="{{ nonce }}">
+  (function(){
+    var CHART_DATA = {{ style_chart_json|safe }};
+    var FILE_DATA  = {{ style_file_json|safe }};
+    var activeLang = CHART_DATA.length ? CHART_DATA[0].family : '';
+    function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+    function renderBars(family){
+      var wrap=document.getElementById('style-guide-bars');
+      if(!wrap)return;
+      wrap.innerHTML='';
+      var grp=null;
+      for(var i=0;i<CHART_DATA.length;i++){if(CHART_DATA[i].family===family){grp=CHART_DATA[i];break;}}
+      if(!grp||!grp.guides.length)return;
+      grp.guides.forEach(function(d){
+        var isTop=(d.guide===grp.dominant);
+        var row=document.createElement('div');row.className='style-guide-row';
+        var lbl=document.createElement('div');lbl.className='style-guide-label';
+        lbl.textContent=d.guide;
+        if(isTop)lbl.style.color='var(--oxide)';
+        var track=document.createElement('div');track.className='style-guide-track';
+        var fill=document.createElement('div');fill.className='style-guide-fill';
+        fill.style.width='0%';
+        var pct=document.createElement('div');pct.className='style-guide-score';
+        pct.textContent=d.score+'%';
+        if(isTop)pct.style.color='var(--oxide)';
+        track.appendChild(fill);
+        row.appendChild(lbl);row.appendChild(track);row.appendChild(pct);
+        wrap.appendChild(row);
+        setTimeout(function(f,s){return function(){f.style.width=s+'%';};}(fill,d.score),60);
+      });
+    }
+    function initTabs(){
+      var tabsWrap=document.getElementById('style-lang-tabs');
+      if(!tabsWrap||!CHART_DATA.length)return;
+      CHART_DATA.forEach(function(grp){
+        var btn=document.createElement('button');
+        btn.className='style-lang-tab'+(grp.family===activeLang?' active':'');
+        btn.textContent=grp.family+' ('+grp.files+')';
+        btn.onclick=function(){
+          activeLang=grp.family;
+          var tabs=tabsWrap.querySelectorAll('.style-lang-tab');
+          for(var i=0;i<tabs.length;i++)tabs[i].className='style-lang-tab';
+          btn.className='style-lang-tab active';
+          renderBars(activeLang);
+        };
+        tabsWrap.appendChild(btn);
+      });
+      renderBars(activeLang);
+    }
+    function initStyleTable(){
+      var tbody=document.getElementById('style-file-tbody');
+      if(!tbody)return;
+      if(!FILE_DATA.length){
+        tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
+        return;
+      }
+      var html='';
+      FILE_DATA.forEach(function(f){
+        var barW=Math.round(f.score);
+        var badge=f.guide&&f.guide!=='Unknown'?'<span class="style-badge">'+escH(f.guide)+'</span>':'<span style="color:var(--muted);">—</span>';
+        var sigHtml='';
+        if(f.signals&&f.signals.length){
+          sigHtml=f.signals.map(function(s){return'<span class="style-sig-chip" title="'+escH(s.k)+'">'+escH(s.v)+'</span>';}).join(' ');
+        }
+        html+='<tr>'
+          +'<td title="'+escH(f.path)+'">'+escH(f.path.replace(/^.*[\/\\]/,''))+'</td>'
+          +'<td>'+escH(f.lang)+'</td>'
+          +'<td>'+escH(f.indent)+'</td>'
+          +'<td>'+badge+'</td>'
+          +'<td><span class="style-score-bar"><span class="style-score-fill" style="width:'+barW+'%"></span></span>'+f.score+'%</td>'
+          +'<td>'+sigHtml+'</td>'
+          +'</tr>';
+      });
+      tbody.innerHTML=html;
+    }
+    function init(){initTabs();initStyleTable();}
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());
+  </script>
+  {% endif %}
   <script>
   (function(){
     var params=new URLSearchParams(location.search);
@@ -5706,6 +5965,16 @@ struct ReportTemplate<'a> {
     /// `--html-out` and `--pdf-out`), this holds the relative URL to that PDF.
     /// The "View PDF" button navigates directly to it instead of the server route.
     standalone_pdf_url: Option<String>,
+    /// Whether any style data was collected.
+    has_style_data: bool,
+    /// Number of language groups in the style summary (0 when none).
+    style_lang_count: usize,
+    /// Serialised JSON for the multi-language style-guide chart (empty string when none).
+    style_chart_json: String,
+    /// Serialised JSON for the per-file style table (empty string when none).
+    style_file_json: String,
+    /// Aggregate style summary, cloned from `AnalysisRun::style_summary`.
+    style_summary: Option<StyleSummary>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
