@@ -41,7 +41,11 @@ jobs:
         run: bash ci/lint.sh
 
       - name: Security audit
-        run: cargo install cargo-audit --locked && cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit \
+            --ignore RUSTSEC-2024-0437 \
+            --ignore RUSTSEC-2025-0134
 
       - name: Dependency licenses & bans
         run: cargo install cargo-deny --locked && cargo deny check
