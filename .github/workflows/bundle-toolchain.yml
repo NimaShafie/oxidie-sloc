@@ -13,8 +13,7 @@ on:
     paths:
       - 'rust-toolchain.toml'
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: bundle-toolchain
@@ -28,6 +27,8 @@ jobs:
   linux-x86_64:
     name: Bundle linux-x86_64
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -45,6 +46,8 @@ jobs:
   linux-arm64:
     name: Bundle linux-arm64
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -62,6 +65,8 @@ jobs:
   windows-x64:
     name: Bundle windows-x64
     runs-on: windows-latest
+    permissions:
+      contents: read
     defaults:
       run:
         shell: bash
@@ -112,6 +117,8 @@ jobs:
     name: Commit toolchain archives
     needs: [linux-x86_64, linux-arm64, windows-x64]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:

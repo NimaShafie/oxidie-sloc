@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
+pub mod cpp_style;
+pub mod style;
+pub use cpp_style::{BraceStyle, CppStyleAnalysis, IndentStyle, PointerStyle, StyleGuideScore};
+pub use style::{StyleAnalysis, StyleSignal};
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
@@ -252,6 +257,9 @@ pub struct RawFileAnalysis {
     pub raw: RawLineCounts,
     pub parse_mode: ParseMode,
     pub warnings: Vec<String>,
+    /// Lexical style-guide analysis for supported languages; `None` when no heuristics apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_analysis: Option<StyleAnalysis>,
 }
 
 /// IEEE 1045-1992 counting options passed from `sloc-core` (built from `AnalysisConfig`).
@@ -534,7 +542,8 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
     {
         match language {
             Language::C | Language::Cpp => {
-                if let Some(result) = ts::analyze_c(text) {
+                if let Some(mut result) = ts::analyze_c(text) {
+                    result.style_analysis = style::analyze_style(language, text);
                     return result;
                 }
             }
@@ -561,7 +570,9 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
         blank_in_block_comment_as_comment: options.blank_in_block_comment_as_comment,
         collapse_continuation_lines: options.collapse_continuation_lines,
     };
-    analyze_generic(text, config, flags)
+    let mut result = analyze_generic(text, config, flags);
+    result.style_analysis = style::analyze_style(language, text);
+    result
 }
 
 /// Returns the lexical scan configuration for `language` and whether it uses a C preprocessor.
@@ -2357,6 +2368,7 @@ fn analyze_generic(text: &str, config: ScanConfig, ieee: IeeeFlags) -> RawFileAn
             ParseMode::LexicalBestEffort
         },
         warnings,
+        style_analysis: None,
     }
 }
 

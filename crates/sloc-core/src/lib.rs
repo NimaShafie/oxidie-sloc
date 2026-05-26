@@ -29,9 +29,10 @@ use sloc_config::{
     AppConfig, BinaryFileBehavior, BlankInBlockCommentPolicy, ContinuationLinePolicy,
     FailureBehavior, MixedLinePolicy,
 };
+use sloc_languages::style::IndentStyle;
 use sloc_languages::{
     analyze_text, detect_language, supported_languages, AnalysisOptions, Language, ParseMode,
-    RawLineCounts,
+    RawLineCounts, StyleAnalysis,
 };
 
 // ── Detection sample sizes and thresholds ────────────────────────────────────
@@ -206,7 +207,46 @@ pub struct FileRecord {
     /// Line/function/branch coverage from an external LCOV file, when provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<FileCoverage>,
+    /// Lexical style-guide adherence analysis; `None` for unsupported languages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_analysis: Option<StyleAnalysis>,
 }
+
+/// Per-language-family style aggregation within a `StyleSummary`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageStyleGroup {
+    /// Display label, e.g. `"C / C++"`, `"Python"`, `"JavaScript"`.
+    pub language_family: String,
+    /// Number of files in this group.
+    pub files_count: u32,
+    /// Name of the guide with the highest average adherence.
+    pub dominant_guide: String,
+    /// Average adherence of the dominant guide (0–100).
+    pub dominant_score_pct: u8,
+    /// Most common indent style across the group.
+    pub common_indent_style: String,
+    /// Average guide adherence scores (guide name, 0–100) sorted descending.
+    pub guide_avg_scores: Vec<(String, u8)>,
+    /// Percentage of files (0–100) where ≤ 5 % of lines exceed 80 chars.
+    pub line80_compliant_pct: u8,
+}
+
+/// Aggregate multi-language style-guide adherence across all analysed files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleSummary {
+    /// Total files for which style data was produced.
+    pub files_analyzed: u32,
+    /// Most common indent style across *all* analysed files.
+    pub common_indent_style: String,
+    /// Percentage of all analysed files (0–100) with ≤ 5 % of lines over 80 chars.
+    pub line80_compliant_pct: u8,
+    /// Per-language-family breakdown, sorted by `files_count` descending.
+    pub by_language: Vec<LanguageStyleGroup>,
+}
+
+/// Backward-compatible alias kept so that `sloc-report` and `sloc-web` can migrate
+/// incrementally without a breaking change on the same release.
+pub type CppStyleSummary = StyleSummary;
 
 /// Per-submodule aggregated stats produced when `submodule_breakdown` is enabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +299,9 @@ pub struct AnalysisRun {
     /// URL of the `origin` remote as recorded in `.git/config` at scan time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_remote_url: Option<String>,
+    /// Multi-language style-guide adherence; `None` when no supported files were analysed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_summary: Option<StyleSummary>,
 }
 
 #[derive(Default)]
@@ -829,6 +872,7 @@ fn assemble_run(
 ) -> AnalysisRun {
     let summary = build_summary(&analyzed, &skipped);
     let language_summaries = build_language_summaries(&analyzed);
+    let style_summary = build_style_summary(&analyzed);
 
     let first_root = config
         .discovery
@@ -882,6 +926,7 @@ fn assemble_run(
         git_nearest_tag: git.nearest_tag,
         git_commit_date: git.commit_date,
         git_remote_url: git.remote_url,
+        style_summary,
     }
 }
 
@@ -1367,6 +1412,7 @@ fn analyze_candidate_file(
         parse_mode: Some(analysis.parse_mode),
         submodule: None,
         coverage: None,
+        style_analysis: analysis.style_analysis,
     }))
 }
 
@@ -1534,6 +1580,7 @@ fn skipped_record(
         parse_mode: None,
         submodule: None,
         coverage: None,
+        style_analysis: None,
     }
 }
 
@@ -1620,6 +1667,130 @@ fn build_submodule_summaries(
         })
         .filter(|s| s.files_analyzed > 0)
         .collect()
+}
+
+/// Dominant indent label from vote counts.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn dominant_indent_label(files: &[&StyleAnalysis]) -> String {
+    let mut votes = [0u32; 6];
+    for f in files {
+        let idx = match f.indent_style {
+            IndentStyle::Tabs => 0,
+            IndentStyle::Spaces2 => 1,
+            IndentStyle::Spaces4 => 2,
+            IndentStyle::Spaces8 => 3,
+            IndentStyle::Mixed => 4,
+            IndentStyle::Unknown => 5,
+        };
+        votes[idx] += 1;
+    }
+    let labels = ["Tabs", "2-Space", "4-Space", "8-Space", "Mixed", "\u{2014}"];
+    labels[votes
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, v)| *v)
+        .map(|(i, _)| i)
+        .unwrap_or(5)]
+    .to_string()
+}
+
+/// Line-80 compliance percentage for a slice of style analyses.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn line80_pct(files: &[&StyleAnalysis]) -> u8 {
+    if files.is_empty() {
+        return 0;
+    }
+    let compliant = files
+        .iter()
+        .filter(|f| f.total_lines == 0 || (f.lines_over_80 as f32 / f.total_lines as f32) <= 0.05)
+        .count() as u32;
+    ((compliant * 100) / files.len() as u32) as u8
+}
+
+/// Build a `LanguageStyleGroup` from a non-empty slice of `StyleAnalysis` for one family.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn build_language_group(family: &str, files: &[&StyleAnalysis]) -> LanguageStyleGroup {
+    let count = files.len() as u32;
+
+    // Collect every unique guide name across all files in this group.
+    let mut all_names: Vec<String> = Vec::new();
+    for f in files {
+        for g in &f.guide_scores {
+            if !all_names.contains(&g.name) {
+                all_names.push(g.name.clone());
+            }
+        }
+    }
+
+    let mut guide_avg_scores: Vec<(String, u8)> = all_names
+        .into_iter()
+        .map(|name| {
+            let sum: u32 = files
+                .iter()
+                .filter_map(|f| f.guide_scores.iter().find(|g| g.name == name))
+                .map(|g| u32::from(g.score_pct))
+                .sum();
+            let avg = (sum / count) as u8;
+            (name, avg)
+        })
+        .collect();
+    guide_avg_scores.sort_by_key(|s| std::cmp::Reverse(s.1));
+
+    let (dominant_guide, dominant_score_pct) = guide_avg_scores
+        .first()
+        .map(|(n, s)| (n.clone(), *s))
+        .unwrap_or_default();
+
+    LanguageStyleGroup {
+        language_family: family.to_string(),
+        files_count: count,
+        dominant_guide,
+        dominant_score_pct,
+        common_indent_style: dominant_indent_label(files),
+        guide_avg_scores,
+        line80_compliant_pct: line80_pct(files),
+    }
+}
+
+/// Build aggregate multi-language style-guide adherence.
+/// Returns `None` when no files had style data.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn build_style_summary(analyzed: &[FileRecord]) -> Option<StyleSummary> {
+    let all_style: Vec<&StyleAnalysis> = analyzed
+        .iter()
+        .filter_map(|f| f.style_analysis.as_ref())
+        .collect();
+
+    if all_style.is_empty() {
+        return None;
+    }
+
+    // Group by language_family.
+    let mut families: std::collections::BTreeMap<&str, Vec<&StyleAnalysis>> =
+        std::collections::BTreeMap::new();
+    for sa in &all_style {
+        families
+            .entry(sa.language_family.as_str())
+            .or_default()
+            .push(sa);
+    }
+
+    let mut by_language: Vec<LanguageStyleGroup> = families
+        .iter()
+        .map(|(family, files)| build_language_group(family, files))
+        .collect();
+    by_language.sort_by_key(|g| std::cmp::Reverse(g.files_count));
+
+    let files_analyzed = all_style.len() as u32;
+    let common_indent_style = dominant_indent_label(&all_style);
+    let line80_compliant_pct = line80_pct(&all_style);
+
+    Some(StyleSummary {
+        files_analyzed,
+        common_indent_style,
+        line80_compliant_pct,
+        by_language,
+    })
 }
 
 fn build_language_summaries_from_slice(files: &[&FileRecord]) -> Vec<LanguageSummary> {

@@ -10,6 +10,7 @@ allow = [
   "BSD-3-Clause",
   "ISC",
   "Unicode-DFS-2016",
+  "Unicode-3.0",
   "OpenSSL",
   "Zlib",
   "CC0-1.0",
@@ -42,22 +43,12 @@ skip = [
   { name = "windows-sys", version = "0.60" },
   { name = "windows-targets", version = "0.52" },
   { name = "windows_aarch64_gnullvm", version = "0.52" },
-  { name = "windows_aarch64_msvc", version = "0.52" },
-  { name = "windows_i686_gnu", version = "0.52" },
-  { name = "windows_i686_gnullvm", version = "0.52" },
-  { name = "windows_i686_msvc", version = "0.52" },
-  { name = "windows_x86_64_gnu", version = "0.52" },
-  { name = "windows_x86_64_gnullvm", version = "0.52" },
-  { name = "windows_x86_64_msvc", version = "0.52" },
   { name = "wit-bindgen", version = "0.51" },
 ]
 
 [advisories]
 version = 2
 ignore = [
-  # protobuf 2.x pulled by prometheus 0.13 (no newer release); sloc-web only
-  # generates metrics text output and never parses incoming protobuf payloads.
-  "RUSTSEC-2024-0437",
   # rustls-pemfile is unmaintained; no compatible replacement for rustls 0.23 yet.
   "RUSTSEC-2025-0134",
 ]
