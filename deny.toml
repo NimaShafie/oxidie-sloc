@@ -54,7 +54,13 @@ skip = [
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+  # protobuf 2.x pulled by prometheus 0.13 (no newer release); sloc-web only
+  # generates metrics text output and never parses incoming protobuf payloads.
+  "RUSTSEC-2024-0437",
+  # rustls-pemfile is unmaintained; no compatible replacement for rustls 0.23 yet.
+  "RUSTSEC-2025-0134",
+]
 
 [sources]
 unknown-registry = "deny"
