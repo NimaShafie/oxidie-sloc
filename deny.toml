@@ -2,6 +2,9 @@
 targets = []
 
 [licenses]
+# Suppress warnings for allowed licenses not present in the current dep graph
+# (dep-graph composition changes between dependency bumps).
+unused-allowed-license = "allow"
 allow = [
   "MIT",
   "Apache-2.0",
@@ -10,7 +13,11 @@ allow = [
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "OpenSSL",
   "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
 ]
 exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "oxide-sloc" },
@@ -31,11 +38,12 @@ skip = [
   { name = "getrandom", version = "0.3" },
   # getrandom 0.4 pulled by uuid ≥ 1.23 and tempfile ≥ 3.27 (via headless_chrome)
   { name = "getrandom", version = "0.4" },
-  { name = "hashbrown", version = "0.15" },
   { name = "r-efi", version = "5" },
   { name = "windows-sys", version = "0.52" },
   { name = "windows-sys", version = "0.59" },
-  { name = "windows-sys", version = "0.60" },
+  # thiserror v1 (via prometheus→protobuf) and v2 (via headless_chrome) coexist
+  { name = "thiserror", version = "1" },
+  { name = "thiserror-impl", version = "1" },
   { name = "wit-bindgen", version = "0.51" },
 ]
 
