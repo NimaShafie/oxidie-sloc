@@ -9,16 +9,11 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
-  "Unicode-DFS-2016",
   "Unicode-3.0",
-  "OpenSSL",
   "Zlib",
-  "CC0-1.0",
-  "MPL-2.0",
 ]
 exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "oxide-sloc" },
-  { allow = ["AGPL-3.0-or-later"], name = "sloc-cli" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-config" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-core" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-languages" },
@@ -41,8 +36,6 @@ skip = [
   { name = "windows-sys", version = "0.52" },
   { name = "windows-sys", version = "0.59" },
   { name = "windows-sys", version = "0.60" },
-  { name = "windows-targets", version = "0.52" },
-  { name = "windows_aarch64_gnullvm", version = "0.52" },
   { name = "wit-bindgen", version = "0.51" },
 ]
 
