@@ -22,6 +22,13 @@ allow = [
   "0BSD",
   # Community Data License Agreement Permissive 2.0 — used by webpki-roots
   "CDLA-Permissive-2.0",
+  # Boost Software License 1.0 — permissive, sometimes used without OR pairing
+  "BSL-1.0",
+  # The Unlicense — public domain dedication, sometimes used without OR pairing
+  "Unlicense",
+  # LGPL-2.1-or-later — appears in OR expressions (e.g. "MIT OR Apache-2.0 OR LGPL-2.1-or-later")
+  # Listed here so it doesn't break if a crate ever uses it as its sole identifier
+  "LGPL-2.1-or-later",
 ]
 exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "oxide-sloc" },
