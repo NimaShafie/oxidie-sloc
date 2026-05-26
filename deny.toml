@@ -39,7 +39,17 @@ exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "sloc-web" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-mcp" },
   # Transitive dep of headless_chrome (PDF generation); not distributed as a library
-  { allow = ["GPL-3.0"], name = "auto_generate_cdp" },
+  { allow = ["GPL-3.0-only"], name = "auto_generate_cdp" },
+]
+
+# auto_generate_cdp uses license-file rather than an SPDX expression.
+# cargo-deny needs the hash of the file to confirm the identified expression.
+# Hash computed with: python3 -c "import zlib,sys; print(hex(zlib.crc32(open(sys.argv[1],'rb').read())&0xffffffff))" vendor/auto_generate_cdp/LICENSE.txt
+[[licenses.clarify]]
+name = "auto_generate_cdp"
+expression = "GPL-3.0-only"
+license-files = [
+  { path = "LICENSE.txt", hash = 0xba8ef827 },
 ]
 
 [bans]
