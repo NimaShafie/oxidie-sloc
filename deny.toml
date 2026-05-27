@@ -80,10 +80,7 @@ skip = [
 
 [advisories]
 version = 2
-ignore = [
-  # rustls-pemfile is unmaintained; no compatible replacement for rustls 0.23 yet.
-  "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [sources]
 unknown-registry = "deny"
