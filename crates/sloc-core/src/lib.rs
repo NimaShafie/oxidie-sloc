@@ -227,8 +227,10 @@ pub struct LanguageStyleGroup {
     pub common_indent_style: String,
     /// Average guide adherence scores (guide name, 0–100) sorted descending.
     pub guide_avg_scores: Vec<(String, u8)>,
-    /// Percentage of files (0–100) where ≤ 5 % of lines exceed 80 chars.
+    /// Percentage of files (0–100) where ≤ 5 % of lines exceed the configured column threshold.
     pub line80_compliant_pct: u8,
+    /// Same as `line80_compliant_pct` but named for the actual configured threshold.
+    pub line_col_compliant_pct: u8,
 }
 
 /// Aggregate multi-language style-guide adherence across all analysed files.
@@ -238,8 +240,12 @@ pub struct StyleSummary {
     pub files_analyzed: u32,
     /// Most common indent style across *all* analysed files.
     pub common_indent_style: String,
-    /// Percentage of all analysed files (0–100) with ≤ 5 % of lines over 80 chars.
+    /// Percentage of all analysed files (0–100) with ≤ 5 % of lines over 80 chars (legacy, always 80).
     pub line80_compliant_pct: u8,
+    /// Percentage of all analysed files (0–100) with ≤ 5 % of lines over `col_threshold` chars.
+    pub line_col_compliant_pct: u8,
+    /// Column-width threshold used for `line_col_compliant_pct` (from `analysis.style_col_threshold`).
+    pub col_threshold: u16,
     /// Per-language-family breakdown, sorted by `files_count` descending.
     pub by_language: Vec<LanguageStyleGroup>,
 }
@@ -872,7 +878,8 @@ fn assemble_run(
 ) -> AnalysisRun {
     let summary = build_summary(&analyzed, &skipped);
     let language_summaries = build_language_summaries(&analyzed);
-    let style_summary = build_style_summary(&analyzed);
+    let col_threshold = config.analysis.style_col_threshold;
+    let style_summary = build_style_summary(&analyzed, col_threshold);
 
     let first_root = config
         .discovery
@@ -1707,9 +1714,36 @@ fn line80_pct(files: &[&StyleAnalysis]) -> u8 {
     ((compliant * 100) / files.len() as u32) as u8
 }
 
+/// Column-N compliance percentage using the configured threshold (80, 100, or 120).
+/// Falls back to the 80-col bucket for any threshold ≤ 80.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn line_col_pct(files: &[&StyleAnalysis], threshold: u16) -> u8 {
+    if files.is_empty() {
+        return 0;
+    }
+    let compliant = files
+        .iter()
+        .filter(|f| {
+            let over = if threshold <= 80 {
+                f.lines_over_80
+            } else if threshold <= 100 {
+                f.lines_over_100
+            } else {
+                f.lines_over_120
+            };
+            f.total_lines == 0 || (over as f32 / f.total_lines as f32) <= 0.05
+        })
+        .count() as u32;
+    ((compliant * 100) / files.len() as u32) as u8
+}
+
 /// Build a `LanguageStyleGroup` from a non-empty slice of `StyleAnalysis` for one family.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn build_language_group(family: &str, files: &[&StyleAnalysis]) -> LanguageStyleGroup {
+fn build_language_group(
+    family: &str,
+    files: &[&StyleAnalysis],
+    col_threshold: u16,
+) -> LanguageStyleGroup {
     let count = files.len() as u32;
 
     // Collect every unique guide name across all files in this group.
@@ -1741,6 +1775,7 @@ fn build_language_group(family: &str, files: &[&StyleAnalysis]) -> LanguageStyle
         .map(|(n, s)| (n.clone(), *s))
         .unwrap_or_default();
 
+    let lcp = line_col_pct(files, col_threshold);
     LanguageStyleGroup {
         language_family: family.to_string(),
         files_count: count,
@@ -1749,13 +1784,14 @@ fn build_language_group(family: &str, files: &[&StyleAnalysis]) -> LanguageStyle
         common_indent_style: dominant_indent_label(files),
         guide_avg_scores,
         line80_compliant_pct: line80_pct(files),
+        line_col_compliant_pct: lcp,
     }
 }
 
 /// Build aggregate multi-language style-guide adherence.
 /// Returns `None` when no files had style data.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn build_style_summary(analyzed: &[FileRecord]) -> Option<StyleSummary> {
+fn build_style_summary(analyzed: &[FileRecord], col_threshold: u16) -> Option<StyleSummary> {
     let all_style: Vec<&StyleAnalysis> = analyzed
         .iter()
         .filter_map(|f| f.style_analysis.as_ref())
@@ -1777,18 +1813,21 @@ fn build_style_summary(analyzed: &[FileRecord]) -> Option<StyleSummary> {
 
     let mut by_language: Vec<LanguageStyleGroup> = families
         .iter()
-        .map(|(family, files)| build_language_group(family, files))
+        .map(|(family, files)| build_language_group(family, files, col_threshold))
         .collect();
     by_language.sort_by_key(|g| std::cmp::Reverse(g.files_count));
 
     let files_analyzed = all_style.len() as u32;
     let common_indent_style = dominant_indent_label(&all_style);
     let line80_compliant_pct = line80_pct(&all_style);
+    let line_col_compliant_pct = line_col_pct(&all_style, col_threshold);
 
     Some(StyleSummary {
         files_analyzed,
         common_indent_style,
         line80_compliant_pct,
+        line_col_compliant_pct,
+        col_threshold,
         by_language,
     })
 }
