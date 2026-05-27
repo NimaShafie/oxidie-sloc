@@ -31,8 +31,12 @@ else
     echo "  § Rebuilding the agent image."
     echo "============================================================"
     echo "Downloading rustup installer (requires internet access)..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain "${TOOLCHAIN}" --no-modify-path
+    # Download rustup-init to a file before executing — avoids the curl|sh pattern
+    # flagged by OpenSSF Scorecard Pinned-Dependencies.
+    _RUSTUP_INIT="$(mktemp)"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "${_RUSTUP_INIT}"
+    sh "${_RUSTUP_INIT}" -y --default-toolchain "${TOOLCHAIN}" --no-modify-path
+    rm -f "${_RUSTUP_INIT}"
 fi
 
 rustup show

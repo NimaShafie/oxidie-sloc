@@ -1002,21 +1002,21 @@ async fn shutdown_signal(server_mode: bool) {
 
 /// Load a rustls `ServerConfig` from PEM certificate and key files.
 fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerConfig> {
-    use rustls_pemfile::{certs, private_key};
-    use std::io::BufReader;
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
     let cert_bytes =
         fs::read(cert_path).with_context(|| format!("failed to read TLS cert: {cert_path}"))?;
     let key_bytes =
         fs::read(key_path).with_context(|| format!("failed to read TLS key: {key_path}"))?;
 
-    let cert_chain: Vec<_> = certs(&mut BufReader::new(cert_bytes.as_slice()))
-        .collect::<std::result::Result<_, _>>()
-        .context("failed to parse TLS certificates")?;
+    let cert_chain: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(cert_bytes.as_slice())
+            .collect::<std::result::Result<_, _>>()
+            .context("failed to parse TLS certificates")?;
 
-    let key = private_key(&mut BufReader::new(key_bytes.as_slice()))
-        .context("failed to parse TLS private key")?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {key_path}"))?;
+    let key = PrivateKeyDer::from_pem_slice(key_bytes.as_slice())
+        .context("failed to parse TLS private key")?;
 
     rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -8829,6 +8829,16 @@ async fn test_metrics_handler(
     .cov-pct-badge{{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;}}
     .cov-file-path{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--text);max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
     body.dark-theme .cov-file-search{{background:var(--surface);}}
+    .chart-box-header{{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}}
+    .chart-expand-btn{{background:none;border:1px solid var(--line-strong);border-radius:6px;cursor:pointer;color:var(--muted);padding:4px 10px;font-size:13px;line-height:1;transition:background .13s,color .13s;flex-shrink:0;white-space:nowrap;}}
+    .chart-expand-btn:hover{{background:var(--surface-2);color:var(--text);}}
+    .chart-modal-overlay{{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}}
+    .chart-modal{{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:1200px;width:100%;max-height:88vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}}
+    .chart-modal-title{{font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--text);margin:0 0 2px;display:block;}}
+    .chart-modal-subtitle{{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 16px;display:block;letter-spacing:.02em;}}
+    .chart-modal-close{{position:absolute;top:14px;right:18px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--text);line-height:1;padding:0;}}
+    .chart-modal-close:hover{{opacity:.7;}}
+    body.dark-theme .chart-modal{{background:var(--surface);}}
   </style>
 </head>
 <body>
@@ -8917,11 +8927,17 @@ async fn test_metrics_handler(
 
       <div class="chart-row">
         <div class="chart-box">
-          <div class="chart-box-title">Test Definitions by Language</div>
+          <div class="chart-box-header">
+            <div class="chart-box-title" style="margin-bottom:0;">Test Definitions by Language</div>
+            <button class="chart-expand-btn" id="tests-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+          </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-tests"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-box-title">Test Density (per 1 000 code lines)</div>
+          <div class="chart-box-header">
+            <div class="chart-box-title" style="margin-bottom:0;">Test Density (per 1 000 code lines)</div>
+            <button class="chart-expand-btn" id="density-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+          </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-density"></canvas></div>
         </div>
       </div>
@@ -9008,7 +9024,10 @@ async fn test_metrics_handler(
     </div>
 
     <div class="panel">
-      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">Test Count Trend</div>
+      <div class="chart-box-header" style="margin-bottom:4px;">
+        <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;margin-bottom:0;">Test Count Trend</div>
+        <button class="chart-expand-btn" id="trend-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+      </div>
       <p class="muted" style="margin-bottom:14px;">Test definition count across all saved scans for the selected scope.</p>
       <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
       <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
@@ -9117,6 +9136,8 @@ async fn test_metrics_handler(
     var currentSub  = '';
     var testsChart = null, densityChart = null, covChart = null, tierChart = null, trendChart = null;
     var ALL_CHARTS = [];
+    var currentLangTests = [];
+    var currentTrendPts = [];
 
     function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
     function fmtFull(n){{return Number(n).toLocaleString();}}
@@ -9124,6 +9145,48 @@ async fn test_metrics_handler(
     function clr(){{return isDark()?'rgba(245,236,230,0.12)':'rgba(67,52,45,0.10)';}}
     function txtClr(){{return isDark()?'#c7b7aa':'#7b675b';}}
     var PALETTE=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082','#D0743C','#5BA8A0'];
+
+    function makeDlPlugin(fmtFn, anchor) {{
+      return {{
+        afterDatasetsDraw: function(chart) {{
+          var ctx = chart.ctx;
+          var tc = txtClr();
+          chart.data.datasets.forEach(function(ds, di) {{
+            var meta = chart.getDatasetMeta(di);
+            meta.data.forEach(function(el, idx) {{
+              var label = fmtFn(ds.data[idx], di, idx);
+              if (label == null || label === '') return;
+              ctx.save();
+              ctx.font = '600 11px Inter,ui-sans-serif,sans-serif';
+              ctx.fillStyle = tc;
+              if (anchor === 'top') {{
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText(String(label), el.x, el.y - 5);
+              }} else {{
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(String(label), el.x + 5, el.y);
+              }}
+              ctx.restore();
+            }});
+          }});
+        }}
+      }};
+    }}
+
+    function makeTmOverlay(title, subtitle, h) {{
+      var overlay = document.createElement('div');
+      overlay.className = 'chart-modal-overlay';
+      var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
+      var ch = Math.min(h || 560, maxH);
+      var subHtml = subtitle ? '<span class="chart-modal-subtitle">' + subtitle + '</span>' : '';
+      overlay.innerHTML = '<div class="chart-modal" style="max-width:1200px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">' + title + '</span>' + subHtml + '<div style="position:relative;width:100%;height:' + ch + 'px;"><canvas id="tm-modal-canvas"></canvas></div></div>';
+      document.body.appendChild(overlay);
+      overlay.querySelector('.chart-modal-close').addEventListener('click', function(){{ document.body.removeChild(overlay); }});
+      overlay.addEventListener('click', function(e){{ if (e.target === overlay) document.body.removeChild(overlay); }});
+      return document.getElementById('tm-modal-canvas');
+    }}
 
     function getDataset() {{
       var r = SCOPE_DATA[currentRoot] || SCOPE_DATA['__all__'];
@@ -9133,6 +9196,7 @@ async fn test_metrics_handler(
     function destroyChart(c) {{ if (c) {{ var idx = ALL_CHARTS.indexOf(c); if (idx >= 0) ALL_CHARTS.splice(idx, 1); c.destroy(); }} return null; }}
 
     function renderTestCharts(D) {{
+      currentLangTests = D || [];
       testsChart = destroyChart(testsChart);
       densityChart = destroyChart(densityChart);
       if (!D || !D.length) return;
@@ -9147,12 +9211,14 @@ async fn test_metrics_handler(
           }},
           options: {{
             responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            layout: {{ padding: {{ right: 64 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
               x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
             }}
-          }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
         }});
         ALL_CHARTS.push(testsChart);
       }}
@@ -9167,12 +9233,14 @@ async fn test_metrics_handler(
           }},
           options: {{
             responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            layout: {{ padding: {{ right: 64 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
             scales: {{
               x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v.toFixed(1); }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
             }}
-          }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return v.toFixed(1); }}, 'end')]
         }});
         ALL_CHARTS.push(densityChart);
       }}
@@ -9394,6 +9462,7 @@ async fn test_metrics_handler(
       var trendEmpty  = document.getElementById('trend-empty');
       var pts = data.filter(function(d){{ return d.test_count > 0 || data.some(function(x){{ return x.test_count > 0; }}); }});
       pts = pts.slice().reverse();
+      currentTrendPts = pts;
       if (!pts.length) {{
         if (trendCanvas) trendCanvas.style.display = 'none';
         if (trendEmpty) trendEmpty.style.display = '';
@@ -9418,15 +9487,113 @@ async fn test_metrics_handler(
         }},
         options: {{
           responsive: true, maintainAspectRatio: false,
+          layout: {{ padding: {{ top: 22 }} }},
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
           scales: {{
             x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
             y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
           }}
-        }}
+        }},
+        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
       }});
       ALL_CHARTS.push(trendChart);
     }}
+
+    // ── Full View expand buttons ──────────────────────────────────────────────
+    (function() {{
+      var btn = document.getElementById('tests-expand-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {{
+        var D = currentLangTests;
+        if (!D || !D.length) return;
+        var top15 = D.slice(0, 15);
+        var h = Math.max(320, top15.length * 36 + 80);
+        var canvas = makeTmOverlay('Test Definitions by Language — Full View', top15.length + ' languages', h);
+        if (!canvas) return;
+        new Chart(canvas, {{
+          type: 'bar',
+          data: {{
+            labels: top15.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Test Definitions', data: top15.map(function(d){{ return d.tests; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[i % PALETTE.length]; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            layout: {{ padding: {{ right: 72 }} }},
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmt(v); }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
+            }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+        }});
+      }});
+    }})();
+
+    (function() {{
+      var btn = document.getElementById('density-expand-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {{
+        var D = currentLangTests;
+        if (!D || !D.length) return;
+        var topD = D.slice().sort(function(a,b){{ return b.density - a.density; }}).slice(0, 15);
+        var h = Math.max(320, topD.length * 36 + 80);
+        var canvas = makeTmOverlay('Test Density (per 1 000 code lines) — Full View', topD.length + ' languages', h);
+        if (!canvas) return;
+        new Chart(canvas, {{
+          type: 'bar',
+          data: {{
+            labels: topD.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Tests / 1K Code Lines', data: topD.map(function(d){{ return d.density; }}), backgroundColor: topD.map(function(_,i){{ return PALETTE[(i+4) % PALETTE.length]; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            layout: {{ padding: {{ right: 72 }} }},
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return v.toFixed(1); }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
+            }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return v.toFixed(1); }}, 'end')]
+        }});
+      }});
+    }})();
+
+    (function() {{
+      var btn = document.getElementById('trend-expand-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {{
+        var pts = currentTrendPts;
+        if (!pts || !pts.length) return;
+        var canvas = makeTmOverlay('Test Count Trend — Full View', pts.length + ' scan' + (pts.length !== 1 ? 's' : ''), 420);
+        if (!canvas) return;
+        new Chart(canvas, {{
+          type: 'line',
+          data: {{
+            labels: pts.map(function(d){{ return d.timestamp ? d.timestamp.slice(0,10) : d.run_id_short; }}),
+            datasets: [{{
+              label: 'Test Definitions',
+              data: pts.map(function(d){{ return d.test_count; }}),
+              borderColor: '#C45C10',
+              backgroundColor: 'rgba(196,92,16,0.10)',
+              pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : '#C45C10'; }}),
+              pointRadius: 5, fill: true, tension: 0.3
+            }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false,
+            layout: {{ padding: {{ top: 22 }} }},
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, maxRotation:35 }} }},
+              y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+            }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
+        }});
+      }});
+    }})();
 
     function loadTrend() {{
       var url = '/api/metrics/history?limit=100';
