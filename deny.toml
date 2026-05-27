@@ -37,17 +37,19 @@ exceptions = [
   { allow = ["AGPL-3.0-or-later"], name = "sloc-languages" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-report" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-web" },
+  { allow = ["AGPL-3.0-or-later"], name = "sloc-git" },
   { allow = ["AGPL-3.0-or-later"], name = "sloc-mcp" },
-  # Transitive dep of headless_chrome (PDF generation); not distributed as a library
-  { allow = ["GPL-3.0-only"], name = "auto_generate_cdp" },
+  # Transitive dep of headless_chrome (PDF generation); not distributed as a library.
+  # cargo-deny (via askalono) identifies the GPLv3 file as GPL-3.0-or-later.
+  { allow = ["GPL-3.0-or-later"], name = "auto_generate_cdp" },
 ]
 
 # auto_generate_cdp uses license-file rather than an SPDX expression.
-# cargo-deny needs the hash of the file to confirm the identified expression.
+# cargo-deny (askalono) identifies the standard GPLv3 file as GPL-3.0-or-later.
 # Hash computed with: python3 -c "import zlib,sys; print(hex(zlib.crc32(open(sys.argv[1],'rb').read())&0xffffffff))" vendor/auto_generate_cdp/LICENSE.txt
 [[licenses.clarify]]
 name = "auto_generate_cdp"
-expression = "GPL-3.0-only"
+expression = "GPL-3.0-or-later"
 license-files = [
   { path = "LICENSE.txt", hash = 0xba8ef827 },
 ]
@@ -68,6 +70,12 @@ skip = [
   { name = "thiserror", version = "1" },
   { name = "thiserror-impl", version = "1" },
   { name = "wit-bindgen", version = "0.51" },
+  # linux-raw-sys 0.4 (via rustix 0.38 → procfs → prometheus) and 0.12 (via rustix 1.x) coexist
+  { name = "linux-raw-sys", version = "0.4" },
+  { name = "linux-raw-sys", version = "0.12" },
+  # redox_syscall 0.5 (via parking_lot) and 0.7 (via libredox → filetime → tar) coexist
+  { name = "redox_syscall", version = "0.5" },
+  { name = "redox_syscall", version = "0.7" },
 ]
 
 [advisories]
