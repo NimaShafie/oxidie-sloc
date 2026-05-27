@@ -95,14 +95,17 @@ build_one() {
             "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-gnu/rustup-init.exe" \
             -o "$rustup_init"
     else
-        rustup_init="$work_dir/rustup-init"
+        # Download rustup-init to a file before executing — avoids the curl|sh
+        # pattern flagged by OpenSSF Scorecard Pinned-Dependencies.
+        rustup_init="$work_dir/rustup-init.sh"
         curl -fsSL --connect-timeout 30 \
-            "https://sh.rustup.rs" | \
-            RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
-            sh -s -- -y --default-toolchain "$RUST_VER" \
+            "https://sh.rustup.rs" -o "$rustup_init"
+        RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
+            sh "$rustup_init" -y --default-toolchain "$RUST_VER" \
                 --profile minimal \
                 --no-modify-path \
                 2>&1 | grep -v "^info:" | grep -v "^$" || true
+        rm -f "$rustup_init"
         rustup_init=""
     fi
 

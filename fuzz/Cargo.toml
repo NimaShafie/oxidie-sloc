@@ -1,0 +1,29 @@
+[package]
+name = "oxide-sloc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "fuzz_analyze_text"
+path = "fuzz_targets/fuzz_analyze_text.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_config_parse"
+path = "fuzz_targets/fuzz_config_parse.rs"
+test = false
+doc = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sloc-languages = { path = "../crates/sloc-languages" }
+sloc-config = { path = "../crates/sloc-config" }
+toml = "1.1"
+
+# Prevent this from interfering with workspace dependency resolution.
+[workspace]
