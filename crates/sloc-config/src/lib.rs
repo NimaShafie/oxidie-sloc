@@ -157,10 +157,19 @@ pub struct AnalysisConfig {
     /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_file: Option<PathBuf>,
+    /// Column-width threshold for style "N-col compliant" reporting (default 80).
+    /// Supported values: 80, 100, 120 (others snap to the nearest bucket).
+    /// Files where ≤ 5 % of lines exceed this limit count as compliant.
+    #[serde(default = "default_style_col_threshold")]
+    pub style_col_threshold: u16,
 }
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_style_col_threshold() -> u16 {
+    80
 }
 
 fn default_excluded_directories() -> Vec<String> {
@@ -255,6 +264,7 @@ impl Default for AnalysisConfig {
             count_compiler_directives: true,
             budget: None,
             coverage_file: None,
+            style_col_threshold: 80,
         }
     }
 }

@@ -225,18 +225,21 @@ def runAnalyze() {
                         .replaceAll(/^-|-$/, '') ?: 'project'
     env.SLOC_PROJECT = projectSlug
 
-    def configArg   = (params.CI_PRESET != 'none')
+    def configArg    = (params.CI_PRESET != 'none')
                         ? "--config 'ci/sloc-ci-${params.CI_PRESET}.toml'"
                         : ''
-    def jsonArg     = "--json-out  '${outDir}/result_${projectSlug}.json'"
-    def csvArg      = "--csv-out   '${outDir}/report_${projectSlug}.csv'"
-    def xlsxArg     = "--xlsx-out  '${outDir}/report_${projectSlug}.xlsx'"
-    def htmlArg     = params.GENERATE_HTML       ? "--html-out '${outDir}/report_${projectSlug}.html'" : ''
-    def pdfArg      = params.GENERATE_PDF        ? "--pdf-out  '${outDir}/report_${projectSlug}.pdf'"  : ''
-    def docArg      = params.DOCSTRINGS_AS_CODE  ? '--python-docstrings-as-code'        : ''
-    def symlinkArg  = params.FOLLOW_SYMLINKS     ? '--follow-symlinks'                  : ''
-    def noIgnoreArg = params.NO_IGNORE_FILES     ? '--no-ignore-files'                  : ''
-    def submodArg   = params.SUBMODULE_BREAKDOWN ? '--submodule-breakdown'              : ''
+    def jsonArg      = "--json-out  '${outDir}/result_${projectSlug}.json'"
+    def csvArg       = "--csv-out   '${outDir}/report_${projectSlug}.csv'"
+    def xlsxArg      = "--xlsx-out  '${outDir}/report_${projectSlug}.xlsx'"
+    def htmlArg      = params.GENERATE_HTML       ? "--html-out '${outDir}/report_${projectSlug}.html'" : ''
+    def pdfArg       = params.GENERATE_PDF        ? "--pdf-out  '${outDir}/report_${projectSlug}.pdf'"  : ''
+    def docArg       = params.DOCSTRINGS_AS_CODE  ? '--python-docstrings-as-code'        : ''
+    def symlinkArg   = params.FOLLOW_SYMLINKS     ? '--follow-symlinks'                  : ''
+    def noIgnoreArg  = params.NO_IGNORE_FILES     ? '--no-ignore-files'                  : ''
+    def submodArg    = params.SUBMODULE_BREAKDOWN ? '--submodule-breakdown'              : ''
+    def styleColArg  = (params.STYLE_COL_THRESHOLD?.trim() && params.STYLE_COL_THRESHOLD.trim() != '80')
+                        ? "--style-col-threshold '${params.STYLE_COL_THRESHOLD.trim()}'"
+                        : ''
 
     def includeArgs = params.INCLUDE_GLOBS
         ? params.INCLUDE_GLOBS.tokenize(',').collect { "--include-glob '${it.trim()}'" }.join(' ')
@@ -271,7 +274,7 @@ def runAnalyze() {
             "${BINARY}" analyze "${SCAN_PATH}" \
                 --report-title "${REPORT_TITLE}" \
                 --mixed-line-policy "${MIXED_LINE_POLICY}" \
-                ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg}" + ''' \
+                ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg} ${styleColArg}" + ''' \
                 ''' + "${langArgs} ${includeArgs} ${excludeArgs} ${branchArg}" + ''' \
                 ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + '''
         '''
@@ -395,6 +398,21 @@ def runArchivePublish() {
                 title:       'Line Coverage % Over Time',
                 style:       'line',
                 yaxis:       'Coverage %',
+                numBuilds:   '50',
+                keepRecords: true,
+                useDescr:    true
+            )
+        }
+        if (fileExists("${env.WORKSPACE}/${params.OUTPUT_SUBDIR}/style_analysis.csv")) {
+            plot(
+                csvFileName: 'sloc-trend-style.csv',
+                csvSeries:   [[file: "${params.OUTPUT_SUBDIR}/style_analysis.csv",
+                               url: '', displayTableFlag: false,
+                               inclusionFlag: 'OFF', exclusionValues: '']],
+                group:       'SLOC Trends',
+                title:       'Code Style N-Col Compliance % Over Time',
+                style:       'line',
+                yaxis:       'Compliance %',
                 numBuilds:   '50',
                 keepRecords: true,
                 useDescr:    true
@@ -590,6 +608,13 @@ def runPostSuccess() {
                    "${fmtN(t.comment_lines)} cmts · " +
                    "${fmtN(t.blank_lines)} blank · " +
                    "${fmtN(t.files_analyzed)} files | ${params.SCAN_PATH}"
+
+        def ss = result.style_summary
+        if (ss) {
+            def colThreshold = ss.col_threshold ?: 80
+            def colPct       = ss.line_col_compliant_pct ?: 0
+            desc += " · Style: ${ss.common_indent_style} · ${colPct}% ${colThreshold}-col"
+        }
 
         def junitPath = "${outDir}/test-results/junit.xml"
         if (fileExists(junitPath)) {

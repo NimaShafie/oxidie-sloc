@@ -235,6 +235,11 @@ struct AnalyzeArgs {
     /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[arg(long, value_name = "FILE")]
     coverage_file: Option<PathBuf>,
+
+    /// Column-width threshold for style N-col compliance reporting (default: 80).
+    /// Supported values: 80, 100, 120 — controls the "N-Col Compliant" chip in reports.
+    #[arg(long, value_name = "N")]
+    style_col_threshold: Option<u16>,
 }
 
 // ── report ────────────────────────────────────────────────────────────────────
@@ -1503,6 +1508,9 @@ fn apply_analysis_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
     if let Some(cov) = &args.coverage_file {
         config.analysis.coverage_file = Some(cov.clone());
     }
+    if let Some(threshold) = args.style_col_threshold {
+        config.analysis.style_col_threshold = threshold;
+    }
 }
 
 // ── terminal output ───────────────────────────────────────────────────────────
@@ -1518,6 +1526,13 @@ fn print_plain_summary(run: &AnalysisRun) {
         "mixed_lines_separate={}",
         run.summary_totals.mixed_lines_separate
     );
+    if let Some(ref ss) = run.style_summary {
+        println!("style_files_analyzed={}", ss.files_analyzed);
+        println!("style_common_indent={}", ss.common_indent_style);
+        println!("style_col_threshold={}", ss.col_threshold);
+        println!("style_col_compliant_pct={}", ss.line_col_compliant_pct);
+        println!("style_language_groups={}", ss.by_language.len());
+    }
 }
 
 fn print_totals_header(run: &AnalysisRun, col: bool) {
@@ -1613,6 +1628,40 @@ fn print_per_file_table(run: &AnalysisRun, col: bool) {
     }
 }
 
+fn print_style_summary(run: &AnalysisRun, col: bool) {
+    let Some(ref ss) = run.style_summary else {
+        return;
+    };
+    println!();
+    println!("{}", paint!(col, "1", "Code Style Analysis"));
+    println!(
+        "  {}  {}  |  {}  {}  |  {}  {}  |  {}  {}",
+        paint!(col, "36", "Files:"),
+        paint!(col, "32", ss.files_analyzed),
+        paint!(col, "36", "Groups:"),
+        ss.by_language.len(),
+        paint!(col, "36", "Indent:"),
+        ss.common_indent_style,
+        paint!(col, "36", format!("{}-Col:", ss.col_threshold)),
+        paint!(col, "32;1", format!("{}%", ss.line_col_compliant_pct)),
+    );
+    for grp in &ss.by_language {
+        let guides: String = grp
+            .guide_avg_scores
+            .iter()
+            .take(3)
+            .map(|(name, score)| format!("{name} {score}%"))
+            .collect::<Vec<_>>()
+            .join("  |  ");
+        println!(
+            "  {} ({} files): {}",
+            paint!(col, "33", &grp.language_family),
+            grp.files_count,
+            guides,
+        );
+    }
+}
+
 fn print_submodule_table(run: &AnalysisRun, col: bool) {
     if run.submodule_summaries.is_empty() {
         return;
@@ -1644,6 +1693,7 @@ fn print_summary(run: &AnalysisRun, per_file: bool, plain: bool) {
         print_per_file_table(run, col);
     }
     print_submodule_table(run, col);
+    print_style_summary(run, col);
 
     if !run.warnings.is_empty() {
         println!();

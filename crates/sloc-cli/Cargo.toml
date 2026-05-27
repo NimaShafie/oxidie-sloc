@@ -17,6 +17,15 @@ categories.workspace = true
 name = "oxide-sloc"
 path = "src/main.rs"
 
+[lib]
+name = "oxide_sloc"
+path = "src/lib.rs"
+
+# docs.rs builds on Linux without a display server or GTK; disable native-dialog
+# so the rfd dependency (which requires GTK3) is not compiled during doc builds.
+[package.metadata.docs.rs]
+no-default-features = true
+
 [features]
 default = ["native-dialog"]
 native-dialog = ["sloc-web/native-dialog"]
