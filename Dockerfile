@@ -3,9 +3,15 @@
 # Debian bookworm (glibc 2.36). rust:slim can resolve to a trixie-based digest
 # (glibc 2.39) while the runtime stage below is still bookworm-slim, causing
 # "GLIBC_2.39 not found" at container startup.
-FROM rust:1.95-slim-bookworm AS builder
+# Digest pinned to prevent silent base-image substitution.
+# To update: docker pull rust:1.95-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' rust:1.95-slim-bookworm
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Upgrade base packages first to pull in any OS-level security fixes
+# that have landed since the image was published.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     pkg-config \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -40,7 +46,7 @@ RUN cargo build --release -p oxide-sloc --no-default-features
 # Stage 2: minimal runtime image
 # Pin to a specific digest to prevent silent base-image substitution.
 # To update: docker pull debian:bookworm-slim && docker inspect --format '{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 
 # Install Chromium for PDF export (headless).
 # For a fully air-gapped Docker host, build this layer from a pre-populated

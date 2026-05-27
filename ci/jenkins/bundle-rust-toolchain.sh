@@ -40,11 +40,15 @@ export CARGO_HOME="${TEMP_DIR}/cargo"
 export RUSTUP_HOME="${TEMP_DIR}/rustup"
 
 echo "==> Installing Rust ${TOOLCHAIN} toolchain for bundling..."
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y \
-        --default-toolchain "${TOOLCHAIN}" \
-        --component rustfmt clippy \
-        --no-modify-path
+# Download rustup-init to a file before executing — avoids the curl|sh pattern
+# flagged by OpenSSF Scorecard Pinned-Dependencies.
+RUSTUP_INIT="${TEMP_DIR}/rustup-init.sh"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "${RUSTUP_INIT}"
+sh "${RUSTUP_INIT}" -y \
+    --default-toolchain "${TOOLCHAIN}" \
+    --component rustfmt clippy \
+    --no-modify-path
+rm -f "${RUSTUP_INIT}"
 
 # Strip the cargo registry and git checkout cache — those are covered by
 # vendor.tar.xz at build time and would bloat the bundle unnecessarily.

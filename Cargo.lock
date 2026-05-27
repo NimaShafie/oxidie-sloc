@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "oxide-sloc"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "base64",
@@ -1960,15 +1960,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "rustls-pki-types"
 version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2163,7 +2154,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sloc-config"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "clap",
@@ -2173,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-core"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2190,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-git"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2204,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-languages"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "serde",
  "tree-sitter",
@@ -2214,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-mcp"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -2227,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-report"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "askama",
@@ -2240,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-web"
-version = "1.5.62"
+version = "1.5.63"
 dependencies = [
  "anyhow",
  "askama",
@@ -2254,7 +2245,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "rustls",
- "rustls-pemfile",
+ "rustls-pki-types",
  "secrecy",
  "serde",
  "serde_json",

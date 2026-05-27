@@ -44,11 +44,15 @@ mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}"
 if rustup toolchain list 2>/dev/null | grep -q "${TOOLCHAIN}"; then
     echo "Toolchain ${TOOLCHAIN} already present — nothing to do."
 else
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y \
-            --default-toolchain "${TOOLCHAIN}" \
-            --no-modify-path \
-            --component rustfmt clippy llvm-tools
+    # Download rustup-init to a file before executing — avoids the curl|sh pattern
+    # flagged by OpenSSF Scorecard Pinned-Dependencies.
+    _RUSTUP_INIT="$(mktemp)"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "${_RUSTUP_INIT}"
+    sh "${_RUSTUP_INIT}" -y \
+        --default-toolchain "${TOOLCHAIN}" \
+        --no-modify-path \
+        --component rustfmt clippy llvm-tools
+    rm -f "${_RUSTUP_INIT}"
 fi
 
 JENKINS_HOME_GUESS="$(getent passwd jenkins 2>/dev/null | cut -d: -f6 || echo '/var/lib/jenkins')"
