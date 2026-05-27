@@ -1543,6 +1543,170 @@ fn pdf_render_per_file_pages(
     }
 }
 
+/// Render the Code Style Analysis section onto page 1 of the printpdf PDF.
+///
+/// Draws below the metric tables: a section header, four summary chips, and a
+/// per-language mini-table showing the top style guide and N-col compliance.
+/// Returns the y coordinate of the bottom of the rendered section.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f32) -> f32 {
+    use printpdf::{Color, Mm, Rgb};
+    const HDR_H: f32 = 5.5;
+    const CHIP_H: f32 = 11.0;
+    const CHIP_GAP: f32 = 4.0;
+    const ROW_H: f32 = 5.0;
+    const TBL_HDR_H: f32 = 5.0;
+    const GAP: f32 = 2.5;
+
+    let usable_w = ctx.w - 2.0 * ctx.margin;
+    let chip_w = (usable_w - 3.0 * CHIP_GAP) / 4.0;
+
+    // ── section header bar ────────────────────────────────────────────────────
+    pdf_fill_rect(
+        ctx.layer,
+        ctx.margin,
+        section_top - HDR_H,
+        usable_w,
+        HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        "CODE STYLE ANALYSIS",
+        7.0,
+        Mm(ctx.margin + 2.0),
+        Mm(section_top - HDR_H + 1.5),
+        ctx.font_bold,
+    );
+    let col_label = format!("{}-Col", ss.col_threshold);
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.85, 0.65, 0.35, None)));
+    ctx.layer.use_text(
+        "Lexical heuristics",
+        5.5,
+        Mm(ctx.w - ctx.margin - 26.0),
+        Mm(section_top - HDR_H + 1.5),
+        ctx.font_reg,
+    );
+
+    // ── summary chips ─────────────────────────────────────────────────────────
+    let chips_bot = section_top - HDR_H - GAP - CHIP_H;
+    let chip_data: [(&str, String); 4] = [
+        ("Files Analyzed", ss.files_analyzed.to_string()),
+        ("Language Groups", ss.by_language.len().to_string()),
+        ("Common Indent", ss.common_indent_style.clone()),
+        (&col_label, format!("{}%", ss.line_col_compliant_pct)),
+    ];
+    for (i, (label, value)) in chip_data.iter().enumerate() {
+        let cx = (i as f32).mul_add(chip_w + CHIP_GAP, ctx.margin);
+        pdf_fill_rect(
+            ctx.layer,
+            cx,
+            chips_bot,
+            chip_w,
+            CHIP_H,
+            Rgb::new(0.945, 0.925, 0.90, None),
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+        ctx.layer.use_text(
+            pdf_trunc(value, 16),
+            10.0,
+            Mm(cx + 3.0),
+            Mm(chips_bot + 5.5),
+            ctx.font_bold,
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+        ctx.layer.use_text(
+            pdf_safe_str(label),
+            5.5,
+            Mm(cx + 3.0),
+            Mm(chips_bot + 1.5),
+            ctx.font_reg,
+        );
+    }
+
+    // ── per-language mini-table ───────────────────────────────────────────────
+    if ss.by_language.is_empty() {
+        return chips_bot;
+    }
+    let tbl_top = chips_bot - GAP;
+
+    // Column widths (fractions of usable_w): Family | Files | Top Guide | Score | N-Col
+    let col_w = [0.28_f32, 0.08, 0.36, 0.14, 0.14];
+    let col_x: Vec<f32> = col_w
+        .iter()
+        .scan(ctx.margin, |acc, &w| {
+            let x = *acc;
+            *acc += w * usable_w;
+            Some(x)
+        })
+        .collect();
+    let headers = ["Language Family", "Files", "Top Guide", "Score", &col_label];
+
+    pdf_fill_rect(
+        ctx.layer,
+        ctx.margin,
+        tbl_top - TBL_HDR_H,
+        usable_w,
+        TBL_HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    for (hi, hdr) in headers.iter().enumerate() {
+        ctx.layer.use_text(
+            pdf_safe_str(hdr),
+            5.5,
+            Mm(col_x[hi] + 2.0),
+            Mm(tbl_top - TBL_HDR_H + 1.5),
+            ctx.font_bold,
+        );
+    }
+
+    let mut row_y = tbl_top - TBL_HDR_H;
+    for (ri, grp) in ss.by_language.iter().take(5).enumerate() {
+        let ry = row_y - ROW_H;
+        let bg = if ri % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(ctx.layer, ctx.margin, ry, usable_w, ROW_H, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        let cells = [
+            pdf_trunc(&grp.language_family, 26),
+            grp.files_count.to_string(),
+            pdf_trunc(&grp.dominant_guide, 28),
+            format!("{}%", grp.dominant_score_pct),
+            format!("{}%", grp.line_col_compliant_pct),
+        ];
+        for (ci, cell) in cells.iter().enumerate() {
+            let is_score = ci == 3 || ci == 4;
+            if is_score && cell != "--" {
+                ctx.layer
+                    .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+            } else {
+                ctx.layer
+                    .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+            }
+            ctx.layer.use_text(
+                pdf_safe_str(cell),
+                6.0,
+                Mm(col_x[ci] + 2.0),
+                Mm(ry + 1.5),
+                ctx.font_reg,
+            );
+        }
+        row_y = ry;
+    }
+
+    row_y
+}
+
 /// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
 ///
 /// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
@@ -1610,7 +1774,16 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     let roots_text_y = pdf_render_page1_header(&ctx, run, &ts, &title, H, HDR_H, banner);
     let row2_bot = pdf_render_summary_chips(&ctx, run, roots_text_y);
     let info_y = pdf_render_info_lines(&ctx, run, row2_bot);
-    pdf_render_metric_tables(&ctx, run, info_y - 4.0);
+    let tbl_top = info_y - 4.0;
+    pdf_render_metric_tables(&ctx, run, tbl_top);
+    // Style analysis section — rendered below the metric tables when data is available.
+    // The metric tables occupy ~64.5 mm below tbl_top; leave 4 mm clearance before drawing.
+    if let Some(ref ss) = run.style_summary {
+        let style_top = tbl_top - 64.5 - 4.0;
+        if style_top > FOOTER_H + 12.0 {
+            pdf_render_style_section(&ctx, ss, style_top);
+        }
+    }
     pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
 
     if !run.per_file_records.is_empty() {
@@ -3005,33 +3178,47 @@ struct WarningOpportunityRow {
     body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(40,21,10,.9) 0%,rgba(28,13,4,.94) 100%);border-color:rgba(200,120,50,.13);box-shadow:0 0 0 1px rgba(255,200,140,.04) inset,0 8px 72px rgba(0,0,0,.48),0 2px 16px rgba(0,0,0,.32);}
     body.dark-theme .rpt-spinner-track{border-color:rgba(196,92,16,.16);}
     body.dark-theme .rpt-load-divider{background:linear-gradient(90deg,transparent,rgba(196,92,16,.22),transparent);}
-    /* ── C++ Style Analysis section ── */
+    /* ── Code Style Analysis section ── */
     .style-guide-grid{display:grid;gap:10px;}
-    .style-guide-row{display:grid;grid-template-columns:90px 1fr 44px;align-items:center;gap:10px;}
+    .style-guide-row{display:grid;grid-template-columns:140px 1fr 52px;align-items:center;gap:10px;padding:6px 8px;border-radius:8px;cursor:default;position:relative;transition:transform .18s ease,box-shadow .18s ease,background .18s ease;}
+    .style-guide-row:hover{transform:translateY(-2px);box-shadow:0 6px 22px rgba(77,44,20,0.18);background:var(--surface-2);}
     .style-guide-label{font-size:12px;font-weight:800;color:var(--text);text-align:right;white-space:nowrap;}
-    .style-guide-track{background:var(--surface-3);border-radius:6px;height:20px;overflow:hidden;position:relative;}
-    .style-guide-fill{height:100%;border-radius:6px;background:linear-gradient(90deg,var(--oxide),var(--oxide-2));transition:width .5s ease;position:relative;}
+    .style-guide-track{background:var(--surface-3);border-radius:6px;height:20px;overflow:hidden;position:relative;box-shadow:inset 0 1px 3px rgba(0,0,0,.08);}
+    .style-guide-fill{height:100%;border-radius:6px;background:linear-gradient(90deg,var(--oxide),var(--oxide-2));transition:width .65s cubic-bezier(.25,.46,.45,.94),filter .18s ease;position:relative;}
     .style-guide-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,rgba(255,255,255,.18) 0%,rgba(255,255,255,.04) 100%);border-radius:6px;}
+    .style-guide-row:hover .style-guide-fill{filter:brightness(1.12);}
     .style-guide-score{font-size:12px;font-weight:800;color:var(--oxide);text-align:right;white-space:nowrap;}
     .style-guide-desc{font-size:10px;color:var(--muted);margin-top:2px;grid-column:2/3;}
+    .style-bar-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 14px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .18s ease;z-index:300;box-shadow:0 4px 18px rgba(0,0,0,.24);}
+    .style-bar-tip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--text);}
+    .style-guide-row:hover .style-bar-tip{opacity:1;}
     .style-metrics-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0 0;}
     @media(max-width:800px){.style-metrics-strip{grid-template-columns:repeat(2,1fr);}}
-    .style-chip{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:center;}
+    .style-chip{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:center;cursor:default;position:relative;transition:transform .2s ease,box-shadow .2s ease;}
+    .style-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}
     .style-chip-val{font-size:18px;font-weight:900;color:var(--oxide);}
     .style-chip-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:3px;}
+    .style-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;}
+    .style-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
+    .style-chip:hover .style-chip-tip{opacity:1;}
     .style-file-table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;}
-    .style-file-table th{background:var(--surface-3);padding:7px 10px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);text-align:left;border-bottom:2px solid var(--line);}
+    .style-file-table th{background:var(--surface-3);padding:7px 10px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);text-align:left;border-bottom:2px solid var(--line);cursor:pointer;user-select:none;white-space:nowrap;position:relative;}
+    .style-file-table th:hover{background:var(--surface-2);color:var(--text);}
+    .style-sort-ind{display:inline-block;margin-left:4px;font-size:9px;opacity:.4;vertical-align:middle;}
+    .style-file-table th.sft-sort-asc .style-sort-ind,.style-file-table th.sft-sort-desc .style-sort-ind{opacity:1;color:var(--oxide);}
     .style-file-table td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .style-file-table tr:hover td{background:var(--surface-2);}
     .style-score-bar{display:inline-block;width:48px;height:8px;border-radius:4px;background:var(--surface-3);vertical-align:middle;position:relative;margin-right:4px;}
     .style-score-fill{position:absolute;left:0;top:0;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--oxide),var(--oxide-2));}
-    .style-badge{display:inline-block;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700;background:var(--surface-3);color:var(--oxide);border:1px solid var(--line);}
+    .style-badge{display:inline-block;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700;background:var(--surface-3);color:var(--oxide);border:1px solid var(--line);text-decoration:none;transition:background .15s,transform .15s,box-shadow .15s;}
+    a.style-badge:hover{background:var(--oxide);color:#fff !important;transform:translateY(-1px);box-shadow:0 3px 10px rgba(77,44,20,.24);}
     .style-heuristic-note{background:var(--info-bg);color:var(--info-text);border-radius:8px;padding:8px 14px;font-size:11px;font-weight:600;margin-top:12px;}
     .style-lang-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
     .style-lang-tab{padding:4px 12px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:11px;font-weight:700;cursor:pointer;color:var(--text);transition:background .15s;}
     .style-lang-tab:hover{background:var(--surface-2);}
     .style-lang-tab.active{background:var(--oxide);color:#fff;border-color:var(--oxide);}
     .style-sig-chip{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line);margin-right:3px;}
+    .style-sig-more{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:transparent;color:var(--oxide);border:1px solid var(--oxide);margin-right:3px;font-weight:700;cursor:default;}
     body.dark-theme .style-guide-track{background:var(--surface-3);}
     body.dark-theme .style-chip{background:var(--surface-2);}
     body.dark-theme .style-file-table th{background:var(--surface-3);}
@@ -3458,18 +3645,22 @@ struct WarningOpportunityRow {
             <div class="style-chip">
               <div class="style-chip-val">{{ ss.files_analyzed }}</div>
               <div class="style-chip-label">Files Analyzed</div>
+              <div class="style-chip-tip">Total files with style data</div>
             </div>
             <div class="style-chip">
               <div class="style-chip-val">{{ style_lang_count }}</div>
               <div class="style-chip-label">Language Groups</div>
+              <div class="style-chip-tip">Distinct language families detected</div>
             </div>
             <div class="style-chip">
               <div class="style-chip-val">{{ ss.common_indent_style }}</div>
               <div class="style-chip-label">Common Indent</div>
+              <div class="style-chip-tip">Most prevalent indentation across all files</div>
             </div>
             <div class="style-chip">
-              <div class="style-chip-val">{{ ss.line80_compliant_pct }}%</div>
-              <div class="style-chip-label">80-Col Compliant</div>
+              <div class="style-chip-val">{{ ss.line_col_compliant_pct }}%</div>
+              <div class="style-chip-label">{{ ss.col_threshold }}-Col Compliant</div>
+              <div class="style-chip-tip">Files where &le;5% of lines exceed {{ ss.col_threshold }} chars</div>
             </div>
           </div>
           <!-- Language selector tab strip -->
@@ -3485,12 +3676,12 @@ struct WarningOpportunityRow {
               <table class="style-file-table" id="style-file-table">
                 <thead>
                   <tr>
-                    <th style="width:35%;">File</th>
-                    <th style="width:10%;">Language</th>
-                    <th style="width:12%;">Indent</th>
-                    <th style="width:20%;">Best Match Guide</th>
-                    <th style="width:10%;">Score</th>
-                    <th style="width:13%;">Signals</th>
+                    <th data-sort-key="path" style="width:35%;" title="File path relative to the scanned root. Click to sort alphabetically.">File <span class="style-sort-ind">&#9662;</span></th>
+                    <th data-sort-key="lang" style="width:10%;" title="Programming language detected for this file. Click to sort.">Language <span class="style-sort-ind">&#9662;</span></th>
+                    <th data-sort-key="indent" style="width:12%;" title="Dominant indentation style detected: Tabs, 2-Space, 4-Space, 8-Space, Mixed, or Unknown. Click to sort.">Indent <span class="style-sort-ind">&#9662;</span></th>
+                    <th data-sort-key="guide" style="width:20%;" title="Style guide with the highest lexical-adherence score for this file. Click a badge to open the official guide documentation. Click header to sort.">Best Match Guide <span class="style-sort-ind">&#9662;</span></th>
+                    <th data-sort-key="score" style="width:10%;" title="Adherence score (0-100%) for the best-matching style guide. Higher = closer match to that guide's conventions. Lexical heuristic only — not a full parse. Click to sort.">Score <span class="style-sort-ind">&#9662;</span></th>
+                    <th style="width:13%;" title="Language-specific style signals detected in this file (e.g. quote style, indentation, naming conventions). Hover a row's cell to see the full signal list as a tooltip.">Signals</th>
                   </tr>
                 </thead>
                 <tbody id="style-file-tbody">
@@ -5790,7 +5981,101 @@ struct WarningOpportunityRow {
     var CHART_DATA = {{ style_chart_json|safe }};
     var FILE_DATA  = {{ style_file_json|safe }};
     var activeLang = CHART_DATA.length ? CHART_DATA[0].family : '';
-    function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+    var sftSortKey = '';
+    var sftSortDir = 1;
+    function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+    // Official style guide URLs — covers every guide produced by the language analysers
+    var GUIDE_URLS = {
+      'PEP 8':'https://peps.python.org/pep-0008/',
+      'PEP 8 (99-col)':'https://peps.python.org/pep-0008/',
+      'Black':'https://black.readthedocs.io/en/stable/the_black_code_style/current_style.html',
+      'Google Python':'https://google.github.io/styleguide/pyguide.html',
+      'Effective Go':'https://go.dev/doc/effective_go',
+      'Uber Go':'https://github.com/uber-go/guide/blob/master/style.md',
+      'Google Go':'https://google.github.io/styleguide/go/',
+      'LLVM':'https://llvm.org/docs/CodingStandards.html',
+      'Google':'https://google.github.io/styleguide/cppguide.html',
+      'Mozilla':'https://firefox-source-docs.mozilla.org/code-quality/coding-style/',
+      'Microsoft':'https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/coding-style/coding-conventions',
+      'WebKit':'https://webkit.org/code-style-guidelines/',
+      'rustfmt defaults':'https://doc.rust-lang.org/rustfmt/',
+      'Mozilla Rust':'https://firefox-source-docs.mozilla.org/code-quality/coding-style/coding-style-rust.html',
+      'Rust API Guidelines':'https://rust-lang.github.io/api-guidelines/',
+      'Relaxed (120-col)':'https://doc.rust-lang.org/rustfmt/',
+      'Airbnb':'https://airbnb.io/javascript/',
+      'Google JS':'https://google.github.io/styleguide/jsguide.html',
+      'Standard.js':'https://standardjs.com/',
+      'Prettier':'https://prettier.io/docs/en/options.html',
+      'Airbnb TS':'https://airbnb.io/javascript/',
+      'Google TS':'https://google.github.io/styleguide/tsguide.html',
+      'Angular':'https://angular.dev/style-guide',
+      'Microsoft TS':'https://github.com/Microsoft/TypeScript/wiki/Coding-guidelines',
+      'Google Java':'https://google.github.io/styleguide/javaguide.html',
+      'Oracle/Sun':'https://www.oracle.com/java/technologies/javase/codeconventions-contents.html',
+      'Spring':'https://github.com/spring-projects/spring-framework/wiki/Code-Style',
+      'JetBrains':'https://www.jetbrains.com/help/idea/code-style.html',
+      'Android':'https://source.android.com/docs/setup/contribute/code-style',
+      'Google Kotlin':'https://developer.android.com/kotlin/style-guide',
+      'Apache Groovy':'https://groovy-lang.org/style-guide.html',
+      'Gradle DSL':'https://docs.gradle.org/current/userguide/groovy_build_script_primer.html',
+      'Scala Style Guide':'https://docs.scala-lang.org/style/',
+      'Lightbend':'https://docs.scala-lang.org/style/',
+      'Spark':'https://spark.apache.org/contributing.html',
+      'RuboCop':'https://docs.rubocop.org/rubocop/',
+      'Airbnb Ruby':'https://github.com/airbnb/ruby',
+      'Standard Ruby':'https://github.com/standardrb/standard',
+      'Microsoft .NET':'https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/coding-style/coding-conventions',
+      'Google C#':'https://google.github.io/styleguide/csharp-style.html',
+      'StyleCop':'https://github.com/DotNetAnalyzers/StyleCopAnalyzers',
+      'Microsoft F#':'https://learn.microsoft.com/en-us/dotnet/fsharp/style-guide/formatting',
+      'FSharp.Formatting':'https://fsprojects.github.io/FSharp.Formatting/'
+    };
+    // Human-readable descriptions for each guide shown in bar tooltips
+    var GUIDE_DESC = {
+      'PEP 8':'4-space | 79-col | Python style standard',
+      'PEP 8 (99-col)':'4-space | 99-col | relaxed line limit',
+      'Black':'4-space | 88-col | double quotes enforced',
+      'Google Python':'4-space | 80-col | double quotes preferred',
+      'Effective Go':'tabs | ~80-col | gofmt standard',
+      'Uber Go':'tabs | 120-col max',
+      'Google Go':'tabs | 80-col',
+      'LLVM':'2-space | 80-col | C/C++ LLVM project style',
+      'Google':'2-space | 80-col | Google C++ style',
+      'Mozilla':'4-space | 80-col | Firefox codebase style',
+      'Microsoft':'4-space | Allman braces | C++ Win32 style',
+      'WebKit':'4-space | 80-col | WebKit engine style',
+      'rustfmt defaults':'4-space | 100-col | official Rust formatter',
+      'Mozilla Rust':'4-space | 100-col | Firefox Rust style',
+      'Rust API Guidelines':'4-space | naming + docs conventions',
+      'Relaxed (120-col)':'4-space | 120-col | relaxed line limit',
+      'Airbnb':'2-space | single quotes | no semicolons opt',
+      'Google JS':'2-space | 80-col | single quotes',
+      'Standard.js':'2-space | no semicolons | single quotes',
+      'Prettier':'2-space | 80-col | double quotes | semicolons',
+      'Airbnb TS':'2-space | single quotes | TypeScript variant',
+      'Google TS':'2-space | 80-col | single quotes | TypeScript',
+      'Angular':'2-space | Angular team TypeScript conventions',
+      'Microsoft TS':'4-space | TypeScript compiler team style',
+      'Google Java':'2-space | 100-col | Google Java guide',
+      'Oracle/Sun':'4-space | 80-col | original Java conventions',
+      'Spring':'4-space | Spring Framework code style',
+      'JetBrains':'4-space | IntelliJ default Java style',
+      'Android':'4-space | 100-col | AOSP Java style',
+      'Google Kotlin':'4-space | 100-col | Android Kotlin style',
+      'Apache Groovy':'4-space | Apache Groovy style',
+      'Gradle DSL':'4-space | Gradle build script conventions',
+      'Scala Style Guide':'2-space | 100-col | official Scala style',
+      'Lightbend':'2-space | Lightbend/Akka Scala style',
+      'Spark':'2-space | Apache Spark Scala style',
+      'RuboCop':'2-space | 120-col | community Ruby style',
+      'Airbnb Ruby':'2-space | 80-col | Airbnb Ruby guide',
+      'Standard Ruby':'2-space | 80-col | StandardRB formatter',
+      'Microsoft .NET':'4-space | Allman braces | .NET C# style',
+      'Google C#':'2-space | Google C# style guide',
+      'StyleCop':'4-space | StyleCop analyzer rules',
+      'Microsoft F#':'4-space | official F# formatting guide',
+      'FSharp.Formatting':'4-space | FSharp.Formatting conventions'
+    };
     function renderBars(family){
       var wrap=document.getElementById('style-guide-bars');
       if(!wrap)return;
@@ -5801,6 +6086,10 @@ struct WarningOpportunityRow {
       grp.guides.forEach(function(d){
         var isTop=(d.guide===grp.dominant);
         var row=document.createElement('div');row.className='style-guide-row';
+        // Hover tooltip showing guide name + score + description
+        var tip=document.createElement('div');tip.className='style-bar-tip';
+        var desc=GUIDE_DESC[d.guide]||'';
+        tip.textContent=d.guide+': '+d.score+'%'+(desc?' · '+desc:'');
         var lbl=document.createElement('div');lbl.className='style-guide-label';
         lbl.textContent=d.guide;
         if(isTop)lbl.style.color='var(--oxide)';
@@ -5811,6 +6100,7 @@ struct WarningOpportunityRow {
         pct.textContent=d.score+'%';
         if(isTop)pct.style.color='var(--oxide)';
         track.appendChild(fill);
+        row.appendChild(tip);
         row.appendChild(lbl);row.appendChild(track);row.appendChild(pct);
         wrap.appendChild(row);
         setTimeout(function(f,s){return function(){f.style.width=s+'%';};}(fill,d.score),60);
@@ -5834,31 +6124,79 @@ struct WarningOpportunityRow {
       });
       renderBars(activeLang);
     }
-    function initStyleTable(){
+    function buildGuideHtml(guide){
+      if(!guide||guide==='—'||guide==='Unknown')return'<span style="color:var(--muted);">—</span>';
+      var url=GUIDE_URLS[guide];
+      var desc=GUIDE_DESC[guide]||'';
+      var tipText='Open official '+guide+' documentation'+(desc?' · '+desc:'');
+      if(url){return'<a href="'+escH(url)+'" target="_blank" rel="noopener" class="style-badge" title="'+escH(tipText)+'">'+escH(guide)+'</a>';}
+      return'<span class="style-badge" title="'+escH(desc)+'">'+escH(guide)+'</span>';
+    }
+    function buildSigsHtml(sigs,allTip){
+      if(!sigs||!sigs.length)return'<span style="color:var(--muted);">—</span>';
+      var html='';
+      var visible=sigs.slice(0,2);
+      var rest=sigs.slice(2);
+      visible.forEach(function(s){html+='<span class="style-sig-chip">'+escH(s.v)+'</span>';});
+      if(rest.length){html+='<span class="style-sig-more" title="'+escH(allTip)+'">'+'\u22EF'+' '+rest.length+' more</span>';}
+      return html;
+    }
+    var sftRows=[];
+    function renderSftTable(){
       var tbody=document.getElementById('style-file-tbody');
       if(!tbody)return;
-      if(!FILE_DATA.length){
-        tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
-        return;
+      var sorted=sftRows.slice();
+      if(sftSortKey){
+        sorted.sort(function(a,b){
+          if(sftSortKey==='score'){var av=a.score||0,bv=b.score||0;return sftSortDir*(av-bv);}
+          var av=String(a[sftSortKey]||'').toLowerCase(),bv=String(b[sftSortKey]||'').toLowerCase();
+          return av<bv?-1*sftSortDir:av>bv?1*sftSortDir:0;
+        });
       }
       var html='';
-      FILE_DATA.forEach(function(f){
+      sorted.forEach(function(f){
         var barW=Math.round(f.score);
-        var badge=f.guide&&f.guide!=='Unknown'?'<span class="style-badge">'+escH(f.guide)+'</span>':'<span style="color:var(--muted);">—</span>';
-        var sigHtml='';
-        if(f.signals&&f.signals.length){
-          sigHtml=f.signals.map(function(s){return'<span class="style-sig-chip" title="'+escH(s.k)+'">'+escH(s.v)+'</span>';}).join(' ');
-        }
+        var guide=f.guide&&f.guide!=='Unknown'?f.guide:'';
+        var badge=guide?buildGuideHtml(guide):'<span style="color:var(--muted);">—</span>';
+        var allSigTip=f.signals?f.signals.map(function(s){return s.k+': '+s.v;}).join('\n'):'';
+        var sigHtml=buildSigsHtml(f.signals,allSigTip);
         html+='<tr>'
           +'<td title="'+escH(f.path)+'">'+escH(f.path.replace(/^.*[\/\\]/,''))+'</td>'
           +'<td>'+escH(f.lang)+'</td>'
           +'<td>'+escH(f.indent)+'</td>'
           +'<td>'+badge+'</td>'
           +'<td><span class="style-score-bar"><span class="style-score-fill" style="width:'+barW+'%"></span></span>'+f.score+'%</td>'
-          +'<td>'+sigHtml+'</td>'
+          +'<td title="'+escH(allSigTip)+'">'+sigHtml+'</td>'
           +'</tr>';
       });
-      tbody.innerHTML=html;
+      tbody.innerHTML=html||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
+    }
+    function initStyleTable(){
+      if(!FILE_DATA.length){
+        var tb=document.getElementById('style-file-tbody');
+        if(tb)tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
+        return;
+      }
+      sftRows=FILE_DATA.slice();
+      renderSftTable();
+      // Wire up sortable column headers
+      var ths=document.querySelectorAll('#style-file-table thead th[data-sort-key]');
+      for(var i=0;i<ths.length;i++){(function(th){
+        th.style.cursor='pointer';
+        th.addEventListener('click',function(){
+          var key=th.getAttribute('data-sort-key');
+          if(sftSortKey===key){sftSortDir*=-1;}else{sftSortKey=key;sftSortDir=1;}
+          for(var j=0;j<ths.length;j++){
+            ths[j].classList.remove('sft-sort-asc','sft-sort-desc');
+            var ind=ths[j].querySelector('.style-sort-ind');
+            if(ind)ind.textContent='\u25BE';
+          }
+          th.classList.add(sftSortDir===1?'sft-sort-asc':'sft-sort-desc');
+          var tind=th.querySelector('.style-sort-ind');
+          if(tind)tind.textContent=sftSortDir===1?'\u25B2':'\u25BC';
+          renderSftTable();
+        });
+      })(ths[i]);}
     }
     function init(){initTabs();initStyleTable();}
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();

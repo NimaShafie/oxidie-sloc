@@ -1471,6 +1471,7 @@ struct AnalyzeForm {
     continuation_line_policy: Option<ContinuationLinePolicy>,
     blank_in_block_comment_policy: Option<BlankInBlockCommentPolicy>,
     count_compiler_directives: Option<String>,
+    style_col_threshold: Option<String>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -3389,6 +3390,13 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
     }
     config.analysis.count_compiler_directives =
         form.count_compiler_directives.as_deref() != Some("disabled");
+    if let Some(threshold_str) = form.style_col_threshold.as_deref() {
+        if let Ok(t) = threshold_str.parse::<u16>() {
+            if t == 80 || t == 100 || t == 120 {
+                config.analysis.style_col_threshold = t;
+            }
+        }
+    }
     if let Some(cov) = &form.coverage_file {
         let trimmed = cov.trim();
         if !trimmed.is_empty() {
@@ -12307,6 +12315,29 @@ int main() { … }   ← code
                 </div>
               </div>
 
+              <div class="subsection-bar">Code Style Analysis</div>
+              <div class="scan-rules-grid">
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Column-width threshold</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Line-length compliance column</h4>
+                    <select name="style_col_threshold" id="style_col_threshold">
+                      <option value="80" selected>80 columns (PEP 8, Google, gofmt)</option>
+                      <option value="100">100 columns (Uber Go, Google Java)</option>
+                      <option value="120">120 columns (Uber Go max, Kotlin)</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Sets the column width used to compute the <em>N-col Compliant</em> summary chip in the Code Style Analysis section of the report.<br /><strong>A file is compliant</strong> when ≤&thinsp;5&thinsp;% of its lines exceed this limit.<br /><strong>Does not affect SLOC counts</strong> — only the style-adherence reporting. The style guide scores themselves are always computed across all three thresholds (80 / 100 / 120) regardless of this setting.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_col_threshold = 80  (PEP 8, Google, gofmt)
+# style_col_threshold = 100 (Uber Go, Google Java)
+# style_col_threshold = 120 (Uber Go max, Kotlin)
+# Files where ≤ 5% of lines exceed the limit
+# are counted as "N-col compliant" in the report.</div>
+                  </div>
+                </div>
+              </div>
+
               <div class="wizard-actions">
                 <div class="left">
                   <button type="button" class="secondary prev-step" data-prev="1">Back</button>
@@ -12429,7 +12460,7 @@ int main() { … }   ← code
                       <span class="soft-chip">Best for visual review</span>
                       <span class="soft-chip">Embeddable preview</span>
                     </div>
-                    <input type="checkbox" name="generate_html" checked class="hidden artifact-checkbox" />
+                    <input type="checkbox" name="generate_html" id="generate_html" checked class="hidden artifact-checkbox" />
                   </div>
                   <div class="artifact-card selected" data-artifact="pdf" data-review-label="PDF export">
                     <div class="marker">✓</div>
@@ -12440,7 +12471,7 @@ int main() { … }   ← code
                       <span class="soft-chip">Portable snapshot</span>
                       <span class="soft-chip">Good for handoff</span>
                     </div>
-                    <input type="checkbox" name="generate_pdf" checked class="hidden artifact-checkbox" />
+                    <input type="checkbox" name="generate_pdf" id="generate_pdf" checked class="hidden artifact-checkbox" />
                   </div>
                   <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)" style="opacity:0.85;pointer-events:none;">
                     <div style="position:absolute;inset:0;border-radius:inherit;background:radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,0.13) 100%);pointer-events:none;z-index:2;"></div>
@@ -14501,29 +14532,29 @@ int main() { … }   ← code
     (function () {
       var raw = {{ prefill_json|safe }};
       if (!raw || typeof raw !== 'object' || !raw.path) return;
-      function setVal(id, val) { var el = document.getElementById(id); if (el) { el.value = val; if (id === 'output-dir') scrollInputToEnd(el); } }
+      function setVal(id, val) { var el = document.getElementById(id); if (el) { el.value = val; if (id === 'output_dir') scrollInputToEnd(el); } }
       function setChecked(id, v) { var el = document.getElementById(id); if (el) el.checked = v; }
       function setSelect(id, val) { var el = document.getElementById(id); if (el) el.value = val; }
-      setVal('path-input', raw.path || '');
-      setVal('include-globs', raw.include_globs || '');
-      setVal('exclude-globs', raw.exclude_globs || '');
-      setVal('output-dir', raw.output_dir || '');
-      setVal('report-title', raw.report_title || '');
-      if (raw.submodule_breakdown) setChecked('submodule-breakdown', true);
-      setSelect('mixed-line-policy', raw.mixed_line_policy || 'code_only');
-      setChecked('python-docstrings-as-comments', !!raw.python_docstrings_as_comments);
+      setVal('path', raw.path || '');
+      setVal('include_globs', raw.include_globs || '');
+      setVal('exclude_globs', raw.exclude_globs || '');
+      setVal('output_dir', raw.output_dir || '');
+      setVal('report_title', raw.report_title || '');
+      if (raw.submodule_breakdown) setChecked('submodule_breakdown', true);
+      setSelect('mixed_line_policy', raw.mixed_line_policy || 'code_only');
+      setChecked('python_docstrings_as_comments', !!raw.python_docstrings_as_comments);
       setSelect('generated_file_detection', raw.generated_file_detection ? 'enabled' : 'disabled');
       setSelect('minified_file_detection', raw.minified_file_detection ? 'enabled' : 'disabled');
       setSelect('vendor_directory_detection', raw.vendor_directory_detection ? 'enabled' : 'disabled');
-      if (raw.include_lockfiles) setSelect('include-lockfiles', 'enabled');
-      setSelect('binary-file-behavior', raw.binary_file_behavior || 'skip');
-      setChecked('generate-html', raw.generate_html !== false);
-      setChecked('generate-pdf', !!raw.generate_pdf);
+      if (raw.include_lockfiles) setSelect('include_lockfiles', 'enabled');
+      setSelect('binary_file_behavior', raw.binary_file_behavior || 'skip');
+      setChecked('generate_html', raw.generate_html !== false);
+      setChecked('generate_pdf', !!raw.generate_pdf);
       // Trigger dynamic UI updates after pre-fill.
       setTimeout(function () {
-        var pathEl = document.getElementById('path-input');
+        var pathEl = document.getElementById('path');
         if (pathEl) pathEl.dispatchEvent(new Event('input', { bubbles: true }));
-        var policyEl = document.getElementById('mixed-line-policy');
+        var policyEl = document.getElementById('mixed_line_policy');
         if (policyEl) policyEl.dispatchEvent(new Event('change', { bubbles: true }));
       }, 80);
     })();
@@ -15775,6 +15806,11 @@ struct SplashTemplate {
       // Config file loader
       var fileInput = document.getElementById('config-file-input');
       var fileName = document.getElementById('config-file-name');
+      var loadBtn = document.getElementById('load-config-btn');
+      // Wire the visible button to open the hidden file picker.
+      if (loadBtn && fileInput) {
+        loadBtn.addEventListener('click', function () { fileInput.click(); });
+      }
       if (fileInput) {
         fileInput.addEventListener('change', function () {
           var file = fileInput.files && fileInput.files[0];
@@ -16108,7 +16144,7 @@ struct ScanSetupTemplate {
     .r-chart-select:focus{border-color:var(--accent);}
     .r-chart-container{width:100%;overflow:hidden;position:relative;flex:1;}
     .r-chart-container svg{display:block;width:100%;height:auto;}
-    .r-expand-btn{background:none;border:1px solid var(--line);border-radius:6px;cursor:pointer;color:var(--muted);padding:3px 8px;font-size:12px;line-height:1;transition:background .13s,color .13s;flex-shrink:0;}
+    .r-expand-btn{background:none;border:1px solid var(--line);border-radius:6px;cursor:pointer;color:var(--muted);padding:4px 10px;font-size:13px;line-height:1;transition:background .13s,color .13s;flex-shrink:0;white-space:nowrap;}
     .r-expand-btn:hover{background:var(--surface);color:var(--text);}
     .r-chart-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}
     .r-chart-modal{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:960px;width:100%;max-height:85vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}
@@ -16818,7 +16854,7 @@ struct ScanSetupTemplate {
         <div class="r-viz-card">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
             <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Language Composition</p>
-            <button class="r-expand-btn" id="r-composition-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
+            <button class="r-expand-btn" id="r-composition-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="r-chart-tab-bar">
             <button class="r-chart-tab active" data-rcomp="abs">Absolute</button>
@@ -16829,7 +16865,7 @@ struct ScanSetupTemplate {
         <div class="r-viz-card">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
             <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Files vs Code Lines</p>
-            <button class="r-expand-btn" id="r-scatter-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
+            <button class="r-expand-btn" id="r-scatter-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="r-chart-container" id="r-scatter-chart"></div>
         </div>
@@ -16843,7 +16879,7 @@ struct ScanSetupTemplate {
               <option value="variables">Variables</option>
               <option value="imports">Imports</option>
             </select>
-            <button class="r-expand-btn" id="r-semantic-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
+            <button class="r-expand-btn" id="r-semantic-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="r-chart-container" id="r-semantic-chart"></div>
         </div>
@@ -16851,14 +16887,14 @@ struct ScanSetupTemplate {
         <div class="r-viz-card">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
             <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Comment Density</p>
-            <button class="r-expand-btn" id="r-density-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
+            <button class="r-expand-btn" id="r-density-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="r-chart-container" id="r-density-chart"></div>
         </div>
         <div class="r-viz-card">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
             <p class="r-viz-card-title" style="margin:0;flex:1 1 auto;">Avg Lines per File</p>
-            <button class="r-expand-btn" id="r-avglines-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
+            <button class="r-expand-btn" id="r-avglines-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="r-chart-container" id="r-avglines-chart"></div>
         </div>
@@ -16877,7 +16913,7 @@ struct ScanSetupTemplate {
               <option value="asc">Value ↑</option>
               <option value="name">Name A→Z</option>
             </select>
-            <button class="r-expand-btn" id="r-submodule-expand" title="View full chart" aria-label="Expand chart">&#x2922;</button>
+            <button class="r-expand-btn" id="r-submodule-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="r-chart-container" id="r-submodule-chart"></div>
         </div>

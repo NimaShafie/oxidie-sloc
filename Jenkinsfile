@@ -136,6 +136,13 @@ pipeline {
             defaultValue: true,
             description:  'Detect .gitmodules and emit per-submodule stats in the report.'
         )
+        string(
+            name:         'STYLE_COL_THRESHOLD',
+            defaultValue: '80',
+            description:  'Column-width threshold for Code Style N-col compliance reporting. ' +
+                          'Supported values: 80, 100, 120. Controls the "N-Col Compliant" chip ' +
+                          'in HTML/PDF reports and the style_col_compliant_pct metric in CI output.'
+        )
         booleanParam(
             name:         'FOLLOW_SYMLINKS',
             defaultValue: false,

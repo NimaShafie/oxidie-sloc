@@ -45,6 +45,25 @@ def main():
                 w.writerow([name, lang["code_lines"]])
 
         print("SLOC trend CSVs written to:", out)
+
+        style_summary = data.get("style_summary")
+        if style_summary:
+            col_threshold = style_summary.get("col_threshold", 80)
+            with open(os.path.join(out, "style_analysis.csv"), "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    "style_files_analyzed",
+                    f"{col_threshold}_col_compliant_pct",
+                    "style_language_groups",
+                ])
+                w.writerow([
+                    style_summary.get("files_analyzed", 0),
+                    style_summary.get("line_col_compliant_pct", 0),
+                    len(style_summary.get("by_language", [])),
+                ])
+            print(f"Style trend CSV: {col_threshold}-col compliant={style_summary.get('line_col_compliant_pct', 0)}%")
+        else:
+            print("No style_summary in result.json — skipping style CSV")
     else:
         print("result.json not found — skipping SLOC CSV generation")
 
