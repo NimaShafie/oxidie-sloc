@@ -4,7 +4,11 @@
 //! Style-guide analysis for Python.
 //! Guides: PEP 8, Black, Google Python.
 
-use super::common::*;
+use super::common::{
+    classify_indent, count_first_quote, count_over, scan_indent, score_indent_4, score_line80,
+    score_line88, score_line_n, top_guide, weighted_score, StyleAnalysis, StyleGuideScore,
+    StyleSignal,
+};
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
@@ -25,32 +29,16 @@ pub fn analyze(text: &str) -> StyleAnalysis {
 
     for line in &lines {
         total += 1;
-        let trimmed = line.trim();
         scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
-
-        // Quote style: count string literal opens (simple heuristic)
-        for ch in trimmed.chars() {
-            if ch == '\'' {
-                single_q += 1;
-                break;
-            }
-            if ch == '"' {
-                double_q += 1;
-                break;
-            }
-        }
-
-        // Type hints: function signatures like `def f(x: int)` or `-> Type`
-        if (trimmed.starts_with("def ") || trimmed.starts_with("async def "))
-            && (trimmed.contains(": ") || trimmed.contains("->"))
-        {
+        let trimmed = line.trim();
+        count_first_quote(trimmed, &mut single_q, &mut double_q);
+        if has_type_hints(trimmed) {
             type_hints += 1;
         }
     }
 
     let indent = classify_indent(tabs, sp2, sp4);
 
-    // Quote style
     let quote_val = if single_q == 0 && double_q == 0 {
         "\u{2014}"
     } else if double_q as f32 / (single_q + double_q) as f32 >= 0.70 {
@@ -103,33 +91,23 @@ pub fn analyze(text: &str) -> StyleAnalysis {
     }
 }
 
+fn has_type_hints(trimmed: &str) -> bool {
+    (trimmed.starts_with("def ") || trimmed.starts_with("async def "))
+        && (trimmed.contains(": ") || trimmed.contains("->"))
+}
+
 fn score_double_quotes(double: u32, single: u32) -> f32 {
     let t = double + single;
     if t == 0 {
-        return 0.50;
+        0.50
+    } else {
+        double as f32 / t as f32
     }
-    double as f32 / t as f32
-}
-
-fn score_single_quotes(double: u32, single: u32) -> f32 {
-    let t = double + single;
-    if t == 0 {
-        return 0.50;
-    }
-    single as f32 / t as f32
-}
-
-fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
-    scores
-        .iter()
-        .max_by_key(|s| s.score_pct)
-        .map(|s| (s.name.clone(), s.score_pct))
-        .unwrap_or_else(|| ("Unknown".into(), 0))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn score_guides(
-    ind: IndentStyle,
+    ind: super::common::IndentStyle,
     over80: u32,
     over88: u32,
     over99: u32,
@@ -138,62 +116,33 @@ fn score_guides(
     single_q: u32,
     _type_hints: u32,
 ) -> Vec<StyleGuideScore> {
-    let l79 = score_line80(over80, total); // PEP 8 uses 79-col; close enough to 80
+    let l79 = score_line80(over80, total);
     let l88 = score_line88(over88, total);
     let l80 = score_line80(over80, total);
-    let l99 = score_line_n_pub(over99, total);
+    let l99 = score_line_n(over99, total);
     let i4 = score_indent_4(ind);
     let dq = score_double_quotes(double_q, single_q);
-    let _sq = score_single_quotes(double_q, single_q);
-
-    // PEP 8: 4-space, 79-col, either quote style (slight preference for neither)
-    let pep8 = weighted_score(&[(0.40, i4), (0.40, l79), (0.20, 0.70)]);
-
-    // Black: 4-space, 88-col, double quotes (enforced by formatter)
-    let black = weighted_score(&[(0.35, i4), (0.35, l88), (0.30, dq)]);
-
-    // Google Python: 4-space, 80-col, allows both quotes (slight preference for double)
-    let google = weighted_score(&[(0.35, i4), (0.35, l80), (0.20, dq), (0.10, 0.70)]);
-
-    // PEP 8 (relaxed/99-col): 4-space, 99-col, either quote style
-    let pep8_relaxed = weighted_score(&[(0.40, i4), (0.40, l99), (0.20, 0.70)]);
 
     vec![
         StyleGuideScore {
             name: "PEP 8".into(),
             description: "4-space | 79-col | style guide standard".into(),
-            score_pct: pep8,
+            score_pct: weighted_score(&[(0.40, i4), (0.40, l79), (0.20, 0.70)]),
         },
         StyleGuideScore {
             name: "Black".into(),
             description: "4-space | 88-col | double quotes (enforced)".into(),
-            score_pct: black,
+            score_pct: weighted_score(&[(0.35, i4), (0.35, l88), (0.30, dq)]),
         },
         StyleGuideScore {
             name: "Google Python".into(),
             description: "4-space | 80-col | double quotes preferred".into(),
-            score_pct: google,
+            score_pct: weighted_score(&[(0.35, i4), (0.35, l80), (0.20, dq), (0.10, 0.70)]),
         },
         StyleGuideScore {
             name: "PEP 8 (99-col)".into(),
             description: "4-space | 99-col | relaxed line limit variant".into(),
-            score_pct: pep8_relaxed,
+            score_pct: weighted_score(&[(0.40, i4), (0.40, l99), (0.20, 0.70)]),
         },
     ]
-}
-
-fn score_line_n_pub(over: u32, total: u32) -> f32 {
-    if total == 0 {
-        return 1.0;
-    }
-    let p = over as f32 / total as f32;
-    if p < 0.03 {
-        1.00
-    } else if p < 0.10 {
-        0.75
-    } else if p < 0.25 {
-        0.45
-    } else {
-        0.10
-    }
 }

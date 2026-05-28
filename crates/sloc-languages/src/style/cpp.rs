@@ -4,16 +4,11 @@
 //! Style-guide analysis for C, C++, and Objective-C.
 //! Guides: LLVM, Google, Mozilla, Microsoft, WebKit.
 
-use super::common::*;
-
-/// Brace placement.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BraceStyle {
-    Attach,
-    Allman,
-    Mixed,
-    Unknown,
-}
+use super::common::{
+    classify_brace, classify_indent, count_over, scan_indent, score_allman_brace,
+    score_attach_brace, score_indent_2, score_indent_4, score_line100, score_line80, top_guide,
+    weighted_score, BraceStyle, IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+};
 
 /// Pointer/reference declarator alignment.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -160,6 +155,55 @@ fn scan_paren(trimmed: &str, with_sp: &mut u32, no_sp: &mut u32) {
     }
 }
 
+// ─── Pointer-style scanner (cognitive complexity ≤ 15) ────────────────────────
+
+enum PtrToken {
+    Skip2,
+    Skip1,
+    WithType,
+    WithName,
+    Unclassified,
+}
+
+/// Toggle string/char literal state for byte `b` at index `i`; returns true when inside a literal.
+fn step_quote_state(b: u8, i: usize, bytes: &[u8], in_str: &mut bool, in_char: &mut bool) -> bool {
+    let not_escaped = i == 0 || bytes[i - 1] != b'\\';
+    if b == b'"' && !*in_char && not_escaped {
+        *in_str = !*in_str;
+    }
+    if b == b'\'' && !*in_str && not_escaped {
+        *in_char = !*in_char;
+    }
+    *in_str || *in_char
+}
+
+/// Classify a `*` or `&` token at position `i` without nested branching.
+fn classify_ptr_token(bytes: &[u8], i: usize) -> PtrToken {
+    let len = bytes.len();
+    let nx = (i + 1 < len).then(|| bytes[i + 1]);
+    let pv = i.checked_sub(1).map(|p| bytes[p]);
+    if matches!(
+        nx,
+        Some(b'*') | Some(b'&') | Some(b'=') | Some(b'/') | Some(b'>')
+    ) {
+        return PtrToken::Skip2;
+    }
+    if matches!(pv, Some(b'=') | Some(b'/') | Some(b'-')) {
+        return PtrToken::Skip1;
+    }
+    let pre_word = pv.is_some_and(|p| p.is_ascii_alphanumeric() || p == b'_');
+    let pre_space = pv == Some(b' ');
+    let post_word = nx.is_some_and(|n| n.is_ascii_alphanumeric() || n == b'_');
+    let post_space = nx == Some(b' ');
+    if pre_word && (post_word || post_space) {
+        PtrToken::WithType
+    } else if pre_space && post_word {
+        PtrToken::WithName
+    } else {
+        PtrToken::Unclassified
+    }
+}
+
 fn scan_ptr(trimmed: &str, with_type: &mut u32, with_name: &mut u32) {
     if trimmed.starts_with("//")
         || trimmed.starts_with('*')
@@ -175,60 +219,26 @@ fn scan_ptr(trimmed: &str, with_type: &mut u32, with_name: &mut u32) {
     let mut in_char = false;
     while i < len {
         let b = bytes[i];
-        if b == b'"' && !in_char && (i == 0 || bytes[i - 1] != b'\\') {
-            in_str = !in_str;
-        }
-        if b == b'\'' && !in_str && (i == 0 || bytes[i - 1] != b'\\') {
-            in_char = !in_char;
-        }
-        if in_str || in_char {
+        if step_quote_state(b, i, bytes, &mut in_str, &mut in_char) {
             i += 1;
             continue;
         }
         if b == b'*' || b == b'&' {
-            if i + 1 < len && (bytes[i + 1] == b'*' || bytes[i + 1] == b'&') {
-                i += 2;
-                continue;
-            }
-            if i + 1 < len && (bytes[i + 1] == b'=' || bytes[i + 1] == b'/' || bytes[i + 1] == b'>')
-            {
-                i += 2;
-                continue;
-            }
-            if i > 0 && (bytes[i - 1] == b'=' || bytes[i - 1] == b'/' || bytes[i - 1] == b'-') {
-                i += 1;
-                continue;
-            }
-            let pre_word = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            let pre_space = i > 0 && bytes[i - 1] == b' ';
-            let post_word =
-                i + 1 < len && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'_');
-            let post_space = i + 1 < len && bytes[i + 1] == b' ';
-            if pre_word && (post_word || post_space) {
-                *with_type += 1;
-            } else if pre_space && post_word {
-                *with_name += 1;
+            match classify_ptr_token(bytes, i) {
+                PtrToken::Skip2 => {
+                    i += 2;
+                    continue;
+                }
+                PtrToken::WithType => *with_type += 1,
+                PtrToken::WithName => *with_name += 1,
+                PtrToken::Skip1 | PtrToken::Unclassified => {}
             }
         }
         i += 1;
     }
 }
 
-fn classify_brace(allman: u32, attach: u32) -> BraceStyle {
-    let t = allman + attach;
-    if t == 0 {
-        return BraceStyle::Unknown;
-    }
-    let a = allman as f32 / t as f32;
-    let k = attach as f32 / t as f32;
-    if a >= 0.65 {
-        BraceStyle::Allman
-    } else if k >= 0.65 {
-        BraceStyle::Attach
-    } else {
-        BraceStyle::Mixed
-    }
-}
+// ─── Classifiers ──────────────────────────────────────────────────────────────
 
 fn classify_ptr(with_type: u32, with_name: u32) -> PointerStyle {
     let t = with_type + with_name;
@@ -276,24 +286,6 @@ fn paren_display(with_sp: u32, no_sp: u32) -> &'static str {
     }
 }
 
-fn score_attach(b: BraceStyle) -> f32 {
-    match b {
-        BraceStyle::Attach => 1.0,
-        BraceStyle::Mixed => 0.40,
-        BraceStyle::Allman => 0.05,
-        BraceStyle::Unknown => 0.50,
-    }
-}
-
-fn score_allman(b: BraceStyle) -> f32 {
-    match b {
-        BraceStyle::Allman => 1.0,
-        BraceStyle::Mixed => 0.40,
-        BraceStyle::Attach => 0.05,
-        BraceStyle::Unknown => 0.50,
-    }
-}
-
 fn score_ptr_type(p: PointerStyle) -> f32 {
     match p {
         PointerStyle::WithType => 1.0,
@@ -321,14 +313,6 @@ fn score_sp(with: u32, no: u32) -> f32 {
     }
 }
 
-fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
-    scores
-        .iter()
-        .max_by_key(|s| s.score_pct)
-        .map(|s| (s.name.clone(), s.score_pct))
-        .unwrap_or_else(|| ("Unknown".into(), 0))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn score_guides(
     ind: IndentStyle,
@@ -342,78 +326,73 @@ fn score_guides(
 ) -> Vec<StyleGuideScore> {
     let l80 = score_line80(over80, total);
     let l100 = score_line100(over100, total);
-    let att = score_attach(brace);
-    let all = score_allman(brace);
+    let att = score_attach_brace(brace);
+    let all = score_allman_brace(brace);
     let pt = score_ptr_type(ptr);
     let pn = score_ptr_name(ptr);
     let spc = score_sp(sp, no_sp);
 
-    let llvm = weighted_score(&[
-        (0.28, score_indent_2(ind)),
-        (0.20, l80),
-        (0.24, att),
-        (0.15, pn),
-        (0.13, spc),
-    ]);
-    let google = weighted_score(&[
-        (0.25, score_indent_2(ind)),
-        (0.20, l80),
-        (0.25, att),
-        (0.18, pt),
-        (0.12, spc),
-    ]);
     let moz_brace = match brace {
         BraceStyle::Attach => 0.60,
         BraceStyle::Allman => 0.45,
         BraceStyle::Mixed => 0.80,
         BraceStyle::Unknown => 0.50,
     };
-    let mozilla = weighted_score(&[
-        (0.28, score_indent_4(ind)),
-        (0.20, l80),
-        (0.22, moz_brace),
-        (0.18, pt),
-        (0.12, spc),
-    ]);
-    let microsoft = weighted_score(&[
-        (0.32, score_indent_4(ind)),
-        (0.36, all),
-        (0.16, l100),
-        (0.16, pn),
-    ]);
-    let webkit = weighted_score(&[
-        (0.28, score_indent_4(ind)),
-        (0.20, l80),
-        (0.24, att),
-        (0.16, pt),
-        (0.12, spc),
-    ]);
 
     vec![
         StyleGuideScore {
             name: "LLVM".into(),
             description: "2-space | 80-col | K&R | *var".into(),
-            score_pct: llvm,
+            score_pct: weighted_score(&[
+                (0.28, score_indent_2(ind)),
+                (0.20, l80),
+                (0.24, att),
+                (0.15, pn),
+                (0.13, spc),
+            ]),
         },
         StyleGuideScore {
             name: "Google".into(),
             description: "2-space | 80-col | K&R | Type*".into(),
-            score_pct: google,
+            score_pct: weighted_score(&[
+                (0.25, score_indent_2(ind)),
+                (0.20, l80),
+                (0.25, att),
+                (0.18, pt),
+                (0.12, spc),
+            ]),
         },
         StyleGuideScore {
             name: "Mozilla".into(),
             description: "4-space | 80-col | mixed braces | Type*".into(),
-            score_pct: mozilla,
+            score_pct: weighted_score(&[
+                (0.28, score_indent_4(ind)),
+                (0.20, l80),
+                (0.22, moz_brace),
+                (0.18, pt),
+                (0.12, spc),
+            ]),
         },
         StyleGuideScore {
             name: "Microsoft".into(),
             description: "4-space | Allman | 100-col | *var".into(),
-            score_pct: microsoft,
+            score_pct: weighted_score(&[
+                (0.32, score_indent_4(ind)),
+                (0.36, all),
+                (0.16, l100),
+                (0.16, pn),
+            ]),
         },
         StyleGuideScore {
             name: "WebKit".into(),
             description: "4-space | 80-col | K&R | Type*".into(),
-            score_pct: webkit,
+            score_pct: weighted_score(&[
+                (0.28, score_indent_4(ind)),
+                (0.20, l80),
+                (0.24, att),
+                (0.16, pt),
+                (0.12, spc),
+            ]),
         },
     ]
 }

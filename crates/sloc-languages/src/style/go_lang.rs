@@ -94,14 +94,6 @@ pub fn analyze(text: &str) -> StyleAnalysis {
     }
 }
 
-fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
-    scores
-        .iter()
-        .max_by_key(|s| s.score_pct)
-        .map(|s| (s.name.clone(), s.score_pct))
-        .unwrap_or_else(|| ("Unknown".into(), 0))
-}
-
 fn score_go(
     ind: IndentStyle,
     over80: u32,

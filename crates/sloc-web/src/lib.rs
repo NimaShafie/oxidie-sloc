@@ -3365,6 +3365,23 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
     if let Some(binary_behavior) = form.binary_file_behavior {
         config.analysis.binary_file_behavior = binary_behavior;
     }
+    apply_report_opts(config, form);
+    config.discovery.include_globs = split_patterns(form.include_globs.as_deref());
+    config.discovery.exclude_globs = split_patterns(form.exclude_globs.as_deref());
+    config.discovery.submodule_breakdown = form.submodule_breakdown.as_deref() == Some("enabled");
+    if let Some(policy) = form.continuation_line_policy {
+        config.analysis.continuation_line_policy = policy;
+    }
+    if let Some(policy) = form.blank_in_block_comment_policy {
+        config.analysis.blank_in_block_comment_policy = policy;
+    }
+    config.analysis.count_compiler_directives =
+        form.count_compiler_directives.as_deref() != Some("disabled");
+    apply_style_threshold(config, form);
+    apply_coverage_path(config, form);
+}
+
+fn apply_report_opts(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(report_title) = form.report_title.as_deref() {
         let trimmed = report_title.trim();
         if !trimmed.is_empty() {
@@ -3379,17 +3396,9 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
             Some(trimmed.to_string())
         };
     }
-    config.discovery.include_globs = split_patterns(form.include_globs.as_deref());
-    config.discovery.exclude_globs = split_patterns(form.exclude_globs.as_deref());
-    config.discovery.submodule_breakdown = form.submodule_breakdown.as_deref() == Some("enabled");
-    if let Some(policy) = form.continuation_line_policy {
-        config.analysis.continuation_line_policy = policy;
-    }
-    if let Some(policy) = form.blank_in_block_comment_policy {
-        config.analysis.blank_in_block_comment_policy = policy;
-    }
-    config.analysis.count_compiler_directives =
-        form.count_compiler_directives.as_deref() != Some("disabled");
+}
+
+fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(threshold_str) = form.style_col_threshold.as_deref() {
         if let Ok(t) = threshold_str.parse::<u16>() {
             if t == 80 || t == 100 || t == 120 {
@@ -3397,6 +3406,9 @@ fn apply_form_to_config(config: &mut sloc_config::AppConfig, form: &AnalyzeForm)
             }
         }
     }
+}
+
+fn apply_coverage_path(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(cov) = &form.coverage_file {
         let trimmed = cov.trim();
         if !trimmed.is_empty() {
