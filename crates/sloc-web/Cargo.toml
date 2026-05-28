@@ -42,10 +42,10 @@ tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 uuid = { workspace = true }
-sloc-config = { path = "../sloc-config", version = "1.5.63" }
-sloc-core = { path = "../sloc-core", version = "1.5.63" }
-sloc-git = { path = "../sloc-git", version = "1.5.63" }
-sloc-report = { path = "../sloc-report", version = "1.5.63" }
+sloc-config = { path = "../sloc-config", version = "1.5.64" }
+sloc-core = { path = "../sloc-core", version = "1.5.64" }
+sloc-git = { path = "../sloc-git", version = "1.5.64" }
+sloc-report = { path = "../sloc-report", version = "1.5.64" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
