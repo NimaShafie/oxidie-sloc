@@ -5,9 +5,9 @@
 //! Guides: LLVM, Google, Mozilla, Microsoft, WebKit.
 
 use super::common::{
-    classify_brace, classify_indent, count_over, scan_indent, score_allman_brace,
-    score_attach_brace, score_indent_2, score_indent_4, score_line100, score_line80, top_guide,
-    weighted_score, BraceStyle, IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+    classify_brace, classify_indent, scan_base_metrics, score_allman_brace, score_attach_brace,
+    score_indent_2, score_indent_4, score_line100, score_line80, weighted_score, BraceStyle,
+    IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
 };
 
 /// Pointer/reference declarator alignment.
@@ -21,9 +21,8 @@ enum PointerStyle {
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
-    let mut tabs = 0u32;
-    let mut sp2 = 0u32;
-    let mut sp4 = 0u32;
+    let m = scan_base_metrics(&lines);
+
     let mut allman = 0u32;
     let mut attach = 0u32;
     let mut ptr_type = 0u32;
@@ -31,26 +30,18 @@ pub fn analyze(text: &str) -> StyleAnalysis {
     let mut space_paren = 0u32;
     let mut nospace_paren = 0u32;
     let mut pragma_once = false;
-    let mut total = 0u32;
-
-    let over80 = count_over(&lines, 80);
-    let over100 = count_over(&lines, 100);
-    let over120 = count_over(&lines, 120);
-    let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
 
     for line in &lines {
-        total += 1;
         let trimmed = line.trim();
         if trimmed == "#pragma once" {
             pragma_once = true;
         }
-        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
         scan_braces(trimmed, &mut allman, &mut attach);
         scan_paren(trimmed, &mut space_paren, &mut nospace_paren);
         scan_ptr(trimmed, &mut ptr_type, &mut ptr_name);
     }
 
-    let indent = classify_indent(tabs, sp2, sp4);
+    let indent = classify_indent(m.tabs, m.sp2, m.sp4);
     let brace = classify_brace(allman, attach);
     let ptr = classify_ptr(ptr_type, ptr_name);
 
@@ -58,18 +49,17 @@ pub fn analyze(text: &str) -> StyleAnalysis {
         indent,
         brace,
         ptr,
-        over80,
-        over100,
-        total,
+        m.over80,
+        m.over100,
+        m.total,
         space_paren,
         nospace_paren,
     );
-    let (dominant, dominant_pct) = top_guide(&guides);
 
     let mut signals = vec![
         StyleSignal {
             name: "Brace Style".into(),
-            value: brace_display(brace).into(),
+            value: brace.display().into(),
         },
         StyleSignal {
             name: "Pointer Style".into(),
@@ -87,22 +77,7 @@ pub fn analyze(text: &str) -> StyleAnalysis {
         });
     }
 
-    StyleAnalysis {
-        language_family: "C / C++".into(),
-        indent_style: indent,
-        tab_indented_lines: tabs,
-        space2_indented_lines: sp2,
-        space4_indented_lines: sp4,
-        lines_over_80: over80,
-        lines_over_100: over100,
-        lines_over_120: over120,
-        max_line_length: max_len,
-        total_lines: total,
-        signals,
-        guide_scores: guides,
-        dominant_guide: dominant,
-        dominant_score_pct: dominant_pct,
-    }
+    StyleAnalysis::assemble("C / C++", indent, &m, signals, guides)
 }
 
 fn scan_braces(trimmed: &str, allman: &mut u32, attach: &mut u32) {
@@ -253,15 +228,6 @@ fn classify_ptr(with_type: u32, with_name: u32) -> PointerStyle {
         PointerStyle::WithName
     } else {
         PointerStyle::Mixed
-    }
-}
-
-fn brace_display(s: BraceStyle) -> &'static str {
-    match s {
-        BraceStyle::Attach => "K&R / Attach",
-        BraceStyle::Allman => "Allman",
-        BraceStyle::Mixed => "Mixed",
-        BraceStyle::Unknown => "\u{2014}",
     }
 }
 
