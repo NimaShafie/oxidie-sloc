@@ -218,11 +218,24 @@ def runAnalyze() {
     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
     sh "mkdir -p '${outDir}'"
 
-    def scanParts   = params.SCAN_PATH.trim().split('[/\\\\]') as List
-    def projectSlug = (scanParts ? scanParts[-1] : params.SCAN_PATH.trim())
-                        .replaceAll(/[^a-zA-Z0-9_\-]/, '-')
-                        .replaceAll(/-+/, '-')
-                        .replaceAll(/^-|-$/, '') ?: 'project'
+    // Derive a project slug that matches the local-run naming convention:
+    //   {repo-name}_{short-sha}  (e.g. airgap-devkit_a78a632)
+    // Repo name comes from the last path segment of REPO_URL (strip .git suffix).
+    // Short SHA comes from GIT_COMMIT set by the GitSCM checkout, falling back
+    // to `git rev-parse --short HEAD` for edge cases (manual/scripted checkouts).
+    def repoSlug = (params.REPO_URL?.trim()
+                        ? params.REPO_URL.trim()
+                              .replaceAll(/\.git$/, '')
+                              .replaceAll(/.*[\/:]/, '')
+                              .replaceAll(/[^a-zA-Z0-9_\-]/, '-')
+                              .replaceAll(/-+/, '-')
+                              .replaceAll(/^-|-$/, '')
+                        : '') ?: 'project'
+    def rawSha   = env.GIT_COMMIT?.trim() ?: ''
+    def shortSha = (rawSha.length() >= 7)
+                        ? rawSha[0..6]
+                        : sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+    def projectSlug = "${repoSlug}_${shortSha}"
     env.SLOC_PROJECT = projectSlug
 
     def configArg    = (params.CI_PRESET != 'none')
@@ -239,6 +252,12 @@ def runAnalyze() {
     def submodArg    = params.SUBMODULE_BREAKDOWN ? '--submodule-breakdown'              : ''
     def styleColArg  = (params.STYLE_COL_THRESHOLD?.trim() && params.STYLE_COL_THRESHOLD.trim() != '80')
                         ? "--style-col-threshold '${params.STYLE_COL_THRESHOLD.trim()}'"
+                        : ''
+    // Outputs that mirror the web UI artifact layout: scan-config JSON and
+    // per-submodule HTML reports (sub_<name>.html in the output directory).
+    def scanConfigArg = "--scan-config-out '${outDir}/scan-config_${projectSlug}.json'"
+    def subHtmlArg    = params.SUBMODULE_BREAKDOWN
+                        ? "--sub-html-out-dir '${outDir}'"
                         : ''
 
     def includeArgs = params.INCLUDE_GLOBS
@@ -276,7 +295,8 @@ def runAnalyze() {
                 --mixed-line-policy "${MIXED_LINE_POLICY}" \
                 ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg} ${styleColArg}" + ''' \
                 ''' + "${langArgs} ${includeArgs} ${excludeArgs} ${branchArg}" + ''' \
-                ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + '''
+                ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + ''' \
+                ''' + "${scanConfigArg} ${subHtmlArg}" + '''
         '''
     }
 
