@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
-pub mod cpp_style;
 pub mod style;
-pub use cpp_style::{BraceStyle, CppStyleAnalysis, IndentStyle, PointerStyle, StyleGuideScore};
-pub use style::{StyleAnalysis, StyleSignal};
+pub use style::{IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal};
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;

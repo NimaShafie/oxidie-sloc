@@ -197,7 +197,7 @@ pub fn score_line120(over120: u32, total: u32) -> f32 {
     score_line_n(over120, total)
 }
 
-fn score_line_n(over: u32, total: u32) -> f32 {
+pub fn score_line_n(over: u32, total: u32) -> f32 {
     if total == 0 {
         return 1.0;
     }
@@ -216,4 +216,78 @@ fn score_line_n(over: u32, total: u32) -> f32 {
 /// Count lines over a given length threshold.
 pub fn count_over(lines: &[&str], limit: usize) -> u32 {
     lines.iter().filter(|l| l.len() > limit).count() as u32
+}
+
+// ─── Shared analysis helpers ──────────────────────────────────────────────────
+
+/// Return the guide with the highest score, or `("Unknown", 0)` for an empty slice.
+pub fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
+    scores
+        .iter()
+        .max_by_key(|s| s.score_pct)
+        .map(|s| (s.name.clone(), s.score_pct))
+        .unwrap_or_else(|| ("Unknown".into(), 0))
+}
+
+/// Count the first quote character (`'` or `"`) on a line.
+/// At most one counter is incremented per call.
+pub fn count_first_quote(trimmed: &str, single_q: &mut u32, double_q: &mut u32) {
+    for ch in trimmed.chars() {
+        if ch == '\'' {
+            *single_q += 1;
+            break;
+        }
+        if ch == '"' {
+            *double_q += 1;
+            break;
+        }
+    }
+}
+
+// ─── Shared brace-style helpers ───────────────────────────────────────────────
+
+/// Brace placement style shared across C, C++, Java, C#, and similar languages.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BraceStyle {
+    Attach,
+    Allman,
+    Mixed,
+    Unknown,
+}
+
+/// Classify accumulated allman/attach counts into a dominant brace style.
+pub fn classify_brace(allman: u32, attach: u32) -> BraceStyle {
+    let t = allman + attach;
+    if t == 0 {
+        return BraceStyle::Unknown;
+    }
+    let a = allman as f32 / t as f32;
+    let k = attach as f32 / t as f32;
+    if a >= 0.65 {
+        BraceStyle::Allman
+    } else if k >= 0.65 {
+        BraceStyle::Attach
+    } else {
+        BraceStyle::Mixed
+    }
+}
+
+/// Score compliance with K&R / attach brace style.
+pub fn score_attach_brace(b: BraceStyle) -> f32 {
+    match b {
+        BraceStyle::Attach => 1.0,
+        BraceStyle::Mixed => 0.40,
+        BraceStyle::Allman => 0.05,
+        BraceStyle::Unknown => 0.50,
+    }
+}
+
+/// Score compliance with Allman brace style.
+pub fn score_allman_brace(b: BraceStyle) -> f32 {
+    match b {
+        BraceStyle::Allman => 1.0,
+        BraceStyle::Mixed => 0.40,
+        BraceStyle::Attach => 0.05,
+        BraceStyle::Unknown => 0.50,
+    }
 }

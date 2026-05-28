@@ -5,23 +5,72 @@
 //! JS guides: Airbnb, Google, Standard.js, Prettier.
 //! TS guides: Airbnb TS, Google TS, Angular, Microsoft TS.
 
-use super::common::*;
+use super::common::{
+    classify_indent, count_first_quote, count_over, scan_indent, score_indent_2, score_indent_4,
+    score_line100, score_line120, score_line80, score_line_n, top_guide, weighted_score,
+    StyleAnalysis, StyleGuideScore, StyleSignal,
+};
 use crate::Language;
+
+// ─── Per-line accumulator ─────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct JsCounts {
+    tabs: u32,
+    sp2: u32,
+    sp4: u32,
+    semicolons: u32,
+    no_semicolons: u32,
+    single_q: u32,
+    double_q: u32,
+    var_count: u32,
+    let_const: u32,
+    arrow_fns: u32,
+    total: u32,
+}
+
+/// Returns true when a trimmed line looks like a statement end but has no semicolon.
+fn is_statement_line(trimmed: &str) -> bool {
+    !trimmed.is_empty()
+        && !trimmed.ends_with('{')
+        && !trimmed.ends_with('}')
+        && !trimmed.ends_with(',')
+        && !trimmed.ends_with('(')
+        && !trimmed.ends_with(')')
+        && !trimmed.ends_with(':')
+        && trimmed.len() > 3
+}
+
+fn scan_js_line(line: &str, c: &mut JsCounts) {
+    c.total += 1;
+    scan_indent(line, &mut c.tabs, &mut c.sp2, &mut c.sp4);
+    let trimmed = line.trim();
+    if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+        return;
+    }
+    if trimmed.ends_with(';') {
+        c.semicolons += 1;
+    } else if is_statement_line(trimmed) {
+        c.no_semicolons += 1;
+    }
+    count_first_quote(trimmed, &mut c.single_q, &mut c.double_q);
+    if trimmed.starts_with("var ") {
+        c.var_count += 1;
+    }
+    if trimmed.starts_with("let ") || trimmed.starts_with("const ") {
+        c.let_const += 1;
+    }
+    if trimmed.contains("=>") {
+        c.arrow_fns += 1;
+    }
+}
+
+// ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     let is_ts = matches!(language, Language::TypeScript);
     let lines: Vec<&str> = text.lines().collect();
-    let mut tabs = 0u32;
-    let mut sp2 = 0u32;
-    let mut sp4 = 0u32;
-    let mut semicolons = 0u32;
-    let mut no_semicolons = 0u32;
-    let mut single_q = 0u32;
-    let mut double_q = 0u32;
-    let mut var_count = 0u32;
-    let mut let_const = 0u32;
-    let mut arrow_fns = 0u32;
-    let mut total = 0u32;
+    let mut c = JsCounts::default();
 
     let over80 = count_over(&lines, 80);
     let over100 = count_over(&lines, 100);
@@ -30,61 +79,15 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
 
     for line in &lines {
-        total += 1;
-        let trimmed = line.trim();
-        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
-
-        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
-            continue;
-        }
-
-        // Semicolons at end of statement lines
-        if trimmed.ends_with(';') {
-            semicolons += 1;
-        } else if !trimmed.is_empty()
-            && !trimmed.ends_with('{')
-            && !trimmed.ends_with('}')
-            && !trimmed.ends_with(',')
-            && !trimmed.ends_with('(')
-            && !trimmed.ends_with(')')
-            && !trimmed.ends_with(':')
-            && trimmed.len() > 3
-        {
-            no_semicolons += 1;
-        }
-
-        // Quote style (first quote character wins per line)
-        for ch in trimmed.chars() {
-            if ch == '\'' {
-                single_q += 1;
-                break;
-            }
-            if ch == '"' && !trimmed.starts_with("//") {
-                double_q += 1;
-                break;
-            }
-        }
-
-        // var vs let/const
-        if trimmed.starts_with("var ") {
-            var_count += 1;
-        }
-        if trimmed.starts_with("let ") || trimmed.starts_with("const ") {
-            let_const += 1;
-        }
-
-        // Arrow functions
-        if trimmed.contains("=>") {
-            arrow_fns += 1;
-        }
+        scan_js_line(line, &mut c);
     }
 
-    let indent = classify_indent(tabs, sp2, sp4);
-    let uses_semis = semicolons as f32 / (semicolons + no_semicolons).max(1) as f32 >= 0.60;
-    let uses_single = single_q as f32 / (single_q + double_q).max(1) as f32 >= 0.60;
-    let uses_double = double_q as f32 / (single_q + double_q).max(1) as f32 >= 0.60;
-    let modern_vars =
-        var_count == 0 || (let_const as f32 / (var_count + let_const).max(1) as f32 >= 0.80);
+    let indent = classify_indent(c.tabs, c.sp2, c.sp4);
+    let uses_semis = c.semicolons as f32 / (c.semicolons + c.no_semicolons).max(1) as f32 >= 0.60;
+    let uses_single = c.single_q as f32 / (c.single_q + c.double_q).max(1) as f32 >= 0.60;
+    let uses_double = c.double_q as f32 / (c.single_q + c.double_q).max(1) as f32 >= 0.60;
+    let modern_vars = c.var_count == 0
+        || (c.let_const as f32 / (c.var_count + c.let_const).max(1) as f32 >= 0.80);
 
     let quote_str = if uses_single {
         "Single quotes"
@@ -98,7 +101,7 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     } else {
         "No semicolons"
     };
-    let var_str = if var_count == 0 {
+    let var_str = if c.var_count == 0 {
         "let / const only"
     } else {
         "var present"
@@ -111,17 +114,16 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
             over100,
             over120,
             over140,
-            total,
+            c.total,
             uses_semis,
             uses_single,
-            uses_double,
         )
     } else {
         score_js(
             indent,
             over80,
             over100,
-            total,
+            c.total,
             uses_semis,
             uses_single,
             uses_double,
@@ -144,26 +146,24 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
             value: var_str.into(),
         },
     ];
-    if arrow_fns > 0 {
+    if c.arrow_fns > 0 {
         signals.push(StyleSignal {
             name: "Arrow Functions".into(),
-            value: format!("{arrow_fns} detected"),
+            value: format!("{} detected", c.arrow_fns),
         });
     }
 
-    let lang_family = if is_ts { "TypeScript" } else { "JavaScript" };
-
     StyleAnalysis {
-        language_family: lang_family.into(),
+        language_family: if is_ts { "TypeScript" } else { "JavaScript" }.into(),
         indent_style: indent,
-        tab_indented_lines: tabs,
-        space2_indented_lines: sp2,
-        space4_indented_lines: sp4,
+        tab_indented_lines: c.tabs,
+        space2_indented_lines: c.sp2,
+        space4_indented_lines: c.sp4,
         lines_over_80: over80,
         lines_over_100: over100,
         lines_over_120: over120,
         max_line_length: max_len,
-        total_lines: total,
+        total_lines: c.total,
         signals,
         guide_scores: guides,
         dominant_guide: dominant,
@@ -171,17 +171,11 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     }
 }
 
-fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
-    scores
-        .iter()
-        .max_by_key(|s| s.score_pct)
-        .map(|s| (s.name.clone(), s.score_pct))
-        .unwrap_or_else(|| ("Unknown".into(), 0))
-}
+// ─── Scoring ──────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn score_js(
-    ind: IndentStyle,
+    ind: super::common::IndentStyle,
     over80: u32,
     over100: u32,
     total: u32,
@@ -199,42 +193,39 @@ fn score_js(
     let dq = if double { 1.0_f32 } else { 0.0 };
     let mv = if modern_vars { 1.0_f32 } else { 0.30 };
 
-    // Airbnb: 2-space, 100-col, semicolons, single quotes, no var
-    let airbnb = weighted_score(&[(0.20, i2), (0.20, l100), (0.20, sf), (0.20, sq), (0.20, mv)]);
-    // Google: 2-space, 80-col, semicolons, single quotes
-    let google = weighted_score(&[(0.25, i2), (0.25, l80), (0.25, sf), (0.25, sq)]);
-    // Standard.js: 2-space, no semicolons, single quotes
-    let standard = weighted_score(&[(0.30, i2), (0.30, nsf), (0.25, sq), (0.15, mv)]);
-    // Prettier: 2-space, 80-col, semicolons, double quotes
-    let prettier = weighted_score(&[(0.25, i2), (0.25, l80), (0.25, sf), (0.25, dq)]);
-
     vec![
         StyleGuideScore {
             name: "Airbnb".into(),
             description: "2-space | 100-col | semicolons | single quotes | no var".into(),
-            score_pct: airbnb,
+            score_pct: weighted_score(&[
+                (0.20, i2),
+                (0.20, l100),
+                (0.20, sf),
+                (0.20, sq),
+                (0.20, mv),
+            ]),
         },
         StyleGuideScore {
             name: "Google JS".into(),
             description: "2-space | 80-col | semicolons | single quotes".into(),
-            score_pct: google,
+            score_pct: weighted_score(&[(0.25, i2), (0.25, l80), (0.25, sf), (0.25, sq)]),
         },
         StyleGuideScore {
             name: "Standard.js".into(),
             description: "2-space | no semicolons | single quotes".into(),
-            score_pct: standard,
+            score_pct: weighted_score(&[(0.30, i2), (0.30, nsf), (0.25, sq), (0.15, mv)]),
         },
         StyleGuideScore {
             name: "Prettier".into(),
             description: "2-space | 80-col | semicolons | double quotes".into(),
-            score_pct: prettier,
+            score_pct: weighted_score(&[(0.25, i2), (0.25, l80), (0.25, sf), (0.25, dq)]),
         },
     ]
 }
 
 #[allow(clippy::too_many_arguments)]
 fn score_ts(
-    ind: IndentStyle,
+    ind: super::common::IndentStyle,
     over80: u32,
     over100: u32,
     over120: u32,
@@ -242,62 +233,36 @@ fn score_ts(
     total: u32,
     semis: bool,
     single: bool,
-    _double: bool,
 ) -> Vec<StyleGuideScore> {
     let i2 = score_indent_2(ind);
     let i4 = score_indent_4(ind);
     let l80 = score_line80(over80, total);
     let l100 = score_line100(over100, total);
     let l120 = score_line120(over120, total);
-    let l140 = score_line_n_local(over140, total);
+    let l140 = score_line_n(over140, total);
     let sf = if semis { 1.0_f32 } else { 0.0 };
     let sq = if single { 1.0_f32 } else { 0.0 };
-
-    // Airbnb TS: 2-space, 100-col, semis, single
-    let airbnb = weighted_score(&[(0.25, i2), (0.25, l100), (0.25, sf), (0.25, sq)]);
-    // Google TS: 2-space, 80-col, semis, single
-    let google = weighted_score(&[(0.25, i2), (0.25, l80), (0.25, sf), (0.25, sq)]);
-    // Angular: 2-space, 140-col, semis, single
-    let angular = weighted_score(&[(0.25, i2), (0.25, l140), (0.25, sf), (0.25, sq)]);
-    // Microsoft TS: 4-space, 120-col, semis
-    let microsoft = weighted_score(&[(0.35, i4), (0.35, l120), (0.30, sf)]);
 
     vec![
         StyleGuideScore {
             name: "Airbnb TS".into(),
             description: "2-space | 100-col | semicolons | single quotes".into(),
-            score_pct: airbnb,
+            score_pct: weighted_score(&[(0.25, i2), (0.25, l100), (0.25, sf), (0.25, sq)]),
         },
         StyleGuideScore {
             name: "Google TS".into(),
             description: "2-space | 80-col | semicolons | single quotes".into(),
-            score_pct: google,
+            score_pct: weighted_score(&[(0.25, i2), (0.25, l80), (0.25, sf), (0.25, sq)]),
         },
         StyleGuideScore {
             name: "Angular".into(),
             description: "2-space | 140-col | semicolons | single quotes".into(),
-            score_pct: angular,
+            score_pct: weighted_score(&[(0.25, i2), (0.25, l140), (0.25, sf), (0.25, sq)]),
         },
         StyleGuideScore {
             name: "Microsoft TS".into(),
             description: "4-space | 120-col | semicolons".into(),
-            score_pct: microsoft,
+            score_pct: weighted_score(&[(0.35, i4), (0.35, l120), (0.30, sf)]),
         },
     ]
-}
-
-fn score_line_n_local(over: u32, total: u32) -> f32 {
-    if total == 0 {
-        return 1.0;
-    }
-    let p = over as f32 / total as f32;
-    if p < 0.03 {
-        1.00
-    } else if p < 0.10 {
-        0.75
-    } else if p < 0.25 {
-        0.45
-    } else {
-        0.10
-    }
 }
