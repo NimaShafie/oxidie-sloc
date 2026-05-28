@@ -229,6 +229,45 @@ pub fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
         .unwrap_or_else(|| ("Unknown".into(), 0))
 }
 
+// ─── Base metrics ─────────────────────────────────────────────────────────────
+
+/// Metrics computed identically across every language analyser.
+pub struct BaseMetrics {
+    pub tabs: u32,
+    pub sp2: u32,
+    pub sp4: u32,
+    pub over80: u32,
+    pub over100: u32,
+    pub over120: u32,
+    pub max_len: u32,
+    pub total: u32,
+}
+
+/// Single-pass scan that fills all language-neutral metrics.
+pub fn scan_base_metrics(lines: &[&str]) -> BaseMetrics {
+    let over80 = count_over(lines, 80);
+    let over100 = count_over(lines, 100);
+    let over120 = count_over(lines, 120);
+    let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
+    let total = lines.len() as u32;
+    let mut tabs = 0u32;
+    let mut sp2 = 0u32;
+    let mut sp4 = 0u32;
+    for line in lines {
+        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
+    }
+    BaseMetrics {
+        tabs,
+        sp2,
+        sp4,
+        over80,
+        over100,
+        over120,
+        max_len,
+        total,
+    }
+}
+
 /// Count the first quote character (`'` or `"`) on a line.
 /// At most one counter is incremented per call.
 pub fn count_first_quote(trimmed: &str, single_q: &mut u32, double_q: &mut u32) {
@@ -253,6 +292,17 @@ pub enum BraceStyle {
     Allman,
     Mixed,
     Unknown,
+}
+
+impl BraceStyle {
+    pub fn display(self) -> &'static str {
+        match self {
+            Self::Attach => "K&R / Attach",
+            Self::Allman => "Allman",
+            Self::Mixed => "Mixed",
+            Self::Unknown => "\u{2014}",
+        }
+    }
 }
 
 /// Classify accumulated allman/attach counts into a dominant brace style.
@@ -289,5 +339,35 @@ pub fn score_allman_brace(b: BraceStyle) -> f32 {
         BraceStyle::Mixed => 0.40,
         BraceStyle::Attach => 0.05,
         BraceStyle::Unknown => 0.50,
+    }
+}
+
+impl StyleAnalysis {
+    /// Construct a `StyleAnalysis` from base metrics, signals, and guide scores.
+    /// Computes `dominant_guide` / `dominant_score_pct` internally.
+    pub fn assemble(
+        language_family: &str,
+        indent: IndentStyle,
+        m: &BaseMetrics,
+        signals: Vec<StyleSignal>,
+        guides: Vec<StyleGuideScore>,
+    ) -> Self {
+        let (dominant, dominant_pct) = top_guide(&guides);
+        Self {
+            language_family: language_family.into(),
+            indent_style: indent,
+            tab_indented_lines: m.tabs,
+            space2_indented_lines: m.sp2,
+            space4_indented_lines: m.sp4,
+            lines_over_80: m.over80,
+            lines_over_100: m.over100,
+            lines_over_120: m.over120,
+            max_line_length: m.max_len,
+            total_lines: m.total,
+            signals,
+            guide_scores: guides,
+            dominant_guide: dominant,
+            dominant_score_pct: dominant_pct,
+        }
     }
 }

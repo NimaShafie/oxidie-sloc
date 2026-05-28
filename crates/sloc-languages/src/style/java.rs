@@ -6,63 +6,58 @@
 //! Kotlin guides: JetBrains, Android, Google Kotlin.
 
 use super::common::{
-    classify_brace, classify_indent, count_over, scan_indent, score_attach_brace, score_indent_2,
-    score_indent_4, score_line100, score_line120, score_line80, top_guide, weighted_score,
-    BraceStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+    classify_brace, classify_indent, scan_base_metrics, score_attach_brace, score_indent_2,
+    score_indent_4, score_line100, score_line120, score_line80, weighted_score, BraceStyle,
+    StyleAnalysis, StyleGuideScore, StyleSignal,
 };
 use crate::Language;
 
 pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
-    let mut tabs = 0u32;
-    let mut sp2 = 0u32;
-    let mut sp4 = 0u32;
+    let m = scan_base_metrics(&lines);
+
     let mut allman = 0u32;
     let mut attach = 0u32;
     let mut wildcard_imports = 0u32;
-    let mut total = 0u32;
-
-    let over80 = count_over(&lines, 80);
-    let over100 = count_over(&lines, 100);
-    let over120 = count_over(&lines, 120);
-    let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
 
     for line in &lines {
-        total += 1;
         let trimmed = line.trim();
-        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
-
         if trimmed == "{" {
             allman += 1;
         } else if trimmed.ends_with(" {") || trimmed.ends_with(") {") {
             attach += 1;
         }
-
         if trimmed.starts_with("import ") && trimmed.ends_with(".*;") {
             wildcard_imports += 1;
         }
     }
 
-    let indent = classify_indent(tabs, sp2, sp4);
+    let indent = classify_indent(m.tabs, m.sp2, m.sp4);
     let brace = classify_brace(allman, attach);
     let no_wildcard = wildcard_imports == 0;
 
     let (guides, lang_family) = match language {
-        Language::Kotlin => (score_kotlin(indent, over80, over100, total), "Kotlin"),
-        Language::Groovy => (score_groovy(indent, over80, over100, total), "Groovy"),
-        Language::Scala => (score_scala(indent, over80, over100, total), "Scala"),
+        Language::Kotlin => (score_kotlin(indent, m.over80, m.over100, m.total), "Kotlin"),
+        Language::Groovy => (score_groovy(indent, m.over80, m.over100, m.total), "Groovy"),
+        Language::Scala => (score_scala(indent, m.over80, m.over100, m.total), "Scala"),
         _ => (
-            score_java(indent, brace, over80, over100, over120, total, no_wildcard),
+            score_java(
+                indent,
+                brace,
+                m.over80,
+                m.over100,
+                m.over120,
+                m.total,
+                no_wildcard,
+            ),
             "Java",
         ),
     };
 
-    let (dominant, dominant_pct) = top_guide(&guides);
-
     let signals = vec![
         StyleSignal {
             name: "Brace Style".into(),
-            value: brace_display(brace).into(),
+            value: brace.display().into(),
         },
         StyleSignal {
             name: "Wildcard Imports".into(),
@@ -74,35 +69,11 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
         },
         StyleSignal {
             name: "Max Line Length".into(),
-            value: format!("{max_len} chars"),
+            value: format!("{} chars", m.max_len),
         },
     ];
 
-    StyleAnalysis {
-        language_family: lang_family.into(),
-        indent_style: indent,
-        tab_indented_lines: tabs,
-        space2_indented_lines: sp2,
-        space4_indented_lines: sp4,
-        lines_over_80: over80,
-        lines_over_100: over100,
-        lines_over_120: over120,
-        max_line_length: max_len,
-        total_lines: total,
-        signals,
-        guide_scores: guides,
-        dominant_guide: dominant,
-        dominant_score_pct: dominant_pct,
-    }
-}
-
-fn brace_display(b: BraceStyle) -> &'static str {
-    match b {
-        BraceStyle::Attach => "K&R / Attach",
-        BraceStyle::Allman => "Allman",
-        BraceStyle::Mixed => "Mixed",
-        BraceStyle::Unknown => "\u{2014}",
-    }
+    StyleAnalysis::assemble(lang_family, indent, &m, signals, guides)
 }
 
 fn score_java(
