@@ -10,6 +10,50 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.64] — 2026-05-27
+
+### Added
+
+- **Code-style column-width compliance reporting** (`sloc-core`, `sloc-web`): New analysis
+  dimension that checks source files for lines exceeding a configurable column-width limit.
+  Results are surfaced in the HTML report and JSON output as a `style_analysis` block with
+  per-file violation counts and a workspace-level summary.
+- **`--scan-config-out` and `--sub-html-out-dir` CLI flags** (`sloc-cli`): `--scan-config-out
+  <path>` writes the resolved `AppConfig` as a TOML snapshot — useful for reproducing a scan
+  exactly or auditing which options were active. `--sub-html-out-dir <dir>` writes individual
+  per-submodule HTML reports into a named subdirectory when `--submodule-breakdown` is set.
+
+### Fixed
+
+- **SonarQube cognitive-complexity violations** (`sloc-core`, `sloc-languages`): Resolved all 6
+  remaining S3776 cognitive-complexity violations by extracting focused helpers; no behaviour
+  change.
+- **cargo-deny license failures** (`deny.toml`): Added `GPL-3.0-or-later` exception for
+  `auto_generate_cdp` and `sloc-git`; expanded allow-list with `0BSD`,
+  `CDLA-Permissive-2.0`, and `GPL-3.0-or-later`; vendor archive and stale advisory ignore
+  entries refreshed.
+- **OpenSSF Scorecard code-scanning findings** (`.github/workflows/`): Addressed all
+  outstanding findings from the OpenSSF Scorecard code-scanning check.
+
+### Refactored
+
+- **`scan_base_metrics` and `StyleAnalysis::assemble` helpers** (`sloc-core`): Extracted
+  shared metric-assembly logic into reusable helpers, reducing duplication across the CLI
+  summary path and HTML report rendering.
+
+### CI
+
+- **SLSA provenance bundles exposed as release assets** (`.github/workflows/release.yml`):
+  SLSA provenance attestation bundles (`.intoto.jsonl`) are now attached directly to GitHub
+  Releases, making them discoverable without querying the Actions API.
+- **Improved Jenkins slug generation** (`.github/workflows/`): Build slug now consistently
+  reflects the branch/tag name used in the release matrix.
+- **`cargo-deny` pinned via action** (`.github/workflows/`): `cargo-deny` is now invoked
+  through the official `EmbarkStudios/cargo-deny-action` with a pinned version to prevent
+  unexpected failures from upstream tool changes.
+
+---
+
 ## [1.5.63] — 2026-05-25
 
 ### Fixed
