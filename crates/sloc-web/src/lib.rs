@@ -10171,7 +10171,7 @@ fn split_patterns(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-fn build_sub_run(
+pub fn build_sub_run(
     parent: &AnalysisRun,
     sub: &sloc_core::SubmoduleSummary,
     parent_path: &str,
@@ -10229,7 +10229,7 @@ fn build_sub_run(
     }
 }
 
-pub(crate) fn sanitize_project_label(raw: &str) -> String {
+pub fn sanitize_project_label(raw: &str) -> String {
     let candidate = Path::new(raw)
         .file_name()
         .and_then(|name| name.to_str())
@@ -23030,4 +23030,590 @@ struct ApiDocsTemplate {
     has_api_key: bool,
     csp_nonce: String,
     version: &'static str,
+}
+
+#[cfg(test)]
+mod form_config_tests {
+    use super::*;
+    use sloc_config::{
+        BinaryFileBehavior, BlankInBlockCommentPolicy, ContinuationLinePolicy, MixedLinePolicy,
+    };
+
+    fn blank_form() -> AnalyzeForm {
+        AnalyzeForm {
+            path: ".".to_string(),
+            git_repo: None,
+            git_ref: None,
+            mixed_line_policy: None,
+            python_docstrings_as_comments: None,
+            generated_file_detection: None,
+            minified_file_detection: None,
+            vendor_directory_detection: None,
+            include_lockfiles: None,
+            binary_file_behavior: None,
+            output_dir: None,
+            report_title: None,
+            report_header_footer: None,
+            generate_html: None,
+            generate_pdf: None,
+            include_globs: None,
+            exclude_globs: None,
+            submodule_breakdown: None,
+            coverage_file: None,
+            continuation_line_policy: None,
+            blank_in_block_comment_policy: None,
+            count_compiler_directives: None,
+            style_col_threshold: None,
+        }
+    }
+
+    fn apply(form: &AnalyzeForm) -> sloc_config::AppConfig {
+        let mut cfg = sloc_config::AppConfig::default();
+        apply_form_to_config(&mut cfg, form);
+        cfg
+    }
+
+    // ── python_docstrings_as_comments (checkbox, no value attr → sends "on") ──
+
+    #[test]
+    fn python_docstrings_false_when_unchecked() {
+        // Checkbox absent in form data (unchecked) → field must be false.
+        let cfg = apply(&blank_form());
+        assert!(
+            !cfg.analysis.python_docstrings_as_comments,
+            "absent python_docstrings_as_comments must map to false"
+        );
+    }
+
+    #[test]
+    fn python_docstrings_true_when_checked() {
+        // Browser sends "on" (no value= attr on the checkbox).
+        let mut form = blank_form();
+        form.python_docstrings_as_comments = Some("on".to_string());
+        let cfg = apply(&form);
+        assert!(cfg.analysis.python_docstrings_as_comments);
+    }
+
+    #[test]
+    fn python_docstrings_true_for_any_non_none_value() {
+        // The handler uses .is_some() — any non-None value means "checked".
+        let mut form = blank_form();
+        form.python_docstrings_as_comments = Some("true".to_string());
+        assert!(apply(&form).analysis.python_docstrings_as_comments);
+    }
+
+    // ── submodule_breakdown (checkbox with value="enabled") ──
+
+    #[test]
+    fn submodule_breakdown_false_when_unchecked() {
+        let cfg = apply(&blank_form());
+        assert!(
+            !cfg.discovery.submodule_breakdown,
+            "absent submodule_breakdown must map to false"
+        );
+    }
+
+    #[test]
+    fn submodule_breakdown_true_when_value_enabled() {
+        let mut form = blank_form();
+        form.submodule_breakdown = Some("enabled".to_string());
+        assert!(apply(&form).discovery.submodule_breakdown);
+    }
+
+    #[test]
+    fn submodule_breakdown_false_for_wrong_value() {
+        // If somehow a value other than "enabled" is sent, it must still be false.
+        let mut form = blank_form();
+        form.submodule_breakdown = Some("on".to_string());
+        assert!(
+            !apply(&form).discovery.submodule_breakdown,
+            "submodule_breakdown only becomes true for the exact value 'enabled'"
+        );
+    }
+
+    // ── generated_file_detection (select: "enabled" | "disabled") ──
+
+    #[test]
+    fn generated_detection_true_when_enabled() {
+        let mut form = blank_form();
+        form.generated_file_detection = Some("enabled".to_string());
+        assert!(apply(&form).analysis.generated_file_detection);
+    }
+
+    #[test]
+    fn generated_detection_false_when_disabled() {
+        let mut form = blank_form();
+        form.generated_file_detection = Some("disabled".to_string());
+        assert!(!apply(&form).analysis.generated_file_detection);
+    }
+
+    #[test]
+    fn generated_detection_true_when_absent() {
+        // None != Some("disabled") → true (safe default)
+        assert!(
+            apply(&blank_form()).analysis.generated_file_detection,
+            "absent field must default to true (detection on)"
+        );
+    }
+
+    // ── minified_file_detection ──
+
+    #[test]
+    fn minified_detection_false_when_disabled() {
+        let mut form = blank_form();
+        form.minified_file_detection = Some("disabled".to_string());
+        assert!(!apply(&form).analysis.minified_file_detection);
+    }
+
+    #[test]
+    fn minified_detection_true_when_enabled() {
+        let mut form = blank_form();
+        form.minified_file_detection = Some("enabled".to_string());
+        assert!(apply(&form).analysis.minified_file_detection);
+    }
+
+    #[test]
+    fn minified_detection_true_when_absent() {
+        assert!(apply(&blank_form()).analysis.minified_file_detection);
+    }
+
+    // ── vendor_directory_detection ──
+
+    #[test]
+    fn vendor_detection_false_when_disabled() {
+        let mut form = blank_form();
+        form.vendor_directory_detection = Some("disabled".to_string());
+        assert!(!apply(&form).analysis.vendor_directory_detection);
+    }
+
+    #[test]
+    fn vendor_detection_true_when_enabled() {
+        let mut form = blank_form();
+        form.vendor_directory_detection = Some("enabled".to_string());
+        assert!(apply(&form).analysis.vendor_directory_detection);
+    }
+
+    #[test]
+    fn vendor_detection_true_when_absent() {
+        assert!(apply(&blank_form()).analysis.vendor_directory_detection);
+    }
+
+    // ── include_lockfiles (select: "disabled" default | "enabled") ──
+
+    #[test]
+    fn lockfiles_false_when_absent() {
+        // None == Some("enabled") is false → lockfiles off (correct safe default)
+        assert!(!apply(&blank_form()).analysis.include_lockfiles);
+    }
+
+    #[test]
+    fn lockfiles_false_when_disabled() {
+        let mut form = blank_form();
+        form.include_lockfiles = Some("disabled".to_string());
+        assert!(!apply(&form).analysis.include_lockfiles);
+    }
+
+    #[test]
+    fn lockfiles_true_when_enabled() {
+        let mut form = blank_form();
+        form.include_lockfiles = Some("enabled".to_string());
+        assert!(apply(&form).analysis.include_lockfiles);
+    }
+
+    // ── count_compiler_directives ──
+
+    #[test]
+    fn compiler_directives_true_when_absent() {
+        assert!(
+            apply(&blank_form()).analysis.count_compiler_directives,
+            "absent count_compiler_directives must default to true"
+        );
+    }
+
+    #[test]
+    fn compiler_directives_true_when_enabled() {
+        let mut form = blank_form();
+        form.count_compiler_directives = Some("enabled".to_string());
+        assert!(apply(&form).analysis.count_compiler_directives);
+    }
+
+    #[test]
+    fn compiler_directives_false_when_disabled() {
+        let mut form = blank_form();
+        form.count_compiler_directives = Some("disabled".to_string());
+        assert!(!apply(&form).analysis.count_compiler_directives);
+    }
+
+    // ── mixed_line_policy (enum select) ──
+
+    #[test]
+    fn mixed_policy_unchanged_when_absent() {
+        // None → if-let does nothing → stays at config default (CodeOnly)
+        assert_eq!(
+            apply(&blank_form()).analysis.mixed_line_policy,
+            MixedLinePolicy::CodeOnly
+        );
+    }
+
+    #[test]
+    fn mixed_policy_code_only() {
+        let mut form = blank_form();
+        form.mixed_line_policy = Some(MixedLinePolicy::CodeOnly);
+        assert_eq!(
+            apply(&form).analysis.mixed_line_policy,
+            MixedLinePolicy::CodeOnly
+        );
+    }
+
+    #[test]
+    fn mixed_policy_code_and_comment() {
+        let mut form = blank_form();
+        form.mixed_line_policy = Some(MixedLinePolicy::CodeAndComment);
+        assert_eq!(
+            apply(&form).analysis.mixed_line_policy,
+            MixedLinePolicy::CodeAndComment
+        );
+    }
+
+    #[test]
+    fn mixed_policy_comment_only() {
+        let mut form = blank_form();
+        form.mixed_line_policy = Some(MixedLinePolicy::CommentOnly);
+        assert_eq!(
+            apply(&form).analysis.mixed_line_policy,
+            MixedLinePolicy::CommentOnly
+        );
+    }
+
+    #[test]
+    fn mixed_policy_separate_mixed_category() {
+        let mut form = blank_form();
+        form.mixed_line_policy = Some(MixedLinePolicy::SeparateMixedCategory);
+        assert_eq!(
+            apply(&form).analysis.mixed_line_policy,
+            MixedLinePolicy::SeparateMixedCategory
+        );
+    }
+
+    // ── binary_file_behavior (enum select) ──
+
+    #[test]
+    fn binary_behavior_skip_when_absent() {
+        assert_eq!(
+            apply(&blank_form()).analysis.binary_file_behavior,
+            BinaryFileBehavior::Skip
+        );
+    }
+
+    #[test]
+    fn binary_behavior_skip() {
+        let mut form = blank_form();
+        form.binary_file_behavior = Some(BinaryFileBehavior::Skip);
+        assert_eq!(
+            apply(&form).analysis.binary_file_behavior,
+            BinaryFileBehavior::Skip
+        );
+    }
+
+    #[test]
+    fn binary_behavior_fail() {
+        let mut form = blank_form();
+        form.binary_file_behavior = Some(BinaryFileBehavior::Fail);
+        assert_eq!(
+            apply(&form).analysis.binary_file_behavior,
+            BinaryFileBehavior::Fail
+        );
+    }
+
+    // ── continuation_line_policy (enum select) ──
+
+    #[test]
+    fn continuation_policy_each_physical_when_absent() {
+        assert_eq!(
+            apply(&blank_form()).analysis.continuation_line_policy,
+            ContinuationLinePolicy::EachPhysicalLine
+        );
+    }
+
+    #[test]
+    fn continuation_policy_collapse_to_logical() {
+        let mut form = blank_form();
+        form.continuation_line_policy = Some(ContinuationLinePolicy::CollapseToLogical);
+        assert_eq!(
+            apply(&form).analysis.continuation_line_policy,
+            ContinuationLinePolicy::CollapseToLogical
+        );
+    }
+
+    // ── blank_in_block_comment_policy (enum select) ──
+
+    #[test]
+    fn blank_in_block_comment_count_as_comment_when_absent() {
+        assert_eq!(
+            apply(&blank_form()).analysis.blank_in_block_comment_policy,
+            BlankInBlockCommentPolicy::CountAsComment
+        );
+    }
+
+    #[test]
+    fn blank_in_block_comment_count_as_blank() {
+        let mut form = blank_form();
+        form.blank_in_block_comment_policy = Some(BlankInBlockCommentPolicy::CountAsBlank);
+        assert_eq!(
+            apply(&form).analysis.blank_in_block_comment_policy,
+            BlankInBlockCommentPolicy::CountAsBlank
+        );
+    }
+
+    // ── style_col_threshold ──
+
+    #[test]
+    fn style_threshold_80() {
+        let mut form = blank_form();
+        form.style_col_threshold = Some("80".to_string());
+        assert_eq!(apply(&form).analysis.style_col_threshold, 80);
+    }
+
+    #[test]
+    fn style_threshold_100() {
+        let mut form = blank_form();
+        form.style_col_threshold = Some("100".to_string());
+        assert_eq!(apply(&form).analysis.style_col_threshold, 100);
+    }
+
+    #[test]
+    fn style_threshold_120() {
+        let mut form = blank_form();
+        form.style_col_threshold = Some("120".to_string());
+        assert_eq!(apply(&form).analysis.style_col_threshold, 120);
+    }
+
+    #[test]
+    fn style_threshold_invalid_value_leaves_default() {
+        // 42 is not in the allowed set {80, 100, 120} — must be ignored.
+        let mut cfg = sloc_config::AppConfig::default();
+        let mut form = blank_form();
+        form.style_col_threshold = Some("42".to_string());
+        apply_form_to_config(&mut cfg, &form);
+        assert_eq!(
+            cfg.analysis.style_col_threshold, 80,
+            "invalid threshold must not change config"
+        );
+    }
+
+    #[test]
+    fn style_threshold_non_numeric_leaves_default() {
+        let mut cfg = sloc_config::AppConfig::default();
+        let mut form = blank_form();
+        form.style_col_threshold = Some("large".to_string());
+        apply_form_to_config(&mut cfg, &form);
+        assert_eq!(cfg.analysis.style_col_threshold, 80);
+    }
+
+    #[test]
+    fn style_threshold_zero_leaves_default() {
+        let mut cfg = sloc_config::AppConfig::default();
+        let mut form = blank_form();
+        form.style_col_threshold = Some("0".to_string());
+        apply_form_to_config(&mut cfg, &form);
+        assert_eq!(cfg.analysis.style_col_threshold, 80);
+    }
+
+    #[test]
+    fn style_threshold_absent_leaves_default() {
+        assert_eq!(apply(&blank_form()).analysis.style_col_threshold, 80);
+    }
+
+    // ── coverage_file ──
+
+    #[test]
+    fn coverage_file_none_when_absent() {
+        assert!(apply(&blank_form()).analysis.coverage_file.is_none());
+    }
+
+    #[test]
+    fn coverage_file_none_when_whitespace_only() {
+        let mut form = blank_form();
+        form.coverage_file = Some("   ".to_string());
+        assert!(
+            apply(&form).analysis.coverage_file.is_none(),
+            "whitespace-only coverage_file must be treated as None"
+        );
+    }
+
+    #[test]
+    fn coverage_file_set_when_non_empty() {
+        let mut form = blank_form();
+        form.coverage_file = Some("coverage/lcov.info".to_string());
+        assert_eq!(
+            apply(&form).analysis.coverage_file,
+            Some(std::path::PathBuf::from("coverage/lcov.info"))
+        );
+    }
+
+    #[test]
+    fn coverage_file_trims_whitespace() {
+        let mut form = blank_form();
+        form.coverage_file = Some("  coverage/lcov.info  ".to_string());
+        assert_eq!(
+            apply(&form).analysis.coverage_file,
+            Some(std::path::PathBuf::from("coverage/lcov.info"))
+        );
+    }
+
+    // ── report_title ──
+
+    #[test]
+    fn report_title_unchanged_when_absent() {
+        let original = sloc_config::AppConfig::default()
+            .reporting
+            .report_title
+            .clone();
+        assert_eq!(apply(&blank_form()).reporting.report_title, original);
+    }
+
+    #[test]
+    fn report_title_unchanged_when_whitespace_only() {
+        let original = sloc_config::AppConfig::default()
+            .reporting
+            .report_title
+            .clone();
+        let mut form = blank_form();
+        form.report_title = Some("   ".to_string());
+        assert_eq!(
+            apply(&form).reporting.report_title,
+            original,
+            "whitespace-only title must not overwrite the default"
+        );
+    }
+
+    #[test]
+    fn report_title_updated_and_trimmed() {
+        let mut form = blank_form();
+        form.report_title = Some("  My Project  ".to_string());
+        assert_eq!(apply(&form).reporting.report_title, "My Project");
+    }
+
+    // ── report_header_footer ──
+
+    #[test]
+    fn header_footer_none_when_absent() {
+        assert!(apply(&blank_form())
+            .reporting
+            .report_header_footer
+            .is_none());
+    }
+
+    #[test]
+    fn header_footer_none_when_whitespace_only() {
+        let mut form = blank_form();
+        form.report_header_footer = Some("  ".to_string());
+        assert!(apply(&form).reporting.report_header_footer.is_none());
+    }
+
+    #[test]
+    fn header_footer_set_and_trimmed() {
+        let mut form = blank_form();
+        form.report_header_footer = Some("  Confidential — Internal Use  ".to_string());
+        assert_eq!(
+            apply(&form).reporting.report_header_footer,
+            Some("Confidential — Internal Use".to_string())
+        );
+    }
+
+    // ── include_globs / exclude_globs ──
+
+    #[test]
+    fn include_globs_empty_when_absent() {
+        assert!(apply(&blank_form()).discovery.include_globs.is_empty());
+    }
+
+    #[test]
+    fn include_globs_newline_separated() {
+        let mut form = blank_form();
+        form.include_globs = Some("src/**/*.rs\ntests/**/*.rs".to_string());
+        assert_eq!(
+            apply(&form).discovery.include_globs,
+            vec!["src/**/*.rs", "tests/**/*.rs"]
+        );
+    }
+
+    #[test]
+    fn exclude_globs_comma_separated() {
+        let mut form = blank_form();
+        form.exclude_globs = Some("vendor/**,node_modules/**".to_string());
+        assert_eq!(
+            apply(&form).discovery.exclude_globs,
+            vec!["vendor/**", "node_modules/**"]
+        );
+    }
+
+    #[test]
+    fn globs_mixed_separators() {
+        let mut form = blank_form();
+        form.exclude_globs = Some("a/**\nb/**,c/**".to_string());
+        assert_eq!(
+            apply(&form).discovery.exclude_globs,
+            vec!["a/**", "b/**", "c/**"]
+        );
+    }
+
+    // ── split_patterns unit tests ──
+
+    #[test]
+    fn split_patterns_none_is_empty() {
+        assert!(split_patterns(None).is_empty());
+    }
+
+    #[test]
+    fn split_patterns_empty_string_is_empty() {
+        assert!(split_patterns(Some("")).is_empty());
+    }
+
+    #[test]
+    fn split_patterns_whitespace_only_is_empty() {
+        assert!(split_patterns(Some("  \n  \n  ")).is_empty());
+    }
+
+    #[test]
+    fn split_patterns_newlines() {
+        assert_eq!(
+            split_patterns(Some("a/**\nb/**\nc/**")),
+            vec!["a/**", "b/**", "c/**"]
+        );
+    }
+
+    #[test]
+    fn split_patterns_commas() {
+        assert_eq!(
+            split_patterns(Some("a/**,b/**,c/**")),
+            vec!["a/**", "b/**", "c/**"]
+        );
+    }
+
+    #[test]
+    fn split_patterns_mixed() {
+        assert_eq!(
+            split_patterns(Some("a/**\nb/**,c/**")),
+            vec!["a/**", "b/**", "c/**"]
+        );
+    }
+
+    #[test]
+    fn split_patterns_trims_whitespace() {
+        assert_eq!(
+            split_patterns(Some("  a/**  \n  b/**  ")),
+            vec!["a/**", "b/**"]
+        );
+    }
+
+    #[test]
+    fn split_patterns_filters_empty_entries() {
+        assert_eq!(split_patterns(Some(",\n,,a/**,,\n")), vec!["a/**"]);
+    }
+
+    #[test]
+    fn split_patterns_single_entry() {
+        assert_eq!(split_patterns(Some("src/**")), vec!["src/**"]);
+    }
 }

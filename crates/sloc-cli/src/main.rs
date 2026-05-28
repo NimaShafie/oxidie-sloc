@@ -240,6 +240,16 @@ struct AnalyzeArgs {
     /// Supported values: 80, 100, 120 — controls the "N-Col Compliant" chip in reports.
     #[arg(long, value_name = "N")]
     style_col_threshold: Option<u16>,
+
+    /// Write scan configuration JSON to this path (records the effective settings used
+    /// for this run — identical to the scan-config_*.json produced by the web UI).
+    #[arg(long, value_name = "PATH")]
+    scan_config_out: Option<PathBuf>,
+
+    /// When --submodule-breakdown is set, write per-submodule HTML reports into
+    /// this directory as sub_<name>.html (mirrors the web UI artifact layout).
+    #[arg(long, value_name = "DIR")]
+    sub_html_out_dir: Option<PathBuf>,
 }
 
 // ── report ────────────────────────────────────────────────────────────────────
@@ -655,6 +665,72 @@ fn write_outputs(run: &AnalysisRun, args: &AnalyzeArgs, quiet: bool) -> Result<(
         log_written(path, quiet);
     }
 
+    if let Some(path) = &args.scan_config_out {
+        write_scan_config(run, path, args)?;
+        log_written(path, quiet);
+    }
+
+    if let Some(dir) = &args.sub_html_out_dir {
+        write_sub_html_reports(run, dir, quiet)?;
+    }
+
+    Ok(())
+}
+
+fn write_scan_config(run: &AnalysisRun, path: &Path, args: &AnalyzeArgs) -> Result<()> {
+    let policy_str = serde_json::to_value(run.effective_configuration.analysis.mixed_line_policy)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "code_only".to_string());
+    let behavior_str =
+        serde_json::to_value(run.effective_configuration.analysis.binary_file_behavior)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "skip".to_string());
+
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "oxide_sloc_version": env!("CARGO_PKG_VERSION"),
+        "path": run.input_roots.first().cloned().unwrap_or_default(),
+        "include_globs": run.effective_configuration.discovery.include_globs.join("\n"),
+        "exclude_globs": run.effective_configuration.discovery.exclude_globs.join("\n"),
+        "submodule_breakdown": run.effective_configuration.discovery.submodule_breakdown,
+        "mixed_line_policy": policy_str,
+        "python_docstrings_as_comments":
+            run.effective_configuration.analysis.python_docstrings_as_comments,
+        "generated_file_detection":
+            run.effective_configuration.analysis.generated_file_detection,
+        "minified_file_detection":
+            run.effective_configuration.analysis.minified_file_detection,
+        "vendor_directory_detection":
+            run.effective_configuration.analysis.vendor_directory_detection,
+        "include_lockfiles": run.effective_configuration.analysis.include_lockfiles,
+        "binary_file_behavior": behavior_str,
+        "output_dir": path.parent().and_then(|p| p.to_str()).unwrap_or(""),
+        "report_title": run.effective_configuration.reporting.report_title,
+        "generate_html": args.html_out.is_some(),
+        "generate_pdf": args.pdf_out.is_some(),
+    }))
+    .context("scan-config serialization failed")?;
+    std::fs::write(path, json).with_context(|| format!("writing scan-config to {}", path.display()))
+}
+
+fn write_sub_html_reports(run: &AnalysisRun, dir: &Path, quiet: bool) -> Result<()> {
+    if run.submodule_summaries.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating sub-html dir {}", dir.display()))?;
+    let parent_path = run.input_roots.first().map(String::as_str).unwrap_or("");
+    for sub in &run.submodule_summaries {
+        let safe = sloc_web::sanitize_project_label(&sub.name);
+        let sub_run = sloc_web::build_sub_run(run, sub, parent_path);
+        let html = sloc_report::render_sub_report_html(&sub_run)
+            .with_context(|| format!("rendering sub-report for '{}'", sub.name))?;
+        let out_path = dir.join(format!("sub_{safe}.html"));
+        std::fs::write(&out_path, html.as_bytes())
+            .with_context(|| format!("writing sub-report to {}", out_path.display()))?;
+        log_written(&out_path, quiet);
+    }
     Ok(())
 }
 

@@ -910,7 +910,11 @@ fn assemble_run(
             runtime_mode: runtime_mode.into(),
             initiator_username: get_current_username(),
             initiator_hostname: get_hostname(),
-            ci_name: detect_ci_system().map(str::to_string),
+            ci_name: if is_jenkins_env() {
+                Some(format!("Jenkins\t{}", get_hostname()))
+            } else {
+                detect_ci_system().map(str::to_string)
+            },
         },
         effective_configuration: config.clone(),
         input_roots: config
