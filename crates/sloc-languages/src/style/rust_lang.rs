@@ -8,24 +8,14 @@ use super::common::*;
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
-    let mut tabs = 0u32;
-    let mut sp2 = 0u32;
-    let mut sp4 = 0u32;
+    let m = scan_base_metrics(&lines);
+
     let mut trailing_commas = 0u32;
     let mut snake_case_fn = 0u32;
     let mut camel_case_fn = 0u32;
-    let mut total = 0u32;
-
-    let over80 = count_over(&lines, 80);
-    let over100 = count_over(&lines, 100);
-    let over120 = count_over(&lines, 120);
-    let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
 
     for line in &lines {
-        total += 1;
         let trimmed = line.trim();
-        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
-
         if trimmed.starts_with("//") {
             continue;
         }
@@ -46,10 +36,15 @@ pub fn analyze(text: &str) -> StyleAnalysis {
         }
     }
 
-    let indent = classify_indent(tabs, sp2, sp4);
-
-    let guides = score_rust(indent, over80, over100, over120, total, trailing_commas);
-    let (dominant, dominant_pct) = top_guide(&guides);
+    let indent = classify_indent(m.tabs, m.sp2, m.sp4);
+    let guides = score_rust(
+        indent,
+        m.over80,
+        m.over100,
+        m.over120,
+        m.total,
+        trailing_commas,
+    );
 
     let signals = vec![
         StyleSignal {
@@ -68,26 +63,11 @@ pub fn analyze(text: &str) -> StyleAnalysis {
         },
         StyleSignal {
             name: "Max Line Length".into(),
-            value: format!("{max_len} chars"),
+            value: format!("{} chars", m.max_len),
         },
     ];
 
-    StyleAnalysis {
-        language_family: "Rust".into(),
-        indent_style: indent,
-        tab_indented_lines: tabs,
-        space2_indented_lines: sp2,
-        space4_indented_lines: sp4,
-        lines_over_80: over80,
-        lines_over_100: over100,
-        lines_over_120: over120,
-        max_line_length: max_len,
-        total_lines: total,
-        signals,
-        guide_scores: guides,
-        dominant_guide: dominant,
-        dominant_score_pct: dominant_pct,
-    }
+    StyleAnalysis::assemble("Rust", indent, &m, signals, guides)
 }
 
 fn score_rust(

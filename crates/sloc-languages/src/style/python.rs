@@ -5,31 +5,22 @@
 //! Guides: PEP 8, Black, Google Python.
 
 use super::common::{
-    classify_indent, count_first_quote, count_over, scan_indent, score_indent_4, score_line80,
-    score_line88, score_line_n, top_guide, weighted_score, StyleAnalysis, StyleGuideScore,
+    classify_indent, count_first_quote, count_over, scan_base_metrics, score_indent_4,
+    score_line80, score_line88, score_line_n, weighted_score, StyleAnalysis, StyleGuideScore,
     StyleSignal,
 };
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
-    let mut tabs = 0u32;
-    let mut sp2 = 0u32;
-    let mut sp4 = 0u32;
+    let m = scan_base_metrics(&lines);
+    let over88 = count_over(&lines, 88);
+    let over99 = count_over(&lines, 99);
+
     let mut single_q = 0u32;
     let mut double_q = 0u32;
     let mut type_hints = 0u32;
-    let mut total = 0u32;
-
-    let over80 = count_over(&lines, 80);
-    let over88 = count_over(&lines, 88);
-    let over99 = count_over(&lines, 99);
-    let over100 = count_over(&lines, 100);
-    let over120 = count_over(&lines, 120);
-    let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
 
     for line in &lines {
-        total += 1;
-        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
         let trimmed = line.trim();
         count_first_quote(trimmed, &mut single_q, &mut double_q);
         if has_type_hints(trimmed) {
@@ -37,7 +28,7 @@ pub fn analyze(text: &str) -> StyleAnalysis {
         }
     }
 
-    let indent = classify_indent(tabs, sp2, sp4);
+    let indent = classify_indent(m.tabs, m.sp2, m.sp4);
 
     let quote_val = if single_q == 0 && double_q == 0 {
         "\u{2014}"
@@ -50,9 +41,8 @@ pub fn analyze(text: &str) -> StyleAnalysis {
     };
 
     let guides = score_guides(
-        indent, over80, over88, over99, total, double_q, single_q, type_hints,
+        indent, m.over80, over88, over99, m.total, double_q, single_q, type_hints,
     );
-    let (dominant, dominant_pct) = top_guide(&guides);
 
     let signals = vec![
         StyleSignal {
@@ -69,26 +59,11 @@ pub fn analyze(text: &str) -> StyleAnalysis {
         },
         StyleSignal {
             name: "Max Line Length".into(),
-            value: format!("{max_len} chars"),
+            value: format!("{} chars", m.max_len),
         },
     ];
 
-    StyleAnalysis {
-        language_family: "Python".into(),
-        indent_style: indent,
-        tab_indented_lines: tabs,
-        space2_indented_lines: sp2,
-        space4_indented_lines: sp4,
-        lines_over_80: over80,
-        lines_over_100: over100,
-        lines_over_120: over120,
-        max_line_length: max_len,
-        total_lines: total,
-        signals,
-        guide_scores: guides,
-        dominant_guide: dominant,
-        dominant_score_pct: dominant_pct,
-    }
+    StyleAnalysis::assemble("Python", indent, &m, signals, guides)
 }
 
 fn has_type_hints(trimmed: &str) -> bool {
