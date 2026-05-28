@@ -4,7 +4,11 @@
 //! Style-guide analysis for Ruby.
 //! Guides: RuboCop (community), Airbnb Ruby, Standard Ruby.
 
-use super::common::*;
+use super::common::{
+    classify_indent, count_first_quote, count_over, scan_indent, score_indent_2, score_line100,
+    score_line120, score_line80, top_guide, weighted_score, StyleAnalysis, StyleGuideScore,
+    StyleSignal,
+};
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
@@ -23,27 +27,15 @@ pub fn analyze(text: &str) -> StyleAnalysis {
 
     for line in &lines {
         total += 1;
-        let trimmed = line.trim();
-        scan_indent(line, &mut tabs, &mut sp2, &mut sp4);
-
-        if trimmed == "# frozen_string_literal: true" {
-            frozen_literal = true;
-        }
-
-        if trimmed.starts_with('#') {
-            continue;
-        }
-
-        for ch in trimmed.chars() {
-            if ch == '\'' {
-                single_q += 1;
-                break;
-            }
-            if ch == '"' {
-                double_q += 1;
-                break;
-            }
-        }
+        scan_ruby_line(
+            line,
+            &mut tabs,
+            &mut sp2,
+            &mut sp4,
+            &mut single_q,
+            &mut double_q,
+            &mut frozen_literal,
+        );
     }
 
     let indent = classify_indent(tabs, sp2, sp4);
@@ -104,16 +96,28 @@ pub fn analyze(text: &str) -> StyleAnalysis {
     }
 }
 
-fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
-    scores
-        .iter()
-        .max_by_key(|s| s.score_pct)
-        .map(|s| (s.name.clone(), s.score_pct))
-        .unwrap_or_else(|| ("Unknown".into(), 0))
+/// Scan one line, updating all per-line counters.
+fn scan_ruby_line(
+    line: &str,
+    tabs: &mut u32,
+    sp2: &mut u32,
+    sp4: &mut u32,
+    single_q: &mut u32,
+    double_q: &mut u32,
+    frozen_literal: &mut bool,
+) {
+    scan_indent(line, tabs, sp2, sp4);
+    let trimmed = line.trim();
+    if trimmed == "# frozen_string_literal: true" {
+        *frozen_literal = true;
+    }
+    if !trimmed.starts_with('#') {
+        count_first_quote(trimmed, single_q, double_q);
+    }
 }
 
 fn score_ruby(
-    ind: IndentStyle,
+    ind: super::common::IndentStyle,
     over80: u32,
     over100: u32,
     over120: u32,
@@ -127,28 +131,21 @@ fn score_ruby(
     let l120 = score_line120(over120, total);
     let sq = if uses_single { 1.0_f32 } else { 0.0 };
 
-    // RuboCop (community): 2-space, 120-col, single quotes
-    let rubocop = weighted_score(&[(0.30, i2), (0.40, l120), (0.30, sq)]);
-    // Airbnb Ruby: 2-space, 100-col, single quotes
-    let airbnb = weighted_score(&[(0.30, i2), (0.40, l100), (0.30, sq)]);
-    // Standard Ruby: 2-space, 80-col, single quotes
-    let standard = weighted_score(&[(0.30, i2), (0.40, l80), (0.30, sq)]);
-
     vec![
         StyleGuideScore {
             name: "RuboCop".into(),
             description: "2-space | 120-col | single quotes".into(),
-            score_pct: rubocop,
+            score_pct: weighted_score(&[(0.30, i2), (0.40, l120), (0.30, sq)]),
         },
         StyleGuideScore {
             name: "Airbnb Ruby".into(),
             description: "2-space | 100-col | single quotes".into(),
-            score_pct: airbnb,
+            score_pct: weighted_score(&[(0.30, i2), (0.40, l100), (0.30, sq)]),
         },
         StyleGuideScore {
             name: "Standard Ruby".into(),
             description: "2-space | 80-col | single quotes".into(),
-            score_pct: standard,
+            score_pct: weighted_score(&[(0.30, i2), (0.40, l80), (0.30, sq)]),
         },
     ]
 }

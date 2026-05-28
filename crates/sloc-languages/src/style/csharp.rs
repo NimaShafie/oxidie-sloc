@@ -5,16 +5,12 @@
 //! C# guides: Microsoft (.NET), Google C#, StyleCop.
 //! F# guides: Microsoft F#, FSharp.Formatting.
 
-use super::common::*;
+use super::common::{
+    classify_brace, classify_indent, count_over, scan_indent, score_allman_brace,
+    score_attach_brace, score_indent_4, score_line100, score_line120, score_line80, top_guide,
+    weighted_score, BraceStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+};
 use crate::Language;
-
-#[derive(Clone, Copy, PartialEq)]
-enum BraceStyle {
-    Allman,
-    Attach,
-    Mixed,
-    Unknown,
-}
 
 pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
@@ -43,11 +39,9 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
             attach += 1;
         }
 
-        // var vs explicit type declarations
         if trimmed.starts_with("var ") {
             var_count += 1;
         }
-        // simple heuristic: explicit type = known type keywords
         for kw in &[
             "int ",
             "string ",
@@ -74,14 +68,11 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     let prefers_var = var_count > explicit_type;
 
     let (guides, lang_family) = match language {
-        Language::FSharp => {
-            let g = score_fsharp(indent, over80, over100, total);
-            (g, "F#")
-        }
-        _ => {
-            let g = score_csharp(indent, brace, over80, over100, over120, total, prefers_var);
-            (g, "C#")
-        }
+        Language::FSharp => (score_fsharp(indent, over80, over100, total), "F#"),
+        _ => (
+            score_csharp(indent, brace, over80, over100, over120, total, prefers_var),
+            "C#",
+        ),
     };
 
     let (dominant, dominant_pct) = top_guide(&guides);
@@ -125,22 +116,6 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     }
 }
 
-fn classify_brace(allman: u32, attach: u32) -> BraceStyle {
-    let t = allman + attach;
-    if t == 0 {
-        return BraceStyle::Unknown;
-    }
-    let a = allman as f32 / t as f32;
-    let k = attach as f32 / t as f32;
-    if a >= 0.65 {
-        BraceStyle::Allman
-    } else if k >= 0.65 {
-        BraceStyle::Attach
-    } else {
-        BraceStyle::Mixed
-    }
-}
-
 fn brace_display(b: BraceStyle) -> &'static str {
     match b {
         BraceStyle::Allman => "Allman (new line)",
@@ -150,34 +125,8 @@ fn brace_display(b: BraceStyle) -> &'static str {
     }
 }
 
-fn score_allman(b: BraceStyle) -> f32 {
-    match b {
-        BraceStyle::Allman => 1.0,
-        BraceStyle::Mixed => 0.40,
-        BraceStyle::Attach => 0.05,
-        BraceStyle::Unknown => 0.50,
-    }
-}
-
-fn score_attach(b: BraceStyle) -> f32 {
-    match b {
-        BraceStyle::Attach => 1.0,
-        BraceStyle::Mixed => 0.40,
-        BraceStyle::Allman => 0.05,
-        BraceStyle::Unknown => 0.50,
-    }
-}
-
-fn top_guide(scores: &[StyleGuideScore]) -> (String, u8) {
-    scores
-        .iter()
-        .max_by_key(|s| s.score_pct)
-        .map(|s| (s.name.clone(), s.score_pct))
-        .unwrap_or_else(|| ("Unknown".into(), 0))
-}
-
 fn score_csharp(
-    ind: IndentStyle,
+    ind: super::common::IndentStyle,
     brace: BraceStyle,
     over80: u32,
     over100: u32,
@@ -189,53 +138,48 @@ fn score_csharp(
     let l80 = score_line80(over80, total);
     let l100 = score_line100(over100, total);
     let l120 = score_line120(over120, total);
-    let all = score_allman(brace);
-    let att = score_attach(brace);
-
-    // Microsoft .NET: 4-space, Allman braces, 120-col
-    let microsoft = weighted_score(&[(0.35, i4), (0.40, all), (0.25, l120)]);
-    // Google C#: 4-space, K&R, 100-col
-    let google = weighted_score(&[(0.35, i4), (0.35, att), (0.30, l100)]);
-    // StyleCop: 4-space, Allman, 80-col
-    let stylecop = weighted_score(&[(0.35, i4), (0.35, all), (0.30, l80)]);
+    let all = score_allman_brace(brace);
+    let att = score_attach_brace(brace);
 
     vec![
         StyleGuideScore {
             name: "Microsoft .NET".into(),
             description: "4-space | Allman braces | 120-col".into(),
-            score_pct: microsoft,
+            score_pct: weighted_score(&[(0.35, i4), (0.40, all), (0.25, l120)]),
         },
         StyleGuideScore {
             name: "Google C#".into(),
             description: "4-space | K&R braces | 100-col".into(),
-            score_pct: google,
+            score_pct: weighted_score(&[(0.35, i4), (0.35, att), (0.30, l100)]),
         },
         StyleGuideScore {
             name: "StyleCop".into(),
             description: "4-space | Allman braces | 80-col".into(),
-            score_pct: stylecop,
+            score_pct: weighted_score(&[(0.35, i4), (0.35, all), (0.30, l80)]),
         },
     ]
 }
 
-fn score_fsharp(ind: IndentStyle, over80: u32, over100: u32, total: u32) -> Vec<StyleGuideScore> {
+fn score_fsharp(
+    ind: super::common::IndentStyle,
+    over80: u32,
+    over100: u32,
+    total: u32,
+) -> Vec<StyleGuideScore> {
     let i4 = score_indent_4(ind);
     let l80 = score_line80(over80, total);
     let l100 = score_line100(over100, total);
-
-    let microsoft = weighted_score(&[(0.50, i4), (0.50, l100)]);
-    let fmt = weighted_score(&[(0.50, i4), (0.50, l80)]);
 
     vec![
         StyleGuideScore {
             name: "Microsoft F#".into(),
             description: "4-space | 100-col".into(),
-            score_pct: microsoft,
+            score_pct: weighted_score(&[(0.50, i4), (0.50, l100)]),
         },
         StyleGuideScore {
             name: "FSharp.Formatting".into(),
             description: "4-space | 80-col".into(),
-            score_pct: fmt,
+            score_pct: weighted_score(&[(0.50, i4), (0.50, l80)]),
         },
     ]
 }
