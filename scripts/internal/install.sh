@@ -5,7 +5,7 @@
 #   bash scripts/internal/install.sh           # auto-installs; pre-built binary preferred
 #   bash scripts/internal/install.sh --online  # explicitly download from SLOC_RELEASE_BASE_URL
 #   bash scripts/internal/install.sh --build   # compile from bundled toolchain + vendor sources
-#   bash scripts/internal/install.sh --rebuild # force a fresh build even if a binary already exists
+#   bash scripts/internal/install.sh --rebuild # force a fresh build from source (implies --build)
 #   bash scripts/internal/install.sh --auto    # auto-install rustup if cargo is absent (interactive prompt)
 #
 # Environment variables:
@@ -39,7 +39,7 @@ ONLINE_MODE=false
 BUILD_MODE=false
 for arg in "$@"; do
     case "$arg" in
-        --rebuild|--force|-f) FORCE_REBUILD=true ;;
+        --rebuild|--force|-f) FORCE_REBUILD=true; BUILD_MODE=true ;;
         --auto) AUTO_RUSTUP=true ;;
         --online) ONLINE_MODE=true ;;
         --build) BUILD_MODE=true ;;
@@ -515,23 +515,23 @@ if ! command -v cargo &>/dev/null; then
         echo "" >&2
         echo " [ERROR] No pre-built binary found and no Rust toolchain on PATH." >&2
         echo "" >&2
-        echo " Option 1 — place the pre-built binary in dist/ and re-run:" >&2
+        echo " Option 1 — compile from the bundled sources (no network required):" >&2
+        echo "   bash scripts/internal/install.sh --build" >&2
+        echo "" >&2
+        echo " Option 2 — download a pre-built binary:" >&2
+        if [[ -n "${SLOC_RELEASE_BASE_URL:-}" ]]; then
+        echo "   From your configured server: ${SLOC_RELEASE_BASE_URL}/v${_OV}/" >&2
+        else
+        echo "   From GitHub Releases (requires internet access):" >&2
+        fi
+        echo "   bash scripts/internal/install.sh --online" >&2
+        echo "" >&2
+        echo " Option 3 — place the pre-built archive in dist/ and re-run:" >&2
         if [[ "$PLATFORM" == windows ]]; then
         echo "   dist/oxide-sloc-windows-x64.zip" >&2
         else
-        echo "   dist/oxide-sloc-linux-x86_64.tar.gz" >&2
+        echo "   dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz" >&2
         fi
-        echo "" >&2
-        if [[ -n "${SLOC_RELEASE_BASE_URL:-}" ]]; then
-        echo "   Obtain from your configured release server:" >&2
-        echo "     ${SLOC_RELEASE_BASE_URL}/v${_OV}/" >&2
-        echo "" >&2
-        echo " Option 2 — download automatically from your release server:" >&2
-        echo "   bash scripts/internal/install.sh --online" >&2
-        fi
-        echo "" >&2
-        echo " Option 3 — compile from the bundled sources (no network required):" >&2
-        echo "   bash scripts/internal/install.sh --build" >&2
         echo "" >&2
         exit 1
     fi

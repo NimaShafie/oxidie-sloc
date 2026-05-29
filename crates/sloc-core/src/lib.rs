@@ -32,7 +32,7 @@ use sloc_config::{
 use sloc_languages::style::IndentStyle;
 use sloc_languages::{
     analyze_text, detect_language, supported_languages, AnalysisOptions, Language, ParseMode,
-    RawLineCounts, StyleAnalysis,
+    RawLineCounts, StyleAnalysis, StyleLangScope,
 };
 
 // ── Detection sample sizes and thresholds ────────────────────────────────────
@@ -1387,11 +1387,17 @@ fn analyze_candidate_file(
         }
     }
 
+    let style_scope = match config.analysis.style_lang_scope.as_str() {
+        "c_family" => StyleLangScope::CFamilyOnly,
+        _ => StyleLangScope::All,
+    };
     let ieee_opts = AnalysisOptions {
         blank_in_block_comment_as_comment: config.analysis.blank_in_block_comment_policy
             == BlankInBlockCommentPolicy::CountAsComment,
         collapse_continuation_lines: config.analysis.continuation_line_policy
             == ContinuationLinePolicy::CollapseToLogical,
+        enable_style: config.analysis.style_analysis_enabled,
+        style_lang_scope: style_scope,
     };
     let analysis = analyze_text(language, &text, ieee_opts);
     let effective_counts = compute_effective_counts(

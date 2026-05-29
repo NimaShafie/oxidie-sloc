@@ -162,6 +162,18 @@ pub struct AnalysisConfig {
     /// Files where ≤ 5 % of lines exceed this limit count as compliant.
     #[serde(default = "default_style_col_threshold")]
     pub style_col_threshold: u16,
+    /// When false, skip all style-guide heuristic analysis entirely (faster on very large repos).
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub style_analysis_enabled: bool,
+    /// Minimum dominant-guide adherence score (0–100) below which a file is flagged in the
+    /// per-file style table. 0 = no threshold / all files shown without warning. Default: 0.
+    #[serde(default)]
+    pub style_score_threshold: u8,
+    /// Language scope for style analysis. "all" = every supported language family (default).
+    /// "c_family" = C / C++ / Objective-C only (fast, backwards-compatible).
+    #[serde(default = "default_style_lang_scope")]
+    pub style_lang_scope: String,
 }
 
 const fn default_true() -> bool {
@@ -170,6 +182,10 @@ const fn default_true() -> bool {
 
 const fn default_style_col_threshold() -> u16 {
     80
+}
+
+fn default_style_lang_scope() -> String {
+    "all".into()
 }
 
 fn default_excluded_directories() -> Vec<String> {
@@ -265,6 +281,9 @@ impl Default for AnalysisConfig {
             budget: None,
             coverage_file: None,
             style_col_threshold: 80,
+            style_analysis_enabled: true,
+            style_score_threshold: 0,
+            style_lang_scope: "all".into(),
         }
     }
 }

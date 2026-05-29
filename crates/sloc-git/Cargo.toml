@@ -8,8 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 rust-version.workspace = true
-description = "Git operations, webhook verification, and scan-schedule management for oxide-sloc"
-readme = "../../README.md"
+description = "Git CLI wrappers, HMAC webhook verification, and scan-schedule store for oxide-sloc"
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 

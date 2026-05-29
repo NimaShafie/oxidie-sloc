@@ -71,7 +71,10 @@ use sloc_core::{
     analyze, compute_delta, read_json, AnalysisRun, FileChangeStatus, RegistryEntry, ScanRegistry,
     ScanSummarySnapshot, SummaryTotals, WatchedDirsStore,
 };
-use sloc_report::{render_html, render_sub_report_html, write_pdf_from_html, write_pdf_from_run};
+use sloc_report::{
+    render_html, render_html_with_delta, render_sub_report_html, write_pdf_from_html,
+    write_pdf_from_run, ReportDeltaContext,
+};
 const MAX_CONCURRENT_ANALYSES: usize = 4;
 
 /// Windows-only helpers that force the native file-picker dialog into the
@@ -1274,8 +1277,6 @@ async fn index(
             binary_file_behavior: behavior,
             output_dir: query.output_dir.unwrap_or_default(),
             report_title: query.report_title.unwrap_or_default(),
-            generate_html: query.generate_html.as_deref() != Some("off"),
-            generate_pdf: query.generate_pdf.as_deref() == Some("on"),
         };
         serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string())
     } else {
@@ -1462,8 +1463,6 @@ struct AnalyzeForm {
     output_dir: Option<String>,
     report_title: Option<String>,
     report_header_footer: Option<String>,
-    generate_html: Option<String>,
-    generate_pdf: Option<String>,
     include_globs: Option<String>,
     exclude_globs: Option<String>,
     submodule_breakdown: Option<String>,
@@ -1472,6 +1471,9 @@ struct AnalyzeForm {
     blank_in_block_comment_policy: Option<BlankInBlockCommentPolicy>,
     count_compiler_directives: Option<String>,
     style_col_threshold: Option<String>,
+    style_analysis_enabled: Option<String>,
+    style_score_threshold: Option<String>,
+    style_lang_scope: Option<String>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1491,8 +1493,6 @@ struct ScanConfig {
     binary_file_behavior: String,
     output_dir: String,
     report_title: String,
-    generate_html: bool,
-    generate_pdf: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1510,8 +1510,6 @@ struct IndexQuery {
     binary_file_behavior: Option<String>,
     output_dir: Option<String>,
     report_title: Option<String>,
-    generate_html: Option<String>,
-    generate_pdf: Option<String>,
     prefilled: Option<String>,
     git_repo: Option<String>,
     git_ref: Option<String>,
@@ -2222,6 +2220,8 @@ async fn upload_tarball_handler(
 #[derive(Deserialize)]
 struct LocateReportForm {
     file_path: String,
+    #[serde(default)]
+    redirect_url: Option<String>,
 }
 
 /// Render a view-reports error page and return it as a `Response`.
@@ -2399,7 +2399,12 @@ async fn locate_report_handler(
     if let Some(idx) = entry_idx {
         reg.entries[idx].html_path = Some(html_path);
         let _ = reg.save(&state.registry_path);
-        return axum::response::Redirect::to("/view-reports?linked=1").into_response();
+        let target = form
+            .redirect_url
+            .as_deref()
+            .filter(|u| u.starts_with('/') && !u.starts_with("//"))
+            .unwrap_or("/view-reports?linked=1");
+        return axum::response::Redirect::to(target).into_response();
     }
     // No match — attempt to build an entry from an adjacent result.json.
     if json_candidate.exists() {
@@ -2408,7 +2413,12 @@ async fn locate_report_handler(
                 let entry = registry_entry_from_run(&run, json_candidate, html_path);
                 reg.add_entry(entry);
                 let _ = reg.save(&state.registry_path);
-                return axum::response::Redirect::to("/view-reports?linked=1").into_response();
+                let target = form
+                    .redirect_url
+                    .as_deref()
+                    .filter(|u| u.starts_with('/') && !u.starts_with("//"))
+                    .unwrap_or("/view-reports?linked=1");
+                return axum::response::Redirect::to(target).into_response();
             }
             Err(e) => {
                 let file_hint = locate_path_hint(state.server_mode, &json_candidate);
@@ -3008,32 +3018,10 @@ async fn open_path_handler(
 
     #[cfg(target_os = "windows")]
     {
-        // Open the folder in Explorer, then use SetForegroundWindow + ShowWindow(SW_MAXIMIZE=3)
-        // to ensure the window surfaces on top of all other windows.  The path is passed via
-        // an environment variable to avoid any command-injection or escaping issues.
-        let ps_cmd = "Add-Type -TypeDefinition \
-            'using System;using System.Runtime.InteropServices;\
-            public class WF{\
-              [DllImport(\"user32.dll\")]public static extern bool SetForegroundWindow(IntPtr h);\
-              [DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int c);\
-            }'; \
-            $p=$env:SLOC_OPEN_PATH; \
-            $sh=New-Object -ComObject Shell.Application; \
-            $sh.Open($p); \
-            Start-Sleep -Milliseconds 600; \
-            foreach($w in $sh.Windows()){ \
-              try{ \
-                if([System.IO.Path]::GetFullPath($w.Document.Folder.Self.Path) -eq \
-                   [System.IO.Path]::GetFullPath($p)){ \
-                  [WF]::ShowWindow($w.HWND,3); \
-                  [WF]::SetForegroundWindow($w.HWND); \
-                  break \
-                } \
-              }catch{} \
-            }";
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd])
-            .env("SLOC_OPEN_PATH", target.to_string_lossy().as_ref())
+        // explorer.exe <path> opens the folder directly; no PowerShell or COM needed.
+        // C:\Windows is in the default Windows PATH so "explorer" resolves correctly.
+        let _ = std::process::Command::new("explorer")
+            .arg(&target)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
@@ -3051,7 +3039,7 @@ async fn open_path_handler(
         .stderr(Stdio::null())
         .spawn();
 
-    (StatusCode::OK, "ok").into_response()
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 async fn image_handler(AxumPath((folder, file)): AxumPath<(String, String)>) -> impl IntoResponse {
@@ -3406,6 +3394,20 @@ fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm
             }
         }
     }
+    if let Some(v) = form.style_analysis_enabled.as_deref() {
+        config.analysis.style_analysis_enabled = v != "disabled";
+    }
+    if let Some(v) = form.style_score_threshold.as_deref() {
+        if let Ok(t) = v.parse::<u8>() {
+            config.analysis.style_score_threshold = t.min(100);
+        }
+    }
+    if let Some(v) = form.style_lang_scope.as_deref() {
+        let scope = v.trim();
+        if scope == "c_family" || scope == "all" {
+            config.analysis.style_lang_scope = scope.to_string();
+        }
+    }
 }
 
 fn apply_coverage_path(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
@@ -3515,17 +3517,25 @@ fn sum_removed_code_lines(cmp: &sloc_core::ScanComparison) -> i64 {
         .sum()
 }
 
-/// Build one `SubmoduleRow`, optionally generating and persisting a sub-report HTML file.
+/// Sum the code lines present in both scans without any change (Unchanged files).
+fn sum_unmodified_code_lines(cmp: &sloc_core::ScanComparison) -> i64 {
+    cmp.file_deltas
+        .iter()
+        .filter(|f| f.status == FileChangeStatus::Unchanged)
+        .map(|f| f.current_code)
+        .sum()
+}
+
+/// Build one `SubmoduleRow`, generating and persisting a sub-report HTML file when available.
 fn build_submodule_row(
     s: &sloc_core::SubmoduleSummary,
     run: &AnalysisRun,
     run_id: &str,
     run_dir: &Path,
-    generate_html: bool,
 ) -> SubmoduleRow {
     let safe = sanitize_project_label(&s.name);
     let artifact_key = format!("sub_{safe}");
-    let html_url = if run.effective_configuration.discovery.submodule_breakdown && generate_html {
+    let html_url = if run.effective_configuration.discovery.submodule_breakdown {
         let parent_path = run
             .input_roots
             .first()
@@ -3657,8 +3667,6 @@ async fn analyze_handler(
         files_total: task_files_total,
         git_repo: form.git_repo.clone().filter(|s| !s.is_empty()),
         git_ref: form.git_ref.clone().filter(|s| !s.is_empty()),
-        generate_html: form.generate_html.is_some(),
-        generate_pdf: form.generate_pdf.is_some(),
         project_path: form.path.clone(),
         // In server mode the client-supplied output_dir is ignored — artifacts are
         // always written under the server's configured output root so remote users
@@ -3702,8 +3710,6 @@ struct AnalysisTask {
     files_total: Arc<std::sync::atomic::AtomicUsize>,
     git_repo: Option<String>,
     git_ref: Option<String>,
-    generate_html: bool,
-    generate_pdf: bool,
     project_path: String,
     output_dir: Option<String>,
     clones_dir: PathBuf,
@@ -3765,7 +3771,7 @@ async fn run_analysis_task(task: AnalysisTask) {
         return;
     }
 
-    let (run, report_html) = match analysis_result {
+    let run = match analysis_result {
         Ok(v) => v,
         Err(err) => {
             // Distinguish user-cancelled from real failure.
@@ -3816,6 +3822,41 @@ async fn run_analysis_task(task: AnalysisTask) {
             .count()
     };
 
+    // Build the HTML report now that delta is available, so the artifact
+    // embeds the full "Changes vs. Previous Scan" section for offline stakeholders.
+    let report_delta_ctx: Option<ReportDeltaContext> = scan_delta
+        .as_ref()
+        .zip(prev_entry.as_ref())
+        .map(|(cmp, prev)| ReportDeltaContext {
+            delta_code_added: sum_added_code_lines(cmp),
+            delta_code_removed: sum_removed_code_lines(cmp),
+            delta_unmodified_lines: sum_unmodified_code_lines(cmp),
+            delta_files_added: cmp.files_added,
+            delta_files_removed: cmp.files_removed,
+            delta_files_modified: cmp.files_modified,
+            delta_files_unchanged: cmp.files_unchanged,
+            prev_code_lines: prev.summary.code_lines,
+            prev_scan_count: prev_scan_count + 1,
+            prev_scan_label: fmt_la_time(prev.timestamp_utc),
+            prev_run_id: Some(prev.run_id.clone()),
+            current_run_id: Some(run_id.clone()),
+        });
+    let report_html = match render_html_with_delta(&run, report_delta_ctx.as_ref()) {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!("[oxide-sloc][analyze] HTML render failed: {err:#}");
+            let mut runs = task.state.async_runs.lock().await;
+            runs.insert(
+                task.wait_id.clone(),
+                AsyncRunState::Failed {
+                    message: "Failed to render HTML report.".to_string(),
+                },
+            );
+            drop(runs);
+            return;
+        }
+    };
+
     let output_root = resolve_output_root(task.output_dir.as_deref());
     let project_label = derive_project_label(
         task.git_repo.as_deref(),
@@ -3835,9 +3876,6 @@ async fn run_analysis_task(task: AnalysisTask) {
         &run,
         &report_html,
         &run_dir,
-        true,
-        task.generate_html,
-        task.generate_pdf,
         &run.effective_configuration.reporting.report_title,
         &file_stem,
         result_context,
@@ -3878,8 +3916,6 @@ async fn run_analysis_task(task: AnalysisTask) {
             &run,
             &task.project_path,
             task.output_dir.as_deref(),
-            task.generate_html,
-            task.generate_pdf,
         );
     }
 
@@ -3911,8 +3947,6 @@ fn save_scan_config_json(
     run: &sloc_core::AnalysisRun,
     project_path: &str,
     output_dir: Option<&str>,
-    generate_html: bool,
-    generate_pdf: bool,
 ) {
     let policy_str = serde_json::to_value(run.effective_configuration.analysis.mixed_line_policy)
         .ok()
@@ -3955,8 +3989,6 @@ fn save_scan_config_json(
         binary_file_behavior: behavior_str,
         output_dir: output_dir.unwrap_or("").to_string(),
         report_title: run.effective_configuration.reporting.report_title.clone(),
-        generate_html,
-        generate_pdf,
     };
     if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
         let _ = std::fs::write(cfg_path, json);
@@ -3971,7 +4003,7 @@ fn run_analysis_blocking(
     clones_dir: PathBuf,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     progress: Option<sloc_core::ProgressCounters>,
-) -> Result<(sloc_core::AnalysisRun, String)> {
+) -> Result<sloc_core::AnalysisRun> {
     if let (Some(repo), Some(refname)) = (git_repo, git_ref) {
         let dest = git_clone_dest(&repo, &clones_dir);
         sloc_git::clone_or_fetch(&repo, &dest)?;
@@ -3984,12 +4016,9 @@ fn run_analysis_blocking(
         if run.git_branch.is_none() {
             run.git_branch = Some(refname);
         }
-        let html = render_html(&run)?;
-        return Ok((run, html));
+        return Ok(run);
     }
-    let run = analyze(&config, "serve", Some(&cancel), progress.as_ref())?;
-    let html = render_html(&run)?;
-    Ok((run, html))
+    analyze(&config, "serve", Some(&cancel), progress.as_ref())
 }
 
 fn derive_project_label(
@@ -4444,14 +4473,16 @@ fn render_result_page(
         submodule_rows: run
             .submodule_summaries
             .iter()
-            .map(|s| build_submodule_row(s, run, run_id, &run_dir, artifacts.html_path.is_some()))
+            .map(|s| build_submodule_row(s, run, run_id, &run_dir))
             .collect(),
         pdf_generating: artifacts.pdf_path.as_ref().is_some_and(|p| !p.exists()),
         scan_config_url: format!("/runs/scan-config/{run_id}"),
         lang_chart_json: {
-            let entries: Vec<String> = run
-                .totals_by_language
-                .iter()
+            let mut langs: Vec<&sloc_core::LanguageSummary> =
+                run.totals_by_language.iter().collect();
+            langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
+            let entries: Vec<String> = langs
+                .into_iter()
                 .take(12)
                 .map(|l| {
                     let name = l
@@ -4460,11 +4491,12 @@ fn render_result_page(
                         .replace('\\', "\\\\")
                         .replace('"', "\\\"");
                     format!(
-                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
+                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"physical":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
                         name,
                         l.code_lines,
                         l.comment_lines,
                         l.blank_lines,
+                        l.total_physical_lines,
                         l.functions,
                         l.classes,
                         l.variables,
@@ -4497,7 +4529,13 @@ fn render_result_page(
             let entries: Vec<String> = run
                 .totals_by_language
                 .iter()
-                .filter(|l| l.functions > 0 || l.classes > 0 || l.variables > 0 || l.imports > 0)
+                .filter(|l| {
+                    l.functions > 0
+                        || l.classes > 0
+                        || l.variables > 0
+                        || l.imports > 0
+                        || l.test_count > 0
+                })
                 .map(|l| {
                     let name = l
                         .language
@@ -4505,8 +4543,8 @@ fn render_result_page(
                         .replace('\\', "\\\\")
                         .replace('"', "\\\"");
                     format!(
-                        r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{}}}"#,
-                        name, l.functions, l.classes, l.variables, l.imports,
+                        r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{},"tests":{}}}"#,
+                        name, l.functions, l.classes, l.variables, l.imports, l.test_count,
                     )
                 })
                 .collect();
@@ -4535,7 +4573,7 @@ fn render_result_page(
         has_semantic_data: run
             .totals_by_language
             .iter()
-            .any(|l| l.functions > 0 || l.classes > 0),
+            .any(|l| l.functions > 0 || l.classes > 0 || l.test_count > 0),
         csp_nonce: csp_nonce.to_owned(),
         confluence_configured,
         server_mode,
@@ -4846,7 +4884,13 @@ fn patch_html_nonce(html: &str, new_nonce: &str) -> String {
     )
 }
 
-fn serve_html_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Response {
+fn serve_html_artifact(
+    path: &Path,
+    wants_download: bool,
+    csp_nonce: &str,
+    run_id: &str,
+    server_mode: bool,
+) -> Response {
     match fs::read_to_string(path) {
         Ok(raw) => {
             // Patch the saved nonce so inline styles/scripts pass CSP.
@@ -4870,17 +4914,29 @@ fn serve_html_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
                 Html(swap_inline_chart_js_for_static(content)).into_response()
             }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !run_id.is_empty() => {
+            let filename = path.file_name().map_or_else(
+                || "report.html".to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let html = LocateFileTemplate {
+                run_id: run_id.to_owned(),
+                artifact_type: "html".to_string(),
+                expected_filename: filename,
+                server_mode,
+                csp_nonce: csp_nonce.to_owned(),
+                version: env!("CARGO_PKG_VERSION"),
+            }
+            .render()
+            .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
+            (StatusCode::NOT_FOUND, Html(html)).into_response()
+        }
         Err(err) => {
             let filename = path.file_name().map_or_else(
                 || "report.html".to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            let msg = format!(
-                "HTML report '{filename}' could not be read.\n\n\
-                 Error: {err}\n\n\
-                 If you moved or renamed the output folder, the stored path is now stale. \
-                 Use 'Open HTML folder' from the results page to browse the output directory."
-            );
+            let msg = format!("HTML report '{filename}' could not be read.\n\nError: {err}");
             let html = ErrorTemplate {
                 message: msg,
                 last_report_url: Some("/view-reports".to_string()),
@@ -5282,10 +5338,22 @@ async fn artifact_handler(
             let Some(path) = artifact_set.html_path else {
                 return StatusCode::NOT_FOUND.into_response();
             };
-            serve_html_artifact(&path, wants_download, &csp_nonce)
+            serve_html_artifact(
+                &path,
+                wants_download,
+                &csp_nonce,
+                &run_id,
+                state.server_mode,
+            )
         }
         "pdf" => {
             let report_title = artifact_set.report_title.clone();
+            let had_pdf_in_registry = artifact_set.pdf_path.is_some();
+            let stale_html_name = artifact_set
+                .html_path
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned());
             let path = match resolve_or_queue_pdf(
                 &state,
                 artifact_set.pdf_path,
@@ -5300,9 +5368,25 @@ async fn artifact_handler(
                 Ok(p) => p,
                 Err(r) => return r,
             };
-            // PDF path is recorded but the background task may still be writing it.
-            // Return a self-refreshing "please wait" page rather than an error.
             if !path.exists() {
+                // Distinguish a stale registry path (folder moved) from an in-progress
+                // background generation. Only show the locate page when the PDF was
+                // already recorded in the registry but the file is now missing.
+                if had_pdf_in_registry {
+                    if let Some(expected_filename) = stale_html_name {
+                        let html = LocateFileTemplate {
+                            run_id: run_id.clone(),
+                            artifact_type: "pdf".to_string(),
+                            expected_filename,
+                            server_mode: state.server_mode,
+                            csp_nonce: csp_nonce.clone(),
+                            version: env!("CARGO_PKG_VERSION"),
+                        }
+                        .render()
+                        .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
+                        return (StatusCode::NOT_FOUND, Html(html)).into_response();
+                    }
+                }
                 return pdf_generating_response(&run_id, &csp_nonce);
             }
             serve_pdf_artifact(&path, &report_title, &run_id, wants_download, &csp_nonce)
@@ -5465,7 +5549,13 @@ async fn artifact_handler(
                 .unwrap_or_else(|_| "<pre>Sub-report not found.</pre>".to_string());
                 return (StatusCode::NOT_FOUND, Html(html)).into_response();
             }
-            serve_html_artifact(&path, wants_download, &csp_nonce)
+            serve_html_artifact(
+                &path,
+                wants_download,
+                &csp_nonce,
+                &run_id,
+                state.server_mode,
+            )
         }
         _ => StatusCode::NOT_FOUND.into_response(),
     }
@@ -6898,7 +6988,7 @@ async fn api_ingest_handler(
                 .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'));
         if !run_id_safe {
             anyhow::bail!(
-                "invalid run_id: must be 1–128 alphanumeric/dash/underscore/dot characters"
+                "invalid run_id: must be 1-128 alphanumeric/dash/underscore/dot characters"
             );
         }
         let project_label = sanitize_project_label(&label_for_task);
@@ -6911,9 +7001,6 @@ async fn api_ingest_handler(
             &run,
             &html,
             &output_dir,
-            true,
-            true,
-            false,
             &label_for_task,
             &file_stem,
             RunResultContext::default(),
@@ -8941,9 +9028,18 @@ async fn test_metrics_handler(
       <div class="stat-chip"><div class="stat-chip-val" id="chip-cov-pct">{cov_line_pct_str}%</div><div class="stat-chip-label">Line Coverage</div><div class="stat-chip-tip">Overall line coverage across all LCOV-instrumented files (empty if no LCOV data)</div></div>
     </div>
 
-    <div class="panel">
-      <h1>Test Metrics</h1>
-      <p class="muted">Lexical test definition counts across your codebase — how many test functions, test cases, and test decorators were detected per language, and how dense the test coverage is relative to production code.</p>
+    <div class="panel" id="viz-panel">
+      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">Visualizations</div>
+
+      <div class="chart-box" style="margin-bottom:18px;">
+        <div class="chart-box-header">
+          <div class="chart-box-title" style="margin-bottom:0;">Test Count Trend</div>
+          <button class="chart-expand-btn" id="trend-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+        </div>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 14px;">Test definition count across all saved scans for the selected scope.</p>
+        <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
+        <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
+      </div>
 
       <div class="chart-row">
         <div class="chart-box">
@@ -8961,6 +9057,40 @@ async fn test_metrics_handler(
           <div class="chart-canvas-wrap"><canvas id="canvas-density"></canvas></div>
         </div>
       </div>
+
+      <div class="chart-row">
+        <div class="chart-box">
+          <div class="chart-box-header">
+            <div class="chart-box-title" style="margin-bottom:0;">Assertions by Language</div>
+            <button class="chart-expand-btn" id="assertions-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="canvas-assertions"></canvas></div>
+        </div>
+        <div class="chart-box" id="suites-chart-box">
+          <div class="chart-box-header">
+            <div class="chart-box-title" style="margin-bottom:0;">Test Suites by Language</div>
+            <button class="chart-expand-btn" id="suites-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+          </div>
+          <div class="chart-canvas-wrap"><canvas id="canvas-suites"></canvas></div>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="chart-box">
+          <div class="chart-box-title">Test Files Breakdown</div>
+          <div class="chart-canvas-wrap" style="height:260px;display:flex;align-items:center;justify-content:center;"><canvas id="canvas-files"></canvas></div>
+        </div>
+        <div class="chart-box">
+          <div class="chart-box-title">Test Composition</div>
+          <p style="font-size:11px;color:var(--muted);margin:0 0 10px;">Total counts: test functions, assertions, and suites workspace-wide.</p>
+          <div class="chart-canvas-wrap"><canvas id="canvas-composition"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h1>Test Metrics</h1>
+      <p class="muted">Lexical test definition counts across your codebase — how many test functions, test cases, and test decorators were detected per language, and how dense the test coverage is relative to production code.</p>
 
       <div class="section-header">Language Breakdown</div>
       {cov_no_data_notice}
@@ -9043,15 +9173,6 @@ async fn test_metrics_handler(
       <div id="cov-file-count" style="text-align:right;font-size:11px;color:var(--muted);margin-top:8px;"></div>
     </div>
 
-    <div class="panel">
-      <div class="chart-box-header" style="margin-bottom:4px;">
-        <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;margin-bottom:0;">Test Count Trend</div>
-        <button class="chart-expand-btn" id="trend-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
-      </div>
-      <p class="muted" style="margin-bottom:14px;">Test definition count across all saved scans for the selected scope.</p>
-      <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
-      <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
-    </div>
   </div>
 
   <footer class="site-footer">
@@ -9155,6 +9276,7 @@ async fn test_metrics_handler(
     var currentRoot = '__all__';
     var currentSub  = '';
     var testsChart = null, densityChart = null, covChart = null, tierChart = null, trendChart = null;
+    var assertionsChart = null, suitesChart = null, filesChart = null, compositionChart = null;
     var ALL_CHARTS = [];
     var currentLangTests = [];
     var currentTrendPts = [];
@@ -9264,6 +9386,111 @@ async fn test_metrics_handler(
         }});
         ALL_CHARTS.push(densityChart);
       }}
+    }}
+
+    function renderAssertionsChart(D) {{
+      assertionsChart = destroyChart(assertionsChart);
+      if (!D || !D.length) return;
+      var top15 = D.filter(function(d){{ return d.assertions > 0; }}).slice(0, 15);
+      var canvas = document.getElementById('canvas-assertions');
+      if (!canvas || !top15.length) return;
+      assertionsChart = new Chart(canvas, {{
+        type: 'bar',
+        data: {{
+          labels: top15.map(function(d){{ return d.lang; }}),
+          datasets: [{{ label: 'Assertions', data: top15.map(function(d){{ return d.assertions; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+2) % PALETTE.length]; }}), borderRadius: 4 }}]
+        }},
+        options: {{
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+          layout: {{ padding: {{ right: 64 }} }},
+          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
+          scales: {{
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+            y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+          }}
+        }},
+        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+      }});
+      ALL_CHARTS.push(assertionsChart);
+    }}
+
+    function renderSuitesChart(D) {{
+      suitesChart = destroyChart(suitesChart);
+      if (!D || !D.length) return;
+      var top15 = D.filter(function(d){{ return d.suites > 0; }}).slice(0, 15);
+      var canvas = document.getElementById('canvas-suites');
+      if (!canvas || !top15.length) return;
+      suitesChart = new Chart(canvas, {{
+        type: 'bar',
+        data: {{
+          labels: top15.map(function(d){{ return d.lang; }}),
+          datasets: [{{ label: 'Test Suites', data: top15.map(function(d){{ return d.suites; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+6) % PALETTE.length]; }}), borderRadius: 4 }}]
+        }},
+        options: {{
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+          layout: {{ padding: {{ right: 64 }} }},
+          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
+          scales: {{
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+            y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
+          }}
+        }},
+        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+      }});
+      ALL_CHARTS.push(suitesChart);
+    }}
+
+    function renderFilesChart(totals) {{
+      filesChart = destroyChart(filesChart);
+      var canvas = document.getElementById('canvas-files');
+      if (!canvas) return;
+      var testF = totals.test_files || 0;
+      var totalF = totals.total_files || 0;
+      var nonTest = Math.max(0, totalF - testF);
+      var dark = isDark();
+      filesChart = new Chart(canvas, {{
+        type: 'doughnut',
+        data: {{
+          labels: ['Test Files', 'Non-Test Files'],
+          datasets: [{{ data: [testF, nonTest], backgroundColor: ['#C45C10', dark ? '#524238' : '#e6d0bf'], borderWidth: 2, borderColor: dark ? '#1e1e1e' : '#f5efe8' }}]
+        }},
+        options: {{
+          responsive: true, maintainAspectRatio: false, cutout: '62%',
+          plugins: {{
+            legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }} }},
+            tooltip: {{ callbacks: {{ label: function(ctx) {{
+              var v = ctx.parsed, pct = totalF > 0 ? (v / totalF * 100).toFixed(1) : '0';
+              return ' ' + fmtFull(v) + ' files (' + pct + '%)';
+            }} }} }}
+          }}
+        }}
+      }});
+      ALL_CHARTS.push(filesChart);
+    }}
+
+    function renderCompositionChart(totals) {{
+      compositionChart = destroyChart(compositionChart);
+      var canvas = document.getElementById('canvas-composition');
+      if (!canvas) return;
+      var tc = totals.test_count || 0, ac = totals.assertions || 0, sc = totals.suites || 0;
+      compositionChart = new Chart(canvas, {{
+        type: 'bar',
+        data: {{
+          labels: ['Test Functions', 'Assertions', 'Test Suites'],
+          datasets: [{{ label: 'Count', data: [tc, ac, sc], backgroundColor: ['#C45C10', '#2A6846', '#4472C4'], borderRadius: 6 }}]
+        }},
+        options: {{
+          responsive: true, maintainAspectRatio: false,
+          layout: {{ padding: {{ top: 22 }} }},
+          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y); }} }} }} }},
+          scales: {{
+            x: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }},
+            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+          }}
+        }},
+        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
+      }});
+      ALL_CHARTS.push(compositionChart);
     }}
 
     function renderCovCharts(covD, tiers) {{
@@ -9427,6 +9654,10 @@ async fn test_metrics_handler(
       if ((el = document.getElementById('chip-langs'))) el.textContent = fmt(t.langs_with_tests);
       if ((el = document.getElementById('chip-cov-pct'))) el.textContent = t.cov_line + '%';
       renderTestCharts(d.lang_tests);
+      renderAssertionsChart(d.lang_tests);
+      renderSuitesChart(d.lang_tests);
+      renderFilesChart(t);
+      renderCompositionChart(t);
       buildLangTable(d.lang_tests);
       var covPanel = document.getElementById('cov-panel');
       if (covPanel) covPanel.style.display = d.has_coverage ? '' : 'none';
@@ -9611,6 +9842,68 @@ async fn test_metrics_handler(
             }}
           }},
           plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
+        }});
+      }});
+    }})();
+
+    (function() {{
+      var btn = document.getElementById('assertions-expand-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {{
+        var D = currentLangTests;
+        if (!D || !D.length) return;
+        var top15 = D.filter(function(d){{ return d.assertions > 0; }}).slice(0, 15);
+        if (!top15.length) return;
+        var h = Math.max(320, top15.length * 36 + 80);
+        var canvas = makeTmOverlay('Assertions by Language — Full View', top15.length + ' languages', h);
+        if (!canvas) return;
+        new Chart(canvas, {{
+          type: 'bar',
+          data: {{
+            labels: top15.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Assertions', data: top15.map(function(d){{ return d.assertions; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+2) % PALETTE.length]; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            layout: {{ padding: {{ right: 72 }} }},
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmt(v); }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
+            }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+        }});
+      }});
+    }})();
+
+    (function() {{
+      var btn = document.getElementById('suites-expand-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {{
+        var D = currentLangTests;
+        if (!D || !D.length) return;
+        var top15 = D.filter(function(d){{ return d.suites > 0; }}).slice(0, 15);
+        if (!top15.length) return;
+        var h = Math.max(320, top15.length * 36 + 80);
+        var canvas = makeTmOverlay('Test Suites by Language — Full View', top15.length + ' languages', h);
+        if (!canvas) return;
+        new Chart(canvas, {{
+          type: 'bar',
+          data: {{
+            labels: top15.map(function(d){{ return d.lang; }}),
+            datasets: [{{ label: 'Test Suites', data: top15.map(function(d){{ return d.suites; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+6) % PALETTE.length]; }}), borderRadius: 4 }}]
+          }},
+          options: {{
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            layout: {{ padding: {{ right: 72 }} }},
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
+            scales: {{
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmt(v); }} }} }},
+              y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
+            }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
         }});
       }});
     }})();
@@ -9809,14 +10102,10 @@ fn render_embed_widget(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_run_artifacts(
     run: &sloc_core::AnalysisRun,
     report_html: &str,
     run_dir: &Path,
-    generate_json: bool,
-    generate_html: bool,
-    generate_pdf: bool,
     report_title: &str,
     file_stem: &str,
     result_context: RunResultContext,
@@ -9824,66 +10113,51 @@ fn persist_run_artifacts(
     fs::create_dir_all(run_dir)
         .with_context(|| format!("failed to create output directory {}", run_dir.display()))?;
 
-    let mut html_path = None;
-    let mut pdf_path = None;
-    let mut json_path = None;
-    let mut pending_pdf: Option<(PathBuf, PathBuf, bool)> = None;
-
-    if generate_html {
+    // HTML is always generated — it is the canonical shareable artifact.
+    let html_path = {
         let path = run_dir.join(format!("report_{file_stem}.html"));
         fs::write(&path, report_html)
             .with_context(|| format!("failed to write HTML report to {}", path.display()))?;
-        html_path = Some(path);
-    }
+        Some(path)
+    };
 
-    if generate_json {
+    // JSON is always generated — required for compare/diff/history.
+    let json_path = {
         let path = run_dir.join(format!("result_{file_stem}.json"));
         let json = serde_json::to_string_pretty(run)
             .context("failed to serialize analysis run to JSON")?;
         fs::write(&path, json)
             .with_context(|| format!("failed to write JSON report to {}", path.display()))?;
-        json_path = Some(path);
-    }
+        Some(path)
+    };
 
-    if generate_pdf {
+    // PDF is always attempted. Native renderer first; HTML->browser on failure.
+    // A missing Chromium is non-fatal — other artifacts are still complete.
+    let (pdf_path, pending_pdf) = {
         let pdf_dest = run_dir.join(format!("report_{file_stem}.pdf"));
-
-        // Attempt pure-Rust native PDF (zero external dependencies).
-        // Falls back to the HTML→browser background task on failure.
         match write_pdf_from_run(run, &pdf_dest) {
             Ok(()) => {
                 eprintln!(
                     "[oxide-sloc][pdf] native PDF written to {}",
                     pdf_dest.display()
                 );
-                pdf_path = Some(pdf_dest);
-                // pending_pdf stays None — no background browser task needed.
+                (Some(pdf_dest), None)
             }
             Err(native_err) => {
                 eprintln!(
-                    "[oxide-sloc][pdf] native PDF failed ({native_err:#}), \
-                     scheduling HTML→browser fallback"
+                    "[oxide-sloc][pdf] native PDF failed ({native_err:#}), scheduling HTML->browser fallback"
                 );
-                let source_html_path = if let Some(existing) = html_path.as_ref() {
-                    existing.clone()
-                } else {
-                    let temp_html = run_dir.join("_report_rendered.html");
-                    fs::write(&temp_html, report_html).with_context(|| {
-                        format!(
-                            "failed to write temporary HTML report to {}",
-                            temp_html.display()
-                        )
-                    })?;
-                    temp_html
-                };
-                let cleanup_src = !generate_html;
-                pdf_path = Some(pdf_dest.clone());
-                pending_pdf = Some((source_html_path, pdf_dest, cleanup_src));
+                let source_html_path = html_path
+                    .as_ref()
+                    .expect("html_path always Some here")
+                    .clone();
+                let pending = Some((source_html_path, pdf_dest.clone(), false));
+                (Some(pdf_dest), pending)
             }
         }
-    }
+    };
 
-    // CSV and XLSX are always generated (like JSON) — no extra flag required.
+    // CSV and XLSX are always generated — no extra flag required.
     let csv_path = {
         let path = run_dir.join(format!("report_{file_stem}.csv"));
         if let Err(e) = sloc_report::write_csv(run, &path) {
@@ -10134,9 +10408,6 @@ pub(crate) fn scan_path_to_artifacts(
         &run,
         &html,
         &output_dir,
-        true,
-        true,
-        false,
         label,
         &file_stem,
         RunResultContext::default(),
@@ -11347,8 +11618,8 @@ struct SubmoduleRow {
     .ws-action-link svg { width: 15px; height: 15px; flex-shrink:0; }
     .ws-action-link:hover { background: rgba(184,93,51,0.14); border-color: rgba(184,93,51,0.35); text-decoration:none; }
     body.dark-theme .ws-action-link { color: var(--oxide); border-color: rgba(211,122,76,0.25); background: rgba(211,122,76,0.08); }
-    .summary-card, .card, .step-nav, .explainer-card, .review-card, .workspace-card, .artifact-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease, transform 0.18s ease; }
-    .summary-card:hover, .workspace-card:hover, .explainer-card:hover, .artifact-card:hover, .review-card:hover { box-shadow: var(--shadow-strong); border-color: var(--line-strong); transform: translateY(-2px); }
+    .summary-card, .card, .step-nav, .explainer-card, .review-card, .workspace-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease, transform 0.18s ease; }
+    .summary-card:hover, .workspace-card:hover, .explainer-card:hover, .review-card:hover { box-shadow: var(--shadow-strong); border-color: var(--line-strong); transform: translateY(-2px); }
     .card:hover, .step-nav:hover { box-shadow: var(--shadow-strong); border-color: var(--line-strong); }
     .side-info-card { padding: 18px; }
     .side-mini-list { display:grid; gap: 10px; margin-top: 14px; }
@@ -11398,6 +11669,10 @@ struct SubmoduleRow {
     .step-button.done .step-num { background:rgba(34,197,94,0.16); color:#16a34a; }
     .sidebar-kbd-hint { margin:14px 4px 0; font-size:10px; color:var(--muted-2); line-height:1.55; text-align:center; display:flex; align-items:center; justify-content:center; gap:4px; }
     .sidebar-kbd-key { display:inline-flex; align-items:center; justify-content:center; padding:1px 5px; border-radius:4px; background:var(--surface-3); border:1px solid var(--line); font-size:9px; font-weight:700; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; line-height:1; }
+    .sidebar-scroll-divider { height:1px; background:var(--line); margin: 12px 4px; }
+    .sidebar-scroll-btn { display:flex; align-items:center; justify-content:center; gap:5px; width:100%; padding:7px 10px; border-radius:9px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); font-size:11px; font-weight:700; text-decoration:none; cursor:pointer; transition:background 0.15s ease,border-color 0.15s ease,color 0.15s ease; }
+    .sidebar-scroll-btn:hover { background:var(--surface-3); border-color:var(--line-strong); color:var(--text); text-decoration:none; }
+    .sidebar-scroll-btn svg { width:12px; height:12px; stroke:currentColor; fill:none; stroke-width:2.5; flex-shrink:0; }
     .card-header { padding: 22px 22px 18px; border-bottom:1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,0.30), transparent), var(--surface); position: sticky; top: 57px; z-index: 20; border-radius: var(--radius) var(--radius) 0 0; }
     body.dark-theme .card-header { background: linear-gradient(180deg, rgba(255,255,255,0.04), transparent), var(--surface); }
     .card-title-row { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
@@ -11513,19 +11788,6 @@ struct SubmoduleRow {
     .review-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap: 10px; margin-bottom: 8px; }
     .review-link { border:none; background: transparent; color: var(--accent-2); font-size: 12px; font-weight: 800; cursor: pointer; padding: 0; }
     .review-link:hover { text-decoration: underline; }
-    .artifact-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; margin-bottom: 48px !important; }
-    .artifact-card { position:relative; padding: 16px; cursor:pointer; }
-    .artifact-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(37,99,235,0.18), var(--shadow-strong); }
-    .artifact-card .marker { position:absolute; top: 12px; right: 12px; width: 22px; height: 22px; border-radius: 999px; border:2px solid var(--line-strong); display:flex; align-items:center; justify-content:center; font-size: 12px; color: transparent; }
-    .artifact-card.selected .marker { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .artifact-card.artifact-locked { background: rgba(0,0,0,0.055); cursor:not-allowed; }
-    .artifact-card.artifact-locked:hover { transform: none !important; box-shadow: 0 0 0 1px rgba(37,99,235,0.18), var(--shadow-strong) !important; }
-    body.dark-theme .artifact-card.artifact-locked { background: rgba(255,255,255,0.055); }
-    .artifact-card.artifact-locked .marker { background: #a0aab4 !important; border-color: #a0aab4 !important; color: #fff !important; }
-    body.dark-theme .artifact-card.artifact-locked .marker { background: #6b7280 !important; border-color: #6b7280 !important; }
-    .artifact-icon { width: 42px; height: 42px; border-radius: 12px; background: var(--surface-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size: 22px; font-weight: 900; }
-    .artifact-card h4 { margin: 12px 0 6px; font-size: 16px; }
-    .artifact-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
     .artifact-tags { display:flex; flex-wrap:wrap; gap: 8px; margin-top: 14px; }
     .review-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
     .review-card { padding: 18px; background: linear-gradient(180deg, rgba(255,255,255,0.22), transparent), var(--surface); }
@@ -11734,7 +11996,7 @@ struct SubmoduleRow {
     body.dark-theme .toast-error{background:rgba(180,30,30,0.12);border-color:rgba(245,163,163,0.3);color:#f08080;}
   </style>
 </head>
-<body>
+<body id="page-top">
   <div class="background-watermarks" aria-hidden="true">
     <img src="/images/logo/logo-text.png" alt="" />
     <img src="/images/logo/logo-text.png" alt="" />
@@ -11931,6 +12193,12 @@ struct SubmoduleRow {
       <aside class="side-stack">
         <section class="step-nav">
         <h3>Guided scan setup</h3>
+        <div class="sidebar-scroll-divider"></div>
+        <a href="#page-top" class="sidebar-scroll-btn" aria-label="Scroll to top of page">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="18 15 12 9 6 15"></polyline></svg>
+          Top of page
+        </a>
+        <div class="sidebar-scroll-divider"></div>
         <button type="button" class="step-button active" data-step-target="1"><span class="step-num">1</span><span>Select project</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
         <button type="button" class="step-button" data-step-target="2"><span class="step-num">2</span><span>Counting rules</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
         <button type="button" class="step-button" data-step-target="3"><span class="step-num">3</span><span>Outputs and reports</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
@@ -11960,6 +12228,11 @@ struct SubmoduleRow {
         </div>
 
         <div class="sidebar-kbd-hint"><span class="sidebar-kbd-key">←</span><span>Back</span><span style="margin:0 6px;">·</span><span class="sidebar-kbd-key">→</span><span>Next</span></div>
+        <div class="sidebar-scroll-divider"></div>
+        <a href="#page-bottom" class="sidebar-scroll-btn" aria-label="Skip to bottom of page">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          Skip to bottom
+        </a>
         </section>
 
       </aside>
@@ -12331,6 +12604,39 @@ int main() { … }   ← code
               <div class="scan-rules-grid">
                 <div class="preset-inline-row">
                   <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Style analysis</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Enable style analysis</h4>
+                    <select name="style_analysis_enabled" id="style_analysis_enabled">
+                      <option value="enabled" selected>Enabled (default)</option>
+                      <option value="disabled">Disabled — skip style scoring</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Controls whether lexical style-guide heuristics run at all.<br /><strong>Enable</strong> — every supported file is scored against its language's style guides and the results appear in the report (default).<br /><strong>Disable</strong> — style scoring is skipped entirely; useful for very large repos where you only need SLOC counts.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_analysis_enabled = true   (default)
+# style_analysis_enabled = false  (skip, faster scan)
+# Disabling removes the Code Style section from the report.</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Language scope</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Languages to style-analyse</h4>
+                    <select name="style_lang_scope" id="style_lang_scope">
+                      <option value="all" selected>All supported languages (default)</option>
+                      <option value="c_family">C / C++ / Objective-C only</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Limits style heuristics to a specific language family.<br /><strong>All languages</strong> — C/C++, Python, JS/TS, Java, Kotlin, Go, Rust, Ruby, C#, and more (default).<br /><strong>C / C++ / Objective-C only</strong> — faster; only the C-family files receive style scoring. All other files still appear in SLOC counts without a style score.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_lang_scope = "all"       (default)
+# style_lang_scope = "c_family"  (C/C++/ObjC only)
+# Families: C/C++, Python, JS/TS, Java/Kotlin,
+#   Go, Rust, Ruby, C#/F#, Groovy, Scala</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
                     <div class="field-help-title">Column-width threshold</div>
                     <h4 style="margin:6px 0 12px;font-size:16px;">Line-length compliance column</h4>
                     <select name="style_col_threshold" id="style_col_threshold">
@@ -12344,8 +12650,28 @@ int main() { … }   ← code
                     <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_col_threshold = 80  (PEP 8, Google, gofmt)
 # style_col_threshold = 100 (Uber Go, Google Java)
 # style_col_threshold = 120 (Uber Go max, Kotlin)
-# Files where ≤ 5% of lines exceed the limit
+# Files where &lt;= 5% of lines exceed the limit
 # are counted as "N-col compliant" in the report.</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Score alert threshold</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Low-score file alert</h4>
+                    <select name="style_score_threshold" id="style_score_threshold">
+                      <option value="0" selected>Off — no threshold (default)</option>
+                      <option value="40">40% — flag poorly styled files</option>
+                      <option value="50">50% — flag below-average files</option>
+                      <option value="60">60% — flag below-good files</option>
+                      <option value="70">70% — flag below-strong files</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Files whose dominant-guide adherence score falls below this percentage are highlighted with a red left-border in the per-file style table — making it easy to spot the lowest-conformance files at a glance.<br /><strong>Off</strong> — all files shown without any alert (default).<br /><strong>Any other value</strong> — a red indicator flags each file scoring below the threshold.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_score_threshold = 0   (off, default)
+# style_score_threshold = 50  (flag files &lt; 50%)
+# Low-scoring files get a red left-border in the
+# per-file style breakdown table.</div>
                   </div>
                 </div>
               </div>
@@ -12458,47 +12784,6 @@ int main() { … }   ← code
                     This text appears as a thin banner at the top and bottom of every report page. Leave blank to omit. Useful for labeling reports with an organization name, engagement ID, or classification level.
                   </div>
                 </div>
-              </div>
-
-              <div class="section">
-                <div class="section-kicker">Artifacts</div>
-                <div class="artifact-grid" style="margin-bottom:24px;">
-                  <div class="artifact-card selected" data-artifact="html" data-review-label="HTML report">
-                    <div class="marker">✓</div>
-                    <div class="artifact-icon">H</div>
-                    <h4>HTML report</h4>
-                    <p>Interactive browser-friendly report for reading totals, drilling into language breakdowns, and previewing saved output in the UI.</p>
-                    <div class="artifact-tags">
-                      <span class="soft-chip">Best for visual review</span>
-                      <span class="soft-chip">Embeddable preview</span>
-                    </div>
-                    <input type="checkbox" name="generate_html" id="generate_html" checked class="hidden artifact-checkbox" />
-                  </div>
-                  <div class="artifact-card selected" data-artifact="pdf" data-review-label="PDF export">
-                    <div class="marker">✓</div>
-                    <div class="artifact-icon">P</div>
-                    <h4>PDF export</h4>
-                    <p>Printable snapshot for sharing, archiving, or attaching to reviews when a fixed-format artifact is more useful than live HTML.</p>
-                    <div class="artifact-tags">
-                      <span class="soft-chip">Portable snapshot</span>
-                      <span class="soft-chip">Good for handoff</span>
-                    </div>
-                    <input type="checkbox" name="generate_pdf" id="generate_pdf" checked class="hidden artifact-checkbox" />
-                  </div>
-                  <div class="artifact-card selected artifact-locked" data-artifact="json" data-review-label="JSON result (always on)" style="opacity:0.85;pointer-events:none;">
-                    <div style="position:absolute;inset:0;border-radius:inherit;background:radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,0.13) 100%);pointer-events:none;z-index:2;"></div>
-                    <div class="marker">✓</div>
-                    <div class="artifact-icon" style="color:var(--muted);">J</div>
-                    <h4>JSON result <span style="font-size:11px;font-weight:700;color:var(--muted);">always on</span></h4>
-                    <p>Machine-readable output always saved — required for run comparison, diff, and history features.</p>
-                    <div class="artifact-tags">
-                      <span class="soft-chip">Required for compare</span>
-                      <span class="soft-chip">Auto-enabled</span>
-                    </div>
-                    <input type="checkbox" name="generate_json" checked class="hidden artifact-checkbox" />
-                  </div>
-                </div>
-                <div class="hint" style="margin-top:12px;">HTML and PDF cards are selectable. Presets above can also toggle them for common workflows. JSON output is always generated.</div>
               </div>
 
               <div class="wizard-actions">
@@ -12672,7 +12957,6 @@ int main() { … }   ← code
       var wizardProgressValue = document.getElementById("wizard-progress-value");
       var stepButtons = Array.prototype.slice.call(document.querySelectorAll(".step-button"));
       var stepPanels = Array.prototype.slice.call(document.querySelectorAll(".wizard-step"));
-      var artifactCards = Array.prototype.slice.call(document.querySelectorAll(".artifact-card"));
       var reportTitleTouched = false;
       var currentStep = 1;
       var previewTimer = null;
@@ -12896,26 +13180,36 @@ int main() { … }   ← code
 
       var artifactPresetInfo = {
         review: {
-          description: "Review bundle enables HTML and PDF so you can inspect the result in-browser and still save a portable snapshot for sharing or archiving.",
-          chips: ["HTML", "PDF"],
-          example: 'generate_html = true\ngenerate_pdf = true\ngenerate_json = false'
+          description: "HTML report for in-browser review. No PDF or data exports — fast and lightweight.",
+          chips: ["HTML", "no PDF", "no JSON/CSV/XLSX"],
+          example: "Ideal for a quick local review before sharing results."
         },
         full: {
-          description: "Full bundle enables HTML, PDF, and JSON. It is the best choice when you want both human-readable outputs and a machine-friendly artifact for later processing.",
-          chips: ["HTML", "PDF", "JSON"],
-          example: 'generate_html = true\ngenerate_pdf = true\ngenerate_json = true'
+          description: "All artifacts: HTML, PDF, JSON, CSV, and XLSX. Best for handoff packages or archiving.",
+          chips: ["HTML", "PDF", "JSON", "CSV", "XLSX"],
+          example: "Use when producing a deliverable or storing a snapshot for future comparison."
         },
         html_only: {
-          description: "HTML only keeps the run lightweight and browser-first. It is ideal for quick local inspection when you do not need a fixed snapshot or automation output.",
-          chips: ["HTML only", "Fast local review"],
-          example: 'generate_html = true\ngenerate_pdf = false\ngenerate_json = false'
+          description: "Standalone HTML report only. No PDF generation, no data files.",
+          chips: ["HTML only"],
+          example: "Fastest option when you only need to open the report in a browser."
         },
         machine: {
-          description: "Machine bundle emphasizes structured output for downstream tooling. It is useful when the run is feeding scripts, dashboards, or other local automation.",
-          chips: ["HTML", "JSON"],
-          example: 'generate_html = true\ngenerate_pdf = false\ngenerate_json = true'
+          description: "JSON and CSV data files only — no HTML or PDF. Designed for CI pipelines and automation.",
+          chips: ["JSON", "CSV", "no HTML", "no PDF"],
+          example: "Use in CI to capture metrics without generating visual reports."
         }
       };
+
+      function applyArtifactPreset() {
+        var info = artifactPresetInfo[artifactPreset ? artifactPreset.value : "review"];
+        if (!info) return;
+        var descEl = document.getElementById("artifact-preset-description");
+        var exampleEl = document.getElementById("artifact-preset-example");
+        if (descEl) descEl.textContent = info.description;
+        if (exampleEl) exampleEl.textContent = info.example;
+        renderPresetChips("artifact-preset-summary", info.chips);
+      }
 
       function applyTheme(theme) {
         if (theme === "dark") document.body.classList.add("dark-theme");
@@ -13078,14 +13372,11 @@ int main() { … }   ← code
 
       function updatePresetDescriptions() {
         var scanInfo = scanPresetInfo[scanPreset.value];
-        var artifactInfo = artifactPresetInfo[artifactPreset.value];
+        if (!scanInfo) return;
         document.getElementById("scan-preset-description").textContent = scanInfo.description;
         document.getElementById("scan-preset-example").textContent = scanInfo.example;
         document.getElementById("scan-preset-note").textContent = scanInfo.note;
-        document.getElementById("artifact-preset-description").textContent = artifactInfo.description;
-        document.getElementById("artifact-preset-example").textContent = artifactInfo.example;
         renderPresetChips("scan-preset-summary", scanInfo.chips);
-        renderPresetChips("artifact-preset-summary", artifactInfo.chips);
       }
 
       function applyScanPreset() {
@@ -13100,29 +13391,6 @@ int main() { … }   ← code
         document.getElementById("binary_file_behavior").value = info.apply.binary;
         updateMixedPolicyUI();
         updatePythonDocstringUI();
-      }
-
-      function applyArtifactPreset() {
-        var enabled = { html: false, pdf: false };
-        if (artifactPreset.value === "review") { enabled.html = true; enabled.pdf = true; }
-        if (artifactPreset.value === "full") { enabled.html = true; enabled.pdf = true; }
-        if (artifactPreset.value === "html_only") { enabled.html = true; }
-        if (artifactPreset.value === "machine") { enabled.html = true; }
-
-        artifactCards.forEach(function (card) {
-          var artifact = card.getAttribute("data-artifact");
-          if (artifact === "json") return;
-          var checked = !!enabled[artifact];
-          var checkbox = card.querySelector(".artifact-checkbox");
-          checkbox.checked = checked;
-          card.classList.toggle("selected", checked);
-        });
-      }
-
-      function toggleArtifactCard(card) {
-        var checkbox = card.querySelector(".artifact-checkbox");
-        checkbox.checked = !checkbox.checked;
-        card.classList.toggle("selected", checkbox.checked);
       }
 
       function updateReview() {
@@ -13160,10 +13428,7 @@ int main() { … }   ← code
           + "<li>Binary behavior: " + escapeHtml(document.getElementById("binary_file_behavior").options[document.getElementById("binary_file_behavior").selectedIndex].text) + "</li>"
           + "<li>Scan preset: " + escapeHtml(scanPreset.options[scanPreset.selectedIndex].text) + "</li>";
 
-        var selectedArtifacts = artifactCards.filter(function (card) { return card.classList.contains("selected"); }).map(function (card) { return card.getAttribute("data-review-label") || card.querySelector("h4").textContent; });
-        artifactSummary.innerHTML = ""
-          + "<li>Artifact preset: " + escapeHtml(artifactPreset.options[artifactPreset.selectedIndex].text) + "</li>"
-          + "<li>Selected artifacts: " + escapeHtml(selectedArtifacts.join(", ") || "none") + "</li>";
+        artifactSummary.innerHTML = "<li>HTML, PDF, JSON, CSV, XLSX (always generated)</li>";
 
         outputSummary.innerHTML = ""
           + "<li>Output directory: " + escapeHtml(outputDirInput.value || "out/web") + "</li>"
@@ -13189,12 +13454,10 @@ int main() { … }   ← code
             + '<li>Detected languages: ' + escapeHtml(languages.join(', ') || 'none') + '</li>';
 
           if (readinessSummary) {
-            var selectedArtifactsCount = selectedArtifacts.length;
             readinessSummary.innerHTML = ''
               + '<li>Current step completion: ' + escapeHtml(String(Math.max(0, Math.min(100, (currentStep - 1) * 25)))) + '%</li>'
               + '<li>Project path set: ' + (pathInput.value ? 'yes' : 'no') + '</li>'
-              + '<li>Artifact count selected: ' + escapeHtml(String(selectedArtifactsCount)) + '</li>'
-              + '<li>Ready to run: ' + ((pathInput.value && selectedArtifactsCount > 0) ? 'yes' : 'no') + '</li>';
+              + '<li>Ready to run: ' + (pathInput.value ? 'yes' : 'no') + '</li>';
           }
           } // end else (non-GIT_MODE)
         }
@@ -14419,14 +14682,6 @@ int main() { … }   ← code
       if (scanPreset) scanPreset.addEventListener("change", function () { applyScanPreset(); updatePresetDescriptions(); updateReview(); updateSidebarSummary(); });
       if (artifactPreset) artifactPreset.addEventListener("change", function () { updatePresetDescriptions(); applyArtifactPreset(); updateReview(); updateSidebarSummary(); });
 
-      artifactCards.forEach(function (card) {
-        card.addEventListener("click", function () {
-          if (card.classList.contains("artifact-locked")) return;
-          toggleArtifactCard(card);
-          updateReview();
-        });
-      });
-
       if (coverageInput) {
         coverageInput.addEventListener("input", function () {
           if (coverageInput.value.trim()) setCovStatus("idle");
@@ -14641,6 +14896,7 @@ int main() { … }   ← code
     if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');}
   })();
   </script>
+  <span id="page-bottom" aria-hidden="true" style="display:block;height:0;"></span>
   <footer class="site-footer">
     local code analysis - metrics, history and reports
     &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: {% if server_mode %}Network Server{% else %}Local{% endif %}</em>
@@ -14754,6 +15010,7 @@ struct IndexTemplate {
     .action-card{display:flex;flex-direction:column;align-items:flex-start;padding:12px 15px 10px;border-radius:var(--radius);border:1px solid var(--line-strong);background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;animation:cardRise 0.7s ease both;}
     .action-card:nth-child(1){animation-delay:0.1s;} .action-card:nth-child(2){animation-delay:0.2s;} .action-card:nth-child(3){animation-delay:0.3s;} .action-card:nth-child(4){animation-delay:0.4s;} .action-card:nth-child(5){animation-delay:0.5s;} .action-card:nth-child(6){animation-delay:0.6s;} .action-card:nth-child(7){animation-delay:0.7s;}
     @keyframes cardRise{from{opacity:0;}to{opacity:1;}}
+    @media(prefers-reduced-motion:reduce){.action-card,.lan-card{animation:none;}}
     .action-card:hover{transform:translateY(-5px) scale(1.04);box-shadow:var(--shadow-strong);border-color:var(--oxide-2);}
     .action-card-icon{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;margin-bottom:8px;flex:0 0 auto;transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
     .action-card:hover .action-card-icon{transform:rotate(-8deg) scale(1.12);}
@@ -14846,7 +15103,7 @@ struct IndexTemplate {
       .hero-logo-shadow{width:42px;}
       .hero-title{font-size:28px;}
       .hero-subtitle{font-size:13px;}
-      .card-sections{gap:16px;margin-bottom:10px;}
+      .card-sections{gap:12px;margin-bottom:6px;}
       .card-section-grid-2,.card-section-grid-3{gap:10px;}
       .action-card{padding:8px 15px 8px;}
       .action-card-icon{width:34px;height:34px;border-radius:10px;margin-bottom:6px;}
@@ -14856,11 +15113,12 @@ struct IndexTemplate {
       .action-card-cta{font-size:11px;}
       .ac-right-row{font-size:11px;}
       .divider{margin:14px 0;}
-      .info-strip{gap:7px;margin-bottom:12px;}
+      .info-strip{gap:7px;margin-bottom:8px;}
       .info-chip{padding:7px 10px;}
       .info-chip-val{font-size:13px;}
       .info-chip-label{font-size:9px;}
       .site-footer{padding:8px 24px;font-size:12px;}
+      .lan-local-hint{margin-top:8px;}
     }
     @media (max-height: 850px) {
       .page{padding-top:6px;}
@@ -15482,6 +15740,7 @@ struct SplashTemplate {
     .option-card{background:var(--surface);border:1.5px solid var(--line-strong);border-radius:var(--radius);padding:20px 24px;box-shadow:var(--shadow);transition:transform 0.22s cubic-bezier(.34,1.56,.64,1),box-shadow 0.18s ease,border-color 0.18s ease;position:relative;z-index:1;display:flex;align-items:center;gap:20px;animation:cardRise 0.7s ease both;}
     .option-card:hover{transform:translateY(-5px) scale(1.03);border-color:var(--oxide-2);box-shadow:var(--shadow-strong);}
     @keyframes cardRise{from{opacity:0;}to{opacity:1;}}
+    @media(prefers-reduced-motion:reduce){.option-card{animation:none;}}
     .option-card-wrap:nth-child(1) .option-card{animation-delay:0.1s;} .option-card-wrap:nth-child(2) .option-card{animation-delay:0.2s;} .option-card-wrap:nth-child(3) .option-card{animation-delay:0.3s;}
     .option-icon{transition:transform 0.22s cubic-bezier(.34,1.56,.64,1);}
     .option-card:hover .option-icon{transform:rotate(-8deg) scale(1.12);}
@@ -16161,7 +16420,8 @@ struct ScanSetupTemplate {
     .r-chart-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}
     .r-chart-modal{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:960px;width:100%;max-height:85vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}
     .r-chart-modal-title{font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--text);margin:0 0 2px;display:block;}
-    .r-chart-modal-subtitle{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 16px;display:block;letter-spacing:.02em;}
+    .r-chart-modal-subtitle{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 12px;display:block;letter-spacing:.02em;}
+    .r-modal-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 16px;}
     .r-chart-modal-close{position:absolute;top:14px;right:18px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--text);line-height:1;padding:0;}
     .r-chart-modal-close:hover{opacity:.7;}
     body.dark-theme .r-chart-modal{background:var(--surface);}
@@ -16181,8 +16441,8 @@ struct ScanSetupTemplate {
     @media(max-width:820px){.r-viz-grid{grid-template-columns:1fr;}}
     .r-viz-card{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--surface);box-shadow:var(--shadow);display:flex;flex-direction:column;}
     .r-viz-card-title{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);margin:0 0 10px;}
-    .report-id-banner{background:var(--nav);color:#fff;font-size:11px;font-weight:700;letter-spacing:0.05em;text-align:center;height:27px;line-height:27px;padding:0 16px;position:fixed;top:0;left:0;right:0;z-index:32;width:100%;}
-    .report-id-footer-banner{background:var(--nav);color:#fff;font-size:11px;font-weight:700;letter-spacing:0.05em;text-align:center;height:27px;line-height:27px;padding:0 16px;position:fixed;bottom:0;left:0;right:0;z-index:32;width:100%;}
+    .report-id-banner{background:var(--nav);color:#fff;font-size:11px;font-weight:700;letter-spacing:0.05em;display:flex;align-items:center;justify-content:center;height:27px;padding:0 16px;position:fixed;top:0;left:0;right:0;z-index:32;}
+    .report-id-footer-banner{background:var(--nav);color:#fff;font-size:11px;font-weight:700;letter-spacing:0.05em;display:flex;align-items:center;justify-content:center;height:27px;padding:0 16px;position:fixed;bottom:0;left:0;right:0;z-index:32;}
     body.has-report-banner .top-nav{top:27px;}
     body.has-report-banner{padding-bottom:27px;}
   </style>
@@ -16488,6 +16748,17 @@ struct ScanSetupTemplate {
       </div>
       {% endif %}{% endif %}
 
+      {% match html_url %}
+      {% when Some with (url) %}
+      <div style="margin:0 0 20px;padding:18px 22px;background:var(--surface);border:2px solid var(--accent);border-radius:14px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">Full Report</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5;">Shareable offline artifact — includes all metrics, delta vs. previous scan, Git context, and charts. Send this file to external stakeholders.</div>
+        </div>
+        <a class="button" href="{{ url }}" target="_blank" rel="noopener" style="flex:0 0 auto;font-size:14px;padding:12px 22px;">Open Full Report &rarr;</a>
+      </div>
+      {% when None %}{% endmatch %}
+
       <div class="action-grid">
         <div class="action-card">
           <h3>HTML report</h3>
@@ -16525,7 +16796,7 @@ struct ScanSetupTemplate {
                     <p class="action-empty-note" style="margin-top:6px;font-size:11px;">Generates the PDF report from the scan results. Usually completes within a few seconds.</p>
                   {% when None %}
                     <p class="action-empty-note" style="color:var(--muted);font-size:12px;background:rgba(0,0,0,0.04);border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
-                      PDF and HTML reports were not generated for this run. Re-run with HTML or PDF output enabled.
+                      PDF could not be generated for this run — Chromium or Edge may not be installed. The HTML report is always available above.
                     </p>
                 {% endmatch %}
             {% endmatch %}
@@ -16890,6 +17161,7 @@ struct ScanSetupTemplate {
               <option value="classes">Classes</option>
               <option value="variables">Variables</option>
               <option value="imports">Imports</option>
+              <option value="tests">Tests</option>
             </select>
             <button class="r-expand-btn" id="r-semantic-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
@@ -17007,12 +17279,21 @@ struct ScanSetupTemplate {
         btn.addEventListener('click', function () {
           var folder = btn.getAttribute('data-folder') || '';
           if (!folder) return;
+          var orig = btn.textContent;
           fetch('/open-path?path=' + encodeURIComponent(folder))
             .then(function (r) { return r.json(); })
             .then(function (d) {
-              if (d && d.server_mode_disabled) window.alert(d.message || 'Opening paths in a file manager is only available in local desktop mode.');
+              if (d && d.server_mode_disabled) {
+                window.alert(d.message || 'Opening paths in a file manager is only available in local desktop mode.');
+              } else if (d && d.ok) {
+                btn.textContent = 'Opened!';
+                setTimeout(function () { btn.textContent = orig; }, 1800);
+              }
             })
-            .catch(function () {});
+            .catch(function () {
+              btn.textContent = 'Failed';
+              setTimeout(function () { btn.textContent = orig; }, 2000);
+            });
         });
       });
 
@@ -17152,17 +17433,18 @@ struct ScanSetupTemplate {
         ds+='</svg>';
 
         // Horizontal stacked-bar chart — fills container width
-        var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
+        var maxT=Math.max.apply(null,D.map(function(d){return d.physical||d.code+d.comments+d.blanks;}))||1;
         var LW=108,BW=260,rHb=28,bH=20,SH=D.length*rHb+32,svgW=LW+BW+68;
         var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         D.forEach(function(d,i){
           var y=6+i*rHb,x=LW;
+          var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
           bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
           if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="0"/>';x+=cW;
           if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="0"/>';x+=cmW;
           if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="0"/>';
-          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
+          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(phys)+'</text>';
         });
         var ly=SH-14;
         bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
@@ -17221,7 +17503,7 @@ struct ScanSetupTemplate {
               if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
               if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
               if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+fmt((d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
+              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
           var ly=SH-legendH+4;
@@ -17304,29 +17586,36 @@ struct ScanSetupTemplate {
         if(semExpand){
           semExpand.addEventListener('click',function(){
             var key=semSel?semSel.value:'functions';
-            var semLabels={'functions':'Functions','classes':'Classes / Types','variables':'Variables'};
-            var semSubtitle=semLabels[key]||key;
             var n=SEM_D.length||1;
             var maxH=Math.max(360,Math.floor(window.innerHeight*0.82)-130);
             var modalH=Math.min(Math.max(360,n*38+60),maxH);
             var overlay=document.createElement('div');
             overlay.className='r-chart-modal-overlay';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">Semantic Metrics — Full View</span><span class="r-chart-modal-subtitle">'+semSubtitle+'</span><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
+            var optHtml=
+              '<option value="functions"'+(key==='functions'?' selected':'')+'>Functions</option>'
+              +'<option value="classes"'+(key==='classes'?' selected':'')+'>Classes</option>'
+              +'<option value="variables"'+(key==='variables'?' selected':'')+'>Variables</option>'
+              +'<option value="imports"'+(key==='imports'?' selected':'')+'>Imports</option>'
+              +'<option value="tests"'+(key==='tests'?' selected':'')+'>Tests</option>';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">Semantic Metrics — Full View</span><div class="r-modal-controls"><select class="r-chart-select" id="r-sem-modal-metric">'+optHtml+'</select></div><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
             var modalEl=document.getElementById('r-sem-modal-chart');
             if(modalEl){setTimeout(function(){renderSemanticInEl(modalEl,key,modalH);},30);}
+            var modalSel=document.getElementById('r-sem-modal-metric');
+            if(modalSel){modalSel.addEventListener('change',function(){renderSemanticInEl(modalEl,modalSel.value,modalH);});}
           });
         }
 
         // ── Expand buttons: re-render charts at large size inside modal ──────────
         (function(){
-          function makeExpandModal(title,mH,subtitle){
+          function makeExpandModal(title,mH,subtitle,ctrlHtml){
             var overlay=document.createElement('div');
             overlay.className='r-chart-modal-overlay';
             var subHtml=subtitle?'<span class="r-chart-modal-subtitle">'+subtitle+'</span>':'';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">'+title+' — Full View</span>'+subHtml+'<div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
+            var ctrlDiv=ctrlHtml?'<div class="r-modal-controls">'+ctrlHtml+'</div>':'';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">'+title+' — Full View</span>'+subHtml+ctrlDiv+'<div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
@@ -17336,10 +17625,20 @@ struct ScanSetupTemplate {
           var compExpandBtn=document.getElementById('r-composition-expand');
           if(compExpandBtn){compExpandBtn.addEventListener('click',function(){
             var mode=document.querySelector('[data-rcomp].active');var modeKey=mode?mode.getAttribute('data-rcomp'):'abs';
-            var modeLabel=modeKey==='pct'?'Composition %':'Absolute Lines';
             var n=LANG_D.length||1;var mH=capH(Math.max(360,n*38+60));
-            var wrap=makeExpandModal('Language Composition',mH,modeLabel);
-            if(wrap)setTimeout(function(){renderCompositionInEl(wrap,modeKey,mH);},30);
+            var ctrlHtml='<button class="r-chart-tab'+(modeKey==='abs'?' active':'')+'" data-mcomp="abs">Absolute</button>'
+              +'<button class="r-chart-tab'+(modeKey==='pct'?' active':'')+'" data-mcomp="pct">100% Normalized</button>';
+            var wrap=makeExpandModal('Language Composition',mH,null,ctrlHtml);
+            if(wrap){
+              setTimeout(function(){renderCompositionInEl(wrap,modeKey,mH);},30);
+              Array.prototype.slice.call(wrap.parentNode.querySelectorAll('[data-mcomp]')).forEach(function(btn){
+                btn.addEventListener('click',function(){
+                  Array.prototype.slice.call(wrap.parentNode.querySelectorAll('[data-mcomp]')).forEach(function(b){b.classList.remove('active');});
+                  btn.classList.add('active');
+                  renderCompositionInEl(wrap,btn.getAttribute('data-mcomp'),mH);
+                });
+              });
+            }
           });}
           var scatExpandBtn=document.getElementById('r-scatter-expand');
           if(scatExpandBtn){scatExpandBtn.addEventListener('click',function(){
@@ -17361,12 +17660,30 @@ struct ScanSetupTemplate {
           var subExpandBtn=document.getElementById('r-submodule-expand');
           if(subExpandBtn){subExpandBtn.addEventListener('click',function(){
             var key=subSel?subSel.value:'code';var sort=sortSel?sortSel.value:'desc';
-            var metricLabels={'code':'Code Lines','comment':'Comments','blank':'Blank Lines','physical':'Physical Lines','files':'Files'};
-            var sortLabels={'desc':'Value ↓','asc':'Value ↑','name':'Name A→Z'};
-            var subLabel=(metricLabels[key]||key)+' · '+(sortLabels[sort]||sort);
             var n=(SUB_D.length+1)||1;var mH=capH(Math.max(360,n*32+100));
-            var wrap=makeExpandModal('Repository Overview',mH,subLabel);
-            if(wrap)setTimeout(function(){renderSubmoduleInEl(wrap,key,sort,mH);},30);
+            var metCtrl=
+              '<select class="r-chart-select" id="r-sub-modal-metric">'
+              +'<option value="code"'+(key==='code'?' selected':'')+'>Code Lines</option>'
+              +'<option value="comment"'+(key==='comment'?' selected':'')+'>Comments</option>'
+              +'<option value="blank"'+(key==='blank'?' selected':'')+'>Blank Lines</option>'
+              +'<option value="physical"'+(key==='physical'?' selected':'')+'>Physical Lines</option>'
+              +'<option value="files"'+(key==='files'?' selected':'')+'>Files</option>'
+              +'</select>';
+            var sortCtrl=
+              '<select class="r-chart-select" id="r-sub-modal-sort">'
+              +'<option value="desc"'+(sort==='desc'?' selected':'')+'>Value ↓</option>'
+              +'<option value="asc"'+(sort==='asc'?' selected':'')+'>Value ↑</option>'
+              +'<option value="name"'+(sort==='name'?' selected':'')+'>Name A→Z</option>'
+              +'</select>';
+            var wrap=makeExpandModal('Repository Overview',mH,null,metCtrl+sortCtrl);
+            if(wrap){
+              setTimeout(function(){renderSubmoduleInEl(wrap,key,sort,mH);},30);
+              var mSub=wrap.parentNode.querySelector('#r-sub-modal-metric');
+              var mSort=wrap.parentNode.querySelector('#r-sub-modal-sort');
+              function reRenderSub(){renderSubmoduleInEl(wrap,mSub?mSub.value:'code',mSort?mSort.value:'desc',mH);}
+              if(mSub)mSub.addEventListener('change',reRenderSub);
+              if(mSort)mSort.addEventListener('change',reRenderSub);
+            }
           });}
         })();
 
@@ -17437,11 +17754,11 @@ struct ScanSetupTemplate {
           if(!el)return;
           var overall={
             name:'Overall',
-            code:LANG_D.reduce(function(s,d){return s+(d.code||0);},0),
-            comment:LANG_D.reduce(function(s,d){return s+(d.comments||0);},0),
-            blank:LANG_D.reduce(function(s,d){return s+(d.blanks||0);},0),
-            physical:SCAT_D.reduce(function(s,d){return s+(d.physical||0);},0),
-            files:LANG_D.reduce(function(s,d){return s+(d.files||0);},0),
+            code:{{ code_lines }},
+            comment:{{ comment_lines }},
+            blank:{{ blank_lines }},
+            physical:{{ physical_lines }},
+            files:{{ files_analyzed }},
             isOverall:true
           };
           var subs=SUB_D.slice();
@@ -18286,13 +18603,24 @@ struct ScanWaitTemplate {
     .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid rgba(111,144,255,0.30);text-decoration:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);}
     .btn-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid var(--line-strong);text-decoration:none;color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;}
     .btn-secondary:hover{background:var(--line);}
-    .bug-report-wrap{margin-top:22px;border-top:1px solid var(--line);padding-top:16px;}
-    .bug-report-wrap summary{cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);list-style:none;display:inline-flex;align-items:center;gap:6px;user-select:none;padding:2px 0;}
-    .bug-report-wrap summary::-webkit-details-marker{display:none;}
-    .bug-report-arrow{display:inline-block;font-size:9px;transition:transform .15s ease;}
-    .bug-report-wrap[open] .bug-report-arrow{transform:rotate(90deg);}
-    .bug-report-wrap summary:hover{color:var(--text);}
-    .bug-report-body{margin-top:12px;display:flex;flex-direction:column;gap:10px;}
+    .bug-report-section{margin-top:28px;padding-top:22px;border-top:1px solid var(--line);}
+    .bug-report-trigger{display:inline-flex;align-items:center;gap:10px;padding:11px 22px;border-radius:14px;border:2px solid var(--oxide);background:transparent;color:var(--oxide);font-size:14px;font-weight:700;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease;letter-spacing:.02em;}
+    .bug-report-trigger:hover,.bug-report-trigger:focus-visible{background:var(--oxide);color:#fff;box-shadow:0 4px 20px rgba(174,92,32,.28);outline:none;}
+    .bug-report-trigger .br-icon{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0;}
+    .bug-report-trigger .br-chevron{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;transition:transform .2s ease;margin-left:2px;}
+    .bug-report-trigger.open .br-chevron{transform:rotate(180deg);}
+    .bug-report-panel{display:none;flex-direction:column;gap:12px;margin-top:18px;}
+    .bug-report-panel.open{display:flex;}
+    .br-network-badge{display:none;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;width:fit-content;}
+    .br-network-badge.online{background:#e8f5ee;color:#2a6846;}
+    .br-network-badge.offline{background:#fff4e5;color:#9a5b00;}
+    body.dark-theme .br-network-badge.online{background:#1a3d2b;color:#5aba8a;}
+    body.dark-theme .br-network-badge.offline{background:#3d2a00;color:#f0a940;}
+    .br-net-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0;}
+    .br-network-badge.online .br-net-dot{background:#2a6846;}
+    .br-network-badge.offline .br-net-dot{background:#9a5b00;}
+    body.dark-theme .br-network-badge.online .br-net-dot{background:#5aba8a;}
+    body.dark-theme .br-network-badge.offline .br-net-dot{background:#f0a940;}
     .bug-report-pre{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto;}
     .bug-report-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
     .btn-sm{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 12px;border-radius:10px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;text-decoration:none;transition:background .15s ease;}
@@ -18384,23 +18712,33 @@ struct ScanWaitTemplate {
         <a class="btn-secondary" href="/view-reports">View Reports</a>
         {% endif %}
       </div>
-      <details class="bug-report-wrap" id="bug-report-wrap">
-        <summary><span class="bug-report-arrow">&#9658;</span>&nbsp;Generate bug report</summary>
-        <div class="bug-report-body">
+      <div class="bug-report-section" id="bug-report-section">
+        <button type="button" class="bug-report-trigger" id="bug-report-trigger" aria-expanded="false" aria-controls="bug-report-panel">
+          <svg class="br-icon" viewBox="0 0 24 24"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Generate Bug Report
+          <svg class="br-chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="bug-report-panel" id="bug-report-panel" role="region" aria-label="Bug report">
+          <div class="br-network-badge" id="br-network-badge"><span class="br-net-dot"></span><span id="br-network-label">Checking&hellip;</span></div>
           <pre class="bug-report-pre" id="bug-report-pre">Collecting info&hellip;</pre>
           <div class="bug-report-btns">
             <button type="button" class="btn-sm" id="bug-report-copy">
               <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               Copy to clipboard
             </button>
-            <a class="btn-sm" href="https://github.com/oxide-sloc/oxide-sloc/issues/new" target="_blank" rel="noopener noreferrer">
-              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <a class="btn-sm" id="bug-report-github-link" href="https://github.com/oxide-sloc/oxide-sloc/issues/new" target="_blank" rel="noopener noreferrer" style="display:none;">
+              <svg viewBox="0 0 24 24"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0 0 22 12.017C22 6.484 17.522 2 12 2z"/></svg>
               Open GitHub Issue
             </a>
+            <button type="button" class="btn-sm" id="bug-report-save" style="display:none;">
+              <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Save as file
+            </button>
           </div>
-          <p class="bug-report-hint">Copy the report above and paste it into a new GitHub issue. Remove any file paths or project names you prefer not to share before posting.</p>
+          <p class="bug-report-hint" id="br-hint-online" style="display:none;">Paste the report into a new GitHub issue, or click <strong>Open GitHub Issue</strong> to open a pre-filled draft. Remove any file paths you prefer not to share before posting.</p>
+          <p class="bug-report-hint" id="br-hint-offline" style="display:none;"><strong>Air-gapped system detected</strong> &mdash; GitHub is not reachable from this machine. Copy or save the report above, then open a <a href="https://github.com/oxide-sloc/oxide-sloc/issues/new" target="_blank" rel="noopener noreferrer">GitHub issue</a> from a connected machine and paste it there.</p>
         </div>
-      </details>
+      </div>
     </div>
   </div>
   <footer class="site-footer">
@@ -18414,6 +18752,14 @@ struct ScanWaitTemplate {
     var meta=document.getElementById('br-meta');
     var pre=document.getElementById('bug-report-pre');
     var copyBtn=document.getElementById('bug-report-copy');
+    var trigger=document.getElementById('bug-report-trigger');
+    var panel=document.getElementById('bug-report-panel');
+    var networkBadge=document.getElementById('br-network-badge');
+    var networkLabel=document.getElementById('br-network-label');
+    var ghLink=document.getElementById('bug-report-github-link');
+    var saveBtn=document.getElementById('bug-report-save');
+    var hintOnline=document.getElementById('br-hint-online');
+    var hintOffline=document.getElementById('br-hint-offline');
     if(!meta||!pre)return;
     var ver=meta.getAttribute('data-version')||'';
     var runId=meta.getAttribute('data-run-id')||'';
@@ -18445,21 +18791,64 @@ struct ScanWaitTemplate {
     lines.push('Expected behavior:');
     lines.push('  ');
     pre.textContent=lines.join('\n');
+    function applyNetwork(online){
+      if(networkBadge){networkBadge.style.display='inline-flex';networkBadge.className='br-network-badge '+(online?'online':'offline');}
+      if(networkLabel)networkLabel.textContent=online?'Internet connected':'Air-gapped / offline';
+      if(ghLink){
+        if(online){
+          var body=encodeURIComponent(pre.textContent+'\n\n---\n*Generated by oxide-sloc v'+ver+'*');
+          ghLink.href='https://github.com/oxide-sloc/oxide-sloc/issues/new?title=Bug+Report&body='+body;
+        }
+        ghLink.style.display=online?'inline-flex':'none';
+      }
+      if(saveBtn)saveBtn.style.display=online?'none':'inline-flex';
+      if(hintOnline)hintOnline.style.display=online?'block':'none';
+      if(hintOffline)hintOffline.style.display=online?'none':'block';
+    }
+    applyNetwork(navigator.onLine);
+    var probed=false;
+    function probeNetwork(){
+      if(probed)return;probed=true;
+      var ctrl=new AbortController();
+      var tid=setTimeout(function(){ctrl.abort();},3000);
+      fetch('https://1.1.1.1',{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
+        .then(function(){clearTimeout(tid);applyNetwork(true);})
+        .catch(function(){clearTimeout(tid);applyNetwork(false);});
+    }
+    if(trigger&&panel){
+      trigger.addEventListener('click',function(){
+        var open=panel.classList.toggle('open');
+        trigger.classList.toggle('open',open);
+        trigger.setAttribute('aria-expanded',open?'true':'false');
+        if(open)probeNetwork();
+      });
+    }
     if(copyBtn){
       copyBtn.addEventListener('click',function(){
         var txt=pre.textContent;
         if(navigator.clipboard&&navigator.clipboard.writeText){
           navigator.clipboard.writeText(txt).then(function(){
-            copyBtn.textContent='[OK] Copied!';
+            copyBtn.textContent='✓ Copied!';
             setTimeout(function(){copyBtn.innerHTML='<svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy to clipboard';},2000);
           });
         }else{
           var ta=document.createElement('textarea');
           ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
           document.body.appendChild(ta);ta.select();
-          try{document.execCommand('copy');copyBtn.textContent='[OK] Copied!';}catch(e){}
+          try{document.execCommand('copy');copyBtn.textContent='✓ Copied!';}catch(e){}
           document.body.removeChild(ta);
         }
+      });
+    }
+    if(saveBtn){
+      saveBtn.addEventListener('click',function(){
+        var txt=pre.textContent;
+        var blob=new Blob([txt],{type:'text/plain'});
+        var url=URL.createObjectURL(blob);
+        var a=document.createElement('a');
+        a.href=url;a.download='oxide-sloc-bug-report-'+new Date().toISOString().slice(0,10)+'.txt';
+        document.body.appendChild(a);a.click();
+        document.body.removeChild(a);URL.revokeObjectURL(url);
       });
     }
   })();</script>
@@ -18539,6 +18928,257 @@ struct ErrorTemplate {
     run_id: Option<String>,
     /// HTTP status code to surface in the bug report; `None` when unknown.
     error_code: Option<u16>,
+    csp_nonce: String,
+    version: &'static str,
+}
+
+// ── LocateFileTemplate ────────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(
+    source = r##"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OxideSLOC | Locate Report</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{{ csp_nonce }}">
+    :root{--radius:18px;--bg:#f5efe8;--surface:rgba(255,255,255,0.86);--surface-2:#fbf7f2;--line:#e6d0bf;--line-strong:#dcb89f;--text:#43342d;--muted:#7b675b;--muted-2:#a08878;--nav:#283790;--nav-2:#013e6b;--accent:#6f9bff;--accent-2:#4a78ee;--oxide:#d37a4c;--oxide-2:#b85d33;--shadow:0 18px 42px rgba(77,44,20,0.12);}
+    body.dark-theme{--bg:#1b1511;--surface:#261c17;--surface-2:#2d221d;--line:#524238;--line-strong:#6b5548;--text:#f5ece6;--muted:#c7b7aa;--muted-2:#9c877a;}
+    *{box-sizing:border-box;}html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}body{display:flex;flex-direction:column;}
+    .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+    .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
+    @keyframes wmFade{from{opacity:var(--wm-op,0.08);}to{opacity:calc(var(--wm-op,0.08)*0.3);}}
+    .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
+    .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
+    .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}.brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
+    .brand-copy{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}
+    .brand-title{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}.brand-subtitle{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}
+    .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px;}
+    @media(max-width:1400px){.nav-right{gap:6px;}.nav-pill,.nav-dropdown-btn,.theme-toggle{padding:0 10px;}}
+    @media(max-width:1150px){.nav-right{gap:4px;}.nav-pill,.nav-dropdown-btn,.theme-toggle{padding:0 8px;font-size:11px;min-height:34px;}.brand-subtitle{display:none;}.server-online-pill{width:34px;padding:0;justify-content:center;font-size:0;gap:0;min-height:34px;}}
+    .nav-pill,.theme-toggle{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;text-decoration:none;transition:background .15s ease,transform .15s ease;}
+    .nav-pill:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px);}
+    .theme-toggle{width:38px;justify-content:center;padding:0;cursor:pointer;}
+    .theme-toggle:hover{transform:translateY(-1px);background:rgba(255,255,255,0.16);}
+    .theme-toggle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
+    .theme-toggle .icon-sun{display:none;}body.dark-theme .theme-toggle .icon-sun{display:block;}body.dark-theme .theme-toggle .icon-moon{display:none;}
+    .settings-modal{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}
+    .settings-modal.open{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}
+    .settings-modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}
+    .settings-close{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}
+    .settings-close:hover{color:var(--text);background:var(--surface-2);}
+    .settings-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}
+    .settings-modal-body{padding:14px 16px 16px;}
+    .settings-modal-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}
+    .scheme-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+    .scheme-swatch{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}
+    .scheme-swatch:hover{border-color:var(--line-strong);transform:translateY(-1px);}
+    .scheme-swatch.active{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}
+    .scheme-preview{width:28px;height:28px;border-radius:7px;flex-shrink:0;}
+    .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
+    .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
+    .tz-select:focus{border-color:var(--oxide);}
+    .page{max-width:860px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
+    h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
+    .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 20px;line-height:1.55;}
+    .field-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin-bottom:6px;}
+    .filename-chip{display:inline-flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:9px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;margin-bottom:22px;word-break:break-all;}
+    .filename-chip svg{flex:0 0 auto;opacity:0.6;}
+    .locate-section{border:1px solid var(--line);border-radius:14px;padding:20px 22px;background:var(--surface-2);}
+    .locate-section h2{margin:0 0 4px;font-size:15px;font-weight:800;color:var(--text);}
+    .locate-section p{margin:0 0 14px;font-size:13px;color:var(--muted);line-height:1.5;}
+    .locate-row{display:flex;gap:8px;align-items:stretch;}
+    .locate-input{flex:1;min-width:0;padding:10px 14px;border-radius:10px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+    .locate-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(111,155,255,0.15);}
+    body.dark-theme .locate-input{background:var(--surface-2);}
+    .warning-banner{display:none;align-items:center;gap:8px;background:#fff4e5;border:1px solid #f5a623;border-radius:8px;padding:10px 14px;font-size:12px;color:#7a4f00;margin-top:8px;line-height:1.4;}
+    .warning-banner.show{display:flex;}
+    .warning-banner svg{flex:0 0 auto;}
+    body.dark-theme .warning-banner{background:#3d2800;border-color:#a06820;color:#ffcf7a;}
+    .btn-row{margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+    .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);cursor:pointer;}
+    .btn-primary:disabled{opacity:0.4;cursor:not-allowed;box-shadow:none;}
+    .btn-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid var(--line-strong);text-decoration:none;color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;cursor:pointer;}
+    .btn-secondary:hover{background:var(--line);}
+    .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
+    .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
+    .code-particles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}.code-particle{position:absolute;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}
+    @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
+    .nav-dropdown{position:relative;display:inline-flex;}.nav-dropdown-btn{cursor:pointer;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;border-radius:999px;padding:0 14px;min-height:38px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;}.nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{background:rgba(255,255,255,0.18);}.nav-dropdown-menu{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity 0.13s ease,visibility 0s ease 0.13s;}.nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{opacity:1;visibility:visible;transition:opacity 0.13s ease,visibility 0s ease 0s;}.nav-dropdown-menu a{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}.nav-dropdown-menu a:last-child{border-bottom:none;}.nav-dropdown-menu a:hover{background:rgba(255,255,255,0.14);color:#fff;}.nav-dropdown-menu a svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}
+    .site-footer{margin-top:auto;padding:16px 24px;text-align:center;font-size:11px;color:var(--muted);border-top:1px solid var(--line);position:relative;z-index:1;}
+    .site-footer a{color:var(--muted);text-decoration:none;}.site-footer a:hover{color:var(--oxide);}
+  </style>
+</head>
+<body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+    <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  <div class="top-nav">
+    <div class="top-nav-inner">
+      <a class="brand" href="/">
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo" />
+        <div class="brand-copy">
+          <div class="brand-title">OxideSLOC</div>
+          <div class="brand-subtitle">local code analysis - metrics, history and reports</div>
+        </div>
+      </a>
+      <div class="nav-right">
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
+          </div>
+        </div>
+        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
+        <div class="nav-dropdown">
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+          </div>
+        </div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running &mdash; accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div id="locate-meta" hidden data-expected="{{ expected_filename }}"></div>
+    <div class="panel">
+      <h1>Report File Not Found</h1>
+      <p class="panel-subtitle">The report file could not be found &mdash; the output folder may have been moved or renamed. Use the browser below to locate it in its new location.</p>
+      <div class="field-label">Missing file</div>
+      <div class="filename-chip">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+        {{ expected_filename }}
+      </div>
+      <div class="locate-section">
+        <h2>Locate Report File</h2>
+        {% if artifact_type == "pdf" %}
+        <p>Select the HTML report file from the output folder. Locating the HTML report restores all paths in that folder (HTML and PDF).</p>
+        {% else %}
+        <p>Select the HTML report file from its new location on disk.</p>
+        {% endif %}
+        <form id="locate-form" method="post" action="/locate-report">
+          <input type="hidden" name="redirect_url" value="/runs/{{ artifact_type }}/{{ run_id }}">
+          <div class="locate-row">
+            <input type="text" id="locate-file-input" name="file_path"
+                   placeholder="Path to HTML report file..."
+                   class="locate-input" autocomplete="off" spellcheck="false">
+            {% if !server_mode %}
+            <button type="button" id="browse-locate-btn" class="btn-secondary">Browse&hellip;</button>
+            {% endif %}
+          </div>
+          <div class="warning-banner" id="filename-warning">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <span>Selected file name does not match &mdash; expected <strong>{{ expected_filename }}</strong>. The server will reject a file from a different scan.</span>
+          </div>
+          <div class="btn-row">
+            <button type="submit" id="locate-submit-btn" class="btn-primary" disabled>Restore Report</button>
+            <a class="btn-secondary" href="/view-reports">View Reports</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <footer class="site-footer">
+    oxide-sloc v{{ version }} &mdash; local code metrics workbench &nbsp;&middot;&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;&middot;&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;&middot;&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;&middot;&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
+  <script nonce="{{ csp_nonce }}">(function(){
+    var k="oxide-theme",b=document.body,s=localStorage.getItem(k);
+    if(s==="dark")b.classList.add("dark-theme");
+    document.getElementById("theme-toggle").addEventListener("click",function(){
+      var d=b.classList.toggle("dark-theme");localStorage.setItem(k,d?"dark":"light");
+    });
+  })();</script>
+  <script nonce="{{ csp_nonce }}">(function spawnCodeParticles(){
+    var c=document.getElementById('code-particles');if(!c)return;
+    var snips=['report moved','fn analyze()','locate file','.html report','restore path','folder path','result.json','run_id','pub fn run','use std::fs','Result<()>','git main','files: 60','cargo build','Ok(run)','match lang','fn main() {','.rs .go .py','sloc_core','render_html'];
+    for(var i=0;i<38;i++){(function(idx){var el=document.createElement('span');el.className='code-particle';el.textContent=snips[idx%snips.length];var l=(Math.random()*94+2).toFixed(1),t=(Math.random()*88+6).toFixed(1),dur=(Math.random()*10+9).toFixed(1),delay=(Math.random()*18).toFixed(1),rot=(Math.random()*26-13).toFixed(1),op=(Math.random()*0.09+0.06).toFixed(3);el.style.left=l+'%';el.style.top=t+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';c.appendChild(el);})(i);}
+  })();
+  (function randomizeWatermarks(){var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));var placed=[];function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}var half=Math.floor(wms.length/2);wms.forEach(function(img,i){var pos=pick(i<half),w=Math.floor(Math.random()*60+80),rot=(Math.random()*40-20).toFixed(1),op=(Math.random()*0.08+0.05).toFixed(2),dur=(Math.random()*6+5).toFixed(1),delay=(Math.random()*10).toFixed(1);img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;img.style.animation='wmFade '+dur+'s ease-in-out -'+delay+'s infinite alternate';});})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){
+    var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
+    function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
+    try{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a){ap(sv);}else{ap(S[0]);}}catch(e){ap(S[0]);}
+    function init(){var btn=document.getElementById('settings-btn');if(!btn)return;var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';document.body.appendChild(m);var g=document.getElementById('scheme-grid');if(g)S.forEach(function(s){var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}catch(e){}el.addEventListener('click',function(){ap(s);});g.appendChild(el);});var cl=document.getElementById('settings-close');window.tzAbbr=function(z){return{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}[z]||'PT';};window.fmtTz=function(ms,tz){var d=new Date(ms);if(isNaN(d.getTime()))return'';try{var pts=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);var v={};pts.forEach(function(p){v[p.type]=p.value;});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}catch(e){return'';}};window.applyTz=function(tz){try{localStorage.setItem('sloc-tz',tz);}catch(e){}document.querySelectorAll('[data-utc-ms]').forEach(function(el){var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);});};var tzSel=document.getElementById('tz-select');var storedTz;try{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){storedTz='America/Los_Angeles';}if(tzSel){tzSel.value=storedTz;tzSel.addEventListener('change',function(){window.applyTz(this.value);});}window.applyTz(storedTz);btn.addEventListener('click',function(e){e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');});if(cl)cl.addEventListener('click',function(){m.classList.remove('open');});document.addEventListener('click',function(e){if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');});}
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  }());</script>
+  <script nonce="{{ csp_nonce }}">(function(){
+    var meta=document.getElementById('locate-meta');
+    var inp=document.getElementById('locate-file-input');
+    var browseBtn=document.getElementById('browse-locate-btn');
+    var submitBtn=document.getElementById('locate-submit-btn');
+    var warning=document.getElementById('filename-warning');
+    var expected=meta?meta.getAttribute('data-expected'):'';
+    function basename(p){return p.replace(/\\/g,'/').split('/').pop()||'';}
+    function validate(){
+      var val=inp?inp.value.trim():'';
+      if(!val){if(submitBtn)submitBtn.disabled=true;if(warning)warning.classList.remove('show');return;}
+      if(submitBtn)submitBtn.disabled=false;
+      if(warning){
+        var name=basename(val);
+        if(expected&&name&&name!==expected){warning.classList.add('show');}
+        else{warning.classList.remove('show');}
+      }
+    }
+    if(inp)inp.addEventListener('input',validate);
+    if(browseBtn){
+      browseBtn.addEventListener('click',function(){
+        browseBtn.disabled=true;browseBtn.textContent='...';
+        fetch('/pick-file')
+          .then(function(r){return r.ok?r.json():{cancelled:true};})
+          .then(function(d){
+            browseBtn.disabled=false;browseBtn.textContent='Browse…';
+            if(d&&d.selected_path&&inp){inp.value=d.selected_path;validate();}
+          })
+          .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse…';});
+      });
+    }
+  })();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+</body>
+</html>
+"##,
+    ext = "html"
+)]
+struct LocateFileTemplate {
+    run_id: String,
+    artifact_type: String,
+    expected_filename: String,
+    server_mode: bool,
     csp_nonce: String,
     version: &'static str,
 }
@@ -23054,8 +23694,6 @@ mod form_config_tests {
             output_dir: None,
             report_title: None,
             report_header_footer: None,
-            generate_html: None,
-            generate_pdf: None,
             include_globs: None,
             exclude_globs: None,
             submodule_breakdown: None,
@@ -23064,6 +23702,9 @@ mod form_config_tests {
             blank_in_block_comment_policy: None,
             count_compiler_directives: None,
             style_col_threshold: None,
+            style_analysis_enabled: None,
+            style_score_threshold: None,
+            style_lang_scope: None,
         }
     }
 
