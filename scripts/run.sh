@@ -6,6 +6,7 @@
 #   bash scripts/run.sh --host       # LAN server mode (http://0.0.0.0:4317)
 #   bash scripts/run.sh --lan        # alias for --host
 #   bash scripts/run.sh --build      # compile from bundled toolchain + vendor sources
+#   bash scripts/run.sh --rebuild    # force recompile from source (implies --build)
 #   SLOC_HOST=1 bash scripts/run.sh  # env-var form of --host
 #
 # For a dedicated LAN-server launcher with API-key setup and IP guidance see:
@@ -383,7 +384,7 @@ launch_cargo() {
 
 for arg in "$@"; do
     case "$arg" in
-        --rebuild|--force|-f) REBUILD_MODE=true ;;
+        --rebuild|--force|-f) REBUILD_MODE=true; BUILD_MODE=true ;;
         --host|--lan) HOST_MODE=1 ;;
         --build) BUILD_MODE=true ;;
         *) ;;

@@ -107,6 +107,18 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ---
 
+## Screenshots
+
+![Home — navigation hub with quick-launch cards for every feature](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/home-page.png)
+
+| View Reports | Compare Delta |
+|---|---|
+| ![View Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png) | ![Compare Delta](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/compare-delta.png) |
+| **Trend Reports** | **Test Metrics** |
+| ![Trend Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/trend-reports.png) | ![Test Metrics](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/test-metrics.png) |
+
+---
+
 ## Installation
 
 ### Path A — Pre-built binary or source build (no internet required)
@@ -266,10 +278,18 @@ oxide-sloc serve   # → http://127.0.0.1:4317
 
 A guided 4-step flow: select project → counting rules → outputs → review & run. The **Quick Scan** sidebar button submits from step 1 with all defaults.
 
+| | |
+|---|---|
+| ![Choose scan — start new, load config, or re-scan a recent project](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/choose-scan.png) | ![Scan setup step 1 — select project path and preview scope](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/scan-setup-1.png) |
+
+![Review and run — full summary of what will be scanned, counted, and exported before launch](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/scan-setup-confirm.png)
+
 Additional pages:
 - **Test Metrics** (`/test-metrics`) — four-chip summary (density, most-tested language, languages with tests, line coverage %); per-language test detection counts, test-to-code density, and animated coverage gauges loaded from LCOV, Cobertura XML, JaCoCo XML, or Istanbul/NYC JSON
 - **Trend Reports** (`/trend-reports`) — historical SLOC and test-count trajectory with commit annotation
 - **Compare Scans** (`/compare-scans`) — side-by-side diff of any two saved results with four chart types
+
+![View Reports — full scan history with branch, commit, and submodule breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png)
 
 Every web UI option maps 1:1 to a CLI flag — see the [Web UI → CLI translation](#web-ui--cli-translation) table below.
 
@@ -302,6 +322,8 @@ Five metrics are surfaced at the project level and per-language:
 
 These satisfy the identity `SLOC (new) = Unmodified + Modified + Added`.
 
+![Compare delta — baseline vs current with SLOC charts and per-language breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/compare-delta.png)
+
 ```bash
 oxide-sloc diff baseline.json current.json
 oxide-sloc diff baseline.json current.json -j delta.json -c delta.csv -x delta.xlsx
@@ -318,6 +340,8 @@ Best-effort lexical detection of `functions`, `classes`, `variables`, and `impor
 ## Test Metrics
 
 oxide-sloc lexically detects test definitions as part of every scan — no separate runner or coverage tool is required for basic counts. Navigate to `/test-metrics` in the web UI to see:
+
+![Test Metrics — per-language test counts, density, and optional coverage gauges](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/test-metrics.png)
 
 | Metric | What it measures |
 |---|---|
@@ -465,6 +489,8 @@ Run `oxide-sloc init` to generate a starter config with all options documented i
 ## PDF export
 
 PDF generation uses a locally installed Chromium-based browser (Chrome, Edge, Brave, Vivaldi, or Opera). Generation runs in the background; the web UI returns results immediately.
+
+![PDF report — code metrics with file table, symbol counts, and code style analysis](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/pdf-scan.png)
 
 ```bash
 export SLOC_BROWSER=/usr/bin/chromium   # override browser path

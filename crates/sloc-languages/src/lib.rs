@@ -272,6 +272,19 @@ pub struct AnalysisOptions {
     /// When `true`, backslash-continued physical lines are collapsed into a single logical
     /// line for SLOC counting purposes (IEEE logical SLOC mode).
     pub collapse_continuation_lines: bool,
+    /// When `true` (default), run lexical style-guide heuristics and populate
+    /// `RawFileAnalysis::style_analysis`. Set to `false` to skip style scoring entirely.
+    pub enable_style: bool,
+    /// Restrict style analysis to a specific language family slug (`"all"` or `"c_family"`).
+    /// When `"c_family"`, only C / C++ / Objective-C files are style-analysed.
+    pub style_lang_scope: StyleLangScope,
+}
+
+/// Which language families receive style-guide heuristic analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleLangScope {
+    All,
+    CFamilyOnly,
 }
 
 impl Default for AnalysisOptions {
@@ -279,6 +292,8 @@ impl Default for AnalysisOptions {
         Self {
             blank_in_block_comment_as_comment: true,
             collapse_continuation_lines: false,
+            enable_style: true,
+            style_lang_scope: StyleLangScope::All,
         }
     }
 }
@@ -541,7 +556,11 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
         match language {
             Language::C | Language::Cpp => {
                 if let Some(mut result) = ts::analyze_c(text) {
-                    result.style_analysis = style::analyze_style(language, text);
+                    if options.enable_style
+                        && should_style_analyse(language, options.style_lang_scope)
+                    {
+                        result.style_analysis = style::analyze_style(language, text);
+                    }
                     return result;
                 }
             }
@@ -569,8 +588,20 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
         collapse_continuation_lines: options.collapse_continuation_lines,
     };
     let mut result = analyze_generic(text, config, flags);
-    result.style_analysis = style::analyze_style(language, text);
+    if options.enable_style && should_style_analyse(language, options.style_lang_scope) {
+        result.style_analysis = style::analyze_style(language, text);
+    }
     result
+}
+
+/// Returns `true` when `language` should be style-analysed under `scope`.
+fn should_style_analyse(language: Language, scope: StyleLangScope) -> bool {
+    match scope {
+        StyleLangScope::CFamilyOnly => {
+            matches!(language, Language::C | Language::Cpp | Language::ObjectiveC)
+        }
+        StyleLangScope::All => true,
+    }
 }
 
 /// Returns the lexical scan configuration for `language` and whether it uses a C preprocessor.

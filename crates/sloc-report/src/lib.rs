@@ -55,13 +55,58 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Optional delta context for embedding a "Changes vs. Previous Scan" panel
+/// in the HTML report. Pass `None` to omit the panel (CLI, sub-reports).
+pub struct ReportDeltaContext {
+    /// Net code lines added (new + grown files).
+    pub delta_code_added: i64,
+    /// Net code lines removed (deleted + shrunk files).
+    pub delta_code_removed: i64,
+    /// Code lines present in both scans without change.
+    pub delta_unmodified_lines: i64,
+    /// Number of files added since the previous scan.
+    pub delta_files_added: usize,
+    /// Number of files removed since the previous scan.
+    pub delta_files_removed: usize,
+    /// Number of files modified since the previous scan.
+    pub delta_files_modified: usize,
+    /// Number of files unchanged since the previous scan.
+    pub delta_files_unchanged: usize,
+    /// Code lines in the previous scan (for the "Code before: X" display).
+    pub prev_code_lines: u64,
+    /// Total number of scans on record for this project (including current).
+    pub prev_scan_count: usize,
+    /// Human-readable label for the previous scan (timestamp or run label).
+    pub prev_scan_label: String,
+    /// Run ID of the previous scan, used to generate navigation links.
+    pub prev_run_id: Option<String>,
+    /// Run ID of the current scan, used to generate the compare-scans link.
+    pub current_run_id: Option<String>,
+}
+
 /// Render a full standalone HTML report for the given analysis run.
 ///
 /// # Errors
 ///
 /// Returns an error if template rendering or configuration serialization fails.
 pub fn render_html(run: &AnalysisRun) -> Result<String> {
-    render_html_inner(run, false, None)
+    render_html_inner(run, false, None, None)
+}
+
+/// Render a full standalone HTML report with an optional delta panel.
+///
+/// When `delta` is `Some`, a "Changes vs. Previous Scan" section is embedded
+/// near the top of the report so the artifact is self-contained for external
+/// stakeholders who have no access to the web server.
+///
+/// # Errors
+///
+/// Returns an error if template rendering or configuration serialization fails.
+pub fn render_html_with_delta(
+    run: &AnalysisRun,
+    delta: Option<&ReportDeltaContext>,
+) -> Result<String> {
+    render_html_inner(run, false, None, delta)
 }
 
 /// Render an embedded sub-report HTML fragment for the given analysis run.
@@ -70,7 +115,7 @@ pub fn render_html(run: &AnalysisRun) -> Result<String> {
 ///
 /// Returns an error if template rendering or configuration serialization fails.
 pub fn render_sub_report_html(run: &AnalysisRun) -> Result<String> {
-    render_html_inner(run, true, None)
+    render_html_inner(run, true, None, None)
 }
 
 fn load_custom_logo(path: &std::path::Path) -> Option<String> {
@@ -96,15 +141,16 @@ fn json_escape(s: &str) -> String {
 }
 
 fn build_lang_chart_json(run: &AnalysisRun) -> String {
-    let entries: Vec<String> = run
-        .totals_by_language
-        .iter()
+    let mut langs: Vec<&sloc_core::LanguageSummary> = run.totals_by_language.iter().collect();
+    langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
+    let entries: Vec<String> = langs
+        .into_iter()
         .take(12)
         .map(|l| {
             format!(
-                r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"functions":{},"classes":{},"variables":{},"imports":{},"tests":{},"files":{}}}"#,
+                r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"physical":{},"functions":{},"classes":{},"variables":{},"imports":{},"tests":{},"files":{}}}"#,
                 json_escape(l.language.display_name()),
-                l.code_lines, l.comment_lines, l.blank_lines,
+                l.code_lines, l.comment_lines, l.blank_lines, l.total_physical_lines,
                 l.functions, l.classes, l.variables, l.imports,
                 l.test_count, l.files,
             )
@@ -302,6 +348,7 @@ fn render_html_inner(
     run: &AnalysisRun,
     is_sub_report: bool,
     pdf_url: Option<&str>,
+    delta_ctx: Option<&ReportDeltaContext>,
 ) -> Result<String> {
     let config_json = serde_json::to_string_pretty(&run.effective_configuration)
         .context("failed to serialize effective configuration")?;
@@ -448,6 +495,7 @@ fn render_html_inner(
             .as_ref()
             .map(|ss| ss.by_language.len())
             .unwrap_or(0),
+        style_score_threshold: run.effective_configuration.analysis.style_score_threshold,
         style_chart_json: run
             .style_summary
             .as_ref()
@@ -459,6 +507,19 @@ fn render_html_inner(
             String::new()
         },
         style_summary: run.style_summary.clone(),
+        has_delta: delta_ctx.is_some(),
+        delta_code_added: delta_ctx.map(|d| d.delta_code_added).unwrap_or(0),
+        delta_code_removed: delta_ctx.map(|d| d.delta_code_removed).unwrap_or(0),
+        delta_unmodified_lines: delta_ctx.map(|d| d.delta_unmodified_lines).unwrap_or(0),
+        delta_files_added: delta_ctx.map(|d| d.delta_files_added).unwrap_or(0),
+        delta_files_removed: delta_ctx.map(|d| d.delta_files_removed).unwrap_or(0),
+        delta_files_modified: delta_ctx.map(|d| d.delta_files_modified).unwrap_or(0),
+        delta_files_unchanged: delta_ctx.map(|d| d.delta_files_unchanged).unwrap_or(0),
+        prev_code_lines: delta_ctx.map(|d| d.prev_code_lines).unwrap_or(0),
+        prev_scan_count: delta_ctx.map(|d| d.prev_scan_count).unwrap_or(0),
+        prev_scan_label: delta_ctx
+            .map(|d| d.prev_scan_label.clone())
+            .unwrap_or_default(),
     };
 
     template.render().context("failed to render HTML report")
@@ -470,7 +531,7 @@ fn render_html_inner(
 ///
 /// Returns an error if rendering fails or the file cannot be written.
 pub fn write_html(run: &AnalysisRun, output_path: &Path) -> Result<()> {
-    let html = render_html_inner(run, false, None)?;
+    let html = render_html_inner(run, false, None, None)?;
     fs::write(output_path, html)
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
@@ -495,7 +556,7 @@ pub fn write_html_with_pdf_link(
             None
         }
     });
-    let html = render_html_inner(run, false, pdf_relative.as_deref())?;
+    let html = render_html_inner(run, false, pdf_relative.as_deref(), None)?;
     fs::write(output_path, html)
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
@@ -2576,18 +2637,18 @@ struct WarningOpportunityRow {
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100vh; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
     body { overflow-x: hidden; transition: background 0.18s ease, color 0.18s ease; }
-    .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 2px solid rgba(255,255,255,0.18); box-shadow: 0 6px 28px rgba(0,0,0,0.28), inset 0 -1px 0 rgba(255,255,255,0.06); }
-    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 6px 28px; min-height: 64px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px; }
+    .top-nav { position: sticky; top: 0; z-index: 30; background: linear-gradient(180deg, var(--nav), var(--nav-2)); border-bottom: 1px solid rgba(255,255,255,0.12); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
+    .top-nav-inner { max-width: 1720px; margin: 0 auto; padding: 4px 24px; min-height: 56px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; }
     .brand { display: flex; align-items: center; gap: 14px; min-width: 0; text-decoration: none; flex: 0 0 auto; }
-    .brand-logo { width: 44px; height: 48px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.3)); }
+    .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
     .background-watermarks img { position: absolute; opacity: 0.15; filter: blur(0.3px); user-select: none; max-width: none; }
     .brand-copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
-    .brand-title { margin: 0; color: #fff; font-size: 18px; font-weight: 800; line-height: 1.1; letter-spacing: -0.01em; }
-    .brand-subtitle { color: rgba(255,255,255,0.72); font-size: 11px; line-height: 1.2; margin-top: 3px; letter-spacing: 0.01em; }
+    .brand-title { margin: 0; color: #fff; font-size: 17px; font-weight: 800; line-height: 1.1; letter-spacing: -0.01em; }
+    .brand-subtitle { color: rgba(255,255,255,0.72); font-size: 11px; line-height: 1.2; margin-top: 2px; letter-spacing: 0.01em; }
     .nav-project-slot { display:flex; justify-content:center; min-width:0; }
     .nav-project-pill, .nav-pill, .theme-toggle, .header-button {
-      display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.26); color: #fff; background: rgba(255,255,255,0.13); font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 2px 6px rgba(0,0,0,0.14);
+      display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); color: #fff; background: rgba(255,255,255,0.08); font-size: 12px; font-weight: 700; box-shadow: none;
     }
     .nav-project-pill { pointer-events: auto; width: 100%; max-width: 300px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nav-project-label { color: rgba(255,255,255,0.72); text-transform: uppercase; letter-spacing: 0.09em; font-size: 10px; font-weight: 800; }
@@ -2595,9 +2656,9 @@ struct WarningOpportunityRow {
     .nav-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:nowrap; min-width:0; }
     @media (max-width: 1400px) { .nav-status { gap: 6px; } .header-button, .theme-toggle { padding: 0 10px; } }
     @media (max-width: 1150px) { .nav-status { gap: 4px; } .header-button, .theme-toggle { padding: 0 8px; font-size: 11px; min-height: 34px; } .brand-subtitle { display: none; } }
-    .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.10); text-decoration:none; transition: background 0.15s ease, box-shadow 0.15s ease; }
-    .theme-toggle:hover, .header-button:hover { background: rgba(255,255,255,0.22); box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 4px 12px rgba(0,0,0,0.18); }
-    .theme-toggle { width: 40px; justify-content:center; padding:0; }
+    .theme-toggle, .header-button { cursor:pointer; background: rgba(255,255,255,0.08); text-decoration:none; transition: background 0.15s ease, transform 0.15s ease; }
+    .theme-toggle:hover, .header-button:hover { background: rgba(255,255,255,0.18); transform: translateY(-1px); }
+    .theme-toggle { width: 38px; justify-content:center; padding:0; }
     .nav-dropdown-wrap { position: relative; }
     .nav-dropdown-wrap::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 6px; }
     .nav-dropdown-trigger { }
@@ -2668,6 +2729,33 @@ struct WarningOpportunityRow {
     .meta-chip { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:5px; padding:0 10px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
     .meta-chip:last-child { border-right:none; }
     .meta-chip b { color:var(--text); font-weight:700; }
+    .prev-scan-banner { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin:0 0 20px; display:flex; flex-direction:column; gap:10px; }
+    .prev-scan-banner-empty { flex-direction:row; align-items:center; gap:8px; font-size:13px; color:var(--muted); font-style:italic; }
+    .prev-scan-banner-top { display:flex; flex-direction:column; gap:4px; }
+    .prev-scan-meta { display:flex; align-items:center; gap:7px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); flex-wrap:wrap; }
+    .prev-scan-ts { font-weight:500; text-transform:none; letter-spacing:0; color:var(--muted); }
+    .prev-scan-count { font-weight:500; text-transform:none; letter-spacing:0; color:var(--muted); }
+    .prev-scan-summary { font-size:13px; font-weight:600; color:var(--text); }
+    .prev-scan-summary b { font-weight:900; }
+    .delta-neutral-text { color:var(--muted); }
+    .delta-up { color:#2a6846; }
+    .delta-down { color:#b23030; }
+    body.dark-theme .delta-up { color:#5aba8a; }
+    body.dark-theme .delta-down { color:#e07070; }
+    .delta-card-row { display:flex; flex-wrap:wrap; gap:10px; }
+    .delta-card-inline { display:flex; flex-direction:column; gap:2px; padding:10px 14px; border-radius:10px; border:1px solid var(--line); background:var(--surface-2); min-width:100px; position:relative; cursor:default; }
+    .delta-card-val { font-size:18px; font-weight:900; color:var(--text); line-height:1.2; }
+    .delta-card-val.pos { color:#2a6846; }
+    .delta-card-val.neg { color:#b23030; }
+    .delta-card-val.mod { color:#7a5a10; }
+    body.dark-theme .delta-card-val.pos { color:#5aba8a; }
+    body.dark-theme .delta-card-val.neg { color:#e07070; }
+    body.dark-theme .delta-card-val.mod { color:#d4a843; }
+    .delta-card-lbl { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
+    .delta-card-tip { display:none; position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; z-index:200; }
+    .delta-card-inline:hover .delta-card-tip { display:block; }
+    .delta-panel-link { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:600; text-decoration:none; transition:background .15s, border-color .15s, color .15s, transform .15s; }
+    .delta-panel-link:hover { background:var(--oxide); color:#fff; border-color:var(--oxide); transform:translateY(-2px); }
     .soft-chip { display:inline-flex; align-items:center; min-height:32px; padding:0 12px; border-radius:999px; border:1px solid var(--line); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; }
     .toolbar { display:flex; flex-wrap:wrap; justify-content:space-between; gap: 12px; align-items: center; margin-bottom: 16px; }
     .toolbar-left { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
@@ -2817,8 +2905,8 @@ struct WarningOpportunityRow {
       .search { min-width: 100%; width: 100%; }
     }
     /* ── Report header / footer identification banner ─────────────────── */
-    .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; height: 27px; line-height: 27px; padding: 0 16px; position: fixed; top: 0; left: 0; right: 0; z-index: 32; width: 100%; }
-    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-align: center; height: 27px; line-height: 27px; padding: 0 16px; position: fixed; bottom: 0; left: 0; right: 0; z-index: 32; width: 100%; }
+    .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: center; height: 27px; padding: 0 16px; position: fixed; top: 0; left: 0; right: 0; z-index: 32; }
+    .report-id-footer-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: center; height: 27px; padding: 0 16px; position: fixed; bottom: 0; left: 0; right: 0; z-index: 32; }
     body.has-report-banner .top-nav { top: 27px; }
     body.has-report-banner { padding-bottom: 27px; }
     /* ── Print & PDF export ──────────────────────────────────────────── */
@@ -2838,8 +2926,8 @@ struct WarningOpportunityRow {
       }
 
       /* Report id banner — fixed position repeats the banner on every printed page */
-      .report-id-banner { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; z-index: 9999 !important; }
-      .report-id-footer-banner { display: block !important; position: fixed !important; bottom: 0 !important; left: 0 !important; right: 0 !important; width: 100% !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 0 !important; background: #3d3d3d !important; color: #fff !important; z-index: 9999 !important; }
+      .report-id-banner { display: flex !important; align-items: center !important; justify-content: center !important; position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; padding: 3px 12px !important; font-size: 10px !important; background: #3d3d3d !important; color: #fff !important; z-index: 9999 !important; }
+      .report-id-footer-banner { display: flex !important; align-items: center !important; justify-content: center !important; position: fixed !important; bottom: 0 !important; left: 0 !important; right: 0 !important; padding: 3px 12px !important; font-size: 10px !important; margin-top: 0 !important; background: #3d3d3d !important; color: #fff !important; z-index: 9999 !important; }
       body.has-report-banner .top-nav { top: 0 !important; }
       body.has-report-banner { padding-bottom: 0 !important; }
       /* Hide interactive UI-chrome; keep section heading text visible */
@@ -3218,6 +3306,8 @@ struct WarningOpportunityRow {
     .style-lang-tab:hover{background:var(--surface-2);}
     .style-lang-tab.active{background:var(--oxide);color:#fff;border-color:var(--oxide);}
     .style-sig-chip{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line);margin-right:3px;}
+    .style-row-warn td{background:rgba(178,48,48,0.06)!important;}
+    .style-row-warn td:first-child{border-left:3px solid #b23030;}
     .style-sig-more{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:transparent;color:var(--oxide);border:1px solid var(--oxide);margin-right:3px;font-weight:700;cursor:default;}
     body.dark-theme .style-guide-track{background:var(--surface-3);}
     body.dark-theme .style-chip{background:var(--surface-2);}
@@ -3366,6 +3456,72 @@ struct WarningOpportunityRow {
         <span class="meta-chip">Files analyzed <b>{{ run.summary_totals.files_analyzed }}</b></span>
         <span class="meta-chip">Files skipped <b>{{ run.summary_totals.files_skipped }}</b></span>
       </div>
+
+      {% if has_delta %}
+      <div class="prev-scan-banner" aria-label="Changes vs. previous scan">
+        <div class="prev-scan-banner-top">
+          <div class="prev-scan-meta">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <strong>PREVIOUS SCAN</strong>
+            <span class="prev-scan-ts">{{ prev_scan_label }}</span>
+            {% if prev_scan_count > 0 %}
+            <span class="prev-scan-count">&#xb7; {{ prev_scan_count }} scan{% if prev_scan_count != 1 %}s{% endif %} total</span>
+            {% endif %}
+          </div>
+          <div class="prev-scan-summary">
+            Code before: <b>{{ prev_code_lines }}</b>
+            &nbsp;&rarr;&nbsp;
+            Code now: <b>{{ run.summary_totals.code_lines }}</b>
+            &nbsp;&#xb7;&nbsp;
+            <span class="{% if delta_code_added > 0 %}delta-up{% else %}delta-neutral-text{% endif %}">+{{ delta_code_added }} added</span>
+            &nbsp;
+            <span class="{% if delta_code_removed > 0 %}delta-down{% else %}delta-neutral-text{% endif %}">&minus;{{ delta_code_removed }} removed</span>
+          </div>
+        </div>
+        <div class="delta-card-row">
+          <div class="delta-card-inline {% if delta_code_added > 0 %}pos{% endif %}">
+            <div class="delta-card-val pos">+{{ delta_code_added }}</div>
+            <div class="delta-card-lbl">lines added</div>
+            <div class="delta-card-tip">Code lines added since the previous scan</div>
+          </div>
+          <div class="delta-card-inline {% if delta_code_removed > 0 %}neg{% endif %}">
+            <div class="delta-card-val neg">&minus;{{ delta_code_removed }}</div>
+            <div class="delta-card-lbl">lines removed</div>
+            <div class="delta-card-tip">Code lines removed since the previous scan</div>
+          </div>
+          <div class="delta-card-inline">
+            <div class="delta-card-val">{{ delta_unmodified_lines }}</div>
+            <div class="delta-card-lbl">unmodified lines</div>
+            <div class="delta-card-tip">Code lines unchanged since the previous scan</div>
+          </div>
+          <div class="delta-card-inline {% if delta_files_modified > 0 %}mod{% endif %}">
+            <div class="delta-card-val mod">{{ delta_files_modified }}</div>
+            <div class="delta-card-lbl">files modified</div>
+            <div class="delta-card-tip">Files with at least one line changed</div>
+          </div>
+          <div class="delta-card-inline {% if delta_files_added > 0 %}pos{% endif %}">
+            <div class="delta-card-val pos">{{ delta_files_added }}</div>
+            <div class="delta-card-lbl">files added</div>
+            <div class="delta-card-tip">New files added since the previous scan</div>
+          </div>
+          <div class="delta-card-inline {% if delta_files_removed > 0 %}neg{% endif %}">
+            <div class="delta-card-val neg">{{ delta_files_removed }}</div>
+            <div class="delta-card-lbl">files removed</div>
+            <div class="delta-card-tip">Files deleted since the previous scan</div>
+          </div>
+          <div class="delta-card-inline">
+            <div class="delta-card-val">{{ delta_files_unchanged }}</div>
+            <div class="delta-card-lbl">files unchanged</div>
+            <div class="delta-card-tip">Files with no changes since the previous scan</div>
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="prev-scan-banner prev-scan-banner-empty" aria-label="No previous scan">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        No previous scan found for this project &#x2014; this report is the baseline.
+      </div>
+      {% endif %}
 
       <div class="summary-grid">
         <div class="metric" data-metric-value="{{ run.summary_totals.total_physical_lines }}"><div class="metric-tooltip">Total lines across all analyzed files, including code, comments, and blank lines.</div><div class="metric-label">Physical lines</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
@@ -4786,17 +4942,18 @@ struct WarningOpportunityRow {
         });
         ds+='</svg>';
         // Horizontal stacked-bar chart
-        var maxT=Math.max.apply(null,D.map(function(d){return d.code+d.comments+d.blanks;}))||1;
+        var maxT=Math.max.apply(null,D.map(function(d){return d.physical||d.code+d.comments+d.blanks;}))||1;
         var LW=108,BW=260,rHb=28,bH=20,SH=D.length*rHb+32,svgW=LW+BW+68;
         var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         D.forEach(function(d,i){
           var y=6+i*rHb,x=LW;
+          var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
           bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
           if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
           if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
           if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(d.code+d.comments+d.blanks)+'</text>';
+          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(phys)+'</text>';
         });
         var ly=SH-14;
         bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
@@ -5037,9 +5194,9 @@ struct WarningOpportunityRow {
                 }
               }
             },
-            plugins: [makeStackedEndPlugin(function(total) {
+            plugins: [makeStackedEndPlugin(function(total, idx) {
               if (compMode === 'pct') return '';
-              return fmt(Math.round(total));
+              var d = data[idx]; return fmt(Math.round(d && d.physical ? d.physical : total));
             })]
           });
           ALL_CHARTS.push(compChart);
@@ -5487,9 +5644,9 @@ struct WarningOpportunityRow {
                 },
                 plugins: { legend: { position: 'bottom', labels: { color: c.text } } }
               },
-              plugins: [makeStackedEndPlugin(function(total) {
+              plugins: [makeStackedEndPlugin(function(total, idx) {
                 if (isPct) return '';
-                return fmt(Math.round(total));
+                var d = data[idx]; return fmt(Math.round(d && d.physical ? d.physical : total));
               })]
             });
           });
@@ -5980,6 +6137,7 @@ struct WarningOpportunityRow {
   (function(){
     var CHART_DATA = {{ style_chart_json|safe }};
     var FILE_DATA  = {{ style_file_json|safe }};
+    var SCORE_THRESHOLD = {{ style_score_threshold }};
     var activeLang = CHART_DATA.length ? CHART_DATA[0].family : '';
     var sftSortKey = '';
     var sftSortDir = 1;
@@ -6160,7 +6318,8 @@ struct WarningOpportunityRow {
         var badge=guide?buildGuideHtml(guide):'<span style="color:var(--muted);">—</span>';
         var allSigTip=f.signals?f.signals.map(function(s){return s.k+': '+s.v;}).join('\n'):'';
         var sigHtml=buildSigsHtml(f.signals,allSigTip);
-        html+='<tr>'
+        var rowClass=SCORE_THRESHOLD>0&&f.score<SCORE_THRESHOLD?' class="style-row-warn"':'';
+        html+='<tr'+rowClass+'>'
           +'<td title="'+escH(f.path)+'">'+escH(f.path.replace(/^.*[\/\\]/,''))+'</td>'
           +'<td>'+escH(f.lang)+'</td>'
           +'<td>'+escH(f.indent)+'</td>'
@@ -6307,12 +6466,26 @@ struct ReportTemplate<'a> {
     has_style_data: bool,
     /// Number of language groups in the style summary (0 when none).
     style_lang_count: usize,
+    /// Files scoring below this threshold are highlighted in the per-file table. 0 = off.
+    style_score_threshold: u8,
     /// Serialised JSON for the multi-language style-guide chart (empty string when none).
     style_chart_json: String,
     /// Serialised JSON for the per-file style table (empty string when none).
     style_file_json: String,
     /// Aggregate style summary, cloned from `AnalysisRun::style_summary`.
     style_summary: Option<StyleSummary>,
+    /// True when a previous-scan delta was provided (shows the delta panel).
+    has_delta: bool,
+    delta_code_added: i64,
+    delta_code_removed: i64,
+    delta_unmodified_lines: i64,
+    delta_files_added: usize,
+    delta_files_removed: usize,
+    delta_files_modified: usize,
+    delta_files_unchanged: usize,
+    prev_code_lines: u64,
+    prev_scan_count: usize,
+    prev_scan_label: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

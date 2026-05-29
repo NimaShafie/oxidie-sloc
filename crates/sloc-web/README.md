@@ -2,6 +2,8 @@
 
 Axum web server and UI for [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc) — a local code analysis tool.
 
+![View Reports — full scan history with branch, commit, and submodule breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png)
+
 ## Overview
 
 This crate runs the localhost web UI:
