@@ -520,6 +520,9 @@ fn render_html_inner(
         prev_scan_label: delta_ctx
             .map(|d| d.prev_scan_label.clone())
             .unwrap_or_default(),
+        prev_run_id: delta_ctx
+            .and_then(|d| d.prev_run_id.clone())
+            .unwrap_or_default(),
     };
 
     template.render().context("failed to render HTML report")
@@ -2729,7 +2732,8 @@ struct WarningOpportunityRow {
     .meta-chip { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:5px; padding:0 10px; font-size:13px; font-weight:500; color:var(--muted); border-right:1px solid var(--line); line-height:1.8; }
     .meta-chip:last-child { border-right:none; }
     .meta-chip b { color:var(--text); font-weight:700; }
-    .prev-scan-banner { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin:0 0 20px; display:flex; flex-direction:column; gap:10px; }
+    .prev-scan-banner { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:0 0 20px; display:flex; flex-direction:column; gap:12px; width:100%; box-sizing:border-box; box-shadow:0 4px 16px rgba(77,44,20,0.10); }
+    body.dark-theme .prev-scan-banner { box-shadow:0 4px 16px rgba(0,0,0,0.3); }
     .prev-scan-banner-empty { flex-direction:row; align-items:center; gap:8px; font-size:13px; color:var(--muted); font-style:italic; }
     .prev-scan-banner-top { display:flex; flex-direction:column; gap:4px; }
     .prev-scan-meta { display:flex; align-items:center; gap:7px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); flex-wrap:wrap; }
@@ -2742,20 +2746,28 @@ struct WarningOpportunityRow {
     .delta-down { color:#b23030; }
     body.dark-theme .delta-up { color:#5aba8a; }
     body.dark-theme .delta-down { color:#e07070; }
-    .delta-card-row { display:flex; flex-wrap:wrap; gap:10px; }
-    .delta-card-inline { display:flex; flex-direction:column; gap:2px; padding:10px 14px; border-radius:10px; border:1px solid var(--line); background:var(--surface-2); min-width:100px; position:relative; cursor:default; }
-    .delta-card-val { font-size:18px; font-weight:900; color:var(--text); line-height:1.2; }
+    .delta-card-row { display:grid; grid-template-columns:repeat(7,1fr); gap:12px; width:100%; }
+    @media(max-width:1000px){ .delta-card-row { grid-template-columns:repeat(4,1fr); } }
+    @media(max-width:540px){ .delta-card-row { grid-template-columns:repeat(2,1fr); } }
+    .delta-card-inline { display:flex; flex-direction:column; gap:4px; padding:14px 16px; border-radius:12px; border:1px solid var(--line); background:var(--surface); position:relative; cursor:default; transition:transform .2s ease, box-shadow .2s ease; box-shadow:0 2px 8px rgba(77,44,20,0.07); }
+    .delta-card-inline:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.22); z-index:10; }
+    body.dark-theme .delta-card-inline { box-shadow:0 2px 8px rgba(0,0,0,0.2); }
+    body.dark-theme .delta-card-inline:hover { box-shadow:0 12px 32px rgba(0,0,0,0.55); }
+    .delta-card-val { font-size:20px; font-weight:900; color:var(--oxide); line-height:1.2; }
     .delta-card-val.pos { color:#2a6846; }
     .delta-card-val.neg { color:#b23030; }
     .delta-card-val.mod { color:#7a5a10; }
     body.dark-theme .delta-card-val.pos { color:#5aba8a; }
     body.dark-theme .delta-card-val.neg { color:#e07070; }
     body.dark-theme .delta-card-val.mod { color:#d4a843; }
-    .delta-card-lbl { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
-    .delta-card-tip { display:none; position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; z-index:200; }
-    .delta-card-inline:hover .delta-card-tip { display:block; }
-    .delta-panel-link { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:var(--surface-2); color:var(--text); font-size:12px; font-weight:600; text-decoration:none; transition:background .15s, border-color .15s, color .15s, transform .15s; }
-    .delta-panel-link:hover { background:var(--oxide); color:#fff; border-color:var(--oxide); transform:translateY(-2px); }
+    .delta-card-lbl { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
+    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 12px rgba(0,0,0,0.18); }
+    .delta-card-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .delta-card-inline:hover .delta-card-tip { opacity:1; }
+    .delta-panel-link { display:inline-flex; align-items:center; gap:6px; padding:8px 16px; border-radius:10px; border:1px solid var(--line); background:var(--surface); color:var(--text); font-size:12px; font-weight:600; text-decoration:none; transition:background .15s, border-color .15s, color .15s, transform .15s, box-shadow .15s; box-shadow:0 2px 6px rgba(77,44,20,0.08); }
+    .delta-panel-link:hover { background:var(--oxide); color:#fff; border-color:var(--oxide); transform:translateY(-2px); box-shadow:0 6px 18px rgba(77,44,20,0.25); }
+    body.dark-theme .delta-panel-link { box-shadow:0 2px 6px rgba(0,0,0,0.2); }
+    body.dark-theme .delta-panel-link:hover { box-shadow:0 6px 18px rgba(0,0,0,0.45); }
     .soft-chip { display:inline-flex; align-items:center; min-height:32px; padding:0 12px; border-radius:999px; border:1px solid var(--line); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; }
     .toolbar { display:flex; flex-wrap:wrap; justify-content:space-between; gap: 12px; align-items: center; margin-bottom: 16px; }
     .toolbar-left { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
@@ -3193,6 +3205,8 @@ struct WarningOpportunityRow {
     .chart-modal-subtitle { font-size:13px; font-weight:600; color:var(--muted); margin:0 0 16px; display:block; letter-spacing:.02em; }
     .chart-modal-close { position:absolute; top:14px; right:18px; background:none; border:none; font-size:22px; cursor:pointer; color:var(--text); line-height:1; padding:0; }
     .chart-modal-close:hover { opacity:.7; }
+    .chart-modal-header { display:flex; align-items:center; gap:12px; flex-wrap:nowrap; margin:0 0 16px; padding-right:44px; }
+    .chart-modal-header .chart-modal-title { flex:1 1 auto; margin:0; min-width:0; }
     body.dark-theme .chart-modal { background:var(--surface); }
     .chart-container { width:100%; overflow:visible; }
     .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:stretch; }
@@ -3462,7 +3476,7 @@ struct WarningOpportunityRow {
         <div class="prev-scan-banner-top">
           <div class="prev-scan-meta">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            <strong>PREVIOUS SCAN</strong>
+            {% if prev_run_id != "" %}<a href="/runs/html/{{ prev_run_id }}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;font-weight:700;">PREVIOUS SCAN</a>{% else %}<strong>PREVIOUS SCAN</strong>{% endif %}
             <span class="prev-scan-ts">{{ prev_scan_label }}</span>
             {% if prev_scan_count > 0 %}
             <span class="prev-scan-count">&#xb7; {{ prev_scan_count }} scan{% if prev_scan_count != 1 %}s{% endif %} total</span>
@@ -3481,40 +3495,52 @@ struct WarningOpportunityRow {
         <div class="delta-card-row">
           <div class="delta-card-inline {% if delta_code_added > 0 %}pos{% endif %}">
             <div class="delta-card-val pos">+{{ delta_code_added }}</div>
-            <div class="delta-card-lbl">lines added</div>
-            <div class="delta-card-tip">Code lines added since the previous scan</div>
+            <div class="delta-card-lbl">Lines added</div>
+            <div class="delta-card-tip">Code lines added since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline {% if delta_code_removed > 0 %}neg{% endif %}">
             <div class="delta-card-val neg">&minus;{{ delta_code_removed }}</div>
-            <div class="delta-card-lbl">lines removed</div>
-            <div class="delta-card-tip">Code lines removed since the previous scan</div>
+            <div class="delta-card-lbl">Lines removed</div>
+            <div class="delta-card-tip">Code lines removed since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline">
             <div class="delta-card-val">{{ delta_unmodified_lines }}</div>
-            <div class="delta-card-lbl">unmodified lines</div>
-            <div class="delta-card-tip">Code lines unchanged since the previous scan</div>
+            <div class="delta-card-lbl">Unmodified lines</div>
+            <div class="delta-card-tip">Code lines unchanged since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline {% if delta_files_modified > 0 %}mod{% endif %}">
             <div class="delta-card-val mod">{{ delta_files_modified }}</div>
-            <div class="delta-card-lbl">files modified</div>
+            <div class="delta-card-lbl">Files modified</div>
             <div class="delta-card-tip">Files with at least one line changed</div>
           </div>
           <div class="delta-card-inline {% if delta_files_added > 0 %}pos{% endif %}">
             <div class="delta-card-val pos">{{ delta_files_added }}</div>
-            <div class="delta-card-lbl">files added</div>
-            <div class="delta-card-tip">New files added since the previous scan</div>
+            <div class="delta-card-lbl">Files added</div>
+            <div class="delta-card-tip">New files added since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline {% if delta_files_removed > 0 %}neg{% endif %}">
             <div class="delta-card-val neg">{{ delta_files_removed }}</div>
-            <div class="delta-card-lbl">files removed</div>
-            <div class="delta-card-tip">Files deleted since the previous scan</div>
+            <div class="delta-card-lbl">Files removed</div>
+            <div class="delta-card-tip">Files deleted since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline">
             <div class="delta-card-val">{{ delta_files_unchanged }}</div>
-            <div class="delta-card-lbl">files unchanged</div>
-            <div class="delta-card-tip">Files with no changes since the previous scan</div>
+            <div class="delta-card-lbl">Files unchanged</div>
+            <div class="delta-card-tip">Files with no changes since {{ prev_scan_label }}</div>
           </div>
         </div>
+        {% if prev_run_id != "" %}
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <a href="/view-reports" target="_blank" rel="noopener" class="delta-panel-link">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            View previous report
+          </a>
+          <a href="/compare-scans" target="_blank" rel="noopener" class="delta-panel-link">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="18"/><rect x="14" y="3" width="7" height="18"/></svg>
+            Compare scans
+          </a>
+        </div>
+        {% endif %}
       </div>
       {% else %}
       <div class="prev-scan-banner prev-scan-banner-empty" aria-label="No previous scan">
@@ -3896,7 +3922,7 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div>
-          <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button><div class="pill-row"><span class="pill good">Click any column header to sort</span></div></div>
+          <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button></div>
           <div id="report-lang-overview" style="margin:0 0 16px;"></div>
           <div class="table-shell">
             <table id="lang-breakdown-table" data-sort-table>
@@ -4953,7 +4979,7 @@ struct WarningOpportunityRow {
           if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
           if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
           if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
         });
         var ly=SH-14;
         bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
@@ -5050,9 +5076,9 @@ struct WarningOpportunityRow {
             overlay.className = 'chart-modal-overlay';
             overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;">'
               + '<button class="chart-modal-close" aria-label="Close">&times;</button>'
+              + '<div class="chart-modal-header">'
               + '<span class="chart-modal-title">Project Overview — Full View</span>'
-              + '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;">'
-              + '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;">Y Axis:'
+              + '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Y Axis:'
               + '<select id="ov-modal-y" class="chart-select">'
               + '<option value="code">Code Lines</option>'
               + '<option value="comments">Comment Lines</option>'
@@ -5454,22 +5480,32 @@ struct WarningOpportunityRow {
             var modalH = Math.min(Math.max(400, n * 46 + 96), maxH);
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            var semLabels2 = { functions:'Functions', classes:'Classes / Types', variables:'Variables' };
-            var semSubtitle2 = semLabels2[mKey] || mKey;
-            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Semantic Metrics — Full View</span><span class="chart-modal-subtitle">' + semSubtitle2 + '</span><div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
+            var semOptHtml = '<option value="functions">Functions</option>'
+              + '<option value="classes">Classes / Types</option>'
+              + '<option value="variables">Variables</option>'
+              + '<option value="imports">Imports</option>'
+              + '<option value="tests">Tests</option>';
+            var hdr = '<div class="chart-modal-header"><span class="chart-modal-title">Semantic Metrics — Full View</span>'
+              + '<select class="chart-select" id="sem-modal-metric">' + semOptHtml + '</select></div>';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button>' + hdr + '<div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function() { document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e) { if (e.target === overlay) document.body.removeChild(overlay); });
+            var modalSel = document.getElementById('sem-modal-metric');
+            if (modalSel) modalSel.value = mKey;
             var modalCanvas = document.getElementById('canvas-semantic-modal');
-            if (modalCanvas) {
-              var data = SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);});
+            var semModalChart = null;
+            function renderSemModal(key) {
+              if (semModalChart) { semModalChart.destroy(); semModalChart = null; }
+              if (!modalCanvas) return;
+              var data = SEM_D.slice().sort(function(a,b){return (b[key]||0)-(a[key]||0);});
               var c = clr();
-              var col = SEM_COLS[mKey] || OX;
-              new Chart(modalCanvas, {
+              var col = SEM_COLS[key] || OX;
+              semModalChart = new Chart(modalCanvas, {
                 type: 'bar',
                 data: {
                   labels: data.map(function(d){return d.lang;}),
-                  datasets: [{ label: SEM_LABELS[mKey]||mKey, data: data.map(function(d){return d[mKey]||0;}),
+                  datasets: [{ label: SEM_LABELS[key]||key, data: data.map(function(d){return d[key]||0;}),
                     backgroundColor: col, borderRadius: 4 }]
                 },
                 options: {
@@ -5481,12 +5517,14 @@ struct WarningOpportunityRow {
                   },
                   plugins: { legend: { display: false }, tooltip: { callbacks: {
                     title: function(items){return items.length?items[0].label:'';},
-                    label: function(ctx){ return '  '+(SEM_LABELS[mKey]||mKey)+': '+Number(ctx.parsed.y).toLocaleString(); }
+                    label: function(ctx){ return '  '+(SEM_LABELS[key]||key)+': '+Number(ctx.parsed.y).toLocaleString(); }
                   }}}
                 },
                 plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
               });
             }
+            renderSemModal(mKey);
+            if (modalSel) modalSel.addEventListener('change', function() { renderSemModal(this.value); });
           });
         }
       })();
@@ -5595,13 +5633,14 @@ struct WarningOpportunityRow {
 
       // ── Expand button handlers ────────────────────────────────────────────────
       (function() {
-        function makeOverlay(title, h, subtitle) {
+        function makeOverlay(title, h, subtitle, ctrlHtml) {
           var overlay = document.createElement('div');
           overlay.className = 'chart-modal-overlay';
           var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
           var hAttr = 'height:' + Math.min(h || 696, maxH) + 'px;';
           var subHtml = subtitle ? '<span class="chart-modal-subtitle">' + subtitle + '</span>' : '';
-          overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">' + title + '</span>' + subHtml + '<div style="position:relative;width:100%;' + hAttr + '"><canvas id="modal-expand-canvas"></canvas></div></div>';
+          var hdr = '<div class="chart-modal-header"><span class="chart-modal-title">' + title + '</span>' + (ctrlHtml || '') + '</div>';
+          overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button>' + hdr + subHtml + '<div style="position:relative;width:100%;' + hAttr + '"><canvas id="modal-expand-canvas"></canvas></div></div>';
           document.body.appendChild(overlay);
           overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
           overlay.addEventListener('click', function(e){ if(e.target === overlay) document.body.removeChild(overlay); });
@@ -5615,40 +5654,51 @@ struct WarningOpportunityRow {
           btn.addEventListener('click', function(){
             var activeTab = document.querySelector('[data-comp-tab].active');
             var compMode = activeTab ? activeTab.getAttribute('data-comp-tab') : 'absolute';
-            var compLabel = compMode === 'pct' ? 'Composition %' : 'Absolute Lines';
-            var canvas = makeOverlay('Language Composition — Full View', undefined, compLabel);
+            var ctrlHtml = '<select class="chart-select" id="comp-modal-mode">'
+              + '<option value="absolute">Absolute Lines</option>'
+              + '<option value="pct">100% Normalized</option>'
+              + '</select>';
+            var canvas = makeOverlay('Language Composition — Full View', undefined, null, ctrlHtml);
             if(!canvas) return;
-            var data = D.slice(0, 15);
-            var c = clr(), isPct = compMode === 'pct';
-            var tot = function(d){ return (d.code||0)+(d.comments||0)+(d.blanks||0)||1; };
-            var codeD = data.map(function(d){ return isPct ? (d.code||0)/tot(d)*100 : d.code||0; });
-            var cmD   = data.map(function(d){ return isPct ? (d.comments||0)/tot(d)*100 : d.comments||0; });
-            var blD   = data.map(function(d){ return isPct ? (d.blanks||0)/tot(d)*100 : d.blanks||0; });
-            var tickCb = isPct ? function(v){return v.toFixed(0)+'%';} : function(v){return fmt(v);};
-            new Chart(canvas, {
-              type: 'bar',
-              data: {
-                labels: data.map(function(d){ return d.lang; }),
-                datasets: [
-                  { label:'Code',     data: codeD, backgroundColor: OX, borderRadius: 3 },
-                  { label:'Comments', data: cmD,   backgroundColor: GN, borderRadius: 3 },
-                  { label:'Blanks',   data: blD,   backgroundColor: GY, borderRadius: 3 }
-                ]
-              },
-              options: {
-                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-                layout: { padding: { right: 64 } },
-                scales: {
-                  x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
-                  y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
+            var modalMode = document.getElementById('comp-modal-mode');
+            if(modalMode) modalMode.value = compMode;
+            var compModalChart = null;
+            function renderCompModal(mode) {
+              if(compModalChart) { compModalChart.destroy(); compModalChart = null; }
+              var data = D.slice(0, 15);
+              var c = clr(), isPct = mode === 'pct';
+              var tot = function(d){ return (d.code||0)+(d.comments||0)+(d.blanks||0)||1; };
+              var codeD = data.map(function(d){ return isPct ? (d.code||0)/tot(d)*100 : d.code||0; });
+              var cmD   = data.map(function(d){ return isPct ? (d.comments||0)/tot(d)*100 : d.comments||0; });
+              var blD   = data.map(function(d){ return isPct ? (d.blanks||0)/tot(d)*100 : d.blanks||0; });
+              var tickCb = isPct ? function(v){return v.toFixed(0)+'%';} : function(v){return fmt(v);};
+              compModalChart = new Chart(canvas, {
+                type: 'bar',
+                data: {
+                  labels: data.map(function(d){ return d.lang; }),
+                  datasets: [
+                    { label:'Code',     data: codeD, backgroundColor: OX, borderRadius: 3 },
+                    { label:'Comments', data: cmD,   backgroundColor: GN, borderRadius: 3 },
+                    { label:'Blanks',   data: blD,   backgroundColor: GY, borderRadius: 3 }
+                  ]
                 },
-                plugins: { legend: { position: 'bottom', labels: { color: c.text } } }
-              },
-              plugins: [makeStackedEndPlugin(function(total, idx) {
-                if (isPct) return '';
-                var d = data[idx]; return fmt(Math.round(d && d.physical ? d.physical : total));
-              })]
-            });
+                options: {
+                  indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                  layout: { padding: { right: 64 } },
+                  scales: {
+                    x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
+                    y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
+                  },
+                  plugins: { legend: { position: 'bottom', labels: { color: c.text } } }
+                },
+                plugins: [makeStackedEndPlugin(function(total, idx) {
+                  if (isPct) return '';
+                  var d = data[idx]; return fmt(Math.round(d && d.physical ? d.physical : total));
+                })]
+              });
+            }
+            renderCompModal(compMode);
+            if(modalMode) modalMode.addEventListener('change', function(){ renderCompModal(this.value); });
           });
         })();
 
@@ -5833,12 +5883,25 @@ struct WarningOpportunityRow {
             if(!src) return;
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Language Breakdown — Full View</span><span class="chart-modal-subtitle">All languages — click any column header to sort</span><div id="lang-overview-modal-wrap" style="width:100%;overflow:auto;"></div></div>';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1600px;"><button class="chart-modal-close" aria-label="Close">&times;</button><div class="chart-modal-header"><span class="chart-modal-title">Language Breakdown — Full View</span></div><div id="lang-overview-modal-wrap" style="width:100%;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
             var wrap = document.getElementById('lang-overview-modal-wrap');
-            if(wrap) { wrap.innerHTML = src.innerHTML; }
+            if(wrap) {
+              wrap.innerHTML = src.innerHTML;
+              var svgs = wrap.querySelectorAll('svg');
+              for(var i=0;i<svgs.length;i++){
+                svgs[i].removeAttribute('width');
+                svgs[i].removeAttribute('height');
+                svgs[i].style.cssText='display:block;width:100%;height:auto;';
+              }
+              var ov = wrap.querySelector('.r-lang-overview');
+              if(ov){ov.style.flexWrap='nowrap';ov.style.alignItems='stretch';}
+              var cells = wrap.querySelectorAll('.r-lang-overview-cell');
+              if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;';
+              if(cells.length>1)cells[1].style.cssText='flex:2 1 0;max-width:none;';
+            }
           });
         })();
       })();
@@ -6486,6 +6549,7 @@ struct ReportTemplate<'a> {
     prev_code_lines: u64,
     prev_scan_count: usize,
     prev_scan_label: String,
+    prev_run_id: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
