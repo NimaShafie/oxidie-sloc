@@ -84,9 +84,10 @@ const MAX_CONCURRENT_ANALYSES: usize = 4;
 /// foreground thread so that windows created on our thread inherit focus; and
 /// (b) spin a polling watcher that finds the dialog by title and calls
 /// `SetForegroundWindow` + `FlashWindowEx` once it appears.
-#[cfg(all(target_os = "windows", feature = "native-dialog"))]
+#[cfg(target_os = "windows")]
 #[allow(clippy::upper_case_acronyms)]
 mod win_dialog_focus {
+    #[cfg(feature = "native-dialog")]
     use std::mem::size_of;
 
     type HWND = *mut core::ffi::c_void;
@@ -94,9 +95,8 @@ mod win_dialog_focus {
     type UINT = u32;
     type BOOL = i32;
 
-    // Mirror of FLASHWINFO from winuser.h — field names kept in PascalCase to
-    // match the Win32 ABI layout exactly; the #[allow] suppresses the Rust
-    // naming lint for this one struct.
+    // Mirror of FLASHWINFO — only needed with the native-dialog rfd integration.
+    #[cfg(feature = "native-dialog")]
     #[repr(C)]
     #[allow(non_snake_case)]
     struct FLASHWINFO {
@@ -107,18 +107,41 @@ mod win_dialog_focus {
         dwTimeout: DWORD,
     }
 
+    #[cfg(feature = "native-dialog")]
     const FLASHW_ALL: DWORD = 0x3;
+    #[cfg(feature = "native-dialog")]
     const FLASHW_TIMERNOFG: DWORD = 0xC;
 
     #[link(name = "user32")]
     extern "system" {
         fn GetForegroundWindow() -> HWND;
         fn SetForegroundWindow(hWnd: HWND) -> BOOL;
+        fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
         fn BringWindowToTop(hWnd: HWND) -> BOOL;
+        fn SetWindowPos(
+            hWnd: HWND,
+            hWndAfter: HWND,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: UINT,
+        ) -> BOOL;
         fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
         fn AttachThreadInput(idAttach: DWORD, idAttachTo: DWORD, fAttach: BOOL) -> BOOL;
+        #[cfg(feature = "native-dialog")]
         fn FlashWindowEx(pfwi: *const FLASHWINFO) -> BOOL;
         fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
+        fn FindWindowExW(
+            hWndParent: HWND,
+            hWndChildAfter: HWND,
+            lpszClass: *const u16,
+            lpszWindow: *const u16,
+        ) -> HWND;
+        // Undocumented but present on all Windows versions since XP; bypasses
+        // the foreground-lock that blocks SetForegroundWindow from non-foreground
+        // processes.  fAltTab=1 simulates the Alt+Tab activation path.
+        fn SwitchToThisWindow(hWnd: HWND, fAltTab: BOOL);
     }
 
     #[link(name = "kernel32")]
@@ -130,6 +153,7 @@ mod win_dialog_focus {
     /// windows created on our thread inherit foreground focus.  Returns the
     /// foreground thread ID (needed for `detach_from_foreground`), or 0 if
     /// the thread was already the foreground thread.
+    #[cfg(feature = "native-dialog")]
     pub fn attach_to_foreground() -> DWORD {
         unsafe {
             let fg_hwnd = GetForegroundWindow();
@@ -147,6 +171,7 @@ mod win_dialog_focus {
     }
 
     /// Undoes `attach_to_foreground`.
+    #[cfg(feature = "native-dialog")]
     pub fn detach_from_foreground(fg_tid: DWORD) {
         if fg_tid == 0 {
             return;
@@ -156,9 +181,139 @@ mod win_dialog_focus {
         }
     }
 
+    /// Opens `path` in Windows Explorer and forces the folder window to the
+    /// foreground.  Runs on a dedicated thread so the async handler returns
+    /// instantly.
+    ///
+    /// Polls every 80 ms (up to ~4 s) for a `CabinetWClass` window whose title
+    /// matches the folder name.  The thread-input attachment is done INSIDE the
+    /// loop, right before the focus calls, so it targets the CURRENT foreground
+    /// thread at that moment — not the thread that was foreground at spawn time,
+    /// which will have changed by the time Explorer creates its window.
+    pub fn open_folder_foreground(path: std::path::PathBuf) {
+        std::thread::spawn(move || {
+            let folder_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_owned();
+            let title_w: Vec<u16> = folder_name
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect();
+            let cls_w: Vec<u16> = "CabinetWClass"
+                .encode_utf16()
+                .chain(core::iter::once(0))
+                .collect();
+
+            // Snapshot all existing CabinetWClass HWNDs before spawning Explorer.
+            // Used as a fallback: when Windows 11 opens the folder as a new tab
+            // inside an existing Explorer window, the window title stays as the
+            // previous tab's name and the exact-title FindWindowW call returns
+            // NULL for the entire poll window.  Detecting a new HWND bypasses
+            // the title-match requirement entirely.
+            let mut existing: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            unsafe {
+                let mut h = FindWindowExW(
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    cls_w.as_ptr(),
+                    core::ptr::null(),
+                );
+                while !h.is_null() {
+                    existing.insert(h as usize);
+                    h = FindWindowExW(core::ptr::null_mut(), h, cls_w.as_ptr(), core::ptr::null());
+                }
+            }
+
+            let _ = std::process::Command::new("explorer").arg(&path).spawn();
+
+            // SWP_NOMOVE | SWP_NOSIZE
+            const SWP_FLAGS: UINT = 0x0003;
+            #[allow(clippy::cast_sign_loss)]
+            let hwnd_topmost: HWND = usize::MAX as HWND; // (HWND)(-1) = HWND_TOPMOST
+            #[allow(clippy::cast_sign_loss)]
+            let hwnd_notopmost: HWND = (usize::MAX - 1) as HWND; // (HWND)(-2) = HWND_NOTOPMOST
+
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                unsafe {
+                    // Strategy 1: exact title match — works when Explorer is not
+                    // already running or when the new folder opens in its own window.
+                    let hwnd = FindWindowW(cls_w.as_ptr(), title_w.as_ptr());
+
+                    // Strategy 2: any CabinetWClass HWND that wasn't present in
+                    // the pre-spawn snapshot — covers a freshly-created Explorer
+                    // window whose title hasn't settled to the target folder yet.
+                    let hwnd = if !hwnd.is_null() {
+                        hwnd
+                    } else {
+                        let mut found: HWND = core::ptr::null_mut();
+                        let mut h = FindWindowExW(
+                            core::ptr::null_mut(),
+                            core::ptr::null_mut(),
+                            cls_w.as_ptr(),
+                            core::ptr::null(),
+                        );
+                        while !h.is_null() {
+                            if !existing.contains(&(h as usize)) {
+                                found = h;
+                                break;
+                            }
+                            h = FindWindowExW(
+                                core::ptr::null_mut(),
+                                h,
+                                cls_w.as_ptr(),
+                                core::ptr::null(),
+                            );
+                        }
+                        found
+                    };
+
+                    if hwnd.is_null() {
+                        continue;
+                    }
+
+                    // Attach to the CURRENT foreground thread right now.
+                    // Explorer's window may take 100–500 ms to appear, and by
+                    // then the foreground thread is different from what it was
+                    // when this OS thread was spawned.  Re-reading it here is
+                    // what actually makes SetForegroundWindow succeed.
+                    let my_tid = GetCurrentThreadId();
+                    let cur_fg = GetForegroundWindow();
+                    let cur_fg_tid = if !cur_fg.is_null() {
+                        GetWindowThreadProcessId(cur_fg, core::ptr::null_mut())
+                    } else {
+                        0
+                    };
+                    let attached = cur_fg_tid != 0 && cur_fg_tid != my_tid;
+                    if attached {
+                        AttachThreadInput(my_tid, cur_fg_tid, 1);
+                    }
+
+                    ShowWindow(hwnd, 9); // SW_RESTORE
+                    SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, SWP_FLAGS);
+                    SetForegroundWindow(hwnd);
+                    BringWindowToTop(hwnd);
+                    SetWindowPos(hwnd, hwnd_notopmost, 0, 0, 0, 0, SWP_FLAGS);
+                    // SwitchToThisWindow bypasses the foreground lock that can
+                    // still block SetForegroundWindow from a non-foreground
+                    // process even after AttachThreadInput.
+                    SwitchToThisWindow(hwnd, 1);
+
+                    if attached {
+                        AttachThreadInput(my_tid, cur_fg_tid, 0);
+                    }
+                    break;
+                }
+            }
+        });
+    }
+
     /// Spawns a short-lived watcher thread that polls for a dialog window
     /// matching `title` and, once found, forces it to the foreground and
     /// flashes its taskbar button until the user interacts with it.
+    #[cfg(feature = "native-dialog")]
     pub fn flash_dialog_when_ready(title: String) {
         std::thread::spawn(move || {
             let title_w: Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
@@ -2309,8 +2464,43 @@ pub(crate) async fn register_artifacts_in_registry(
     let _ = reg.save(&state.registry_path);
 }
 
-/// Validate the locate-report form: check extension, resolve the canonical path, enforce
-/// server-mode root restriction, and extract the parent directory.
+fn is_html_report_file(p: &Path) -> bool {
+    p.is_file()
+        && p.extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("html"))
+        && p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("result") || n.starts_with("report"))
+}
+
+fn find_html_report_in_dir(dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| is_html_report_file(p))
+}
+
+fn find_html_report_in_tree(dir: &Path) -> Option<PathBuf> {
+    if let Some(f) = find_html_report_in_dir(dir) {
+        return Some(f);
+    }
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() {
+                if let Some(f) = find_html_report_in_dir(&sub) {
+                    return Some(f);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Validate the locate-report form: accept either a folder (scan output dir) or an .html file,
+/// resolve the canonical path, enforce server-mode root restriction, and extract parent dir.
 ///
 /// Returns `Ok((html_path, parent))` or an error `Response` ready to return to the client.
 #[allow(clippy::result_large_err)]
@@ -2319,26 +2509,44 @@ fn validate_locate_request(
     file_path: &str,
     csp_nonce: &str,
 ) -> Result<(PathBuf, PathBuf), Response> {
-    let file_ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if file_ext != "html" {
-        return Err(locate_report_error(
-            "Only .html report files can be located via this form.",
-            csp_nonce,
-        ));
-    }
-    let html_path = match fs::canonicalize(PathBuf::from(file_path)) {
-        Ok(p) => strip_unc_prefix(p),
-        Err(_) => {
+    let raw = PathBuf::from(file_path);
+
+    // If the user pointed at a directory, find the HTML report inside it (or one level deep).
+    let html_path = if raw.is_dir() {
+        let found = find_html_report_in_tree(&raw);
+        match found {
+            Some(f) => strip_unc_prefix(fs::canonicalize(&f).unwrap_or(f)),
+            None => {
+                return Err(locate_report_error(
+                    "No HTML report file found in the selected folder.\n\nMake sure you selected \
+                     the folder that contains your scan output (result_*.html or report_*.html).",
+                    csp_nonce,
+                ));
+            }
+        }
+    } else {
+        let file_ext = raw
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if file_ext != "html" {
             return Err(locate_report_error(
-                "Report file not found or path is invalid.",
+                "Please select the scan output folder, or an .html report file directly.",
                 csp_nonce,
             ));
         }
+        match fs::canonicalize(&raw) {
+            Ok(p) => strip_unc_prefix(p),
+            Err(_) => {
+                return Err(locate_report_error(
+                    "Report file not found or path is invalid.",
+                    csp_nonce,
+                ));
+            }
+        }
     };
+
     if state.server_mode {
         let output_root = resolve_output_root(None);
         let canonical_root = fs::canonicalize(&output_root).unwrap_or(output_root);
@@ -2380,21 +2588,30 @@ async fn locate_report_handler(
         Err(resp) => return resp,
     };
 
-    let json_candidate = parent.join("result.json");
+    // Search for result_*.json in the HTML's parent and also its grandparent (handles
+    // layouts where HTML is in a named subdir like html/ alongside json/, pdf/, etc.).
+    let scan_root = html_path
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(&parent);
+    let json_candidate = {
+        let mut hits = collect_result_json_candidates(scan_root);
+        if hits.is_empty() {
+            hits = collect_result_json_candidates(&parent);
+        }
+        hits.sort();
+        hits.into_iter().next_back()
+    };
     let mut reg = state.registry.lock().await;
-    // Find an existing entry whose output directory matches the selected file's parent.
+    // Find an existing entry whose output directory matches the selected file's parent or
+    // the scan root (for layouts where HTML/JSON live in named subdirs like html/ and json/).
     let entry_idx = reg.entries.iter().position(|e| {
-        let json_match = e
-            .json_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .is_some_and(|p| p == parent);
-        let html_match = e
-            .html_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .is_some_and(|p| p == parent);
-        json_match || html_match
+        let matches_dir = |reg_path: Option<&PathBuf>| {
+            reg_path.and_then(|p| p.parent()).is_some_and(|p| {
+                p == parent || p == scan_root || p.parent().is_some_and(|gp| gp == scan_root)
+            })
+        };
+        matches_dir(e.json_path.as_ref()) || matches_dir(e.html_path.as_ref())
     });
     if let Some(idx) = entry_idx {
         reg.entries[idx].html_path = Some(html_path);
@@ -2406,11 +2623,11 @@ async fn locate_report_handler(
             .unwrap_or("/view-reports?linked=1");
         return axum::response::Redirect::to(target).into_response();
     }
-    // No match — attempt to build an entry from an adjacent result.json.
-    if json_candidate.exists() {
-        match read_json(&json_candidate) {
+    // No match — attempt to build an entry from a result JSON in the same folder.
+    if let Some(json_path) = json_candidate {
+        match read_json(&json_path) {
             Ok(run) => {
-                let entry = registry_entry_from_run(&run, json_candidate, html_path);
+                let entry = registry_entry_from_run(&run, json_path, html_path);
                 reg.add_entry(entry);
                 let _ = reg.save(&state.registry_path);
                 let target = form
@@ -2421,7 +2638,7 @@ async fn locate_report_handler(
                 return axum::response::Redirect::to(target).into_response();
             }
             Err(e) => {
-                let file_hint = locate_path_hint(state.server_mode, &json_candidate);
+                let file_hint = locate_path_hint(state.server_mode, &json_path);
                 let err_detail = if state.server_mode {
                     String::new()
                 } else {
@@ -2429,7 +2646,7 @@ async fn locate_report_handler(
                 };
                 return locate_report_error(
                     format!(
-                        "Could not link this report.\n\nA 'result.json' was found but could not \
+                        "Could not link this report.\n\nA result JSON was found but could not \
                          be parsed — it may have been saved by an older version of OxideSLOC. \
                          Re-running the analysis will create a fresh, compatible \
                          record.{file_hint}{err_detail}"
@@ -2443,8 +2660,9 @@ async fn locate_report_handler(
     let file_hint = locate_path_hint(state.server_mode, &html_path);
     locate_report_error(
         format!(
-            "Could not link this report.\n\nNo matching scan record was found, and no \
-             'result.json' was found in the same folder.{file_hint}"
+            "Could not link this report.\n\nNo matching scan record was found and no result \
+             JSON was found in the same folder. Make sure you selected the folder that \
+             contains both the HTML report and the result_*.json file.{file_hint}"
         ),
         &csp_nonce,
     )
@@ -2541,8 +2759,13 @@ struct RelocateScanForm {
 async fn relocate_scan_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<RelocateScanForm>,
 ) -> impl IntoResponse {
+    let want_json = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"));
     if state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -2555,6 +2778,16 @@ async fn relocate_scan_handler(
         reg.find_by_run_id(&run_id).is_some()
     };
     if !run_exists {
+        if want_json {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("Run ID '{run_id}' not found in registry.")
+                })),
+            )
+                .into_response();
+        }
         let html = ErrorTemplate {
             message: format!("Run ID '{run_id}' not found in registry."),
             last_report_url: Some("/compare-scans".to_string()),
@@ -2572,6 +2805,16 @@ async fn relocate_scan_handler(
     let folder = match fs::canonicalize(PathBuf::from(form.folder_path.trim())) {
         Ok(p) => strip_unc_prefix(p),
         Err(_) => {
+            if want_json {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    axum::Json(serde_json::json!({
+                        "ok": false,
+                        "message": "Folder not found or path is invalid."
+                    })),
+                )
+                    .into_response();
+            }
             return missing_scan_relocate_response(
                 "Folder not found or path is invalid.",
                 &run_id,
@@ -2583,6 +2826,16 @@ async fn relocate_scan_handler(
         }
     };
     if !folder.is_dir() {
+        if want_json {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": "Selected path is not a directory."
+                })),
+            )
+                .into_response();
+        }
         return missing_scan_relocate_response(
             "Selected path is not a directory.",
             &run_id,
@@ -2595,11 +2848,19 @@ async fn relocate_scan_handler(
 
     let json_candidates = find_result_files_by_ext(&folder, "json");
     if json_candidates.is_empty() {
+        let msg = format!(
+            "No result JSON files found in the selected folder.\nSearched: {}",
+            folder.display()
+        );
+        if want_json {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({"ok": false, "message": msg})),
+            )
+                .into_response();
+        }
         return missing_scan_relocate_response(
-            &format!(
-                "No result JSON files found in the selected folder.\nSearched: {}",
-                folder.display()
-            ),
+            &msg,
             &run_id,
             &folder.display().to_string(),
             &redirect_url,
@@ -2609,13 +2870,21 @@ async fn relocate_scan_handler(
     }
 
     let Some(json_path) = find_matching_run_json(&json_candidates, &run_id) else {
+        let msg = format!(
+            "No matching scan found in the selected folder.\n\
+             The JSON files present do not contain run ID: {run_id}\n\
+             Searched: {}",
+            folder.display()
+        );
+        if want_json {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(serde_json::json!({"ok": false, "message": msg})),
+            )
+                .into_response();
+        }
         return missing_scan_relocate_response(
-            &format!(
-                "No matching scan found in the selected folder.\n\
-                 The JSON files present do not contain run ID: {run_id}\n\
-                 Searched: {}",
-                folder.display()
-            ),
+            &msg,
             &run_id,
             &folder.display().to_string(),
             &redirect_url,
@@ -2633,24 +2902,40 @@ async fn relocate_scan_handler(
     } else {
         "/compare-scans".to_string()
     };
+    if want_json {
+        return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
+            .into_response();
+    }
     axum::response::Redirect::to(&safe_redirect).into_response()
 }
 
 fn find_result_files_by_ext(folder: &std::path::Path, ext: &str) -> Vec<PathBuf> {
-    fs::read_dir(folder)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.file_stem()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("result"))
-                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
-        })
-        .collect()
+    let mut out = Vec::new();
+    collect_scan_files_by_ext(folder, ext, &mut out);
+    if let Ok(rd) = fs::read_dir(folder) {
+        for entry in rd.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() {
+                collect_scan_files_by_ext(&sub, ext, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn collect_scan_files_by_ext(dir: &std::path::Path, ext: &str, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file()
+            && p.file_stem()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("result") || n.starts_with("report"))
+            && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        {
+            out.push(p);
+        }
+    }
 }
 
 fn find_matching_run_json(candidates: &[PathBuf], run_id: &str) -> Option<PathBuf> {
@@ -3017,15 +3302,7 @@ async fn open_path_handler(
     };
 
     #[cfg(target_os = "windows")]
-    {
-        // explorer.exe <path> opens the folder directly; no PowerShell or COM needed.
-        // C:\Windows is in the default Windows PATH so "explorer" resolves correctly.
-        let _ = std::process::Command::new("explorer")
-            .arg(&target)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
+    win_dialog_focus::open_folder_foreground(target);
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open")
         .arg(&target)
@@ -3033,11 +3310,30 @@ async fn open_path_handler(
         .stderr(Stdio::null())
         .spawn();
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open")
-        .arg(&target)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    {
+        let folder_name = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_owned);
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&target)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        // Best-effort: raise the file manager window once it appears.
+        // wmctrl is common on GNOME/KDE desktops but not guaranteed to be
+        // installed; failures are silently discarded.
+        if let Some(name) = folder_name {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                let _ = std::process::Command::new("wmctrl")
+                    .args(["-a", &name])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            });
+        }
+    }
 
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -3542,7 +3838,9 @@ fn build_submodule_row(
             .map_or("", std::string::String::as_str);
         let sub_run = build_sub_run(run, s, parent_path);
         render_sub_report_html(&sub_run).ok().and_then(|sub_html| {
-            let path = run_dir.join(format!("{artifact_key}.html"));
+            let sub_dir = run_dir.join("submodules");
+            let _ = fs::create_dir_all(&sub_dir);
+            let path = sub_dir.join(format!("{artifact_key}.html"));
             if fs::write(&path, sub_html.as_bytes()).is_ok() {
                 Some(format!("/runs/{artifact_key}/{run_id}"))
             } else {
@@ -4582,6 +4880,7 @@ fn render_result_page(
             .reporting
             .report_header_footer
             .clone(),
+        is_offline: false,
     };
 
     Html(
@@ -5058,6 +5357,8 @@ fn serve_json_artifact(path: &Path, wants_download: bool, csp_nonce: &str) -> Re
 
 /// Recover a `RunArtifacts` from the persisted registry for a run ID.
 fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
+    // Derive output_dir from stored paths. New layout puts files in subdirs (html/, json/,
+    // pdf/, excel/), so go up two levels. Old flat layout goes up one level.
     let output_dir = entry
         .html_path
         .as_ref()
@@ -5065,7 +5366,16 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
         .or(entry.pdf_path.as_ref())
         .or(entry.csv_path.as_ref())
         .or(entry.xlsx_path.as_ref())
-        .and_then(|p| p.parent().map(PathBuf::from))
+        .and_then(|p| {
+            let parent = p.parent()?;
+            let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // New layout: file is in a named subfolder (html/, json/, pdf/, excel/).
+            if matches!(parent_name, "html" | "json" | "pdf" | "excel") {
+                parent.parent().map(PathBuf::from)
+            } else {
+                Some(parent.to_path_buf())
+            }
+        })
         .unwrap_or_default();
     // Recover pdf_path: use the persisted one, or look for report.pdf
     // adjacent to html/json if only the old entries lack it.
@@ -5076,30 +5386,27 @@ fn recover_artifacts_from_registry(entry: &RegistryEntry) -> RunArtifacts {
     // csv_path / xlsx_path: persisted paths take precedence; fall back to
     // scanning the run directory for files matching the expected patterns so
     // that runs created before this feature still surface their artifacts.
-    let csv_path = entry.csv_path.clone().or_else(|| {
-        fs::read_dir(&output_dir).ok().and_then(|entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .find(|e| {
-                    let n = e.file_name();
-                    let n = n.to_string_lossy();
-                    n.starts_with("report_") && n.ends_with(".csv")
-                })
-                .map(|e| e.path())
-        })
-    });
-    let xlsx_path = entry.xlsx_path.clone().or_else(|| {
-        fs::read_dir(&output_dir).ok().and_then(|entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .find(|e| {
-                    let n = e.file_name();
-                    let n = n.to_string_lossy();
-                    n.starts_with("report_") && n.ends_with(".xlsx")
-                })
-                .map(|e| e.path())
-        })
-    });
+    let scan_dir_for = |ext: &str| -> Option<PathBuf> {
+        // Check excel/ subfolder (new layout) then root (old layout).
+        for dir in &[output_dir.join("excel"), output_dir.clone()] {
+            if let Some(p) = fs::read_dir(dir).ok().and_then(|entries| {
+                entries
+                    .filter_map(std::result::Result::ok)
+                    .find(|e| {
+                        let n = e.file_name();
+                        let n = n.to_string_lossy();
+                        n.starts_with("report_") && n.ends_with(ext)
+                    })
+                    .map(|e| e.path())
+            }) {
+                return Some(p);
+            }
+        }
+        None
+    };
+
+    let csv_path = entry.csv_path.clone().or_else(|| scan_dir_for(".csv"));
+    let xlsx_path = entry.xlsx_path.clone().or_else(|| scan_dir_for(".xlsx"));
     RunArtifacts {
         output_dir: output_dir.clone(),
         html_path: entry.html_path.clone(),
@@ -5530,7 +5837,13 @@ async fn artifact_handler(
                 return StatusCode::BAD_REQUEST.into_response();
             }
             let filename = format!("{artifact}.html");
-            let path = artifact_set.output_dir.join(&filename);
+            // Check submodules/ subfolder first (new layout), fall back to root (old layout).
+            let new_layout = artifact_set.output_dir.join("submodules").join(&filename);
+            let path = if new_layout.exists() {
+                new_layout
+            } else {
+                artifact_set.output_dir.join(&filename)
+            };
             if !path.exists() {
                 let html = ErrorTemplate {
                     message: format!(
@@ -8879,6 +9192,10 @@ async fn test_metrics_handler(
     .chart-box{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;}}
     .chart-box-title{{font-size:12px;font-weight:800;color:var(--muted-2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;}}
     .chart-canvas-wrap{{position:relative;height:280px;}}
+    .chart-no-data{{display:flex;flex-direction:column;align-items:center;justify-content:center;height:200px;border:1px dashed var(--line-strong);border-radius:10px;color:var(--muted);font-size:13px;gap:10px;}}
+    .chart-no-data svg{{opacity:0.35;}}
+    .chart-no-data-title{{font-weight:700;font-size:13px;color:var(--muted-2);}}
+    .chart-no-data-hint{{font-size:11px;color:var(--muted);text-align:center;max-width:220px;line-height:1.5;}}
     .data-table{{width:100%;border-collapse:collapse;font-size:13px;}}
     .data-table th{{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);padding:8px 12px;border-bottom:2px solid var(--line);white-space:nowrap;}}
     .data-table td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}}
@@ -9048,6 +9365,7 @@ async fn test_metrics_handler(
             <button class="chart-expand-btn" id="tests-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-tests"></canvas></div>
+          <div id="no-data-tests" class="chart-no-data" style="display:none;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><div class="chart-no-data-title">No test data</div><div class="chart-no-data-hint">Run a scan on a project with test files to see test definitions by language.</div></div>
         </div>
         <div class="chart-box">
           <div class="chart-box-header">
@@ -9055,6 +9373,7 @@ async fn test_metrics_handler(
             <button class="chart-expand-btn" id="density-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-density"></canvas></div>
+          <div id="no-data-density" class="chart-no-data" style="display:none;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><polyline points="7 16 11 11 15 14 19 8"/></svg><div class="chart-no-data-title">No density data</div><div class="chart-no-data-hint">Density requires detected test functions alongside code SLOC.</div></div>
         </div>
       </div>
 
@@ -9065,6 +9384,7 @@ async fn test_metrics_handler(
             <button class="chart-expand-btn" id="assertions-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-assertions"></canvas></div>
+          <div id="no-data-assertions" class="chart-no-data" style="display:none;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="12" y1="9" x2="12" y2="15"/></svg><div class="chart-no-data-title">No assertion data</div><div class="chart-no-data-hint">No assertion calls detected in the current scope.</div></div>
         </div>
         <div class="chart-box" id="suites-chart-box">
           <div class="chart-box-header">
@@ -9072,6 +9392,7 @@ async fn test_metrics_handler(
             <button class="chart-expand-btn" id="suites-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-suites"></canvas></div>
+          <div id="no-data-suites" class="chart-no-data" style="display:none;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><div class="chart-no-data-title">No suite data</div><div class="chart-no-data-hint">No test suite groupings detected in the current scope.</div></div>
         </div>
       </div>
 
@@ -9079,11 +9400,13 @@ async fn test_metrics_handler(
         <div class="chart-box">
           <div class="chart-box-title">Test Files Breakdown</div>
           <div class="chart-canvas-wrap" style="height:260px;display:flex;align-items:center;justify-content:center;"><canvas id="canvas-files"></canvas></div>
+          <div id="no-data-files" class="chart-no-data" style="display:none;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg><div class="chart-no-data-title">No file data</div><div class="chart-no-data-hint">No files found in the current scope.</div></div>
         </div>
         <div class="chart-box">
           <div class="chart-box-title">Test Composition</div>
           <p style="font-size:11px;color:var(--muted);margin:0 0 10px;">Total counts: test functions, assertions, and suites workspace-wide.</p>
           <div class="chart-canvas-wrap"><canvas id="canvas-composition"></canvas></div>
+          <div id="no-data-composition" class="chart-no-data" style="display:none;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><div class="chart-no-data-title">No composition data</div><div class="chart-no-data-hint">Run a scan to see test function, assertion, and suite counts.</div></div>
         </div>
       </div>
     </div>
@@ -9337,11 +9660,25 @@ async fn test_metrics_handler(
     }}
     function destroyChart(c) {{ if (c) {{ var idx = ALL_CHARTS.indexOf(c); if (idx >= 0) ALL_CHARTS.splice(idx, 1); c.destroy(); }} return null; }}
 
+    function showNoData(id, show) {{
+      var el = document.getElementById(id);
+      if (!el) return;
+      var wrap = el.previousElementSibling;
+      el.style.display = show ? '' : 'none';
+      if (wrap && wrap.classList.contains('chart-canvas-wrap')) wrap.style.display = show ? 'none' : '';
+    }}
+
     function renderTestCharts(D) {{
       currentLangTests = D || [];
       testsChart = destroyChart(testsChart);
       densityChart = destroyChart(densityChart);
-      if (!D || !D.length) return;
+      if (!D || !D.length) {{
+        showNoData('no-data-tests', true);
+        showNoData('no-data-density', true);
+        return;
+      }}
+      showNoData('no-data-tests', false);
+      showNoData('no-data-density', false);
       var top15 = D.slice(0, 15);
       var canvas1 = document.getElementById('canvas-tests');
       if (canvas1) {{
@@ -9390,10 +9727,11 @@ async fn test_metrics_handler(
 
     function renderAssertionsChart(D) {{
       assertionsChart = destroyChart(assertionsChart);
-      if (!D || !D.length) return;
+      if (!D || !D.length) {{ showNoData('no-data-assertions', true); return; }}
       var top15 = D.filter(function(d){{ return d.assertions > 0; }}).slice(0, 15);
       var canvas = document.getElementById('canvas-assertions');
-      if (!canvas || !top15.length) return;
+      if (!canvas || !top15.length) {{ showNoData('no-data-assertions', true); return; }}
+      showNoData('no-data-assertions', false);
       assertionsChart = new Chart(canvas, {{
         type: 'bar',
         data: {{
@@ -9416,10 +9754,11 @@ async fn test_metrics_handler(
 
     function renderSuitesChart(D) {{
       suitesChart = destroyChart(suitesChart);
-      if (!D || !D.length) return;
+      if (!D || !D.length) {{ showNoData('no-data-suites', true); return; }}
       var top15 = D.filter(function(d){{ return d.suites > 0; }}).slice(0, 15);
       var canvas = document.getElementById('canvas-suites');
-      if (!canvas || !top15.length) return;
+      if (!canvas || !top15.length) {{ showNoData('no-data-suites', true); return; }}
+      showNoData('no-data-suites', false);
       suitesChart = new Chart(canvas, {{
         type: 'bar',
         data: {{
@@ -9447,6 +9786,8 @@ async fn test_metrics_handler(
       var testF = totals.test_files || 0;
       var totalF = totals.total_files || 0;
       var nonTest = Math.max(0, totalF - testF);
+      if (totalF === 0) {{ showNoData('no-data-files', true); return; }}
+      showNoData('no-data-files', false);
       var dark = isDark();
       filesChart = new Chart(canvas, {{
         type: 'doughnut',
@@ -9473,6 +9814,8 @@ async fn test_metrics_handler(
       var canvas = document.getElementById('canvas-composition');
       if (!canvas) return;
       var tc = totals.test_count || 0, ac = totals.assertions || 0, sc = totals.suites || 0;
+      if (tc === 0 && ac === 0 && sc === 0) {{ showNoData('no-data-composition', true); return; }}
+      showNoData('no-data-composition', false);
       compositionChart = new Chart(canvas, {{
         type: 'bar',
         data: {{
@@ -10110,31 +10453,45 @@ fn persist_run_artifacts(
     file_stem: &str,
     result_context: RunResultContext,
 ) -> Result<(RunArtifacts, PendingPdf)> {
-    fs::create_dir_all(run_dir)
-        .with_context(|| format!("failed to create output directory {}", run_dir.display()))?;
+    // Root dir + organised subdirectories.
+    let html_dir = run_dir.join("html");
+    let pdf_dir = run_dir.join("pdf");
+    let excel_dir = run_dir.join("excel");
+    let json_dir = run_dir.join("json");
+    let submodules_dir = run_dir.join("submodules");
+    for dir in &[
+        run_dir,
+        &html_dir,
+        &pdf_dir,
+        &excel_dir,
+        &json_dir,
+        &submodules_dir,
+    ] {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create directory {}", dir.display()))?;
+    }
 
-    // HTML is always generated — it is the canonical shareable artifact.
+    // HTML report in html/.
     let html_path = {
-        let path = run_dir.join(format!("report_{file_stem}.html"));
+        let path = html_dir.join(format!("report_{file_stem}.html"));
         fs::write(&path, report_html)
             .with_context(|| format!("failed to write HTML report to {}", path.display()))?;
         Some(path)
     };
 
-    // JSON is always generated — required for compare/diff/history.
+    // JSON result in json/.
     let json_path = {
-        let path = run_dir.join(format!("result_{file_stem}.json"));
+        let path = json_dir.join(format!("result_{file_stem}.json"));
         let json = serde_json::to_string_pretty(run)
             .context("failed to serialize analysis run to JSON")?;
         fs::write(&path, json)
-            .with_context(|| format!("failed to write JSON report to {}", path.display()))?;
+            .with_context(|| format!("failed to write JSON result to {}", path.display()))?;
         Some(path)
     };
 
-    // PDF is always attempted. Native renderer first; HTML->browser on failure.
-    // A missing Chromium is non-fatal — other artifacts are still complete.
+    // PDF in pdf/.
     let (pdf_path, pending_pdf) = {
-        let pdf_dest = run_dir.join(format!("report_{file_stem}.pdf"));
+        let pdf_dest = pdf_dir.join(format!("report_{file_stem}.pdf"));
         match write_pdf_from_run(run, &pdf_dest) {
             Ok(()) => {
                 eprintln!(
@@ -10157,9 +10514,9 @@ fn persist_run_artifacts(
         }
     };
 
-    // CSV and XLSX are always generated — no extra flag required.
+    // CSV and XLSX in excel/.
     let csv_path = {
-        let path = run_dir.join(format!("report_{file_stem}.csv"));
+        let path = excel_dir.join(format!("report_{file_stem}.csv"));
         if let Err(e) = sloc_report::write_csv(run, &path) {
             eprintln!("[oxide-sloc] CSV write failed (non-fatal): {e:#}");
             None
@@ -10169,7 +10526,7 @@ fn persist_run_artifacts(
     };
 
     let xlsx_path = {
-        let path = run_dir.join(format!("report_{file_stem}.xlsx"));
+        let path = excel_dir.join(format!("report_{file_stem}.xlsx"));
         if let Err(e) = sloc_report::write_xlsx(run, &path) {
             eprintln!("[oxide-sloc] XLSX write failed (non-fatal): {e:#}");
             None
@@ -10178,7 +10535,28 @@ fn persist_run_artifacts(
         }
     };
 
-    let scan_config_path = Some(run_dir.join(format!("scan-config_{file_stem}.json")));
+    // Scan config in json/.
+    let scan_config_path = Some(json_dir.join(format!("scan-config_{file_stem}.json")));
+
+    // Eagerly generate sub-reports before index.html so relative links work.
+    if run.effective_configuration.discovery.submodule_breakdown {
+        let run_id = &run.tool.run_id;
+        for s in &run.submodule_summaries {
+            build_submodule_row(s, run, run_id, run_dir);
+        }
+    }
+
+    // index.html at root — offline static export of the result-page dashboard.
+    generate_offline_index(
+        run,
+        run_dir,
+        file_stem,
+        html_path.as_deref(),
+        pdf_path.as_deref(),
+        json_path.as_deref(),
+        scan_config_path.as_deref(),
+        &result_context,
+    );
 
     Ok((
         RunArtifacts {
@@ -10196,9 +10574,309 @@ fn persist_run_artifacts(
     ))
 }
 
-/// Find a scan-config JSON file in `dir`, checking both the legacy fixed name and
-/// the current `scan-config_<stem>.json` pattern for backwards compatibility.
+/// Render a static offline result-page dashboard and write it as `index.html` at
+/// the root of the run output directory so business users can open it from disk.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+fn generate_offline_index(
+    run: &sloc_core::AnalysisRun,
+    run_dir: &Path,
+    file_stem: &str,
+    html_path: Option<&Path>,
+    pdf_path: Option<&Path>,
+    json_path: Option<&Path>,
+    scan_config_path: Option<&Path>,
+    result_context: &RunResultContext,
+) {
+    let prev_entry = &result_context.prev_entry;
+    let prev_scan_count = result_context.prev_scan_count;
+    let project_path = &result_context.project_path;
+
+    let scan_delta = prev_entry.as_ref().and_then(|prev| {
+        prev.json_path
+            .as_ref()
+            .and_then(|p| read_json(p).ok())
+            .map(|prev_run| compute_delta(&prev_run, run))
+    });
+
+    let files_analyzed = run.per_file_records.len() as u64;
+    let files_skipped = run.skipped_file_records.len() as u64;
+    let physical_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.total_physical_lines)
+        .sum::<u64>();
+    let code_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.code_lines)
+        .sum::<u64>();
+    let comment_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.comment_lines)
+        .sum::<u64>();
+    let blank_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.blank_lines)
+        .sum::<u64>();
+    let mixed_lines = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.mixed_lines_separate)
+        .sum::<u64>();
+    let functions = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.functions)
+        .sum::<u64>();
+    let classes = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.classes)
+        .sum::<u64>();
+    let variables = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.variables)
+        .sum::<u64>();
+    let imports = run
+        .totals_by_language
+        .iter()
+        .map(|r| r.imports)
+        .sum::<u64>();
+
+    let prev_sum = prev_entry.as_ref().map(|e| &e.summary);
+    let fmt_prev = |opt: Option<u64>| opt.map_or_else(|| "\u{2014}".into(), |v| v.to_string());
+    let prev_fa_str = fmt_prev(prev_sum.map(|s| s.files_analyzed));
+    let prev_fs_str = fmt_prev(prev_sum.map(|s| s.files_skipped));
+    let prev_pl_str = fmt_prev(prev_sum.map(|s| s.total_physical_lines));
+    let prev_cl_str = fmt_prev(prev_sum.map(|s| s.code_lines));
+    let prev_cml_str = fmt_prev(prev_sum.map(|s| s.comment_lines));
+    let prev_bl_str = fmt_prev(prev_sum.map(|s| s.blank_lines));
+
+    let (delta_fa_str, delta_fa_class) =
+        summary_delta(files_analyzed, prev_sum.map(|s| s.files_analyzed));
+    let (delta_fs_str, delta_fs_class) =
+        summary_delta(files_skipped, prev_sum.map(|s| s.files_skipped));
+    let (delta_pl_str, delta_pl_class) =
+        summary_delta(physical_lines, prev_sum.map(|s| s.total_physical_lines));
+    let (delta_cl_str, delta_cl_class) = summary_delta(code_lines, prev_sum.map(|s| s.code_lines));
+    let (delta_cml_str, delta_cml_class) =
+        summary_delta(comment_lines, prev_sum.map(|s| s.comment_lines));
+    let (delta_bl_str, delta_bl_class) =
+        summary_delta(blank_lines, prev_sum.map(|s| s.blank_lines));
+
+    let delta_lines_added: Option<i64> = scan_delta.as_ref().map(sum_added_code_lines);
+    let delta_lines_removed: Option<i64> = scan_delta.as_ref().map(sum_removed_code_lines);
+    let (delta_lines_net_str, delta_lines_net_class) =
+        match (delta_lines_added, delta_lines_removed) {
+            (Some(a), Some(r)) => {
+                let net = a - r;
+                (fmt_delta(net), delta_class(net).to_string())
+            }
+            _ => ("\u{2014}".to_string(), "na".to_string()),
+        };
+
+    let git_commit_url = run
+        .git_remote_url
+        .as_deref()
+        .zip(run.git_commit_long.as_deref())
+        .and_then(|(remote, sha)| remote_to_commit_url(remote, sha));
+    let scan_performed_by = run.environment.ci_name.clone().unwrap_or_else(|| {
+        format!(
+            "{} / {}",
+            run.environment.initiator_username, run.environment.initiator_hostname
+        )
+    });
+
+    // Convert absolute path to relative from run_dir (for file:// navigation).
+    let make_rel = |p: Option<&Path>| -> Option<String> {
+        p.and_then(|abs| abs.strip_prefix(run_dir).ok())
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+    };
+
+    let run_id = &run.tool.run_id;
+
+    // Submodule rows with relative paths into submodules/.
+    let submodule_rows: Vec<SubmoduleRow> = run
+        .submodule_summaries
+        .iter()
+        .map(|s| {
+            let safe = sanitize_project_label(&s.name);
+            let key = format!("sub_{safe}");
+            let sub_path = run_dir.join("submodules").join(format!("{key}.html"));
+            SubmoduleRow {
+                name: s.name.clone(),
+                relative_path: s.relative_path.clone(),
+                files_analyzed: s.files_analyzed,
+                code_lines: s.code_lines,
+                comment_lines: s.comment_lines,
+                blank_lines: s.blank_lines,
+                total_physical_lines: s.total_physical_lines,
+                html_url: if sub_path.exists() {
+                    Some(format!("submodules/{key}.html"))
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+
+    let lang_chart_json = {
+        let mut langs: Vec<&sloc_core::LanguageSummary> = run.totals_by_language.iter().collect();
+        langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
+        let entries: Vec<String> = langs
+            .into_iter()
+            .take(12)
+            .map(|l| {
+                let name = l.language.display_name()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
+                format!(
+                    r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"physical":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
+                    name, l.code_lines, l.comment_lines, l.blank_lines,
+                    l.total_physical_lines, l.functions, l.classes,
+                    l.variables, l.imports, l.files
+                )
+            })
+            .collect();
+        format!("[{}]", entries.join(","))
+    };
+
+    let scan_config_rel =
+        make_rel(scan_config_path).unwrap_or_else(|| format!("json/scan-config_{file_stem}.json"));
+
+    let template = ResultTemplate {
+        version: env!("CARGO_PKG_VERSION"),
+        report_title: run.effective_configuration.reporting.report_title.clone(),
+        project_path: project_path.clone(),
+        output_dir: display_path(run_dir),
+        run_id: run_id.clone(),
+        run_id_short: run_id
+            .split('-')
+            .next_back()
+            .unwrap_or(run_id)
+            .chars()
+            .take(7)
+            .collect(),
+        files_analyzed,
+        files_skipped,
+        physical_lines,
+        code_lines,
+        comment_lines,
+        blank_lines,
+        mixed_lines,
+        functions,
+        classes,
+        variables,
+        imports,
+        html_url: make_rel(html_path),
+        pdf_url: make_rel(pdf_path),
+        json_url: make_rel(json_path),
+        html_download_url: make_rel(html_path),
+        pdf_download_url: make_rel(pdf_path),
+        json_download_url: make_rel(json_path),
+        html_path: html_path.map(display_path),
+        json_path: json_path.map(display_path),
+        prev_run_id: prev_entry.as_ref().map(|e| e.run_id.clone()),
+        prev_run_timestamp: prev_entry.as_ref().map(|e| fmt_la_time(e.timestamp_utc)),
+        prev_run_code_lines: prev_entry.as_ref().map(|e| e.summary.code_lines),
+        prev_fa_str,
+        prev_fs_str,
+        prev_pl_str,
+        prev_cl_str,
+        prev_cml_str,
+        prev_bl_str,
+        delta_fa_str,
+        delta_fa_class: delta_fa_class.to_string(),
+        delta_fs_str,
+        delta_fs_class: delta_fs_class.to_string(),
+        delta_pl_str,
+        delta_pl_class: delta_pl_class.to_string(),
+        delta_cl_str,
+        delta_cl_class: delta_cl_class.to_string(),
+        delta_cml_str,
+        delta_cml_class: delta_cml_class.to_string(),
+        delta_bl_str,
+        delta_bl_class: delta_bl_class.to_string(),
+        delta_lines_added,
+        delta_lines_removed,
+        delta_lines_net_str,
+        delta_lines_net_class,
+        delta_files_added: scan_delta.as_ref().map(|d| d.files_added),
+        delta_files_removed: scan_delta.as_ref().map(|d| d.files_removed),
+        delta_files_modified: scan_delta.as_ref().map(|d| d.files_modified),
+        delta_files_unchanged: scan_delta.as_ref().map(|d| d.files_unchanged),
+        delta_unmodified_lines: scan_delta.as_ref().map(|d| {
+            d.file_deltas
+                .iter()
+                .filter(|f| f.status == sloc_core::FileChangeStatus::Unchanged)
+                .map(|f| {
+                    #[allow(clippy::cast_sign_loss)]
+                    let n = f.current_code as u64;
+                    n
+                })
+                .sum()
+        }),
+        git_branch: run.git_branch.clone(),
+        git_commit: run.git_commit_short.clone(),
+        git_commit_long: run.git_commit_long.clone(),
+        git_author: run.git_commit_author.clone(),
+        git_commit_url,
+        scan_performed_by,
+        scan_time_display: fmt_la_time_meta(run.tool.timestamp_utc),
+        os_display: format!(
+            "{} / {}",
+            run.environment.operating_system, run.environment.architecture
+        ),
+        test_count: run.summary_totals.test_count,
+        current_scan_number: prev_scan_count + 1,
+        prev_scan_count,
+        submodule_rows,
+        pdf_generating: false,
+        scan_config_url: scan_config_rel,
+        lang_chart_json,
+        scatter_chart_json: String::new(),
+        semantic_chart_json: String::new(),
+        submodule_chart_json: String::new(),
+        has_submodule_data: !run.submodule_summaries.is_empty(),
+        has_semantic_data: run
+            .totals_by_language
+            .iter()
+            .any(|l| l.functions > 0 || l.classes > 0 || l.test_count > 0),
+        csp_nonce: String::new(),
+        confluence_configured: false,
+        server_mode: false,
+        report_header_footer: run
+            .effective_configuration
+            .reporting
+            .report_header_footer
+            .clone(),
+        is_offline: true,
+    };
+
+    if let Ok(html) = template.render() {
+        let index_path = run_dir.join("index.html");
+        if let Err(e) = fs::write(&index_path, html) {
+            eprintln!("[oxide-sloc] index.html write failed (non-fatal): {e:#}");
+        }
+    }
+}
+
+/// Find a scan-config JSON file in `dir`, checking json/ subfolder first (new layout),
+/// then root (old flat layout), for backwards compatibility.
 fn find_scan_config_in_dir(dir: &Path) -> Option<PathBuf> {
+    // New layout: json/scan-config_*.json
+    if let Some(found) = find_scan_config_in_dir_flat(&dir.join("json")) {
+        return Some(found);
+    }
+    // Old flat layout: scan-config.json or scan-config_*.json at root
+    find_scan_config_in_dir_flat(dir)
+}
+
+fn find_scan_config_in_dir_flat(dir: &Path) -> Option<PathBuf> {
     let exact = dir.join("scan-config.json");
     if exact.exists() {
         return Some(exact);
@@ -16421,7 +17099,8 @@ struct ScanSetupTemplate {
     .r-chart-modal{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:960px;width:100%;max-height:85vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}
     .r-chart-modal-title{font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--text);margin:0 0 2px;display:block;}
     .r-chart-modal-subtitle{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 12px;display:block;letter-spacing:.02em;}
-    .r-modal-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 16px;}
+    .r-modal-header{display:flex;align-items:center;gap:12px;flex-wrap:nowrap;margin:0 0 16px;padding-right:44px;}
+    .r-modal-header .r-chart-modal-title{flex:1 1 auto;margin:0;min-width:0;}
     .r-chart-modal-close{position:absolute;top:14px;right:18px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--text);line-height:1;padding:0;}
     .r-chart-modal-close:hover{opacity:.7;}
     body.dark-theme .r-chart-modal{background:var(--surface);}
@@ -16535,6 +17214,8 @@ struct ScanSetupTemplate {
           {% if !server_mode %}
           <button type="button" class="copy-button secondary open-path-btn open-folder-button" data-folder="{{ output_dir }}">Open output folder</button>
           {% endif %}
+          <button class="copy-button secondary" id="download-bundle-btn" type="button">Download all artifacts</button>
+          <button class="copy-button" id="delete-run-btn" type="button" style="background:#b23030;border-color:#b23030;color:#fff;box-shadow:0 12px 24px rgba(178,48,48,0.11);">Delete this run</button>
         </div>
       </div>
 
@@ -16748,17 +17429,6 @@ struct ScanSetupTemplate {
       </div>
       {% endif %}{% endif %}
 
-      {% match html_url %}
-      {% when Some with (url) %}
-      <div style="margin:0 0 20px;padding:18px 22px;background:var(--surface);border:2px solid var(--accent);border-radius:14px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
-        <div>
-          <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px;">Full Report</div>
-          <div style="font-size:12px;color:var(--muted);line-height:1.5;">Shareable offline artifact — includes all metrics, delta vs. previous scan, Git context, and charts. Send this file to external stakeholders.</div>
-        </div>
-        <a class="button" href="{{ url }}" target="_blank" rel="noopener" style="flex:0 0 auto;font-size:14px;padding:12px 22px;">Open Full Report &rarr;</a>
-      </div>
-      {% when None %}{% endmatch %}
-
       <div class="action-grid">
         <div class="action-card">
           <h3>HTML report</h3>
@@ -16848,22 +17518,6 @@ struct ScanSetupTemplate {
         </div>
         {% endif %}
       </div>
-      <div class="run-mgmt-strip">
-        <div class="run-mgmt-card">
-          <h3>Download bundle</h3>
-          <div class="action-buttons">
-            <button class="button secondary" id="download-bundle-btn" type="button">Download all artifacts</button>
-          </div>
-          <p class="action-empty-note" style="margin-top:6px;">Downloads a .tar.gz archive containing every artifact for this run (HTML, PDF, JSON, CSV, scan config).</p>
-        </div>
-        <div class="run-mgmt-card" id="delete-run-card">
-          <h3>Delete run</h3>
-          <div class="action-buttons">
-            <button class="button" id="delete-run-btn" type="button" style="background:#b23030;border-color:#b23030;">Delete this run</button>
-          </div>
-          <p class="action-empty-note" style="margin-top:6px;">Permanently removes all artifacts for this run from disk. This action cannot be undone.</p>
-        </div>
-      </div>
       {% if confluence_configured %}
       <div id="confluenceModal" style="display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.45);align-items:center;justify-content:center;">
         <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-width:480px;width:95%;box-shadow:0 16px 48px rgba(0,0,0,0.28);">
@@ -16880,14 +17534,14 @@ struct ScanSetupTemplate {
         </div>
       </div>
       {% endif %}
-      <div id="delete-run-modal" style="display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;">
-        <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-width:460px;width:95%;box-shadow:0 16px 48px rgba(0,0,0,0.28);">
-          <div style="font-size:16px;font-weight:800;margin-bottom:10px;color:#b23030;">Delete run — irreversible</div>
-          <p style="font-size:13px;color:var(--text);margin:0 0 18px;">This will permanently delete all artifacts for this run from disk (HTML, PDF, JSON, CSV, scan config). <strong>This cannot be undone</strong> and the run will no longer be accessible by anyone.</p>
-          <div id="delete-run-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>
-          <div style="display:flex;gap:10px;justify-content:flex-end;">
-            <button class="button secondary" id="delete-run-cancel" type="button">Cancel</button>
-            <button class="button" id="delete-run-confirm" type="button" style="background:#b23030;border-color:#b23030;">Yes, delete permanently</button>
+      <div id="delete-run-modal" style="display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.90);align-items:center;justify-content:center;">
+        <div style="background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:56px 72px;max-width:820px;width:95%;box-shadow:0 24px 72px rgba(0,0,0,0.55);">
+          <div style="font-size:28px;font-weight:800;margin-bottom:16px;color:#b23030;">Delete run &mdash; irreversible</div>
+          <p style="font-size:17px;color:var(--text);margin:0 0 28px;">This will permanently delete all artifacts for this run from disk (HTML, PDF, JSON, CSV, scan config). <strong>This cannot be undone</strong> and the run will no longer be accessible by anyone.</p>
+          <div id="delete-run-status" style="display:none;padding:14px 20px;border-radius:10px;font-size:15px;font-weight:600;margin-bottom:22px;"></div>
+          <div style="display:flex;gap:18px;justify-content:flex-end;">
+            <button class="button secondary" id="delete-run-cancel" type="button" style="font-size:15px;padding:12px 28px;">Cancel</button>
+            <button class="button" id="delete-run-confirm" type="button" style="background:#b23030;border-color:#b23030;font-size:15px;padding:12px 28px;">Yes, delete permanently</button>
           </div>
         </div>
       </div>
@@ -17121,6 +17775,7 @@ struct ScanSetupTemplate {
             <h2>Language breakdown</h2>
             <p class="muted">A quick summary of what this run actually counted across supported languages.</p>
           </div>
+          <button class="r-expand-btn" id="result-lang-overview-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
         </div>
         <div id="result-lang-charts" style="margin:0 0 8px;"></div>
     </section>
@@ -17455,6 +18110,34 @@ struct ScanSetupTemplate {
           '<div class="r-lang-overview-cell"><p>Code Lines by Language</p>'+ds+'</div>'+
           '<div class="r-lang-overview-cell" style="flex:2 1 340px;"><p>Line Mix per Language</p>'+bs+'</div>'+
         '</div>';
+
+        // ── Language breakdown Full View expand ─────────────────────────────────
+        var langOvBtn=document.getElementById('result-lang-overview-expand');
+        if(langOvBtn){langOvBtn.addEventListener('click',function(){
+          var src=document.getElementById('result-lang-charts');
+          if(!src)return;
+          var overlay=document.createElement('div');
+          overlay.className='r-chart-modal-overlay';
+          overlay.innerHTML='<div class="r-chart-modal" style="max-width:1600px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><div class="r-modal-header"><span class="r-chart-modal-title">Language Breakdown — Full View</span></div><div id="result-lang-overview-modal-wrap" style="width:100%;"></div></div>';
+          document.body.appendChild(overlay);
+          overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
+          overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
+          var wrap=document.getElementById('result-lang-overview-modal-wrap');
+          if(wrap){
+            wrap.innerHTML=src.innerHTML;
+            var svgs=wrap.querySelectorAll('svg');
+            for(var i=0;i<svgs.length;i++){
+              svgs[i].removeAttribute('width');
+              svgs[i].removeAttribute('height');
+              svgs[i].style.cssText='display:block;width:100%;height:auto;';
+            }
+            var ov=wrap.querySelector('.r-lang-overview');
+            if(ov){ov.style.flexWrap='nowrap';ov.style.alignItems='stretch';}
+            var cells=wrap.querySelectorAll('.r-lang-overview-cell');
+            if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;';
+            if(cells.length>1)cells[1].style.cssText='flex:2 1 0;max-width:none;';
+          }
+        });}
       })();
 
       // ── Extended charts (composition, scatter, semantic, submodule) ─────────
@@ -17492,7 +18175,7 @@ struct ScanSetupTemplate {
               if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
               if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
               var pct=Math.round((d.code||0)/tot2*100);
-              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+pct+'%</text>';
+              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+pct+'%</text>';
             });
           } else {
             var maxT=Math.max.apply(null,LANG_D.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);}))||1;
@@ -17503,7 +18186,7 @@ struct ScanSetupTemplate {
               if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
               if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
               if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
+              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
           var ly=SH-legendH+4;
@@ -17574,7 +18257,7 @@ struct ScanSetupTemplate {
             var v=d[key]||0,bw=v/maxV*BW,y=topPad+i*rowTotal2+Math.floor((rowTotal2-bH)/2);
             s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
             if(bw>0.5)s+='<rect'+tt(d.lang,fmt(v)+' '+key)+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
-            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(v)+'</text>';
+            s+='<text x="'+(LW+px(bw)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+fmt(v)+'</text>';
           });
           s+='</svg>';
           el.innerHTML=s;
@@ -17597,7 +18280,7 @@ struct ScanSetupTemplate {
               +'<option value="variables"'+(key==='variables'?' selected':'')+'>Variables</option>'
               +'<option value="imports"'+(key==='imports'?' selected':'')+'>Imports</option>'
               +'<option value="tests"'+(key==='tests'?' selected':'')+'>Tests</option>';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">Semantic Metrics — Full View</span><div class="r-modal-controls"><select class="r-chart-select" id="r-sem-modal-metric">'+optHtml+'</select></div><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><div class="r-modal-header"><span class="r-chart-modal-title">Semantic Metrics — Full View</span><select class="r-chart-select" id="r-sem-modal-metric">'+optHtml+'</select></div><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
@@ -17614,8 +18297,8 @@ struct ScanSetupTemplate {
             var overlay=document.createElement('div');
             overlay.className='r-chart-modal-overlay';
             var subHtml=subtitle?'<span class="r-chart-modal-subtitle">'+subtitle+'</span>':'';
-            var ctrlDiv=ctrlHtml?'<div class="r-modal-controls">'+ctrlHtml+'</div>':'';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><span class="r-chart-modal-title">'+title+' — Full View</span>'+subHtml+ctrlDiv+'<div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
+            var hdr='<div class="r-modal-header"><span class="r-chart-modal-title">'+title+' — Full View</span>'+(ctrlHtml||'')+'</div>';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button>'+hdr+subHtml+'<div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
@@ -17710,7 +18393,7 @@ struct ScanSetupTemplate {
             s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
             if(bw>0.5)s+='<rect'+tt(d.lang,pct+'% of significant lines are comments')+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
-            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+pct+'%</text>';
+            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+pct+'%</text>';
           });
           s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" fill="currentColor" opacity="0.75">comment ratio (higher = more documented)</text>';
           s+='</svg>';
@@ -17740,7 +18423,7 @@ struct ScanSetupTemplate {
             s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
             if(bw>0.5)s+='<rect'+tt(d.lang,fmt(Math.round(avg))+' avg code lines/file · '+fmt(d.files||0)+' files')+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
-            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;">'+fmt(Math.round(avg))+'</text>';
+            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+fmt(Math.round(avg))+'</text>';
           });
           s+='<text x="'+(LW+BW/2)+'" y="'+(SH-6)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" fill="currentColor" opacity="0.75">avg code lines per file (higher = larger files)</text>';
           s+='</svg>';
@@ -17781,7 +18464,7 @@ struct ScanSetupTemplate {
             s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor"'+(d.isOverall?' font-weight="700"':'')+'>'+esc(label)+'</text>';
             if(bw>0.5)s+='<rect'+tt(label,fmt(v))+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+col+'" rx="3"/>';
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
-            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="10" fill="currentColor" opacity="0.8" style="pointer-events:none;"'+(d.isOverall?' font-weight="700"':'')+'>'+fmt(v)+'</text>';
+            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+fmt(v)+'</text>';
             yOff+=rowH;
             if(d.isOverall&&subs.length>0){
               yOff+=sepH;
@@ -18223,6 +18906,9 @@ struct ResultTemplate {
     /// Header/footer identification banner, mirrored from the HTML/PDF report.
     report_header_footer: Option<String>,
     run_id_short: String,
+    /// True when rendering a static offline file (index.html); hides server-only actions.
+    #[allow(dead_code)]
+    is_offline: bool,
 }
 
 #[derive(Template)]
@@ -18809,11 +19495,18 @@ struct ScanWaitTemplate {
     var probed=false;
     function probeNetwork(){
       if(probed)return;probed=true;
-      var ctrl=new AbortController();
-      var tid=setTimeout(function(){ctrl.abort();},3000);
-      fetch('https://1.1.1.1',{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-        .then(function(){clearTimeout(tid);applyNetwork(true);})
-        .catch(function(){clearTimeout(tid);applyNetwork(false);});
+      var probeUrls=['https://github.com','https://www.google.com','https://www.cloudflare.com'];
+      var probeIdx=0;
+      function tryNext(){
+        if(probeIdx>=probeUrls.length){applyNetwork(false);return;}
+        var u=probeUrls[probeIdx++];
+        var c2=new AbortController();
+        var t2=setTimeout(function(){c2.abort();},4000);
+        fetch(u,{mode:'no-cors',cache:'no-store',signal:c2.signal})
+          .then(function(){clearTimeout(t2);applyNetwork(true);})
+          .catch(function(){clearTimeout(t2);tryNext();});
+      }
+      tryNext();
     }
     if(trigger&&panel){
       trigger.addEventListener('click',function(){
@@ -18950,7 +19643,6 @@ struct ErrorTemplate {
     *{box-sizing:border-box;}html,body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);}body{display:flex;flex-direction:column;}
     .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
     .background-watermarks img{position:absolute;opacity:0.16;filter:blur(0.3px);user-select:none;max-width:none;}
-    @keyframes wmFade{from{opacity:var(--wm-op,0.08);}to{opacity:calc(var(--wm-op,0.08)*0.3);}}
     .top-nav{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}
     .top-nav-inner{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;}
     .brand{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}.brand-logo{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}
@@ -18981,7 +19673,7 @@ struct ErrorTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:860px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    .page{max-width:1200px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 20px;line-height:1.55;}
@@ -19091,7 +19783,7 @@ struct ErrorTemplate {
           <input type="hidden" name="redirect_url" value="/runs/{{ artifact_type }}/{{ run_id }}">
           <div class="locate-row">
             <input type="text" id="locate-file-input" name="file_path"
-                   placeholder="Path to HTML report file..."
+                   placeholder="Path to scan output folder (or .html report file)..."
                    class="locate-input" autocomplete="off" spellcheck="false">
             {% if !server_mode %}
             <button type="button" id="browse-locate-btn" class="btn-secondary">Browse&hellip;</button>
@@ -19128,7 +19820,7 @@ struct ErrorTemplate {
     var snips=['report moved','fn analyze()','locate file','.html report','restore path','folder path','result.json','run_id','pub fn run','use std::fs','Result<()>','git main','files: 60','cargo build','Ok(run)','match lang','fn main() {','.rs .go .py','sloc_core','render_html'];
     for(var i=0;i<38;i++){(function(idx){var el=document.createElement('span');el.className='code-particle';el.textContent=snips[idx%snips.length];var l=(Math.random()*94+2).toFixed(1),t=(Math.random()*88+6).toFixed(1),dur=(Math.random()*10+9).toFixed(1),delay=(Math.random()*18).toFixed(1),rot=(Math.random()*26-13).toFixed(1),op=(Math.random()*0.09+0.06).toFixed(3);el.style.left=l+'%';el.style.top=t+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';c.appendChild(el);})(i);}
   })();
-  (function randomizeWatermarks(){var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));var placed=[];function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}var half=Math.floor(wms.length/2);wms.forEach(function(img,i){var pos=pick(i<half),w=Math.floor(Math.random()*60+80),rot=(Math.random()*40-20).toFixed(1),op=(Math.random()*0.08+0.05).toFixed(2),dur=(Math.random()*6+5).toFixed(1),delay=(Math.random()*10).toFixed(1);img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;img.style.animation='wmFade '+dur+'s ease-in-out -'+delay+'s infinite alternate';});})();</script>
+  (function randomizeWatermarks(){var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));if(!wms.length)return;var placed=[];function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}var half=Math.floor(wms.length/2);wms.forEach(function(img,i){var pos=pick(i<half),w=Math.floor(Math.random()*100+120),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.08+0.12).toFixed(2);img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;});})();</script>
   <script nonce="{{ csp_nonce }}">(function(){
     var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
     function ap(s){document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{localStorage.setItem('sloc-ns',JSON.stringify(s));}catch(e){}document.querySelectorAll('.scheme-swatch').forEach(function(x){x.classList.toggle('active',x.dataset.n===s.n);});}
@@ -19150,7 +19842,8 @@ struct ErrorTemplate {
       if(submitBtn)submitBtn.disabled=false;
       if(warning){
         var name=basename(val);
-        if(expected&&name&&name!==expected){warning.classList.add('show');}
+        var looksLikeHtmlFile=name.toLowerCase().slice(-5)==='.html';
+        if(expected&&name&&looksLikeHtmlFile&&name!==expected){warning.classList.add('show');}
         else{warning.classList.remove('show');}
       }
     }
@@ -19158,7 +19851,7 @@ struct ErrorTemplate {
     if(browseBtn){
       browseBtn.addEventListener('click',function(){
         browseBtn.disabled=true;browseBtn.textContent='...';
-        fetch('/pick-file')
+        fetch('/pick-directory')
           .then(function(r){return r.ok?r.json():{cancelled:true};})
           .then(function(d){
             browseBtn.disabled=false;browseBtn.textContent='Browse…';
@@ -19237,13 +19930,18 @@ struct LocateFileTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:860px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    .page{max-width:1200px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 18px;}
     .error-box{border-radius:16px;border:1px solid var(--line);background:var(--surface-2);padding:16px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:12.5px;margin-bottom:22px;}
+    .error-box.hidden{display:none;}
+    .success-box{border-radius:16px;border:1px solid #a3d9b5;background:#eafaf0;padding:16px 18px;font-size:13px;font-weight:600;color:#1a6b3c;margin-bottom:22px;display:none;}
+    body.dark-theme .success-box{background:#163927;border-color:#2d7a52;color:#8fe2a8;}
     .actions{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;}
     .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid rgba(111,144,255,0.30);text-decoration:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);cursor:pointer;}
+    .site-footer{margin-top:auto;padding:18px 24px;text-align:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:transparent;}
+    .site-footer a{color:var(--oxide);text-decoration:none;}.site-footer a:hover{text-decoration:underline;}
     .btn-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid var(--line-strong);text-decoration:none;color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;cursor:pointer;}
     .btn-secondary:hover{background:var(--line);}
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
@@ -19321,26 +20019,23 @@ struct LocateFileTemplate {
     <div class="panel">
       <h1>Scan Files Moved</h1>
       <p class="panel-subtitle">The scan output folder was moved, renamed, or deleted. Browse to its new location to restore the comparison.</p>
-      <div class="error-box">{{ message }}</div>
+      <div class="error-box" id="relocate-error-box">{{ message }}</div>
+      <div class="success-box" id="relocate-success-box">Scan restored — redirecting&hellip;</div>
       <div class="relocate-section">
         <h2>Locate Scan Output</h2>
         <p>Select the folder that contains the scan output files (result_*.json, result_*.html, etc.).</p>
-        <form method="post" action="/relocate-scan">
-          <input type="hidden" name="run_id" value="{{ run_id }}">
-          <input type="hidden" name="redirect_url" value="{{ redirect_url }}">
-          <div class="relocate-row">
-            <input type="text" id="relocate-folder" name="folder_path"
-                   value="{{ folder_hint }}"
-                   placeholder="Path to folder containing scan output..."
-                   class="relocate-input" autocomplete="off" spellcheck="false">
-            {% if !server_mode %}
-            <button type="button" id="browse-relocate-btn" class="btn-secondary">Browse&hellip;</button>
-            {% endif %}
-          </div>
-          <div style="margin-top:12px;">
-            <button type="submit" class="btn-primary" style="border:none;">Restore Scan</button>
-          </div>
-        </form>
+        <div class="relocate-row">
+          <input type="text" id="relocate-folder" name="folder_path"
+                 value="{{ folder_hint }}"
+                 placeholder="Path to folder containing scan output..."
+                 class="relocate-input" autocomplete="off" spellcheck="false">
+          {% if !server_mode %}
+          <button type="button" id="browse-relocate-btn" class="btn-secondary">Browse&hellip;</button>
+          {% endif %}
+        </div>
+        <div style="margin-top:12px;">
+          <button type="button" id="restore-btn" class="btn-primary" style="border:none;">Restore Scan</button>
+        </div>
       </div>
       <div class="actions">
         <a class="btn-secondary" href="/compare-scans">Compare Scans</a>
@@ -19348,10 +20043,17 @@ struct LocateFileTemplate {
       </div>
     </div>
   </div>
+  <footer class="site-footer">
+    oxide-sloc v{{ version }} — local code metrics workbench &nbsp;&middot;&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;&middot;&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;&middot;&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;&middot;&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
   <script nonce="{{ csp_nonce }}">
     (function(){var k="oxide-theme",b=document.body,s=localStorage.getItem(k);if(s==="dark")b.classList.add("dark-theme");document.getElementById("theme-toggle").addEventListener("click",function(){var d=b.classList.toggle("dark-theme");localStorage.setItem(k,d?"dark":"light");});})();
     (function spawnCodeParticles(){var c=document.getElementById('code-particles');if(!c)return;var snips=['scan moved','fn analyze()','result.json','.html .pdf','locate files','restore scan','folder path','result*.json','run_id','compare','pub fn run','use std::fs','Result<()>','git main','files: 60','cargo build','Ok(run)','match lang','fn main() {','.rs .go .py','sloc_core','render_html'];for(var i=0;i<38;i++){(function(idx){var el=document.createElement('span');el.className='code-particle';el.textContent=snips[idx%snips.length];var l=(Math.random()*94+2).toFixed(1),t=(Math.random()*88+6).toFixed(1),dur=(Math.random()*10+9).toFixed(1),delay=(Math.random()*18).toFixed(1),rot=(Math.random()*26-13).toFixed(1),op=(Math.random()*0.09+0.06).toFixed(3);el.style.left=l+'%';el.style.top=t+'%';el.style.setProperty('--rot',rot+'deg');el.style.setProperty('--op',op);el.style.animationDuration=dur+'s';el.style.animationDelay='-'+delay+'s';c.appendChild(el);})(i);}})();
-    (function randomizeWatermarks(){var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));var placed=[];function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}var half=Math.floor(wms.length/2);wms.forEach(function(img,i){var pos=pick(i<half),w=Math.floor(Math.random()*60+80),rot=(Math.random()*40-20).toFixed(1),op=(Math.random()*0.08+0.05).toFixed(2),dur=(Math.random()*6+5).toFixed(1),delay=(Math.random()*10).toFixed(1);img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;img.style.animation='wmFade '+dur+'s ease-in-out -'+delay+'s infinite alternate';});})();
+    (function randomizeWatermarks(){var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));if(!wms.length)return;var placed=[];function tooClose(t,l){for(var i=0;i<placed.length;i++){if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}return false;}function pick(lb){for(var a=0;a<50;a++){var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){placed.push([t,l]);return[t,l];}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}var half=Math.floor(wms.length/2);wms.forEach(function(img,i){var pos=pick(i<half),w=Math.floor(Math.random()*100+120),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.08+0.12).toFixed(2);img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.width=w+'px';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;});})();
   </script>
   <script nonce="{{ csp_nonce }}">
   (function(){
@@ -19374,20 +20076,52 @@ struct LocateFileTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   (function(){
-    var btn=document.getElementById('browse-relocate-btn');
-    if(!btn)return;
-    btn.addEventListener('click',function(){
-      btn.disabled=true;btn.textContent='...';
-      var inp=document.getElementById('relocate-folder');
-      var hint=inp?inp.value:'';
-      fetch('/pick-directory?kind=reports&current='+encodeURIComponent(hint))
-        .then(function(r){return r.ok?r.json():{cancelled:true};})
-        .then(function(d){
-          btn.disabled=false;btn.textContent='Browse…';
-          if(d&&d.selected_path&&inp)inp.value=d.selected_path;
-        })
-        .catch(function(){btn.disabled=false;btn.textContent='Browse…';});
-    });
+    var browseBtn=document.getElementById('browse-relocate-btn');
+    if(browseBtn){
+      browseBtn.addEventListener('click',function(){
+        browseBtn.disabled=true;browseBtn.textContent='...';
+        var inp=document.getElementById('relocate-folder');
+        var hint=inp?inp.value:'';
+        fetch('/pick-directory?kind=reports&current='+encodeURIComponent(hint))
+          .then(function(r){return r.ok?r.json():{cancelled:true};})
+          .then(function(d){
+            browseBtn.disabled=false;browseBtn.textContent='Browse…';
+            if(d&&d.selected_path&&inp)inp.value=d.selected_path;
+          })
+          .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse…';});
+      });
+    }
+    var restoreBtn=document.getElementById('restore-btn');
+    var errBox=document.getElementById('relocate-error-box');
+    var okBox=document.getElementById('relocate-success-box');
+    if(restoreBtn){
+      restoreBtn.addEventListener('click',function(){
+        var inp=document.getElementById('relocate-folder');
+        var folder=inp?inp.value.trim():'';
+        if(!folder){if(errBox){errBox.textContent='Please enter a folder path.';errBox.classList.remove('hidden');}return;}
+        restoreBtn.disabled=true;restoreBtn.textContent='Checking…';
+        var body=new URLSearchParams();
+        body.set('run_id','{{ run_id }}');
+        body.set('redirect_url','{{ redirect_url }}');
+        body.set('folder_path',folder);
+        fetch('/relocate-scan',{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:body.toString()})
+          .then(function(r){return r.json();})
+          .then(function(d){
+            restoreBtn.disabled=false;restoreBtn.textContent='Restore Scan';
+            if(d&&d.ok){
+              if(errBox)errBox.classList.add('hidden');
+              if(okBox){okBox.style.display='block';}
+              setTimeout(function(){window.location.href=d.redirect||'/compare-scans';},600);
+            } else {
+              if(errBox){errBox.textContent=d&&d.message?d.message:'Unknown error.';errBox.classList.remove('hidden');}
+            }
+          })
+          .catch(function(e){
+            restoreBtn.disabled=false;restoreBtn.textContent='Restore Scan';
+            if(errBox){errBox.textContent='Network error: '+String(e);errBox.classList.remove('hidden');}
+          });
+      });
+    }
   }());
   </script>
   <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
