@@ -5251,7 +5251,23 @@ struct WarningOpportunityRow {
                 y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
               },
               plugins: {
-                legend: { position: 'bottom', labels: { color: c.text } },
+                legend: {
+                  position: 'bottom', labels: { color: c.text },
+                  onHover: function(e, item, leg) {
+                    var chart = leg.chart, idx = item.datasetIndex;
+                    var cols = [OX, GN, GY];
+                    chart.data.datasets.forEach(function(ds, i) {
+                      ds.backgroundColor = i === idx ? cols[i] : cols[i] + '28';
+                    });
+                    chart.update('none');
+                  },
+                  onLeave: function(e, item, leg) {
+                    var chart = leg.chart;
+                    var cols = [OX, GN, GY];
+                    chart.data.datasets.forEach(function(ds, i) { ds.backgroundColor = cols[i]; });
+                    chart.update('none');
+                  }
+                },
                 tooltip: {
                   mode: 'index', axis: 'y', intersect: false,
                   callbacks: {
@@ -5319,7 +5335,27 @@ struct WarningOpportunityRow {
                    title: { display: true, text: 'Code Lines', color: c.text } }
             },
             plugins: {
-              legend: { position: 'right', labels: { color: c.text } },
+              legend: {
+                position: 'right', labels: { color: c.text },
+                onHover: function(e, item, leg) {
+                  var chart = leg.chart, idx = item.datasetIndex;
+                  chart.data.datasets.forEach(function(ds, i) {
+                    var base = PALETTE[i % PALETTE.length];
+                    ds.backgroundColor = i === idx ? base + 'b8' : base + '20';
+                    ds.borderColor = i === idx ? base : base + '30';
+                  });
+                  chart.update('none');
+                },
+                onLeave: function(e, item, leg) {
+                  var chart = leg.chart;
+                  chart.data.datasets.forEach(function(ds, i) {
+                    var base = PALETTE[i % PALETTE.length];
+                    ds.backgroundColor = base + 'b8';
+                    ds.borderColor = base;
+                  });
+                  chart.update('none');
+                }
+              },
               tooltip: {
                 callbacks: {
                   title: function(items) { return items.length ? items[0].dataset.label : ''; },
