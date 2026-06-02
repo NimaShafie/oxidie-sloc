@@ -68,21 +68,23 @@ def main():
     src, out = sys.argv[1], sys.argv[2]
     project_root = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
     rules, issues, seen = {}, [], set()
-    for raw in open(src):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            d = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        finding = _extract_finding(d, project_root, seen)
-        if finding is None:
-            continue
-        rule, issue = finding
-        rules.setdefault(rule["id"], rule)
-        issues.append(issue)
-    json.dump({"rules": list(rules.values()), "issues": issues}, open(out, "w"), indent=2)
+    with open(src) as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            finding = _extract_finding(d, project_root, seen)
+            if finding is None:
+                continue
+            rule, issue = finding
+            rules.setdefault(rule["id"], rule)
+            issues.append(issue)
+    with open(out, "w") as fh:
+        json.dump({"rules": list(rules.values()), "issues": issues}, fh, indent=2)
 
 
 if __name__ == "__main__":

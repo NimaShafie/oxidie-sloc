@@ -17,93 +17,26 @@
 ## Quick Start
 
 ```bash
-bash scripts/run.sh   # installs on first run, then opens web UI at http://127.0.0.1:4317
+bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 ```
 
-On first run `run.sh` automatically invokes `install.sh`, then launches the server. Subsequent runs skip directly to launch. To force a fresh install: `bash scripts/run.sh --rebuild`.
-
-When compiling from source, the build displays a live animated progress indicator (dependency resolution → compile → install/launch) with a frozen summary on completion.
-
-| Platform | First run | Subsequent runs | LAN server |
-|---|---|---|---|
-| **Windows 10/11** (Git Bash) | `bash scripts/run.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
-| **Linux — RHEL 8/9, Ubuntu, Debian** | `bash scripts/run.sh` | `bash scripts/run.sh` | `bash scripts/serve-server.sh` |
-
-**Internet requirements by scenario:**
-
-| Scenario | What's needed | What happens |
-|---|---|---|
-| **Windows (any)** | `dist/oxide-sloc-windows-x64.zip` (committed, ~9 MB) | run.sh extracts pre-built binary — no Rust, no build, no internet required |
-| **Rust already installed (Linux)** | `vendor.tar.xz` (committed, ~35 MB) | builds offline — no internet required |
-| **No Rust, toolchain committed (Linux)** | `toolchain/` archives + `vendor.tar.xz` | install.sh bootstraps Rust from `toolchain/`, builds offline |
-| **No Rust, Linux, has curl** | `--online` flag | downloads release binary from GitHub Releases |
-| **No Rust, no internet, Linux** | Option C air-gap kit | see [`docs/airgap.md`](./docs/airgap.md) |
-
-No network calls are made by default. On **Windows**, the pre-built binary is already in `dist/` — just run `bash scripts/run.sh`. On **Linux** without Rust, a fully offline build additionally requires the maintainer to have committed the toolchain archive — see [`docs/airgap.md`](./docs/airgap.md).
-
----
-
-## Host on your LAN
-
-Make oxide-sloc reachable from any device on the same network.
-
-**Quickest path (open, no authentication):**
-
-```bash
-bash scripts/serve-server.sh
-```
-
-Prints every LAN address the server is reachable on and gives you a ready-made `curl` test command. The server starts **without authentication** — anyone on the network can access it and trigger directory scans. Use this only on a trusted private network.
-
-If another device times out, your firewall is dropping port 4317 — the script tells you exactly what to run, or pass `--open-firewall` to have it open the port automatically (requires `sudo` on Linux).
-
-**With authentication (recommended when untrusted devices may be on the network):**
-
-```bash
-bash scripts/serve-server.sh --with-auth
-```
-
-Generates a session key, prints the login URL, and requires anyone using the web UI to enter the key before gaining access. CLI/curl callers must include it as a Bearer token:
-
-```bash
-curl -H "Authorization: Bearer $SLOC_API_KEY" http://<your-ip>:4317/healthz
-```
-
-**Or run the binary directly with a key:**
-
-```bash
-export SLOC_API_KEY=$(openssl rand -hex 32)
-oxide-sloc serve --server          # binds to 0.0.0.0:4317
-```
-
-Then open `http://<your-ip>:4317` from any device on the same network (`hostname -I` on Linux, `ipconfig` on Windows).
-
-> **Browsers and the API key:** when `SLOC_API_KEY` is set, navigate to
-> `http://<your-ip>:4317/auth/login` and paste the key into the sign-in form — the
-> server sets an `HttpOnly` session cookie for subsequent requests.
-
-**Firewall (Linux):**
-
-```bash
-sudo ufw allow 4317/tcp            # UFW
-sudo firewall-cmd --add-port=4317/tcp --permanent  # firewalld
-```
-
-On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
-
-> **Docker:** the published image already binds to `0.0.0.0:4317`. See [Path B — Docker](#path-b--docker) below and [`docs/server-deployment.md`](./docs/server-deployment.md) for persistent deployments.
-
----
+| Platform | What happens |
+|---|---|
+| **Windows 10/11** (Git Bash) | Extracts pre-built binary from `dist/` — no Rust required |
+| **Linux — Rust installed** | Builds offline from committed `vendor.tar.xz` |
+| **Linux — no Rust, toolchain committed** | Bootstraps Rust from `toolchain/` archives, builds offline |
+| **Linux — online** | `bash scripts/internal/install.sh --online` downloads the release binary |
+| **Air-gapped** | See [`docs/airgap.md`](./docs/airgap.md) |
 
 ## Features
 
-- **CLI + web UI** — `analyze / report / diff / serve / send / init / git-scan / git-compare` commands; guided 4-step web flow with light/dark theme and one-click Quick Scan
-- **IEEE 1045-1992 physical SLOC** — configurable mixed-line policy, continuation lines, compiler directives, and blank-in-comment classification; symbol counting (functions, classes, variables, imports)
-- **Test Metrics** — lexical test function and test-case detection across all 41 supported languages; test-to-code density per language; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, Istanbul/NYC JSON) with animated per-language coverage gauges at `/test-metrics`
-- **Flexible output** — HTML reports with per-file breakdown and language charts; PDF, CSV, and 4-sheet Excel export; re-render any saved JSON result
-- **Git integration** — browser UI for branches/tags/commits, GitHub/GitLab/Bitbucket webhook and polling automation, point-in-time comparison via git worktree, submodule breakdown
-- **CI/CD and integrations** — Jenkinsfile, GitHub Actions, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable `<iframe>` widget, SMTP/webhook report delivery, Confluence push
-- **Offline-first deployment** — vendored Rust deps, Chart.js compiled in, no CDN calls; Docker image on GHCR; LAN server mode with API key auth and optional TLS
+- **CLI + web UI** — `analyze / report / diff / serve / send / init` commands; guided 4-step web flow with Quick Scan
+- **IEEE 1045-1992 physical SLOC** — configurable mixed-line, continuation-line, compiler-directive, and blank-in-comment policies; symbol counting (functions, classes, variables, imports)
+- **Test Metrics** — lexical test function detection across 41 languages; test-to-code density; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, Istanbul/NYC JSON)
+- **Flexible output** — HTML reports, PDF, CSV, and 4-sheet Excel export; re-render any saved JSON
+- **Git integration** — branch/tag/commit browser, GitHub/GitLab/Bitbucket webhooks and polling, submodule breakdown
+- **CI/CD** — GitHub Actions, Jenkins, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable widget, SMTP/webhook delivery
+- **Offline-first** — vendored deps, Chart.js compiled in, no CDN calls; Docker on GHCR; LAN server mode with API key auth and optional TLS
 
 ---
 
@@ -121,21 +54,7 @@ On Windows, allow oxide-sloc through Windows Defender Firewall when prompted.
 
 ## Installation
 
-### Path A — Pre-built binary or source build (no internet required)
-
-```bash
-bash scripts/run.sh   # Windows 10/11 (Git Bash) or Linux — http://127.0.0.1:4317
-```
-
-**No network calls are made by default.** `run.sh` calls `scripts/internal/install.sh` automatically on first run and selects the best available path:
-
-- **Windows:** extracts `dist/oxide-sloc-windows-x64.zip` (committed, ~9 MB) — no Rust required, no compilation, no `.tools/` directory. The pre-built binary is updated automatically by CI after every release.
-- **Linux — Rust already installed:** builds directly from the committed `vendor.tar.xz` — no internet required.
-- **Linux — no Rust, toolchain committed:** `install.sh` detects `toolchain/rust-toolchain-linux-*.tar.gz.*` split parts, bootstraps Rust into `.tools/`, decompresses `vendor.tar.xz`, and builds offline. Requires the maintainer to have run `bash scripts/internal/bundle-rust-toolchain.sh` and committed the archives — see [`docs/airgap.md`](./docs/airgap.md).
-- **Linux — no Rust, download from GitHub:** run `bash scripts/internal/install.sh --online` (requires `curl`) to fetch the release binary automatically.
-- **Linux — no Rust, no internet:** use the Option C air-gap kit — see [`docs/airgap.md`](./docs/airgap.md).
-
-### Path B — Package managers
+### Package managers
 
 | Manager | Command | Platform |
 |---|---|---|
@@ -144,14 +63,12 @@ bash scripts/run.sh   # Windows 10/11 (Git Bash) or Linux — http://127.0.0.1:4
 | **Scoop** | `scoop bucket add oxide-sloc https://github.com/oxide-sloc/scoop-oxide-sloc && scoop install oxide-sloc` | Windows |
 | **Homebrew** | `brew tap oxide-sloc/oxide-sloc && brew install oxide-sloc` | macOS / Linux |
 | **Nix** | `nix run github:oxide-sloc/oxide-sloc` | Linux / macOS |
-| **cargo** | `cargo install oxide-sloc --locked` | Any (requires Rust) |
-| **DEB** | Download `oxide-sloc-*-linux-amd64.deb` from [Releases](https://github.com/oxide-sloc/oxide-sloc/releases) → `sudo dpkg -i` | Ubuntu / Debian |
-| **RPM** | Download `oxide-sloc-*.rpm` from [Releases](https://github.com/oxide-sloc/oxide-sloc/releases) → `rpm -ivh` | RHEL 8/9 |
+| **cargo** | `cargo install oxide-sloc --locked` | Any |
+| **DEB / RPM** | Download from [Releases](https://github.com/oxide-sloc/oxide-sloc/releases) | Ubuntu / RHEL |
 
-### Path C — Docker
+### Docker
 
 ```bash
-# Build locally from the committed Dockerfile (no registry pull needed):
 export SLOC_API_KEY=$(openssl rand -hex 32)
 docker compose up
 ```
@@ -162,23 +79,7 @@ docker run --rm -v /path/to/your/repo:/repo:ro \
   ghcr.io/nimashafie/oxide-sloc:latest analyze /repo --plain
 ```
 
-**Environment variables for `docker compose`:**
-
-| Variable | Required | Description |
-|---|---|---|
-| `SLOC_API_KEY` | Yes | Bearer token for all web endpoints. Generate: `openssl rand -hex 32` |
-| `SLOC_ALLOWED_ROOTS` | No | Colon-separated list of paths the web UI may scan. Default: unrestricted |
-| `SLOC_TARGET` | No | Host directory to mount as `/repo`. Default: `./tmp-sloc` |
-| `SLOC_TLS_CERT` / `SLOC_TLS_KEY` | No | Paths to PEM certificate and key for HTTPS |
-
-See [`docs/airgap.md`](./docs/airgap.md) for air-gapped setup and [`docs/server-deployment.md`](./docs/server-deployment.md) for persistent deployments.
-
-### Path D — Nix (reproducible dev shell)
-
-```bash
-nix develop github:oxide-sloc/oxide-sloc   # drops into a shell with Rust + rust-analyzer
-nix run    github:oxide-sloc/oxide-sloc -- analyze .
-```
+Set `SLOC_API_KEY`, `SLOC_ALLOWED_ROOTS`, and `SLOC_TLS_CERT`/`SLOC_TLS_KEY` as needed. See [`docs/server-deployment.md`](./docs/server-deployment.md).
 
 ---
 
@@ -187,88 +88,24 @@ nix run    github:oxide-sloc/oxide-sloc -- analyze .
 ### CLI
 
 ```bash
-# Analyze and print a colored summary
-oxide-sloc analyze ./my-repo
-
-# Machine-readable key=value output
-oxide-sloc analyze ./my-repo --plain
-
-# Full output: JSON + HTML + CSV + Excel
-oxide-sloc analyze ./my-repo -j result.json -H report.html -c report.csv -x report.xlsx
-
-# Per-file breakdown in the terminal
+# Analyze — common forms
+oxide-sloc analyze ./my-repo                            # colored summary
+oxide-sloc analyze ./my-repo --plain                    # machine-readable key=value (CI-friendly)
+oxide-sloc analyze ./my-repo -j out.json -H out.html -c out.csv -x out.xlsx
 oxide-sloc analyze ./my-repo --per-file
-
-# Open the HTML report immediately after generation
-oxide-sloc analyze ./my-repo -H report.html --open
-
-# Quiet mode — only write files, print nothing (ideal for CI)
-oxide-sloc analyze ./my-repo -j result.json --quiet
-
-# Pipeline guards
 oxide-sloc analyze ./my-repo --fail-on-warnings --fail-below 10000
+oxide-sloc analyze ./my-repo --enabled-language rust --enabled-language python
+oxide-sloc analyze ./my-repo --submodule-breakdown
 
-# Filter by language or glob
-oxide-sloc analyze ./my-repo --enabled-language rust --enabled-language python --plain
-oxide-sloc analyze ./my-repo --include-glob "src/**" --exclude-glob "vendor/**"
-
-# Git submodule breakdown
-oxide-sloc analyze ./mono-repo --submodule-breakdown -j result.json -H report.html
-
-# Re-render a report from saved JSON
-oxide-sloc report result.json -H report.html --pdf-out report.pdf -c report.csv -x report.xlsx
-
-# Compare two saved results
-oxide-sloc diff baseline.json current.json
-oxide-sloc diff baseline.json current.json -j delta.json -c delta.csv -x delta.xlsx
-
-# Generate a starter config
-oxide-sloc init                        # creates .oxide-sloc.toml
-oxide-sloc init ci/sloc.toml --force
-
-# Start the web UI
-oxide-sloc serve              # http://127.0.0.1:4317, auto-opens browser
-oxide-sloc serve --server     # binds to 0.0.0.0, no browser auto-open
-
-# Deliver a saved report
-oxide-sloc send result.json --smtp-to team@example.com --smtp-from bot@example.com --smtp-host smtp.example.com
-oxide-sloc send result.json --webhook-url https://hooks.example.com/sloc --webhook-token "$TOKEN"
+# Other commands
+oxide-sloc report result.json -H report.html --pdf-out report.pdf
+oxide-sloc diff baseline.json current.json -j delta.json
+oxide-sloc serve                                        # http://127.0.0.1:4317
+oxide-sloc init                                         # creates .oxide-sloc.toml
+oxide-sloc send result.json --smtp-to team@example.com --smtp-host smtp.example.com
 ```
 
-### CLI flags reference
-
-#### `analyze`
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--json-out` | `-j` | *(none)* | Write JSON result |
-| `--html-out` | `-H` | *(none)* | Write HTML report |
-| `--csv-out` | `-c` | *(none)* | Write CSV summary |
-| `--xlsx-out` | `-x` | *(none)* | Write Excel workbook (4 sheets) |
-| `--pdf-out` | | *(none)* | Write PDF (requires Chrome/Edge/Brave) |
-| `--open` | | off | Open HTML in system browser |
-| `--quiet` | `-q` | off | Suppress all non-error output |
-| `--plain` | | off | Machine-readable key=value output |
-| `--per-file` | | off | Per-file breakdown in terminal |
-| `--fail-on-warnings` | | off | Exit 2 if warnings are emitted |
-| `--fail-below` | | *(none)* | Exit 3 if code lines fall below N |
-| `--mixed-line-policy` | | `code-only` | `code-only` \| `code-and-comment` \| `comment-only` \| `separate-mixed-category` |
-| `--python-docstrings-as-code` | | off | Treat docstrings as code |
-| `--continuation-line-policy` | | `each-physical-line` | `each-physical-line` \| `collapse-to-logical` — IEEE 1045-1992 §3 |
-| `--blank-in-block-comment-policy` | | `count-as-comment` | `count-as-comment` \| `count-as-blank` — IEEE 1045-1992 §4 |
-| `--no-count-compiler-directives` | | off | Exclude `#include`/`#define` from code SLOC — IEEE 1045-1992 §4.2 (C/C++/ObjC only) |
-| `--include-glob` | | *(all)* | Only scan matching files (repeatable) |
-| `--exclude-glob` | | *(none)* | Skip matching files (repeatable) |
-| `--enabled-language` | | *(all)* | Restrict to language (repeatable) |
-| `--no-ignore-files` | | off | Ignore `.gitignore` / `.ignore` |
-| `--follow-symlinks` | | off | Follow symbolic links |
-| `--report-title` | | folder name | Title in HTML/PDF/XLSX reports |
-| `--submodule-breakdown` | | off | Per-submodule stats from `.gitmodules` |
-| `--config` | | *(none)* | Load settings from TOML file |
-
-#### `report` / `diff` / `init` / `serve` / `send`
-
-Run `oxide-sloc <command> --help` for the full flag list of each subcommand.
+Run `oxide-sloc <command> --help` for the full flag list.
 
 ### Web UI
 
@@ -276,251 +113,25 @@ Run `oxide-sloc <command> --help` for the full flag list of each subcommand.
 oxide-sloc serve   # → http://127.0.0.1:4317
 ```
 
-A guided 4-step flow: select project → counting rules → outputs → review & run. The **Quick Scan** sidebar button submits from step 1 with all defaults.
+A guided 4-step flow: select project → counting rules → outputs → review & run. **Quick Scan** submits from step 1 with all defaults.
 
-| | |
-|---|---|
-| ![Choose scan — start new, load config, or re-scan a recent project](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/choose-scan.png) | ![Scan setup step 1 — select project path and preview scope](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/scan-setup-1.png) |
+Additional pages: **Test Metrics** (`/test-metrics`), **Trend Reports** (`/trend-reports`), **Compare Scans** (`/compare-scans`).
 
-![Review and run — full summary of what will be scanned, counted, and exported before launch](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/scan-setup-confirm.png)
-
-Additional pages:
-- **Test Metrics** (`/test-metrics`) — four-chip summary (density, most-tested language, languages with tests, line coverage %); per-language test detection counts, test-to-code density, and animated coverage gauges loaded from LCOV, Cobertura XML, JaCoCo XML, or Istanbul/NYC JSON
-- **Trend Reports** (`/trend-reports`) — historical SLOC and test-count trajectory with commit annotation
-- **Compare Scans** (`/compare-scans`) — side-by-side diff of any two saved results with four chart types
-
-![View Reports — full scan history with branch, commit, and submodule breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png)
-
-Every web UI option maps 1:1 to a CLI flag — see the [Web UI → CLI translation](#web-ui--cli-translation) table below.
-
-### Configuration file
+### Configuration
 
 ```bash
-cp examples/sloc.example.toml sloc.toml
-oxide-sloc init    # or generate one with the CLI
+oxide-sloc init    # generates .oxide-sloc.toml with all options documented inline
 ```
 
-CLI flags always override config file values.
+IEEE 1045-1992 counting parameters — `mixed_line_policy`, `continuation_line_policy`, `blank_in_block_comment_policy`, `count_compiler_directives` — are configurable via TOML or CLI flags. CLI flags always override config file values.
 
 ---
 
-## Scan history and delta tracking
+## Supported Languages (41)
 
-Every web UI scan is recorded in `out/web/registry.json`. Re-running the same project path shows an inline delta. Navigate to `/history` to browse past scans, or `/compare?a=<run_id>&b=<run_id>` for a side-by-side diff with four chart types.
+Assembly, C, C++, C#, Clojure, CSS, Dart, Dockerfile, Elixir, Erlang, F#, Go, Groovy, Haskell, HTML, Java, JavaScript, Julia, Kotlin, Lua, Makefile, Nim, Objective-C, OCaml, Perl, PHP, PowerShell, Python, R, Ruby, Rust, Scala, SCSS/Sass, Shell, SQL, Svelte, Swift, TypeScript, Vue, XML/SVG, Zig.
 
-### Comparison metrics
-
-Five metrics are surfaced at the project level and per-language:
-
-| Metric | What it measures |
-|---|---|
-| **SLOC** | Effective source lines of code after policy application — the primary size signal |
-| **Added** | Lines present in the new scan that did not exist in the baseline |
-| **Removed** | Lines present in the baseline that are gone in the new scan |
-| **Modified** | Lines that changed in files present in both scans (content diff, not just count) |
-| **Unmodified** | Lines carried over from the baseline with no change |
-
-These satisfy the identity `SLOC (new) = Unmodified + Modified + Added`.
-
-![Compare delta — baseline vs current with SLOC charts and per-language breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/compare-delta.png)
-
-```bash
-oxide-sloc diff baseline.json current.json
-oxide-sloc diff baseline.json current.json -j delta.json -c delta.csv -x delta.xlsx
-```
-
----
-
-## Symbol counting
-
-Best-effort lexical detection of `functions`, `classes`, `variables`, and `imports` per file, surfaced in the JSON output and HTML report. Supported languages: C, C++, C#, Go, Java, JavaScript, Rust, Shell, PowerShell, TypeScript.
-
----
-
-## Test Metrics
-
-oxide-sloc lexically detects test definitions as part of every scan — no separate runner or coverage tool is required for basic counts. Navigate to `/test-metrics` in the web UI to see:
-
-![Test Metrics — per-language test counts, density, and optional coverage gauges](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/test-metrics.png)
-
-| Metric | What it measures |
-|---|---|
-| **Total tests** | Sum of detected test functions, test cases, and test decorators across all files |
-| **Test assertions** | Best-effort count of assertion call lines (`assert_eq!`, `ASSERT_EQ`, `assertEquals`, `Assert.AreEqual`, etc.) |
-| **Test suites** | Count of test suite / fixture / group declarations (`TEST_GROUP`, `[TestClass]`, `[TestFixture]`, `BOOST_AUTO_TEST_SUITE`, etc.) |
-| **Workspace density** | Tests per 1,000 code lines — a normalized measure of test thoroughness |
-| **Languages with tests** | Number of languages for which at least one test definition was found |
-| **Coverage (optional)** | Average line-hit percentage per language, loaded from LCOV (`.info`), Cobertura XML, JaCoCo XML, or Istanbul/NYC JSON — format is auto-detected |
-
-Test detection is lexical — it recognizes patterns such as `#[test]` (Rust), `def test_*` / `@pytest.mark` (Python), `@Test` (Java/Kotlin), `it(` / `describe(` (JavaScript/TypeScript), `func Test*` (Go), and equivalent patterns across all supported languages. No execution or instrumentation is required.
-
-To include coverage data, generate a report with your test runner and load it via the web UI or the `SLOC_COVERAGE_FILE` env var. oxide-sloc auto-detects the format from the file extension and content:
-
-| Format | Typical source | Extension |
-|---|---|---|
-| LCOV | `cargo llvm-cov --lcov`, `pytest --cov --cov-report lcov`, `jest --coverage` | `.info` |
-| Cobertura XML | `pytest --cov --cov-report xml`, Maven Cobertura plugin, PHP PHPUnit | `.xml` (`<coverage` header) |
-| JaCoCo XML | Gradle `jacocoTestReport`, Maven JaCoCo plugin | `.xml` (`<report` header) |
-| Istanbul/NYC JSON | `nyc --reporter=json-summary`, Jest with `json-summary` reporter | `.json` |
-
-The `/api/suggest-coverage` endpoint inspects your project root for build files (`Cargo.toml`, `pom.xml`, `build.gradle`, `package.json`, etc.) and returns the recommended generation command — the web UI shows this as a hint in the coverage file picker. Coverage is aggregated by language and displayed as animated gauge cards with line-hit percentage.
-
----
-
-## Counting methodology — IEEE 1045-1992
-
-oxide-sloc implements **physical SLOC** as defined in IEEE Std 1045-1992 *Software Productivity Metrics*. Every source line is classified into one of four categories before any policy is applied:
-
-| Category | What it contains |
-|---|---|
-| **Code** | Executable statements, declarations, and compiler directives |
-| **Comment** | Lines consisting solely of comment text |
-| **Mixed** | Lines that contain both code and a trailing comment |
-| **Blank** | Empty or whitespace-only lines |
-
-The standard defines several counting parameters as configurable. oxide-sloc exposes all of them via CLI flags and the TOML config file.
-
-### Mixed-line policy — `mixed_line_policy`
-
-Controls how lines that contain both code and a comment are counted toward the totals. Default: `code-only`.
-
-| Value | Behaviour |
-|---|---|
-| `code-only` *(default)* | Mixed lines count toward code only |
-| `code-and-comment` | Mixed lines are counted in both totals |
-| `comment-only` | Mixed lines count toward comments only |
-| `separate-mixed-category` | Mixed lines are kept in a separate total |
-
-### Continuation-line policy — `continuation_line_policy` (IEEE 1045-1992 §3)
-
-Controls how backslash-continued lines (C/C++ macros, shell, Makefile) are counted. Default: `each-physical-line`.
-
-| Value | Behaviour |
-|---|---|
-| `each-physical-line` *(default)* | Each physical line is counted separately (physical SLOC mode) |
-| `collapse-to-logical` | A backslash-continued sequence counts as a single logical line |
-
-### Blank lines inside block comments — `blank_in_block_comment_policy` (IEEE 1045-1992 §4)
-
-Controls how blank lines that fall inside `/* ... */` (or equivalent) comment blocks are classified. Default: `count-as-comment`, which is the IEEE-aligned behaviour.
-
-| Value | Behaviour |
-|---|---|
-| `count-as-comment` *(default, IEEE aligned)* | Blank lines inside block comments count as comment lines |
-| `count-as-blank` | Blank lines inside block comments remain blank lines |
-
-### Compiler directives — `count_compiler_directives` (IEEE 1045-1992 §4.2)
-
-Applies to **C, C++, and Objective-C** only. By default, preprocessor directive lines (`#include`, `#define`, `#ifdef`, `#pragma`, etc.) are counted as code lines. Set `count_compiler_directives = false` to exclude them from effective code SLOC — they are still recorded in the raw JSON output as `compiler_directive_lines` so nothing is lost.
-
-### TOML configuration
-
-All parameters are settable in `.oxide-sloc.toml` under `[analysis]`:
-
-```toml
-[analysis]
-mixed_line_policy            = "code-only"          # code-only | code-and-comment | comment-only | separate-mixed-category
-continuation_line_policy     = "each-physical-line"  # each-physical-line | collapse-to-logical
-blank_in_block_comment_policy = "count-as-comment"  # count-as-comment | count-as-blank
-count_compiler_directives    = true                 # false = exclude #include/#define from code SLOC (C/C++/ObjC)
-python_docstrings_as_comments = true                # false = treat docstrings as code
-```
-
-Run `oxide-sloc init` to generate a starter config with all options documented inline.
-
----
-
-## Supported languages (41)
-
-| Language | Extensions / Filenames | Comment styles |
-|---|---|---|
-| Assembly | `.asm`, `.s` | `;` |
-| C | `.c`, `.h` | `//` `/* */` |
-| C++ | `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hxx` | `//` `/* */` |
-| C# | `.cs` | `//` `/* */` verbatim strings |
-| Clojure | `.clj`, `.cljs`, `.cljc`, `.edn` | `;` |
-| CSS | `.css` | `/* */` |
-| Dart | `.dart` | `//` `/* */` |
-| Dockerfile | `Dockerfile`, `Dockerfile.*` | `#` |
-| Elixir | `.ex`, `.exs` | `#` |
-| Erlang | `.erl`, `.hrl` | `%` |
-| F# | `.fs`, `.fsi`, `.fsx` | `//` `(* *)` |
-| Go | `.go` | `//` `/* */` |
-| Groovy | `.groovy`, `.gradle` | `//` `/* */` |
-| Haskell | `.hs`, `.lhs` | `--` `{- -}` |
-| HTML | `.html`, `.htm`, `.xhtml` | `<!-- -->` |
-| Java | `.java` | `//` `/* */` |
-| JavaScript | `.js`, `.mjs`, `.cjs` | `//` `/* */` |
-| Julia | `.jl` | `#` `#= =#` |
-| Kotlin | `.kt`, `.kts` | `//` `/* */` |
-| Lua | `.lua` | `--` `--[[ ]]` |
-| Makefile | `Makefile`, `GNUmakefile`, `.mk` | `#` |
-| Nim | `.nim`, `.nims` | `#` `#[ ]#` |
-| Objective-C | `.m`, `.mm` | `//` `/* */` |
-| OCaml | `.ml`, `.mli` | `(* *)` |
-| Perl | `.pl`, `.pm`, `.t` | `#` |
-| PHP | `.php` | `//` `#` `/* */` |
-| PowerShell | `.ps1`, `.psm1`, `.psd1` | `#` `<# #>` |
-| Python | `.py` | `#` docstrings |
-| R | `.r` | `#` |
-| Ruby | `.rb`, `.rake`, `Rakefile`, `Gemfile` | `#` |
-| Rust | `.rs` | `//` `/* */` |
-| Scala | `.scala`, `.sc` | `//` `/* */` |
-| SCSS | `.scss`, `.sass` | `//` `/* */` |
-| Shell | `.sh`, `.bash`, `.zsh`, `.ksh` | `#` |
-| SQL | `.sql` | `--` `/* */` |
-| Svelte | `.svelte` | `//` `/* */` |
-| Swift | `.swift` | `//` `/* */` |
-| TypeScript | `.ts`, `.mts`, `.cts` | `//` `/* */` |
-| Vue | `.vue` | `//` `/* */` |
-| XML / SVG | `.xml`, `.xsd`, `.xsl`, `.svg` | `<!-- -->` |
-| Zig | `.zig` | `//` |
-
-> **Not supported (intentionally):** TOML, Markdown, YAML — no meaningful SLOC metric applies.
-> Shebang (`#!`) detection works for Python, Shell, Ruby, Perl, PHP, and Node.js scripts.
-
-### Adding a new language
-
-1. **`crates/sloc-languages/src/lib.rs`** — add a `Language` variant, implement `display_name`/`as_slug`/`from_name`, register extensions in `detect_language`, add a `ScanConfig` entry in `analyze_text`.
-2. No change needed in `sloc-config` — `enabled_languages` filtering picks up new variants automatically.
-
----
-
-## PDF export
-
-PDF generation uses a locally installed Chromium-based browser (Chrome, Edge, Brave, Vivaldi, or Opera). Generation runs in the background; the web UI returns results immediately.
-
-![PDF report — code metrics with file table, symbol counts, and code style analysis](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/pdf-scan.png)
-
-```bash
-export SLOC_BROWSER=/usr/bin/chromium   # override browser path
-oxide-sloc report result.json --pdf-out result.pdf
-```
-
-In Docker, Chromium is bundled — no extra setup needed.
-
----
-
-## CSV and Excel export
-
-**Web UI:** Every analysis run automatically generates `report.csv` and `report.xlsx` alongside the HTML and JSON artifacts. The **Export CSV** and **Export Excel** buttons in the HTML report nav bar serve the pre-generated files directly — no on-the-fly generation. The server-side artifacts are also accessible via:
-
-```
-GET /runs/csv/<run_id>
-GET /runs/xlsx/<run_id>
-```
-
-These endpoints work in CI/CD pipelines that call the REST API to pull artifacts after a web-triggered scan.
-
-The Excel workbook has four sheets: Summary, By Language, Per File, and Skipped Files — compatible with Excel, LibreOffice, and Google Sheets.
-
-**CLI:** use `-c result.csv -x result.xlsx` on `analyze`, `report`, and `diff`.
-
-```bash
-oxide-sloc analyze ./my-repo -j result.json -H report.html -c report.csv -x report.xlsx
-oxide-sloc report result.json -c report.csv -x report.xlsx
-oxide-sloc diff baseline.json current.json -c delta.csv -x delta.xlsx
-```
+> TOML, Markdown, and YAML are intentionally not supported — no meaningful SLOC metric applies.
 
 ---
 
@@ -533,63 +144,28 @@ oxide-sloc diff baseline.json current.json -c delta.csv -x delta.xlsx
 | `GET /api/project-history?path=<dir>` | Scan history for a project root |
 | `GET /badge/:metric` | SVG badge (`code-lines`, `files`, `comment-lines`, `blank-lines`) |
 | `GET /embed/summary` | Embeddable HTML widget |
-| `GET /test-metrics` | Test detection and coverage dashboard (web UI) |
-| `GET /api/suggest-coverage?path=<dir>` | Infer coverage file path and generation command for a project root |
 | `GET /healthz` | Health check |
+
+Full OpenAPI 3.1 spec: `GET /api/openapi.yaml` or [`docs/openapi.yaml`](./docs/openapi.yaml).
 
 ```markdown
 ![Code Lines](http://your-host:4317/badge/code-lines)
-```
-
-```html
-<iframe src="http://your-host:4317/embed/summary" width="100%" height="180" frameborder="0"></iframe>
 ```
 
 ---
 
 ## CI/CD
 
-### Web UI → CLI translation
-
-| Web UI | CLI equivalent |
-|---|---|
-| Step 1: select project | `oxide-sloc analyze ./my-repo` |
-| Step 1: include / exclude pattern | `--include-glob` / `--exclude-glob` |
-| Step 1: submodule breakdown | `--submodule-breakdown` |
-| Quick Scan | `oxide-sloc analyze ./my-repo --plain` |
-| Step 2: mixed-line policy | `--mixed-line-policy code-only` |
-| Step 2: Python docstrings as code | `--python-docstrings-as-code` |
-| *(config / CLI only)* | `--continuation-line-policy collapse-to-logical` |
-| *(config / CLI only)* | `--blank-in-block-comment-policy count-as-blank` |
-| *(config / CLI only)* | `--no-count-compiler-directives` |
-| Step 3: outputs | `-j` `-H` `--pdf-out` `-c` `-x` `--open` |
-| Step 3: custom title | `--report-title "My Report"` |
-| Re-render from saved JSON | `oxide-sloc report result.json -H report.html` |
-| Compare two scans | `oxide-sloc diff baseline.json current.json` |
-| Generate starter config | `oxide-sloc init` |
-| Quiet / fail guards | `--quiet` `--fail-on-warnings` `--fail-below N` |
-
-### CI config presets
-
-| File | Use case |
-|---|---|
-| `ci/sloc-ci-default.toml` | Balanced defaults |
-| `ci/sloc-ci-strict.toml` | Fail-fast on binary files |
-| `ci/sloc-ci-full-scope.toml` | Audit mode — counts vendor/lockfiles too |
-
-### Drop-in CI examples
-
 | Platform | File |
 |---|---|
-| GitHub Actions | `ci/sloc-github-action.yml` — copy to your repo's `.github/workflows/` |
-| GitHub Marketplace | `uses: NimaShafie/oxide-sloc@main` in any workflow (see [`action.yml`](./action.yml)) |
+| GitHub Actions | `ci/sloc-github-action.yml` — copy to `.github/workflows/` |
+| GitHub Marketplace | `uses: NimaShafie/oxide-sloc@main` (see [`action.yml`](./action.yml)) |
 | Jenkins | `examples/jenkins/Jenkinsfile` |
 | GitLab CI | `ci/sloc-gitlab.yml` — include via `include:` |
 | Bitbucket Pipelines | `examples/bitbucket/bitbucket-pipelines.yml` |
 | Azure Pipelines | `examples/azure/azure-pipelines.yml` |
-| CircleCI | `examples/circleci/config.yml` |
 
-**Marketplace action usage** (zero setup — downloads the binary automatically):
+**Marketplace action:**
 
 ```yaml
 - uses: NimaShafie/oxide-sloc@main
@@ -597,70 +173,37 @@ oxide-sloc diff baseline.json current.json -c delta.csv -x delta.xlsx
   with:
     path: .
     html-out: sloc-out/report.html
-
 - run: echo "Code lines ${{ steps.sloc.outputs.code-lines }}"
 ```
 
-### GitHub Actions (this repo's own workflows)
-
-| Workflow | Trigger | What it does |
-|---|---|---|
-| `ci.yml` | push to `main`, all PRs | fmt → clippy → build → tests → CLI smoke → web health check → coverage (main only) |
-| `release.yml` | `v*` tag | Cross-compile for 5 platforms → sign → SBOM → GitHub Release |
-| `docker.yml` | push to `main`, `v*` tag | Build and push Docker image to GHCR |
-| `update-dist.yml` | `v*` tag, manual | Build platform bundles (tar.gz, zip, RPM, DEB) and commit to `dist/` |
-| `docs.yml` | push to `main` (docs changed) | Build mdBook and deploy to GitHub Pages |
-
-All workflows run on Node 24.
-
-To cut a release:
-
-```bash
-git tag v1.1.0
-git push origin v1.1.0
-```
-
-### Jenkins / GitLab CI
-
-A `Jenkinsfile` and `.gitlab-ci.yml` are included at the repo root. On self-hosted or air-gapped runners, `vendor.tar.xz` is committed to the repository — a `git clone` is all that is needed. The pipeline decompresses and caches `vendor/` between runs automatically.
-
-`ci/artifact-push.sh` pushes JSON, HTML, and PDF scan artifacts to an external artifact repository after each build. Supported backends: JFrog Artifactory, Sonatype Nexus 3 & 2, AWS S3, MinIO, Azure Blob Storage, and any generic HTTP PUT endpoint. Configure via the `ARTIFACT_REPO_TYPE` / `ARTIFACT_REPO_URL` build parameters.
-
-For detailed setup including Confluence publishing and artifact repository integration, see [`docs/ci-integrations.md`](./docs/ci-integrations.md).
+For Jenkins/GitLab setup, Confluence publishing, and artifact repository integration, see [`docs/ci-integrations.md`](./docs/ci-integrations.md).
 
 ---
 
-## Local development
+## LAN Server
 
 ```bash
-# Run all CI gates before pushing
+bash scripts/serve-server.sh              # open, prints every LAN address
+bash scripts/serve-server.sh --with-auth  # generates a session key, requires login
+```
+
+See [`docs/server-deployment.md`](./docs/server-deployment.md) for persistent deployments, TLS, and firewall configuration.
+
+---
+
+## Development
+
+```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 cargo test --workspace
-
-# Run the web UI during development
-cargo run -p oxide-sloc -- serve
-
-# Fast rebuild (keeps vendored dep cache, ~1 min)
-cargo clean -p oxide-sloc -p sloc-config -p sloc-core -p sloc-languages -p sloc-report -p sloc-web \
-  && cargo run -p oxide-sloc -- serve
-```
-
-> **`scripts/run.sh` vs `cargo run`:** `scripts/run.sh` auto-installs on first run (extracts the pre-built binary on Windows, or builds from source on Linux), then launches the server. For active development when Rust is available, `cargo run -p oxide-sloc -- serve` is the shortest iteration loop. Use `bash scripts/run.sh --rebuild` to force a fresh install from `dist/` or source.
-
-**Make targets (Linux/macOS):**
-
-```bash
-make check        # fmt + lint + test
-make dev          # fmt + lint + test + serve
-make build        # release binary → target/release/oxide-sloc
-make docker-build # build Docker image locally
+cargo run -p oxide-sloc -- serve    # http://127.0.0.1:4317
 ```
 
 ---
 
-## Repository layout
+## Repository Layout
 
 ```
 crates/
@@ -668,93 +211,40 @@ crates/
   sloc-config/      # Config schema and TOML parsing
   sloc-core/        # File discovery, decoding, aggregation, delta engine
   sloc-languages/   # Language detection, lexical analyzers, symbol counting
-  sloc-report/      # HTML rendering, PDF export, CSV/Excel export
-  sloc-web/         # Axum web server, scan registry, metrics API, badge endpoint
-ci/                 # CI shell scripts (lint.sh, build.sh, test.sh, release.sh, artifact-push.sh) + config presets
-deploy/             # systemd unit + server config template
-dist/               # Windows pre-built binary (oxide-sloc-windows-x64.zip) — committed by CI after each release
-docs/
-  assets/           # Icons, logos (served at /images/* by the web UI)
-  airgap.md         # Offline and air-gapped deployment guide
-  ci-integrations.md
-  server-deployment.md
-examples/           # Runnable examples + sloc.example.toml config template
-scripts/            # run.sh, serve-server.sh  (user-facing entry points)
-scripts/internal/   # install.sh, airgap-build.sh, make-airgap-kit.sh, update-vendor.sh, install-hooks.sh
-tests/
-  fixtures/basic/   # Sample source files used by smoke tests
+  sloc-report/      # HTML rendering, PDF/CSV/Excel export
+  sloc-web/         # Axum web server, metrics API, badge endpoint
+ci/                 # CI scripts + config presets
+docs/               # airgap.md, ci-integrations.md, server-deployment.md, openapi.yaml
+dist/               # Windows pre-built binary (committed by CI after each release)
+examples/           # Runnable examples + sloc.example.toml
+scripts/            # run.sh, serve-server.sh (user-facing entry points)
 ```
 
 ---
 
 ## AI Integration
 
-oxide-sloc exposes its analysis capabilities to AI agents and external endpoints via three
-complementary integration paths:
-
-### MCP Server (`sloc-mcp`)
-
-The `sloc-mcp` binary implements the [Model Context Protocol](https://modelcontextprotocol.io)
-over stdio, making oxide-sloc directly callable as a tool from Claude Desktop, Claude Code,
-and any other MCP-compatible agent host. Build it with the rest of the workspace:
+The `sloc-mcp` binary implements the [Model Context Protocol](https://modelcontextprotocol.io), making oxide-sloc callable as a tool from Claude Desktop, Claude Code, and any MCP-compatible host.
 
 ```bash
 cargo build -p sloc-mcp
 ```
 
-**Smithery / MCP registry**: the [`mcp.json`](./mcp.json) manifest in the repo root
-enables auto-discovery by [smithery.ai](https://smithery.ai) and other MCP registries.
-
-**Configure Claude Desktop** (`claude_desktop_config.json`):
+**Claude Code** (project `.mcp.json`):
 ```json
-{
-  "mcpServers": {
-    "oxide-sloc": {
-      "command": "sloc-mcp",
-      "env": { "SLOC_SERVER_URL": "http://127.0.0.1:4317" }
-    }
-  }
-}
+{ "mcpServers": { "oxide-sloc": { "command": "sloc-mcp" } } }
 ```
 
-**Configure Claude Code** (project `.mcp.json`):
-```json
-{
-  "mcpServers": {
-    "oxide-sloc": { "command": "sloc-mcp" }
-  }
-}
-```
+Available tools: `analyze_path` · `get_metrics_latest` · `get_metrics_history` · `get_run_metrics` · `compare_runs` · `health_check` · `ingest_result`
 
-Available tools: `analyze_path` · `get_metrics_latest` · `get_metrics_history` ·
-`get_run_metrics` · `compare_runs` · `health_check` · `ingest_result`
-
-### REST API + OpenAPI spec
-
-The live server exposes a machine-readable REST API. The full OpenAPI 3.1 spec is available
-at [`docs/openapi.yaml`](./docs/openapi.yaml) and served live at:
-
-```
-GET http://127.0.0.1:4317/api/openapi.yaml
-```
-
-### Drop-in tool definitions
-
-Pre-built JSON schemas for embedding in agent prompts without an MCP host:
-
-| File | Format |
-|---|---|
-| [`docs/mcp/tool-definitions.json`](./docs/mcp/tool-definitions.json) | Claude API `tool_use` array |
-| [`docs/mcp/function-definitions.json`](./docs/mcp/function-definitions.json) | OpenAI `function_calling` array |
+Pre-built tool definitions for Claude API (`tool_use`) and OpenAI (`function_calling`): [`docs/mcp/`](./docs/mcp/).
 
 ---
 
 ## License
 
-**oxide-sloc** is licensed under [AGPL-3.0-or-later](./LICENSE).
-Copyright (C) 2026 Nima Shafie. All intellectual property rights vest solely in the author.
-
-Commercial support, hosted services, and proprietary add-ons are available through separate arrangements. See [`docs/licensing-commercial.md`](./docs/licensing-commercial.md).
+**oxide-sloc** is licensed under [AGPL-3.0-or-later](./LICENSE).  
+Copyright (C) 2026 Nima Shafie.
 
 ---
 

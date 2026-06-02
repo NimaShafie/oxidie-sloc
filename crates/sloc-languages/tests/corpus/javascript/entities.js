@@ -15,10 +15,12 @@ const divide = (a, b) => a / b;
 
 describe('Calculator', () => {
     it('should add', () => {
-        expect(1 + 1).toBe(2);
+        expect(new Calculator().add(1, 1)).toBe(2);
     });
 
     test('should multiply', () => {
+        foo();
+        divide(2, 3);
         expect(multiply(2, 3)).toBe(6);
     });
 });
