@@ -2159,6 +2159,8 @@ dependencies = [
  "anyhow",
  "clap",
  "serde",
+ "serde_json",
+ "tempfile",
  "toml",
 ]
 
@@ -2175,6 +2177,7 @@ dependencies = [
  "serde_json",
  "sloc-config",
  "sloc-languages",
+ "tempfile",
  "tracing",
  "uuid",
 ]
@@ -2226,7 +2229,10 @@ dependencies = [
  "headless_chrome",
  "printpdf",
  "serde_json",
+ "sloc-config",
  "sloc-core",
+ "sloc-languages",
+ "tempfile",
 ]
 
 [[package]]

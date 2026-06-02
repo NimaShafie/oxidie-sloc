@@ -202,6 +202,37 @@ fn empty_file_all_languages() {
         Language::Shell,
         Language::PowerShell,
         Language::TypeScript,
+        // Extended languages
+        Language::Assembly,
+        Language::Clojure,
+        Language::Css,
+        Language::Dart,
+        Language::Dockerfile,
+        Language::Elixir,
+        Language::Erlang,
+        Language::FSharp,
+        Language::Groovy,
+        Language::Haskell,
+        Language::Html,
+        Language::Julia,
+        Language::Kotlin,
+        Language::Lua,
+        Language::Makefile,
+        Language::Nim,
+        Language::ObjectiveC,
+        Language::Ocaml,
+        Language::Perl,
+        Language::Php,
+        Language::R,
+        Language::Ruby,
+        Language::Scala,
+        Language::Scss,
+        Language::Sql,
+        Language::Svelte,
+        Language::Swift,
+        Language::Vue,
+        Language::Xml,
+        Language::Zig,
     ] {
         let result = analyze_text(lang, "", AnalysisOptions::default());
         assert_eq!(
@@ -211,4 +242,342 @@ fn empty_file_all_languages() {
             lang.display_name()
         );
     }
+}
+
+// ─── Basic corpus: extended languages ────────────────────────────────────────
+
+#[test]
+fn assembly_basic() {
+    let text = corpus("assembly/basic.asm");
+    let r = &analyze_text(Language::Assembly, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1, "should detect code lines");
+    assert!(r.single_comment_only_lines >= 1, "should detect ; comments");
+}
+
+#[test]
+fn clojure_basic() {
+    let text = corpus("clojure/basic.clj");
+    let r = &analyze_text(Language::Clojure, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.single_comment_only_lines >= 1,
+        "should detect ;; comments"
+    );
+}
+
+#[test]
+fn css_basic() {
+    let text = corpus("css/basic.css");
+    let r = &analyze_text(Language::Css, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.multi_comment_only_lines >= 1,
+        "should detect /* */ block comments"
+    );
+}
+
+#[test]
+fn dart_basic() {
+    let text = corpus("dart/basic.dart");
+    let r = &analyze_text(Language::Dart, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn dockerfile_basic() {
+    let text = corpus("dockerfile/basic.dockerfile");
+    let r = &analyze_text(Language::Dockerfile, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1, "should detect # comments");
+}
+
+#[test]
+fn elixir_basic() {
+    let text = corpus("elixir/basic.ex");
+    let r = &analyze_text(Language::Elixir, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn erlang_basic() {
+    let text = corpus("erlang/basic.erl");
+    let r = &analyze_text(Language::Erlang, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1, "should detect % comments");
+}
+
+#[test]
+fn fsharp_basic() {
+    let text = corpus("fsharp/basic.fs");
+    let r = &analyze_text(Language::FSharp, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn groovy_basic() {
+    let text = corpus("groovy/basic.groovy");
+    let r = &analyze_text(Language::Groovy, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn haskell_basic() {
+    let text = corpus("haskell/basic.hs");
+    let r = &analyze_text(Language::Haskell, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.single_comment_only_lines >= 1,
+        "should detect -- comments"
+    );
+}
+
+#[test]
+fn html_basic() {
+    let text = corpus("html/basic.html");
+    let r = &analyze_text(Language::Html, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.multi_comment_only_lines >= 1,
+        "should detect <!-- --> comments"
+    );
+}
+
+#[test]
+fn julia_basic() {
+    let text = corpus("julia/basic.jl");
+    let r = &analyze_text(Language::Julia, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn kotlin_basic() {
+    let text = corpus("kotlin/basic.kt");
+    let r = &analyze_text(Language::Kotlin, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn lua_basic() {
+    let text = corpus("lua/basic.lua");
+    let r = &analyze_text(Language::Lua, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.single_comment_only_lines >= 1,
+        "should detect -- comments"
+    );
+}
+
+#[test]
+fn makefile_basic() {
+    let text = corpus("makefile/basic.mk");
+    let r = &analyze_text(Language::Makefile, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1, "should detect # comments");
+}
+
+#[test]
+fn nim_basic() {
+    let text = corpus("nim/basic.nim");
+    let r = &analyze_text(Language::Nim, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn objectivec_basic() {
+    let text = corpus("objectivec/basic.m");
+    let r = &analyze_text(Language::ObjectiveC, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn ocaml_basic() {
+    let text = corpus("ocaml/basic.ml");
+    let r = &analyze_text(Language::Ocaml, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.multi_comment_only_lines >= 1,
+        "should detect (* *) block comments"
+    );
+}
+
+#[test]
+fn perl_basic() {
+    let text = corpus("perl/basic.pl");
+    let r = &analyze_text(Language::Perl, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn php_basic() {
+    let text = corpus("php/basic.php");
+    let r = &analyze_text(Language::Php, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn r_basic() {
+    let text = corpus("r/basic.r");
+    let r = &analyze_text(Language::R, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn ruby_basic() {
+    let text = corpus("ruby/basic.rb");
+    let r = &analyze_text(Language::Ruby, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn scala_basic() {
+    let text = corpus("scala/basic.scala");
+    let r = &analyze_text(Language::Scala, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn scss_basic() {
+    let text = corpus("scss/basic.scss");
+    let r = &analyze_text(Language::Scss, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+}
+
+#[test]
+fn sql_basic() {
+    let text = corpus("sql/basic.sql");
+    let r = &analyze_text(Language::Sql, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.single_comment_only_lines >= 1,
+        "should detect -- comments"
+    );
+}
+
+#[test]
+fn svelte_basic() {
+    let text = corpus("svelte/basic.svelte");
+    let r = &analyze_text(Language::Svelte, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+}
+
+#[test]
+fn swift_basic() {
+    let text = corpus("swift/basic.swift");
+    let r = &analyze_text(Language::Swift, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn vue_basic() {
+    let text = corpus("vue/basic.vue");
+    let r = &analyze_text(Language::Vue, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+}
+
+#[test]
+fn xml_basic() {
+    let text = corpus("xml/basic.xml");
+    let r = &analyze_text(Language::Xml, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(
+        r.multi_comment_only_lines >= 1,
+        "should detect <!-- --> comments"
+    );
+}
+
+#[test]
+fn zig_basic() {
+    let text = corpus("zig/basic.zig");
+    let r = &analyze_text(Language::Zig, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn cpp_basic() {
+    let text = corpus("cpp/basic.cpp");
+    let r = &analyze_text(Language::Cpp, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn csharp_basic() {
+    let text = corpus("csharp/basic.cs");
+    let r = &analyze_text(Language::CSharp, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn java_basic() {
+    let text = corpus("java/basic.java");
+    let r = &analyze_text(Language::Java, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn shell_basic() {
+    let text = corpus("shell/basic.sh");
+    let r = &analyze_text(Language::Shell, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
+}
+
+#[test]
+fn powershell_basic() {
+    let text = corpus("powershell/basic.ps1");
+    let r = &analyze_text(Language::PowerShell, &text, AnalysisOptions::default()).raw;
+    assert!(r.total_physical_lines >= 3);
+    assert!(r.code_only_lines >= 1);
+    assert!(r.single_comment_only_lines >= 1);
 }

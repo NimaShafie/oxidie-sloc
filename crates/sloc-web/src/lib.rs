@@ -13058,9 +13058,34 @@ struct SubmoduleRow {
     body.dark-theme .toast-success{background:rgba(26,143,71,0.12);border-color:rgba(163,217,177,0.3);color:#6fcf97;}
     .toast-error{display:flex;align-items:center;gap:10px;background:#fde8e8;border:1px solid #f5a3a3;border-radius:10px;padding:10px 16px;font-size:13px;color:#7a1a1a;font-weight:600;}
     body.dark-theme .toast-error{background:rgba(180,30,30,0.12);border-color:rgba(245,163,163,0.3);color:#f08080;}
+    #offline-file-banner{display:none;position:sticky;top:0;z-index:9999;background:#fff8e1;border-bottom:2px solid #f0b429;padding:10px 20px;font-size:13px;font-weight:600;color:#7a5000;align-items:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,0.12);}
+    #offline-file-banner.show{display:flex;}
+    #offline-file-banner svg{flex-shrink:0;width:20px;height:20px;stroke:#f0b429;fill:none;stroke-width:2;}
+    #offline-file-banner .ofb-text{flex:1;}
+    #offline-file-banner .ofb-text a{color:#b35c00;font-weight:700;text-decoration:underline;}
+    #offline-file-banner .ofb-code{background:rgba(0,0,0,0.08);padding:1px 5px;border-radius:4px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+    #offline-file-banner .ofb-dismiss{margin-left:auto;background:none;border:1px solid #d4950a;border-radius:6px;color:#7a5000;font-size:12px;font-weight:700;padding:3px 10px;cursor:pointer;white-space:nowrap;}
+    #offline-file-banner .ofb-dismiss:hover{background:#feefc3;}
+    body.dark-theme #offline-file-banner{background:#2d2200;border-bottom-color:#c98a00;color:#e8c96a;}
+    body.dark-theme #offline-file-banner svg{stroke:#c98a00;}
+    body.dark-theme #offline-file-banner .ofb-text a{color:#f0c040;}
+    body.dark-theme #offline-file-banner .ofb-code{background:rgba(255,255,255,0.08);}
+    body.dark-theme #offline-file-banner .ofb-dismiss{border-color:#9a6a00;color:#e8c96a;}
+    body.dark-theme #offline-file-banner .ofb-dismiss:hover{background:rgba(240,180,0,0.12);}
   </style>
 </head>
 <body id="page-top">
+  <div id="offline-file-banner" role="alert">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <span class="ofb-text">
+      Charts, images, and navigation require the oxide-sloc server.
+      Start it with <span class="ofb-code">cargo run -p oxide-sloc</span> or <span class="ofb-code">bash run.sh</span>,
+      then open this run at <a href="http://127.0.0.1:4317" target="_blank" rel="noopener">http://127.0.0.1:4317</a>.
+      The metric tables below are fully readable without the server.
+    </span>
+    <button class="ofb-dismiss" id="ofb-dismiss-btn" type="button">Dismiss</button>
+  </div>
+  <script>(function(){if(location.protocol==='file:'){var b=document.getElementById('offline-file-banner');if(b)b.classList.add('show');var d=document.getElementById('ofb-dismiss-btn');if(d)d.addEventListener('click',function(){b.classList.remove('show');});}})();</script>
   <div class="background-watermarks" aria-hidden="true">
     <img src="/images/logo/logo-text.png" alt="" />
     <img src="/images/logo/logo-text.png" alt="" />
@@ -18493,20 +18518,24 @@ struct ScanSetupTemplate {
         var totCm=D.reduce(function(a,d){return a+(d.comments||0);},0);
         var totBl=D.reduce(function(a,d){return a+(d.blanks||0);},0);
         var totAll=totC+totCm+totBl||1;
-        bs+='<g data-kind="code" data-ttl="Code lines" data-ttv="'+fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)" style="cursor:pointer;">'
-          +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"/>'
-          +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/>'
-          +'<text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
+        function legTT(lbl,val){return ' data-ttl="'+lbl+'" data-ttv="'+val.replace(/"/g,'&quot;')+'"';}
+        var ttC=legTT('Code lines',fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)');
+        var ttCm=legTT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
+        var ttBl=legTT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
+        bs+='<g data-kind="code" style="cursor:pointer;">'
+          +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/>'
+          +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC+'/>'
+          +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
           +'</g>';
-        bs+='<g data-kind="comment" data-ttl="Comment lines" data-ttv="'+fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)" style="cursor:pointer;">'
-          +'<rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"/>'
-          +'<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/>'
-          +'<text x="'+(LW+67)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
+        bs+='<g data-kind="comment" style="cursor:pointer;">'
+          +'<rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/>'
+          +'<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
+          +'<text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
-        bs+='<g data-kind="blank" data-ttl="Blank lines" data-ttv="'+fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)" style="cursor:pointer;">'
-          +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"/>'
-          +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/>'
-          +'<text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+        bs+='<g data-kind="blank" style="cursor:pointer;">'
+          +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -18622,20 +18651,24 @@ struct ScanSetupTemplate {
             });
           }
           var ly=SH-legendH+4;
-          s+='<g data-kind="code" data-ttl="Code lines" data-ttv="'+fmt(totC2)+' total ('+Math.round(totC2/totAll2*100)+'%)" style="cursor:pointer;">'
-            +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"/>'
-            +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/>'
-            +'<text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>'
+          function legTT2(lbl,val){return ' data-ttl="'+lbl+'" data-ttv="'+val.replace(/"/g,'&quot;')+'"';}
+          var ttC2=legTT2('Code lines',fmt(totC2)+' total ('+Math.round(totC2/totAll2*100)+'%)');
+          var ttCm2=legTT2('Comment lines',fmt(totCm2)+' total ('+Math.round(totCm2/totAll2*100)+'%)');
+          var ttBl2=legTT2('Blank lines',fmt(totBl2)+' total ('+Math.round(totBl2/totAll2*100)+'%)');
+          s+='<g data-kind="code" style="cursor:pointer;">'
+            +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC2+'/>'
+            +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC2+'/>'
+            +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>'
             +'</g>';
-          s+='<g data-kind="comment" data-ttl="Comment lines" data-ttv="'+fmt(totCm2)+' total ('+Math.round(totCm2/totAll2*100)+'%)" style="cursor:pointer;">'
-            +'<rect x="'+(LW+53)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"/>'
-            +'<rect x="'+(LW+53)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/>'
-            +'<text x="'+(LW+66)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
+          s+='<g data-kind="comment" style="cursor:pointer;">'
+            +'<rect x="'+(LW+53)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm2+'/>'
+            +'<rect x="'+(LW+53)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm2+'/>'
+            +'<text x="'+(LW+66)+'" y="'+(ly+9)+'"'+ttCm2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
             +'</g>';
-          s+='<g data-kind="blank" data-ttl="Blank lines" data-ttv="'+fmt(totBl2)+' total ('+Math.round(totBl2/totAll2*100)+'%)" style="cursor:pointer;">'
-            +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"/>'
-            +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/>'
-            +'<text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blank</text>'
+          s+='<g data-kind="blank" style="cursor:pointer;">'
+            +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
+            +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
+            +'<text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blank</text>'
             +'</g>';
           s+='</svg>';
           el.innerHTML=s;
@@ -20128,7 +20161,7 @@ struct ErrorTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{width:100%;max-width:1560px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    .page{width:100%;max-width:1404px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 20px;line-height:1.55;}
