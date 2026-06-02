@@ -2702,6 +2702,8 @@ async fn locate_report_handler(
             entry.json_path = Some(json_path);
             let _ = reg.save(&state.registry_path);
             drop(reg);
+            // Evict the stale in-memory cache so artifact_handler reads fresh from registry.
+            state.artifacts.lock().await.remove(&run_id);
             if want_json {
                 return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
                     .into_response();
@@ -2715,6 +2717,7 @@ async fn locate_report_handler(
                 reg.add_entry(entry);
                 let _ = reg.save(&state.registry_path);
                 drop(reg);
+                state.artifacts.lock().await.remove(&run_id);
                 if want_json {
                     return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
                         .into_response();
@@ -2739,6 +2742,7 @@ async fn locate_report_handler(
             entry.html_path = Some(html_path.clone());
             let _ = reg.save(&state.registry_path);
             drop(reg);
+            state.artifacts.lock().await.remove(&expected_run_id);
             if want_json {
                 return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
                     .into_response();
@@ -13651,15 +13655,6 @@ int main() { … }   ← code
                 </div>
               </div>
 
-              <div class="always-tracked-tip">
-                <div class="always-tracked-tip-icon">ℹ</div>
-                <div class="always-tracked-tip-body">
-                  <div class="field-help-title">Always tracked — not configurable &nbsp;·&nbsp; What these settings change</div>
-                  <h4>Comment and blank-line basics &amp; Lines on the boundary</h4>
-                  <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The settings on this page only affect lines that live on the boundary between code and comments — for example <code style="font-size:12px;">x = 1  # counter</code>, which contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
-                </div>
-              </div>
-
               <div class="subsection-bar">Code Style Analysis</div>
               <div class="scan-rules-grid">
                 <div class="preset-inline-row">
@@ -13676,23 +13671,6 @@ int main() { … }   ← code
                     <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_analysis_enabled = true   (default)
 # style_analysis_enabled = false  (skip, faster scan)
 # Disabling removes the Code Style section from the report.</div>
-                  </div>
-                </div>
-                <div class="preset-inline-row">
-                  <div class="toggle-card" style="margin:0;">
-                    <div class="field-help-title">Language scope</div>
-                    <h4 style="margin:6px 0 12px;font-size:16px;">Languages to style-analyse</h4>
-                    <select name="style_lang_scope" id="style_lang_scope">
-                      <option value="all" selected>All supported languages (default)</option>
-                      <option value="c_family">C / C++ / Objective-C only</option>
-                    </select>
-                  </div>
-                  <div class="explainer-card prominent" style="margin:0;">
-                    <div class="advanced-rule-description"><strong>Purpose:</strong> Limits style heuristics to a specific language family.<br /><strong>All languages</strong> — C/C++, Python, JS/TS, Java, Kotlin, Go, Rust, Ruby, C#, and more (default).<br /><strong>C / C++ / Objective-C only</strong> — faster; only the C-family files receive style scoring. All other files still appear in SLOC counts without a style score.</div>
-                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_lang_scope = "all"       (default)
-# style_lang_scope = "c_family"  (C/C++/ObjC only)
-# Families: C/C++, Python, JS/TS, Java/Kotlin,
-#   Go, Rust, Ruby, C#/F#, Groovy, Scala</div>
                   </div>
                 </div>
                 <div class="preset-inline-row">
@@ -13733,6 +13711,15 @@ int main() { … }   ← code
 # Low-scoring files get a red left-border in the
 # per-file style breakdown table.</div>
                   </div>
+                </div>
+              </div>
+
+              <div class="always-tracked-tip">
+                <div class="always-tracked-tip-icon">ℹ</div>
+                <div class="always-tracked-tip-body">
+                  <div class="field-help-title">Always tracked — not configurable &nbsp;·&nbsp; What these settings change</div>
+                  <h4>Comment and blank-line basics &amp; Lines on the boundary</h4>
+                  <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The settings on this page only affect lines that live on the boundary between code and comments — for example <code style="font-size:12px;">x = 1  # counter</code>, which contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
                 </div>
               </div>
 
@@ -18465,7 +18452,7 @@ struct ScanSetupTemplate {
             var xi1=cx+Ri*Math.cos(a2),yi1=cy+Ri*Math.sin(a2);
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
-            ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
+            ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
             ang+=sw;
           });
         }
@@ -18473,8 +18460,14 @@ struct ScanSetupTemplate {
         ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
         D.forEach(function(d,i){
           var ly=legYStart+i*legSpacing;
+          var pctL=Math.round(d.code/tot*100);
+          var ttL=String(d.lang).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+          var ttV=(fmt(d.code)+' code lines ('+pctL+'%)').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+          ds+='<g data-lang="'+esc(d.lang)+'" data-ttl="'+ttL+'" data-ttv="'+ttV+'" style="cursor:pointer;">';
+          ds+='<rect x="'+legX+'" y="'+(ly-2)+'" width="'+(DW-legX)+'" height="'+(legSpacing||14)+'" fill="transparent"/>';
           ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(COLS[i%COLS.length])+'"/>';
           ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(11,legSpacing-2)+'" fill="#43342d">'+esc(d.lang)+'</text>';
+          ds+='</g>';
         });
         ds+='</svg>';
 
@@ -18504,6 +18497,15 @@ struct ScanSetupTemplate {
           '<div class="r-lang-overview-cell"><p>Code Lines by Language</p>'+ds+'</div>'+
           '<div class="r-lang-overview-cell" style="flex:2 1 340px;"><p>Line Mix per Language</p>'+bs+'</div>'+
         '</div>';
+        function wireDonutLegend(svg){
+          if(!svg)return;
+          var paths=svg.querySelectorAll('path[data-lang]');
+          function hl(lang){for(var i=0;i<paths.length;i++){if(paths[i].getAttribute('data-lang')===lang){paths[i].style.filter='brightness(1.18) drop-shadow(0 2px 8px rgba(0,0,0,.25))';paths[i].style.transform='scale(1.05)';paths[i].style.opacity='1';}else{paths[i].style.opacity='0.32';paths[i].style.filter='none';paths[i].style.transform='none';}}}
+          function rst(){for(var i=0;i<paths.length;i++){paths[i].style.opacity='';paths[i].style.filter='';paths[i].style.transform='';}}
+          svg.addEventListener('mouseover',function(e){var t=e.target;while(t&&t!==svg){var l=t.getAttribute&&t.getAttribute('data-lang');if(l){hl(l);return;}t=t.parentNode;}});
+          svg.addEventListener('mouseout',function(e){if(e.relatedTarget&&svg.contains(e.relatedTarget))return;rst();});
+        }
+        wireDonutLegend(el.querySelector('svg'));
 
         // ── Language breakdown Full View expand ─────────────────────────────────
         var langOvBtn=document.getElementById('result-lang-overview-expand');
@@ -18530,6 +18532,11 @@ struct ScanSetupTemplate {
             var cells=wrap.querySelectorAll('.r-lang-overview-cell');
             if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;justify-content:center;';
             if(cells.length>1)cells[1].style.cssText='flex:1 1 0;max-width:none;';
+            wireDonutLegend(wrap.querySelector('svg'));
+            requestAnimationFrame(function(){
+              var ss=wrap.querySelectorAll('svg');
+              if(ss.length>=2){var bh=ss[1].getBoundingClientRect().height;if(bh>0){ss[0].style.cssText='display:block;height:'+bh+'px;width:auto;max-width:100%;';}}
+            });
           }
         });}
       })();
@@ -20067,7 +20074,7 @@ struct ErrorTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:1200px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    .page{max-width:1560px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 20px;line-height:1.55;}
@@ -20092,10 +20099,22 @@ struct ErrorTemplate {
     .success-inline{display:none;align-items:center;gap:10px;background:#e8faf0;border:1px solid #4caf80;border-radius:10px;padding:12px 16px;font-size:13px;color:#1a6b3c;margin-top:12px;}
     .success-inline.show{display:flex;}
     body.dark-theme .success-inline{background:#163927;border-color:#2d7a52;color:#8fe2a8;}
-    .struct-hint{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--surface);margin-top:20px;}
-    .struct-hint h3{margin:0 0 10px;font-size:13px;font-weight:800;color:var(--muted-2);text-transform:uppercase;letter-spacing:.06em;}
-    .struct-hint pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--text);line-height:1.7;white-space:pre;}
-    .struct-hint .hl{color:var(--oxide);font-weight:700;}
+    .folder-hint-shell{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--surface);margin-top:20px;}
+    .folder-hint-hdr{padding:11px 16px;background:linear-gradient(180deg,var(--surface-2),rgba(255,255,255,0.35));border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;font-size:12px;font-weight:800;color:var(--muted-2);text-transform:uppercase;letter-spacing:.07em;}
+    body.dark-theme .folder-hint-hdr{background:linear-gradient(180deg,var(--surface-2),rgba(0,0,0,0.12));}
+    .folder-hint-body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;}
+    .fh-row{display:flex;align-items:center;gap:6px;padding:7px 14px;border-bottom:1px solid rgba(0,0,0,0.04);}
+    .fh-row:nth-child(odd){background:rgba(255,255,255,0.25);}
+    body.dark-theme .fh-row:nth-child(odd){background:rgba(255,255,255,0.02);}
+    .fh-row:last-child{border-bottom:none;}
+    .fh-i1{padding-left:36px;}.fh-i2{padding-left:58px;}
+    .fh-dir{font-weight:800;color:var(--text);}
+    .fh-hl{color:var(--oxide);font-weight:700;}
+    .fh-muted{color:var(--muted);}
+    .fh-badge{margin-left:auto;font-size:11px;font-weight:700;color:var(--oxide);background:rgba(184,93,51,0.10);border:1px solid rgba(184,93,51,0.25);border-radius:6px;padding:2px 8px;white-space:nowrap;}
+    body.dark-theme .fh-badge{background:rgba(255,140,90,0.15);border-color:rgba(255,140,90,0.30);}
+    .fh-tog{color:var(--muted-2);font-size:13px;flex:0 0 14px;}
+    .fh-bul{color:var(--muted-2);font-size:8px;flex:0 0 14px;text-align:center;opacity:0.5;}
     .btn-row{margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
     .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 22px;border-radius:14px;border:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);cursor:pointer;}
     .btn-primary:disabled{opacity:0.4;cursor:not-allowed;box-shadow:none;}
@@ -20179,7 +20198,8 @@ struct ErrorTemplate {
       </div>
       <div class="locate-section">
         <h2>Locate Scan Output Folder</h2>
-        <p>Select the <strong>top-level scan output folder</strong> (the one named like <code>project_20260601-…</code> that contains the <code>html/</code>, <code>json/</code>, and <code>pdf/</code> subfolders). OxideSLOC will find the correct files inside automatically.</p>
+        <p>Select the <strong>top-level scan output folder</strong> (the one named like <code>project_20260601-…</code> that contains the <code>html/</code>, <code>json/</code>, and <code>pdf/</code> subfolders).</p>
+        <p>OxideSLOC will find the correct files inside automatically.</p>
         <div class="locate-row">
           <input type="text" id="locate-file-input"
                  placeholder="e.g. C:\Desktop\over-here\project_20260601-0029-…"
@@ -20204,17 +20224,50 @@ struct ErrorTemplate {
           <button type="button" id="locate-submit-btn" class="btn-primary" disabled>Restore Report</button>
           <a class="btn-secondary" href="/view-reports">View Reports</a>
         </div>
-        <div class="struct-hint">
-          <h3>Expected folder structure &mdash; select the top-level folder</h3>
-          <pre><span class="hl">&#9658; project_20260601-0029-…/</span>   &larr; <strong>select this</strong>
-    html/
-      <span class="hl">{{ expected_filename }}</span>
-    json/
-      result_*.json
-    pdf/
-      report_*.pdf
-    excel/
-      report_*.csv  report_*.xlsx</pre>
+        <div class="folder-hint-shell">
+          <div class="folder-hint-hdr">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            Expected Folder Structure &mdash; Select the Top-Level Folder
+          </div>
+          <div class="folder-hint-body">
+            <div class="fh-row">
+              <span class="fh-tog">&#9658;</span>
+              <span class="fh-dir">project_20260601-0029-&hellip;/</span>
+              <span class="fh-badge">&larr; select this</span>
+            </div>
+            <div class="fh-row fh-i1">
+              <span class="fh-tog">&#9658;</span>
+              <span class="fh-dir">html/</span>
+            </div>
+            <div class="fh-row fh-i2">
+              <span class="fh-bul">&#8226;</span>
+              <span class="fh-hl">{{ expected_filename }}</span>
+            </div>
+            <div class="fh-row fh-i1">
+              <span class="fh-tog">&#9658;</span>
+              <span class="fh-dir">json/</span>
+            </div>
+            <div class="fh-row fh-i2">
+              <span class="fh-bul">&#8226;</span>
+              <span class="fh-muted">result_*.json</span>
+            </div>
+            <div class="fh-row fh-i1">
+              <span class="fh-tog">&#9658;</span>
+              <span class="fh-dir">pdf/</span>
+            </div>
+            <div class="fh-row fh-i2">
+              <span class="fh-bul">&#8226;</span>
+              <span class="fh-muted">report_*.pdf</span>
+            </div>
+            <div class="fh-row fh-i1">
+              <span class="fh-tog">&#9658;</span>
+              <span class="fh-dir">excel/</span>
+            </div>
+            <div class="fh-row fh-i2">
+              <span class="fh-bul">&#8226;</span>
+              <span class="fh-muted">report_*.csv &nbsp; report_*.xlsx</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
