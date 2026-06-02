@@ -450,3 +450,221 @@ impl AppConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_hex_color ───────────────────────────────────────────────────
+
+    #[test]
+    fn hex_color_valid_six_digits() {
+        assert!(validate_hex_color("#3b82f6").is_ok());
+        assert!(validate_hex_color("#FFFFFF").is_ok());
+        assert!(validate_hex_color("#000000").is_ok());
+    }
+
+    #[test]
+    fn hex_color_valid_three_digits() {
+        assert!(validate_hex_color("#abc").is_ok());
+        assert!(validate_hex_color("#FFF").is_ok());
+    }
+
+    #[test]
+    fn hex_color_missing_hash_fails() {
+        assert!(validate_hex_color("3b82f6").is_err());
+    }
+
+    #[test]
+    fn hex_color_wrong_length_fails() {
+        assert!(validate_hex_color("#12345").is_err()); // 5 chars
+        assert!(validate_hex_color("#1234567").is_err()); // 7 chars
+    }
+
+    #[test]
+    fn hex_color_non_hex_chars_fails() {
+        assert!(validate_hex_color("#xyz123").is_err());
+        assert!(validate_hex_color("#gg0000").is_err());
+    }
+
+    #[test]
+    fn hex_color_empty_fails() {
+        assert!(validate_hex_color("").is_err());
+        assert!(validate_hex_color("#").is_err());
+    }
+
+    // ── AppConfig::default() validates ──────────────────────────────────────
+
+    #[test]
+    fn app_config_default_validates() {
+        let cfg = AppConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn app_config_zero_max_file_size_fails() {
+        let mut cfg = AppConfig::default();
+        cfg.discovery.max_file_size_bytes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn app_config_empty_bind_address_fails() {
+        let mut cfg = AppConfig::default();
+        cfg.web.bind_address = "   ".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn app_config_invalid_accent_color_fails() {
+        let mut cfg = AppConfig::default();
+        cfg.reporting.accent_color = Some("not-a-color".into());
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn app_config_valid_accent_color_passes() {
+        let mut cfg = AppConfig::default();
+        cfg.reporting.accent_color = Some("#3b82f6".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    // ── BudgetConfig ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn budget_config_is_empty_when_all_zero() {
+        let budget = BudgetConfig {
+            total_max: 0,
+            per_language: BTreeMap::new(),
+        };
+        assert!(budget.is_empty());
+    }
+
+    #[test]
+    fn budget_config_not_empty_when_total_set() {
+        let budget = BudgetConfig {
+            total_max: 10_000,
+            per_language: BTreeMap::new(),
+        };
+        assert!(!budget.is_empty());
+    }
+
+    #[test]
+    fn budget_config_validate_passes_with_positive_per_lang() {
+        let mut budget = BudgetConfig {
+            total_max: 0,
+            per_language: BTreeMap::new(),
+        };
+        budget.per_language.insert("rust".into(), 5_000);
+        assert!(budget.validate().is_ok());
+    }
+
+    #[test]
+    fn budget_config_validate_fails_zero_per_lang() {
+        let mut budget = BudgetConfig {
+            total_max: 0,
+            per_language: BTreeMap::new(),
+        };
+        budget.per_language.insert("rust".into(), 0);
+        assert!(budget.validate().is_err());
+    }
+
+    // ── load_from_file ────────────────────────────────────────────────────────
+
+    #[test]
+    fn load_from_file_minimal_toml_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sloc.toml");
+        std::fs::write(&path, "[discovery]\n").unwrap();
+        let cfg = AppConfig::load_from_file(&path).unwrap();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn load_from_file_missing_file_errors() {
+        let result = AppConfig::load_from_file(std::path::Path::new("/nonexistent/sloc.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_from_file_invalid_toml_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "this is not valid toml {{{{").unwrap();
+        let result = AppConfig::load_from_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_from_file_full_config_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.toml");
+        let toml = r#"
+[discovery]
+max_file_size_bytes = 5242880
+honor_ignore_files = true
+
+[analysis]
+mixed_line_policy = "code_only"
+
+[reporting]
+report_title = "My Report"
+
+[web]
+bind_address = "127.0.0.1:4317"
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let cfg = AppConfig::load_from_file(&path).unwrap();
+        assert_eq!(cfg.reporting.report_title, "My Report");
+        assert_eq!(cfg.web.bind_address, "127.0.0.1:4317");
+    }
+
+    // ── Enum serde round-trips ────────────────────────────────────────────────
+
+    #[test]
+    fn mixed_line_policy_serde_roundtrip() {
+        for variant in [
+            MixedLinePolicy::CodeOnly,
+            MixedLinePolicy::CodeAndComment,
+            MixedLinePolicy::CommentOnly,
+            MixedLinePolicy::SeparateMixedCategory,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: MixedLinePolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
+    fn binary_file_behavior_serde_roundtrip() {
+        for variant in [BinaryFileBehavior::Skip, BinaryFileBehavior::Fail] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: BinaryFileBehavior = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
+    fn continuation_line_policy_serde_roundtrip() {
+        for variant in [
+            ContinuationLinePolicy::EachPhysicalLine,
+            ContinuationLinePolicy::CollapseToLogical,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: ContinuationLinePolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
+    fn blank_in_block_comment_policy_serde_roundtrip() {
+        for variant in [
+            BlankInBlockCommentPolicy::CountAsComment,
+            BlankInBlockCommentPolicy::CountAsBlank,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: BlankInBlockCommentPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+}

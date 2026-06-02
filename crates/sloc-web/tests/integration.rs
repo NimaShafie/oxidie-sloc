@@ -1173,3 +1173,141 @@ async fn error_unprocessable_entity_returned_for_invalid_config() {
         "/import-config must not 5xx for borderline config, got {status}"
     );
 }
+
+// ── Additional route coverage ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn open_path_route_responds() {
+    // /open-path requires a native OS action; in test env it should not 5xx
+    let (status, _, _) = get("/open-path?path=.").await;
+    assert!(
+        status.as_u16() < 500,
+        "/open-path must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn pick_file_route_responds() {
+    // /pick-file opens a native file dialog; in headless test env returns 503 or 200
+    let (status, _, _) = get("/pick-file").await;
+    assert!(
+        status.as_u16() < 500,
+        "/pick-file must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn watched_dirs_add_missing_body_not_5xx() {
+    let (status, _, _) = post_form("/watched-dirs/add", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/watched-dirs/add must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn watched_dirs_remove_missing_body_not_5xx() {
+    let (status, _, _) = post_form("/watched-dirs/remove", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/watched-dirs/remove must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn watched_dirs_refresh_not_5xx() {
+    let (status, _, _) = post_form("/watched-dirs/refresh", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/watched-dirs/refresh must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_runs_not_5xx() {
+    let (status, _, _) = post_form("/api/runs/cleanup", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/runs/cleanup must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_run_on_unknown_id_not_5xx() {
+    let (status, _, _) =
+        post_form("/api/runs/00000000-0000-0000-0000-000000000000/cancel", "").await;
+    assert!(status.as_u16() < 500, "cancel must not 5xx, got {status}");
+}
+
+#[tokio::test]
+async fn relocate_scan_missing_body_not_5xx() {
+    let (status, _, _) = post_form("/relocate-scan", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/relocate-scan must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn locate_report_missing_body_not_5xx() {
+    let (status, _, _) = post_form("/locate-report", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/locate-report must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn locate_reports_dir_missing_body_not_5xx() {
+    let (status, _, _) = post_form("/locate-reports-dir", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "/locate-reports-dir must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_ingest_missing_body_returns_4xx() {
+    let (status, _, _) = post_json("/api/ingest", "{}").await;
+    // Missing required fields → 400 or 422; must not 5xx
+    assert!(
+        status.as_u16() < 500,
+        "/api/ingest must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn bundle_download_unknown_run_not_5xx() {
+    let (status, _, _) = get("/api/runs/00000000-0000-0000-0000-000000000000/bundle").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/runs/:id/bundle must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn scan_profiles_post_not_5xx() {
+    let (status, _, _) = post_json("/api/scan-profiles", r#"{"name":"test","config":{}}"#).await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/scan-profiles must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn git_scan_ref_missing_params_not_5xx() {
+    let (status, _, _) = get("/api/git/scan-ref").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/git/scan-ref must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn git_compare_refs_missing_params_not_5xx() {
+    let (status, _, _) = get("/api/git/compare-refs").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/git/compare-refs must not 5xx, got {status}"
+    );
+}

@@ -5019,20 +5019,24 @@ struct WarningOpportunityRow {
         var totCm=D.reduce(function(a,d){return a+(d.comments||0);},0);
         var totBl=D.reduce(function(a,d){return a+(d.blanks||0);},0);
         var totAll=totC+totCm+totBl||1;
-        bs+='<g data-kind="code" data-ttl="Code lines" data-ttv="'+fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)" style="cursor:pointer;">'
-          +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"/>'
-          +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/>'
-          +'<text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
+        function legTT(lbl,val){return ' data-ttl="'+lbl+'" data-ttv="'+val.replace(/"/g,'&quot;')+'"';}
+        var ttC=legTT('Code lines',fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)');
+        var ttCm=legTT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
+        var ttBl=legTT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
+        bs+='<g data-kind="code" style="cursor:pointer;">'
+          +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/>'
+          +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC+'/>'
+          +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
           +'</g>';
-        bs+='<g data-kind="comment" data-ttl="Comment lines" data-ttv="'+fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)" style="cursor:pointer;">'
-          +'<rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"/>'
-          +'<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"/>'
-          +'<text x="'+(LW+67)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
+        bs+='<g data-kind="comment" style="cursor:pointer;">'
+          +'<rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/>'
+          +'<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
+          +'<text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
-        bs+='<g data-kind="blank" data-ttl="Blank lines" data-ttv="'+fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)" style="cursor:pointer;">'
-          +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"/>'
-          +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"/>'
-          +'<text x="'+(LW+165)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+        bs+='<g data-kind="blank" style="cursor:pointer;">'
+          +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -5260,12 +5264,23 @@ struct WarningOpportunityRow {
                       ds.backgroundColor = i === idx ? cols[i] : cols[i] + '28';
                     });
                     chart.update('none');
+                    var tt = document.getElementById('r-tt');
+                    if (tt && e && e.native) {
+                      var totV = chart.data.datasets[idx].data.reduce(function(a,v){return a+(v||0);},0);
+                      var totAllV = chart.data.datasets.reduce(function(a,ds){return a+ds.data.reduce(function(b,v){return b+(v||0);},0);},0)||1;
+                      var pct = Math.round(totV/totAllV*100);
+                      tt.innerHTML = '<strong>'+chart.data.datasets[idx].label+'</strong><br>'+fmt(totV)+' total ('+pct+'%)';
+                      var nx=e.native.clientX+16, ny=e.native.clientY-12;
+                      if(nx+240>window.innerWidth-8) nx=e.native.clientX-240-8;
+                      tt.style.left=nx+'px'; tt.style.top=ny+'px'; tt.style.display='block';
+                    }
                   },
                   onLeave: function(e, item, leg) {
                     var chart = leg.chart;
                     var cols = [OX, GN, GY];
                     chart.data.datasets.forEach(function(ds, i) { ds.backgroundColor = cols[i]; });
                     chart.update('none');
+                    var tt = document.getElementById('r-tt'); if(tt) tt.style.display='none';
                   }
                 },
                 tooltip: {
@@ -5345,6 +5360,15 @@ struct WarningOpportunityRow {
                     ds.borderColor = i === idx ? base : base + '30';
                   });
                   chart.update('none');
+                  var tt = document.getElementById('r-tt');
+                  if (tt && e && e.native) {
+                    var d = SCAT_D[idx];
+                    tt.innerHTML = '<strong>' + item.text + '</strong><br>'
+                      + fmt(d.files) + ' files &nbsp;·&nbsp; ' + fmt(d.code) + ' code lines';
+                    var nx = e.native.clientX + 16, ny = e.native.clientY - 12;
+                    if (nx + 240 > window.innerWidth - 8) nx = e.native.clientX - 240 - 8;
+                    tt.style.left = nx + 'px'; tt.style.top = ny + 'px'; tt.style.display = 'block';
+                  }
                 },
                 onLeave: function(e, item, leg) {
                   var chart = leg.chart;
@@ -5354,6 +5378,7 @@ struct WarningOpportunityRow {
                     ds.borderColor = base;
                   });
                   chart.update('none');
+                  var tt = document.getElementById('r-tt'); if (tt) tt.style.display = 'none';
                 }
               },
               tooltip: {
