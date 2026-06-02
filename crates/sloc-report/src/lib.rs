@@ -3219,8 +3219,12 @@ struct WarningOpportunityRow {
     .r-lang-overview-cell { display:flex; flex-direction:column; align-items:center; gap:8px; flex:1 1 280px; max-width:480px; }
     .r-lang-overview-cell p { margin:0; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:var(--muted-2); text-align:center; }
     .r-lang-overview svg { display:block; max-width:100%; height:auto; }
-    .rchit { cursor:pointer; transition:opacity .17s,filter .17s; }
-    .rchit:hover { opacity:.75; filter:brightness(1.14); }
+    .rchit { cursor:pointer; transition:filter .17s,transform .17s; transform-box:fill-box; transform-origin:center center; }
+    .rchit:hover { filter:brightness(1.15) drop-shadow(0 2px 6px rgba(0,0,0,.18)); transform:scale(1.05); }
+    .lang-bar-row { cursor:pointer; transition:transform .2s cubic-bezier(.34,1.56,.64,1); }
+    .lang-bar-row:hover { transform:translateY(-2px); }
+    .lang-bar-row .rchit:hover { filter:none; transform:none; }
+    .lang-bar-row:hover .rchit { filter:brightness(1.12); transform:scaleY(1.22); }
     #r-tt { display:none; position:fixed; background:rgba(15,10,6,.95); color:#fff; border-radius:10px; padding:8px 13px; font-size:12px; line-height:1.5; pointer-events:none; z-index:10001; box-shadow:0 4px 20px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.1); max-width:240px; white-space:nowrap; }
     .chart-tab-bar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
     .chart-tab { padding:5px 16px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:700; cursor:pointer; transition:background 0.12s,color 0.12s,border-color 0.12s; }
@@ -4975,11 +4979,14 @@ struct WarningOpportunityRow {
           var y=6+i*rHb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+          bs+='<g class="lang-bar-row">';
+          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+bH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
           if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
           if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
           if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
           bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='</g>';
         });
         var ly=SH-14;
         bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
@@ -5899,8 +5906,8 @@ struct WarningOpportunityRow {
               var ov = wrap.querySelector('.r-lang-overview');
               if(ov){ov.style.flexWrap='nowrap';ov.style.alignItems='stretch';}
               var cells = wrap.querySelectorAll('.r-lang-overview-cell');
-              if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;';
-              if(cells.length>1)cells[1].style.cssText='flex:2 1 0;max-width:none;';
+              if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;justify-content:center;';
+              if(cells.length>1)cells[1].style.cssText='flex:1 1 0;max-width:none;';
             }
           });
         })();

@@ -68,8 +68,9 @@ static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
 static REPORT_CHART_JS: &[u8] = include_bytes!("../static/chart.min.js");
 
 use sloc_core::{
-    analyze, compute_delta, read_json, AnalysisRun, FileChangeStatus, RegistryEntry, ScanRegistry,
-    ScanSummarySnapshot, SummaryTotals, WatchedDirsStore,
+    analyze, compute_delta, read_json, AnalysisRun, CleanupPolicy, CleanupPolicyStore,
+    FileChangeStatus, RegistryEntry, ScanRegistry, ScanSummarySnapshot, SummaryTotals,
+    WatchedDirsStore,
 };
 use sloc_report::{
     render_html, render_html_with_delta, render_sub_report_html, write_pdf_from_html,
@@ -86,6 +87,7 @@ const MAX_CONCURRENT_ANALYSES: usize = 4;
 /// `SetForegroundWindow` + `FlashWindowEx` once it appears.
 #[cfg(target_os = "windows")]
 #[allow(clippy::upper_case_acronyms)]
+#[allow(dead_code)]
 mod win_dialog_focus {
     #[cfg(feature = "native-dialog")]
     use std::mem::size_of;
@@ -146,7 +148,24 @@ mod win_dialog_focus {
 
     #[link(name = "kernel32")]
     extern "system" {
+        #[cfg(feature = "native-dialog")]
         fn GetCurrentThreadId() -> DWORD;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        // Opens a folder (or file) via the Windows shell.  Passing the current
+        // foreground window as `hwnd` gives the new window proper activation
+        // context so it surfaces in the foreground without needing
+        // AttachThreadInput or SetForegroundWindow hacks.
+        fn ShellExecuteW(
+            hwnd: HWND,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> isize; // HINSTANCE (>32 = success)
     }
 
     /// Attaches our thread's input to the foreground window's thread so that
@@ -181,130 +200,88 @@ mod win_dialog_focus {
         }
     }
 
-    /// Opens `path` in Windows Explorer and forces the folder window to the
-    /// foreground.  Runs on a dedicated thread so the async handler returns
-    /// instantly.
-    ///
-    /// Polls every 80 ms (up to ~4 s) for a `CabinetWClass` window whose title
-    /// matches the folder name.  The thread-input attachment is done INSIDE the
-    /// loop, right before the focus calls, so it targets the CURRENT foreground
-    /// thread at that moment — not the thread that was foreground at spawn time,
-    /// which will have changed by the time Explorer creates its window.
+    /// Opens `path` in Windows Explorer and forces it to the foreground.
+    /// ShellExecuteW alone cannot guarantee foreground placement when the
+    /// caller is not the foreground process (the browser is).  After launching,
+    /// we poll for a new CabinetWClass window and call SwitchToThisWindow —
+    /// an undocumented API that bypasses Windows' foreground-lock restriction
+    /// so the window surfaces regardless of which process currently has focus.
     pub fn open_folder_foreground(path: std::path::PathBuf) {
         std::thread::spawn(move || {
-            let folder_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_owned();
-            let title_w: Vec<u16> = folder_name
-                .encode_utf16()
-                .chain(core::iter::once(0))
-                .collect();
-            let cls_w: Vec<u16> = "CabinetWClass"
-                .encode_utf16()
-                .chain(core::iter::once(0))
-                .collect();
+            use std::collections::HashSet;
+            use std::os::windows::ffi::OsStrExt;
 
-            // Snapshot all existing CabinetWClass HWNDs before spawning Explorer.
-            // Used as a fallback: when Windows 11 opens the folder as a new tab
-            // inside an existing Explorer window, the window title stays as the
-            // previous tab's name and the exact-title FindWindowW call returns
-            // NULL for the entire poll window.  Detecting a new HWND bypasses
-            // the title-match requirement entirely.
-            let mut existing: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let op: Vec<u16> = "explore\0".encode_utf16().collect();
+            let mut path_w: Vec<u16> = path.as_os_str().encode_wide().collect();
+            path_w.push(0);
+            let class_w: Vec<u16> = "CabinetWClass\0".encode_utf16().collect();
+
             unsafe {
-                let mut h = FindWindowExW(
-                    core::ptr::null_mut(),
-                    core::ptr::null_mut(),
-                    cls_w.as_ptr(),
-                    core::ptr::null(),
-                );
-                while !h.is_null() {
-                    existing.insert(h as usize);
-                    h = FindWindowExW(core::ptr::null_mut(), h, cls_w.as_ptr(), core::ptr::null());
+                // Snapshot every existing Explorer window before we launch so
+                // we can identify the newly created one.
+                let mut existing: HashSet<usize> = HashSet::new();
+                let mut prev: HWND = core::ptr::null_mut();
+                loop {
+                    let w = FindWindowExW(
+                        core::ptr::null_mut(),
+                        prev,
+                        class_w.as_ptr(),
+                        core::ptr::null(),
+                    );
+                    if w.is_null() {
+                        break;
+                    }
+                    existing.insert(w as usize);
+                    prev = w;
                 }
-            }
 
-            let _ = std::process::Command::new("explorer").arg(&path).spawn();
+                let fg_hwnd = GetForegroundWindow();
+                // SW_SHOWNORMAL = 1
+                ShellExecuteW(
+                    fg_hwnd,
+                    op.as_ptr(),
+                    path_w.as_ptr(),
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    1,
+                );
 
-            // SWP_NOMOVE | SWP_NOSIZE
-            const SWP_FLAGS: UINT = 0x0003;
-            #[allow(clippy::cast_sign_loss)]
-            let hwnd_topmost: HWND = usize::MAX as HWND; // (HWND)(-1) = HWND_TOPMOST
-            #[allow(clippy::cast_sign_loss)]
-            let hwnd_notopmost: HWND = (usize::MAX - 1) as HWND; // (HWND)(-2) = HWND_NOTOPMOST
-
-            for _ in 0..50 {
-                std::thread::sleep(std::time::Duration::from_millis(80));
-                unsafe {
-                    // Strategy 1: exact title match — works when Explorer is not
-                    // already running or when the new folder opens in its own window.
-                    let hwnd = FindWindowW(cls_w.as_ptr(), title_w.as_ptr());
-
-                    // Strategy 2: any CabinetWClass HWND that wasn't present in
-                    // the pre-spawn snapshot — covers a freshly-created Explorer
-                    // window whose title hasn't settled to the target folder yet.
-                    let hwnd = if !hwnd.is_null() {
-                        hwnd
-                    } else {
-                        let mut found: HWND = core::ptr::null_mut();
-                        let mut h = FindWindowExW(
+                // Poll up to ~3 s for a new CabinetWClass window to appear,
+                // then use SwitchToThisWindow (bypasses foreground-lock) to
+                // bring it in front of the browser and everything else.
+                for _ in 0..40 {
+                    std::thread::sleep(std::time::Duration::from_millis(75));
+                    let mut prev2: HWND = core::ptr::null_mut();
+                    loop {
+                        let w = FindWindowExW(
                             core::ptr::null_mut(),
-                            core::ptr::null_mut(),
-                            cls_w.as_ptr(),
+                            prev2,
+                            class_w.as_ptr(),
                             core::ptr::null(),
                         );
-                        while !h.is_null() {
-                            if !existing.contains(&(h as usize)) {
-                                found = h;
-                                break;
-                            }
-                            h = FindWindowExW(
-                                core::ptr::null_mut(),
-                                h,
-                                cls_w.as_ptr(),
-                                core::ptr::null(),
-                            );
+                        if w.is_null() {
+                            break;
                         }
-                        found
-                    };
-
-                    if hwnd.is_null() {
-                        continue;
+                        if !existing.contains(&(w as usize)) {
+                            // SW_RESTORE = 9 — same sequence as flash_dialog_when_ready
+                            ShowWindow(w, 9);
+                            SwitchToThisWindow(w, 1);
+                            SetForegroundWindow(w);
+                            BringWindowToTop(w);
+                            return;
+                        }
+                        prev2 = w;
                     }
+                }
 
-                    // Attach to the CURRENT foreground thread right now.
-                    // Explorer's window may take 100–500 ms to appear, and by
-                    // then the foreground thread is different from what it was
-                    // when this OS thread was spawned.  Re-reading it here is
-                    // what actually makes SetForegroundWindow succeed.
-                    let my_tid = GetCurrentThreadId();
-                    let cur_fg = GetForegroundWindow();
-                    let cur_fg_tid = if !cur_fg.is_null() {
-                        GetWindowThreadProcessId(cur_fg, core::ptr::null_mut())
-                    } else {
-                        0
-                    };
-                    let attached = cur_fg_tid != 0 && cur_fg_tid != my_tid;
-                    if attached {
-                        AttachThreadInput(my_tid, cur_fg_tid, 1);
-                    }
-
-                    ShowWindow(hwnd, 9); // SW_RESTORE
-                    SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, SWP_FLAGS);
-                    SetForegroundWindow(hwnd);
-                    BringWindowToTop(hwnd);
-                    SetWindowPos(hwnd, hwnd_notopmost, 0, 0, 0, 0, SWP_FLAGS);
-                    // SwitchToThisWindow bypasses the foreground lock that can
-                    // still block SetForegroundWindow from a non-foreground
-                    // process even after AttachThreadInput.
-                    SwitchToThisWindow(hwnd, 1);
-
-                    if attached {
-                        AttachThreadInput(my_tid, cur_fg_tid, 0);
-                    }
-                    break;
+                // Fallback: Explorer reused an existing window — bring whichever
+                // CabinetWClass window is first in Z-order to the front.
+                let w = FindWindowW(class_w.as_ptr(), core::ptr::null());
+                if !w.is_null() {
+                    ShowWindow(w, 9);
+                    SwitchToThisWindow(w, 1);
+                    SetForegroundWindow(w);
+                    BringWindowToTop(w);
                 }
             }
         });
@@ -608,6 +585,11 @@ pub(crate) struct AppState {
     /// Directories the user has pinned for auto-scanning of external reports.
     pub(crate) watched_dirs: Arc<Mutex<WatchedDirsStore>>,
     pub(crate) watched_dirs_path: PathBuf,
+    /// Persisted auto-cleanup policy (age/count limits + interval).
+    pub(crate) cleanup_policy: Arc<Mutex<CleanupPolicyStore>>,
+    pub(crate) cleanup_policy_path: PathBuf,
+    /// Handle for the running cleanup background task; replaced on policy change.
+    pub(crate) cleanup_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 type PendingPdf = Option<(PathBuf, PathBuf, bool)>;
@@ -736,6 +718,14 @@ fn build_router(state: AppState) -> Router {
             axum::routing::delete(delete_run_handler),
         )
         .route("/api/runs/cleanup", post(cleanup_runs_handler))
+        // ── Auto-cleanup policy ────────────────────────────────────────────────
+        .route(
+            "/api/cleanup-policy",
+            get(api_get_cleanup_policy)
+                .post(api_save_cleanup_policy)
+                .delete(api_delete_cleanup_policy),
+        )
+        .route("/api/cleanup-policy/run-now", post(api_run_cleanup_now))
         // ── REST API reference page ────────────────────────────────────────────
         .route("/api-docs", get(api_docs_handler))
         .route_layer(middleware::from_fn_with_state(
@@ -809,6 +799,9 @@ pub fn make_test_router() -> Router {
         confluence_path: tmp.join("confluence_config.json"),
         watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
         watched_dirs_path: tmp.join("watched_dirs.json"),
+        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
+        cleanup_policy_path: tmp.join("cleanup_policy.json"),
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
     };
     build_router(state)
 }
@@ -844,6 +837,9 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
         confluence_path: tmp.join("confluence_config.json"),
         watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
         watched_dirs_path: tmp.join("watched_dirs.json"),
+        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
+        cleanup_policy_path: tmp.join("cleanup_policy.json"),
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
     };
     build_router(state)
 }
@@ -998,6 +994,9 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let watched_dirs_path = std::env::var("SLOC_WATCHED_DIRS_PATH")
         .map_or_else(|_| output_root.join("watched_dirs.json"), PathBuf::from);
     let watched_dirs = WatchedDirsStore::load(&watched_dirs_path);
+    let cleanup_policy_path = std::env::var("SLOC_CLEANUP_POLICY_PATH")
+        .map_or_else(|_| output_root.join("cleanup_policy.json"), PathBuf::from);
+    let cleanup_policy = CleanupPolicyStore::load(&cleanup_policy_path);
 
     let state = AppState {
         base_config: config,
@@ -1022,9 +1021,27 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         confluence_path,
         watched_dirs: Arc::new(Mutex::new(watched_dirs)),
         watched_dirs_path,
+        cleanup_policy: Arc::new(Mutex::new(cleanup_policy)),
+        cleanup_policy_path,
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
     };
 
     restart_poll_schedules(&state).await;
+
+    // Restart auto-cleanup task if a policy was previously saved and is enabled.
+    {
+        let enabled = state
+            .cleanup_policy
+            .lock()
+            .await
+            .policy
+            .as_ref()
+            .is_some_and(|p| p.enabled);
+        if enabled {
+            let handle = spawn_cleanup_policy_task(state.clone());
+            *state.cleanup_task_handle.lock().await = Some(handle);
+        }
+    }
 
     let app = build_router(state.clone());
 
@@ -2377,6 +2394,8 @@ struct LocateReportForm {
     file_path: String,
     #[serde(default)]
     redirect_url: Option<String>,
+    #[serde(default)]
+    expected_run_id: Option<String>,
 }
 
 /// Render a view-reports error page and return it as a `Response`.
@@ -2569,103 +2588,181 @@ fn validate_locate_request(
     Ok((html_path, parent))
 }
 
-/// Return a non-sensitive path hint for error messages (empty in server mode).
-fn locate_path_hint(server_mode: bool, path: &Path) -> String {
-    if server_mode {
-        String::new()
-    } else {
-        format!("\n\nFile: {}", path.display())
-    }
-}
-
 async fn locate_report_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<LocateReportForm>,
 ) -> impl IntoResponse {
+    let want_json = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"));
+
+    macro_rules! err {
+        ($msg:expr) => {{
+            let msg: String = $msg;
+            if want_json {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    axum::Json(serde_json::json!({"ok": false, "message": msg})),
+                )
+                    .into_response();
+            }
+            return locate_report_error(msg, &csp_nonce);
+        }};
+    }
+
     let (html_path, parent) = match validate_locate_request(&state, &form.file_path, &csp_nonce) {
         Ok(v) => v,
-        Err(resp) => return resp,
+        Err(resp) => {
+            if want_json {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    axum::Json(serde_json::json!({"ok": false,
+                        "message": "No HTML report file found in the selected folder. \
+                                    Make sure you selected the folder that contains your \
+                                    scan output (look for the folder with html/, json/, pdf/ subdirs)."})),
+                )
+                    .into_response();
+            }
+            return resp;
+        }
     };
 
     // Search for result_*.json in the HTML's parent and also its grandparent (handles
     // layouts where HTML is in a named subdir like html/ alongside json/, pdf/, etc.).
-    let scan_root = html_path
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(&parent);
-    let json_candidate = {
+    let scan_root_owned: PathBuf;
+    let scan_root: &Path = {
+        scan_root_owned = html_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| parent.clone());
+        &scan_root_owned
+    };
+    let json_candidates = {
         let mut hits = collect_result_json_candidates(scan_root);
         if hits.is_empty() {
             hits = collect_result_json_candidates(&parent);
         }
         hits.sort();
-        hits.into_iter().next_back()
+        hits
     };
+
+    // If the expected_run_id was provided, find a JSON that matches it exactly.
+    let expected_run_id = form
+        .expected_run_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    // Read JSONs to find one whose run_id matches (or use the latest if no expectation).
+    let matched_json: Option<(PathBuf, String)> = {
+        let mut found = None;
+        for jpath in &json_candidates {
+            if let Ok(run) = read_json(jpath) {
+                if expected_run_id.is_empty() || run.tool.run_id == expected_run_id {
+                    found = Some((jpath.clone(), run.tool.run_id.clone()));
+                    break;
+                }
+            }
+        }
+        // If we have candidates but none matched the expected run_id, surface a clear error.
+        if found.is_none() && !json_candidates.is_empty() && !expected_run_id.is_empty() {
+            // Read the first parseable JSON to get its actual run_id for the error message.
+            let actual = json_candidates
+                .iter()
+                .find_map(|p| read_json(p).ok().map(|r| r.tool.run_id.clone()))
+                .unwrap_or_else(|| "unknown".to_string());
+            err!(format!(
+                "This folder contains a different scan.\n\n\
+                 Expected run ID : {expected_run_id}\n\
+                 Found run ID    : {actual}\n\n\
+                 Please select the folder that contains the correct scan output."
+            ));
+        }
+        found
+    };
+
+    let safe_redirect = form
+        .redirect_url
+        .as_deref()
+        .filter(|u| u.starts_with('/') && !u.starts_with("//"))
+        .unwrap_or("/view-reports?linked=1")
+        .to_string();
+
     let mut reg = state.registry.lock().await;
-    // Find an existing entry whose output directory matches the selected file's parent or
-    // the scan root (for layouts where HTML/JSON live in named subdirs like html/ and json/).
-    let entry_idx = reg.entries.iter().position(|e| {
-        let matches_dir = |reg_path: Option<&PathBuf>| {
-            reg_path.and_then(|p| p.parent()).is_some_and(|p| {
-                p == parent || p == scan_root || p.parent().is_some_and(|gp| gp == scan_root)
-            })
-        };
-        matches_dir(e.json_path.as_ref()) || matches_dir(e.html_path.as_ref())
-    });
-    if let Some(idx) = entry_idx {
-        reg.entries[idx].html_path = Some(html_path);
-        let _ = reg.save(&state.registry_path);
-        let target = form
-            .redirect_url
-            .as_deref()
-            .filter(|u| u.starts_with('/') && !u.starts_with("//"))
-            .unwrap_or("/view-reports?linked=1");
-        return axum::response::Redirect::to(target).into_response();
-    }
-    // No match — attempt to build an entry from a result JSON in the same folder.
-    if let Some(json_path) = json_candidate {
+
+    if let Some((json_path, run_id)) = matched_json {
+        // Match by run_id in the registry (works even after files are moved).
+        if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
+            entry.html_path = Some(html_path);
+            entry.json_path = Some(json_path);
+            let _ = reg.save(&state.registry_path);
+            drop(reg);
+            if want_json {
+                return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
+                    .into_response();
+            }
+            return axum::response::Redirect::to(&safe_redirect).into_response();
+        }
+        // No existing entry — build one from the JSON.
         match read_json(&json_path) {
             Ok(run) => {
                 let entry = registry_entry_from_run(&run, json_path, html_path);
                 reg.add_entry(entry);
                 let _ = reg.save(&state.registry_path);
-                let target = form
-                    .redirect_url
-                    .as_deref()
-                    .filter(|u| u.starts_with('/') && !u.starts_with("//"))
-                    .unwrap_or("/view-reports?linked=1");
-                return axum::response::Redirect::to(target).into_response();
+                drop(reg);
+                if want_json {
+                    return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
+                        .into_response();
+                }
+                return axum::response::Redirect::to(&safe_redirect).into_response();
             }
             Err(e) => {
-                let file_hint = locate_path_hint(state.server_mode, &json_path);
-                let err_detail = if state.server_mode {
-                    String::new()
-                } else {
-                    format!("\n\nError: {e}")
-                };
-                return locate_report_error(
-                    format!(
-                        "Could not link this report.\n\nA result JSON was found but could not \
-                         be parsed — it may have been saved by an older version of OxideSLOC. \
-                         Re-running the analysis will create a fresh, compatible \
-                         record.{file_hint}{err_detail}"
-                    ),
-                    &csp_nonce,
-                );
+                drop(reg);
+                err!(format!(
+                    "Found the scan folder but could not parse the result JSON.\n\n\
+                     The file may have been saved by an older version of OxideSLOC. \
+                     Re-running the analysis will create a fresh, compatible record.\n\n\
+                     Error: {e}"
+                ));
             }
         }
     }
+
+    // No JSON found — if expected_run_id matches an existing registry entry, just update html_path.
+    if !expected_run_id.is_empty() {
+        if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == expected_run_id) {
+            entry.html_path = Some(html_path.clone());
+            let _ = reg.save(&state.registry_path);
+            drop(reg);
+            if want_json {
+                return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
+                    .into_response();
+            }
+            return axum::response::Redirect::to(&safe_redirect).into_response();
+        }
+    }
+
     drop(reg);
-    let file_hint = locate_path_hint(state.server_mode, &html_path);
-    locate_report_error(
+    let hint = if state.server_mode {
+        String::new()
+    } else {
         format!(
-            "Could not link this report.\n\nNo matching scan record was found and no result \
-             JSON was found in the same folder. Make sure you selected the folder that \
-             contains both the HTML report and the result_*.json file.{file_hint}"
-        ),
-        &csp_nonce,
-    )
+            "\n\nSearched folder : {}\nHTML found      : {}",
+            scan_root.display(),
+            html_path.display()
+        )
+    };
+    err!(format!(
+        "Could not link this report.\n\n\
+         No result_*.json was found in the selected folder. \
+         Make sure you selected the top-level scan output folder \
+         (the one that contains html/, json/, pdf/ subfolders).{hint}"
+    ));
 }
 
 /// Returns the first `result*.json` file found directly inside `dir`, or `None`.
@@ -5136,6 +5233,160 @@ async fn cleanup_runs_handler(
     }
 
     Json(serde_json::json!({ "deleted": deleted })).into_response()
+}
+
+/// Spawns the background auto-cleanup task. Returns a handle so the caller can
+/// abort it when the policy is updated or disabled.
+fn spawn_cleanup_policy_task(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let interval_secs = {
+                let store = state.cleanup_policy.lock().await;
+                match &store.policy {
+                    Some(p) if p.enabled => u64::from(p.interval_hours.max(1)) * 3600,
+                    _ => break,
+                }
+            };
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            let n = run_auto_cleanup(&state).await;
+            tracing::info!("[cleanup-policy] scheduled pass: deleted {n} runs");
+        }
+    })
+}
+
+/// Core cleanup logic shared by the background task and the "Run Now" handler.
+/// Applies both the age limit and the count limit, then updates `last_run_at`.
+/// Returns the number of runs deleted.
+async fn run_auto_cleanup(state: &AppState) -> u32 {
+    let (max_age_days, max_run_count) = {
+        let store = state.cleanup_policy.lock().await;
+        match &store.policy {
+            Some(p) if p.enabled => (p.max_age_days, p.max_run_count),
+            _ => return 0,
+        }
+    };
+
+    let mut to_delete: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    {
+        let reg = state.registry.lock().await;
+        if let Some(days) = max_age_days {
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+            for e in &reg.entries {
+                if e.timestamp_utc < cutoff {
+                    to_delete.insert(e.run_id.clone());
+                }
+            }
+        }
+        if let Some(max_count) = max_run_count {
+            // entries are sorted newest-first; skip the ones we keep
+            for e in reg.entries.iter().skip(max_count as usize) {
+                to_delete.insert(e.run_id.clone());
+            }
+        }
+    }
+
+    // Delete on-disk artifacts for each condemned run.
+    for run_id in &to_delete {
+        let output_dir = {
+            let mut cache = state.artifacts.lock().await;
+            let d = cache.get(run_id).map(|a| a.output_dir.clone());
+            cache.remove(run_id);
+            d
+        };
+        let output_dir = if let Some(d) = output_dir {
+            d
+        } else {
+            let reg = state.registry.lock().await;
+            reg.find_by_run_id(run_id)
+                .map(|e| recover_artifacts_from_registry(e).output_dir)
+                .unwrap_or_default()
+        };
+        if output_dir.exists() {
+            let _ = tokio::fs::remove_dir_all(&output_dir).await;
+        }
+    }
+
+    // Purge from registry.
+    if !to_delete.is_empty() {
+        let mut reg = state.registry.lock().await;
+        reg.entries.retain(|e| !to_delete.contains(&e.run_id));
+        let _ = reg.save(&state.registry_path);
+    }
+
+    let deleted = to_delete.len() as u32;
+    {
+        let mut store = state.cleanup_policy.lock().await;
+        store.last_run_at = Some(chrono::Utc::now());
+        store.last_run_deleted = Some(deleted);
+        let _ = store.save(&state.cleanup_policy_path);
+    }
+    deleted
+}
+
+// ── Auto-cleanup policy API ───────────────────────────────────────────────────
+
+/// GET /api/cleanup-policy — returns the current policy and last-run metadata.
+async fn api_get_cleanup_policy(State(state): State<AppState>) -> Response {
+    let store = state.cleanup_policy.lock().await;
+    Json(serde_json::json!({
+        "policy": store.policy,
+        "last_run_at": store.last_run_at,
+        "last_run_deleted": store.last_run_deleted,
+    }))
+    .into_response()
+}
+
+/// POST /api/cleanup-policy — save a new policy and (re)start the background task.
+async fn api_save_cleanup_policy(
+    State(state): State<AppState>,
+    Json(body): Json<CleanupPolicy>,
+) -> Response {
+    // Abort any running task so the new interval takes effect immediately.
+    {
+        let mut handle = state.cleanup_task_handle.lock().await;
+        if let Some(h) = handle.take() {
+            h.abort();
+        }
+    }
+    {
+        let mut store = state.cleanup_policy.lock().await;
+        store.policy = Some(body.clone());
+        if let Err(e) = store.save(&state.cleanup_policy_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    }
+    if body.enabled {
+        let handle = spawn_cleanup_policy_task(state.clone());
+        *state.cleanup_task_handle.lock().await = Some(handle);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// POST /api/cleanup-policy/run-now — trigger an immediate cleanup pass.
+async fn api_run_cleanup_now(State(state): State<AppState>) -> Response {
+    let deleted = run_auto_cleanup(&state).await;
+    Json(serde_json::json!({ "deleted": deleted })).into_response()
+}
+
+/// DELETE /api/cleanup-policy — remove the policy and stop the background task.
+async fn api_delete_cleanup_policy(State(state): State<AppState>) -> Response {
+    {
+        let mut handle = state.cleanup_task_handle.lock().await;
+        if let Some(h) = handle.take() {
+            h.abort();
+        }
+    }
+    {
+        let mut store = state.cleanup_policy.lock().await;
+        store.policy = None;
+        let _ = store.save(&state.cleanup_policy_path);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Serve the HTML artifact for a run — view or download.
@@ -7622,6 +7873,10 @@ async fn trend_report_handler(
           </span>
         </div>
         <div class="chart-actions">
+          <button type="button" class="export-btn" id="retention-policy-btn" title="Configure automatic cleanup of old scan runs">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Retention Policy
+          </button>
           <button type="button" class="export-btn" id="cleanup-runs-btn" title="Delete scans older than a chosen number of days">
             <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
             Clean up old runs
@@ -7773,7 +8028,7 @@ async fn trend_report_handler(
     var rootSel = document.getElementById('root-sel');
     ROOTS.forEach(function(r){{ var o=document.createElement('option');o.value=r;o.textContent=r;rootSel.appendChild(o); }});
 
-    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
+    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
     function fmtFull(n){{return Number(n).toLocaleString();}}
     function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }}
 
@@ -8496,6 +8751,133 @@ async fn trend_report_handler(
           status.textContent='Network error: '+String(e);
           confirmBtn.disabled=false;
         }});
+      }});
+    }})();
+
+    // ── Retention policy panel ────────────────────────────────────────────────
+    (function(){{
+      var triggerBtn=document.getElementById('retention-policy-btn');
+      if(!triggerBtn)return;
+      var modal=document.createElement('div');
+      modal.style.cssText='display:none;position:fixed;inset:0;z-index:9001;background:rgba(0,0,0,0.72);align-items:center;justify-content:center;';
+      modal.innerHTML=''
+        +'<div style="background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:36px 44px;max-width:580px;width:95%;box-shadow:0 24px 64px rgba(0,0,0,0.38);">'
+        +'<div style="font-size:19px;font-weight:800;margin-bottom:6px;">Retention Policy</div>'
+        +'<p style="font-size:13px;color:var(--muted);margin:0 0 22px;">Automatically clean up old scan runs on a schedule. Both rules apply when set — a run is deleted if it exceeds the age limit <em>or</em> falls outside the count limit.</p>'
+        +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:22px;">'
+        +'<input type="checkbox" id="rp-enabled" style="width:16px;height:16px;cursor:pointer;accent-color:var(--oxide);">'
+        +'<label for="rp-enabled" style="font-size:14px;font-weight:700;cursor:pointer;">Enable auto-cleanup</label>'
+        +'</div>'
+        +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:20px;">'
+        +'<div>'
+        +'<label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;">Max age (days)</label>'
+        +'<input type="number" id="rp-max-age" min="1" max="3650" placeholder="No limit" style="width:100%;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:14px;box-sizing:border-box;">'
+        +'<div style="font-size:11px;color:var(--muted);margin-top:4px;">Delete runs older than N days</div>'
+        +'</div>'
+        +'<div>'
+        +'<label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;">Max runs kept</label>'
+        +'<input type="number" id="rp-max-count" min="1" max="10000" placeholder="No limit" style="width:100%;padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:14px;box-sizing:border-box;">'
+        +'<div style="font-size:11px;color:var(--muted);margin-top:4px;">Keep only the N most recent runs</div>'
+        +'</div>'
+        +'</div>'
+        +'<div style="margin-bottom:20px;">'
+        +'<label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;">Check interval</label>'
+        +'<select id="rp-interval" style="padding:9px 12px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:14px;min-width:180px;">'
+        +'<option value="1">Every hour</option>'
+        +'<option value="6">Every 6 hours</option>'
+        +'<option value="12">Every 12 hours</option>'
+        +'<option value="24" selected>Every 24 hours</option>'
+        +'<option value="48">Every 2 days</option>'
+        +'<option value="72">Every 3 days</option>'
+        +'<option value="168">Every week</option>'
+        +'</select>'
+        +'</div>'
+        +'<div id="rp-last-run" style="padding:10px 14px;border-radius:8px;background:var(--surface-2);font-size:12px;color:var(--muted);margin-bottom:20px;">—</div>'
+        +'<div id="rp-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:18px;"></div>'
+        +'<div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">'
+        +'<button class="button secondary" id="rp-close-btn" type="button">Close</button>'
+        +'<button class="button secondary" id="rp-run-now-btn" type="button">Run Now</button>'
+        +'<button class="button" id="rp-save-btn" type="button">Save Policy</button>'
+        +'</div>'
+        +'</div>';
+      document.body.appendChild(modal);
+
+      function rpShowStatus(msg,ok){{
+        var s=document.getElementById('rp-status');
+        s.style.display='block';
+        s.style.background=ok?'#dcfce7':'#fee2e2';
+        s.style.color=ok?'#166534':'#991b1b';
+        s.textContent=msg;
+      }}
+      function fmtAgo(iso){{
+        if(!iso)return'Never';
+        var diff=Math.floor((Date.now()-new Date(iso).getTime())/1000);
+        if(diff<60)return diff+'s ago';
+        if(diff<3600)return Math.floor(diff/60)+'m ago';
+        if(diff<86400)return Math.floor(diff/3600)+'h ago';
+        return Math.floor(diff/86400)+'d ago';
+      }}
+      function loadPolicy(){{
+        fetch('/api/cleanup-policy')
+          .then(function(r){{return r.json();}})
+          .then(function(d){{
+            var p=d.policy;
+            document.getElementById('rp-enabled').checked=p?p.enabled:false;
+            document.getElementById('rp-max-age').value=(p&&p.max_age_days!=null)?p.max_age_days:'';
+            document.getElementById('rp-max-count').value=(p&&p.max_run_count!=null)?p.max_run_count:'';
+            var sel=document.getElementById('rp-interval');
+            if(p){{var iv=String(p.interval_hours||24);for(var i=0;i<sel.options.length;i++){{if(sel.options[i].value===iv){{sel.selectedIndex=i;break;}}}}}}
+            var lr=document.getElementById('rp-last-run');
+            if(d.last_run_at){{
+              lr.textContent='Last run: '+fmtAgo(d.last_run_at)+(d.last_run_deleted!=null?' \u00b7 deleted '+d.last_run_deleted+' run'+(d.last_run_deleted===1?'':'s'):'');
+            }}else{{
+              lr.textContent='Auto-cleanup has not run yet.';
+            }}
+          }})
+          .catch(function(){{document.getElementById('rp-last-run').textContent='Could not load policy.';}});
+      }}
+
+      triggerBtn.addEventListener('click',function(){{
+        document.getElementById('rp-status').style.display='none';
+        loadPolicy();
+        modal.style.display='flex';
+      }});
+      document.getElementById('rp-close-btn').addEventListener('click',function(){{modal.style.display='none';}});
+      modal.addEventListener('click',function(e){{if(e.target===modal)modal.style.display='none';}});
+
+      document.getElementById('rp-save-btn').addEventListener('click',function(){{
+        var enabled=document.getElementById('rp-enabled').checked;
+        var ageVal=document.getElementById('rp-max-age').value.trim();
+        var countVal=document.getElementById('rp-max-count').value.trim();
+        var intervalHours=parseInt(document.getElementById('rp-interval').value,10)||24;
+        if(enabled&&!ageVal&&!countVal){{
+          rpShowStatus('Set at least one rule (max age or max count) before enabling.',false);
+          return;
+        }}
+        var body={{enabled:enabled,max_age_days:ageVal?parseInt(ageVal,10):null,max_run_count:countVal?parseInt(countVal,10):null,interval_hours:intervalHours}};
+        var saveBtn=document.getElementById('rp-save-btn');
+        saveBtn.disabled=true;
+        fetch('/api/cleanup-policy',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}})
+          .then(function(r){{
+            if(r.status===204||r.ok){{rpShowStatus('Policy saved'+(enabled?'. Background task started.':'.'),true);}}
+            else{{return r.json().then(function(d){{rpShowStatus('Error: '+(d.error||'Unexpected error'),false);}});}}
+          }})
+          .catch(function(e){{rpShowStatus('Network error: '+String(e),false);}})
+          .finally(function(){{saveBtn.disabled=false;}});
+      }});
+
+      document.getElementById('rp-run-now-btn').addEventListener('click',function(){{
+        var btn=this;
+        btn.disabled=true;
+        btn.textContent='Running\u2026';
+        fetch('/api/cleanup-policy/run-now',{{method:'POST'}})
+          .then(function(r){{return r.json();}})
+          .then(function(d){{
+            rpShowStatus('Cleanup complete: deleted '+d.deleted+' run'+(d.deleted===1?'':'s')+'.',true);
+            loadPolicy();
+          }})
+          .catch(function(e){{rpShowStatus('Network error: '+String(e),false);}})
+          .finally(function(){{btn.disabled=false;btn.textContent='Run Now';}});
       }});
     }})();
 
@@ -9604,7 +9986,7 @@ async fn test_metrics_handler(
     var currentLangTests = [];
     var currentTrendPts = [];
 
-    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}}
+    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
     function fmtFull(n){{return Number(n).toLocaleString();}}
     function isDark(){{return document.body.classList.contains('dark-theme');}}
     function clr(){{return isDark()?'rgba(245,236,230,0.12)':'rgba(67,52,45,0.10)';}}
@@ -13638,6 +14020,7 @@ int main() { … }   ← code
       var reportTitleTouched = false;
       var currentStep = 1;
       var previewTimer = null;
+      var _previewGen = 0;
       var quickScanBtn = document.getElementById("quick-scan-btn");
 
       function dismissAnalysisModal() {
@@ -13692,7 +14075,7 @@ int main() { … }   ← code
 
         var warnShown = false, pollRetries = 0, activeWaitId = null;
 
-        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
 
         function lcSetPhase(txt) { var el = document.getElementById("lc-phase"); if (el) el.textContent = txt; }
 
@@ -14490,6 +14873,7 @@ int main() { … }   ← code
         var excludeValue = excludeGlobsInput ? excludeGlobsInput.value : "";
         if (window._previewInterval) { clearInterval(window._previewInterval); window._previewInterval = null; }
         if (window._previewElapsedTimer) { clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null; }
+        var myGen = ++_previewGen;
         var _prevMsgs = [
           'Scanning directory structure…',
           'Detecting file types…',
@@ -14510,11 +14894,13 @@ int main() { … }   ← code
         var _sizeTextEl = document.getElementById('project-size-text');
         if (_sizeTextEl) _sizeTextEl.textContent = 'Project size: Detecting…';
         window._previewInterval = setInterval(function() {
+          if (myGen !== _previewGen) { clearInterval(window._previewInterval); window._previewInterval = null; return; }
           _prevMsgIdx = (_prevMsgIdx + 1) % _prevMsgs.length;
           var ml = document.getElementById('plm');
           if (ml) ml.textContent = _prevMsgs[_prevMsgIdx];
         }, 1500);
         window._previewElapsedTimer = setInterval(function() {
+          if (myGen !== _previewGen) { clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null; return; }
           var el = document.getElementById('ple');
           if (el) el.textContent = Math.round((Date.now() - _prevStart) / 1000) + 's elapsed';
         }, 1000);
@@ -14524,6 +14910,7 @@ int main() { … }   ← code
         fetch(previewUrl)
           .then(function (response) { return response.text(); })
           .then(function (html) {
+            if (myGen !== _previewGen) return;
             clearInterval(window._previewInterval); window._previewInterval = null;
             clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null;
             previewPanel.innerHTML = html;
@@ -14539,7 +14926,7 @@ int main() { … }   ← code
             if (SERVER_MODE && window._lastUploadSizes) {
               var us = window._lastUploadSizes;
               if (sizeText) sizeText.textContent = 'Original: ' + fmtBytes(us.original_bytes) +
-                ' · Compressed: ' + fmtBytes(us.compressed_bytes);
+                ' \xb7 Compressed: ' + fmtBytes(us.compressed_bytes);
               if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(us.original_bytes) +
                 ' — Compressed archive size: ' + fmtBytes(us.compressed_bytes);
             } else if (sizeText && projectSize) {
@@ -14562,6 +14949,7 @@ int main() { … }   ← code
             }
           })
           .catch(function (err) {
+            if (myGen !== _previewGen) return;
             clearInterval(window._previewInterval); window._previewInterval = null;
             clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null;
             previewPanel.innerHTML = '<div class="preview-error">Preview request failed: ' + String(err) + '</div>';
@@ -15296,7 +15684,7 @@ int main() { … }   ← code
                 historyBadge.textContent = data.scan_count + " previous scan" +
                   (data.scan_count === 1 ? "" : "s") + " found" + branch + ". " +
                   "Last: " + (data.last_scan_timestamp || "—") +
-                  " — " + (data.last_scan_code_lines ? (function(v){return v>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M':v>=1e4?Math.round(v/1e3)+'K':Number(v).toLocaleString();})(data.last_scan_code_lines) : "?") + " code lines.";
+                  " — " + (data.last_scan_code_lines ? (function(v){return v>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M':v>=1e4?(v/1e3).toFixed(1).replace(/\.0$/,'')+'K':Number(v).toLocaleString();})(data.last_scan_code_lines) : "?") + " code lines.";
                 historyBadge.className = "path-history-badge found";
                 historyBadge.style.display = "";
               }
@@ -15409,7 +15797,6 @@ int main() { … }   ← code
       updateScrollProgress(); // initialise bar to 0% (step 1)
       window.addEventListener("scroll", updateScrollProgress, { passive: true });
       onPathChange();         // seed output dir, history badge, and preview from initial path
-      loadPreview();
       updateStepNav(1);
 
       // Restore step from URL hash on initial load (e.g., back-forward cache)
@@ -17104,8 +17491,12 @@ struct ScanSetupTemplate {
     .r-chart-modal-close{position:absolute;top:14px;right:18px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--text);line-height:1;padding:0;}
     .r-chart-modal-close:hover{opacity:.7;}
     body.dark-theme .r-chart-modal{background:var(--surface);}
-    .r-chart-container .rchit,.r-expand-modal-chart .rchit{cursor:pointer;transition:opacity .17s,filter .17s;}
-    .r-chart-container .rchit:hover,.r-expand-modal-chart .rchit:hover{opacity:.75;filter:brightness(1.14);}
+    .r-chart-container .rchit,.r-expand-modal-chart .rchit,#result-lang-charts .rchit,#result-lang-overview-modal-wrap .rchit{cursor:pointer;transition:filter .17s,transform .17s;transform-box:fill-box;transform-origin:center center;}
+    .r-chart-container .rchit:hover,.r-expand-modal-chart .rchit:hover,#result-lang-charts .rchit:hover,#result-lang-overview-modal-wrap .rchit:hover{filter:brightness(1.15) drop-shadow(0 2px 6px rgba(0,0,0,.18));transform:scale(1.05);}
+    .lang-bar-row{cursor:pointer;transition:transform .2s cubic-bezier(.34,1.56,.64,1);}
+    .lang-bar-row:hover{transform:translateY(-2px);}
+    .lang-bar-row .rchit:hover{filter:none;transform:none;}
+    .lang-bar-row:hover .rchit{filter:brightness(1.12);transform:scaleY(1.22);}
     .r-chart-tab-bar{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
     .r-chart-tab{padding:4px 14px;border-radius:20px;border:1px solid var(--line-strong);cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);background:var(--surface-2);transition:background .13s,color .13s;}
     .r-chart-tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
@@ -17956,7 +18347,7 @@ struct ScanSetupTemplate {
 
       // ── Compact number formatting for stat chips ──────────────────────────
       (function(){
-        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
         Array.prototype.slice.call(document.querySelectorAll('.stat-chip[data-raw]')).forEach(function(chip){
           var raw=parseInt(chip.getAttribute('data-raw'),10);
           if(isNaN(raw))return;
@@ -18047,7 +18438,7 @@ struct ScanSetupTemplate {
         var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
         var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082'];
         var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
         function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
@@ -18095,11 +18486,14 @@ struct ScanSetupTemplate {
           var y=6+i*rHb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+          bs+='<g class="lang-bar-row">';
+          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+bH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
           if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="0"/>';x+=cW;
           if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="0"/>';x+=cmW;
           if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="0"/>';
           bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='</g>';
         });
         var ly=SH-14;
         bs+='<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"/><text x="'+(LW+13)+'" y="'+(ly+9)+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>';
@@ -18134,8 +18528,8 @@ struct ScanSetupTemplate {
             var ov=wrap.querySelector('.r-lang-overview');
             if(ov){ov.style.flexWrap='nowrap';ov.style.alignItems='stretch';}
             var cells=wrap.querySelectorAll('.r-lang-overview-cell');
-            if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;';
-            if(cells.length>1)cells[1].style.cssText='flex:2 1 0;max-width:none;';
+            if(cells.length>0)cells[0].style.cssText='flex:1 1 0;max-width:none;justify-content:center;';
+            if(cells.length>1)cells[1].style.cssText='flex:1 1 0;max-width:none;';
           }
         });}
       })();
@@ -18148,7 +18542,7 @@ struct ScanSetupTemplate {
         var SUB_D={{ submodule_chart_json|safe }};
         var COLS=['#C45C10','#2A6846','#4472C4','#805099','#D4A017','#B23030','#2E75B6','#70AD47','#FF9900','#9E480E','#636363','#156082','#1F6E6E','#8B4513','#4169E1','#228B22','#8B008B','#FF6347','#708090','#DAA520'];
         var FONT='Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
         function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
@@ -19081,7 +19475,7 @@ struct ResultTemplate {
       var maxRetries = 5;
       var warnShown = false;
 
-      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
 
       function elapsed() {
         return Math.floor((Date.now() - startTime) / 1000);
@@ -19691,8 +20085,19 @@ struct ErrorTemplate {
     .warning-banner.show{display:flex;}
     .warning-banner svg{flex:0 0 auto;}
     body.dark-theme .warning-banner{background:#3d2800;border-color:#a06820;color:#ffcf7a;}
+    .error-inline{display:none;align-items:flex-start;gap:10px;background:#fde8e8;border:1px solid #e07070;border-radius:10px;padding:12px 16px;font-size:13px;color:#7a1e1e;margin-top:12px;white-space:pre-wrap;line-height:1.55;}
+    .error-inline.show{display:flex;}
+    .error-inline svg{flex:0 0 auto;margin-top:2px;}
+    body.dark-theme .error-inline{background:#4a1e1e;border-color:#b85555;color:#ffb3b3;}
+    .success-inline{display:none;align-items:center;gap:10px;background:#e8faf0;border:1px solid #4caf80;border-radius:10px;padding:12px 16px;font-size:13px;color:#1a6b3c;margin-top:12px;}
+    .success-inline.show{display:flex;}
+    body.dark-theme .success-inline{background:#163927;border-color:#2d7a52;color:#8fe2a8;}
+    .struct-hint{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--surface);margin-top:20px;}
+    .struct-hint h3{margin:0 0 10px;font-size:13px;font-weight:800;color:var(--muted-2);text-transform:uppercase;letter-spacing:.06em;}
+    .struct-hint pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--text);line-height:1.7;white-space:pre;}
+    .struct-hint .hl{color:var(--oxide);font-weight:700;}
     .btn-row{margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
-    .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);cursor:pointer;}
+    .btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 22px;border-radius:14px;border:none;color:white;background:linear-gradient(135deg,var(--accent),var(--accent-2));font-weight:800;font-size:14px;box-shadow:0 10px 22px rgba(73,106,255,0.22);cursor:pointer;}
     .btn-primary:disabled{opacity:0.4;cursor:not-allowed;box-shadow:none;}
     .btn-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border-radius:14px;border:1px solid var(--line-strong);text-decoration:none;color:var(--text);background:var(--surface-2);font-weight:700;font-size:14px;cursor:pointer;}
     .btn-secondary:hover{background:var(--line);}
@@ -19763,41 +20168,54 @@ struct ErrorTemplate {
   </div>
 
   <div class="page">
-    <div id="locate-meta" hidden data-expected="{{ expected_filename }}"></div>
+    <div id="locate-meta" hidden data-expected="{{ expected_filename }}" data-run-id="{{ run_id }}" data-redirect="/runs/{{ artifact_type }}/{{ run_id }}"></div>
     <div class="panel">
       <h1>Report File Not Found</h1>
-      <p class="panel-subtitle">The report file could not be found &mdash; the output folder may have been moved or renamed. Use the browser below to locate it in its new location.</p>
+      <p class="panel-subtitle">The report file could not be found &mdash; the output folder may have been moved or renamed. Select the <strong>top-level scan output folder</strong> to restore it.</p>
       <div class="field-label">Missing file</div>
       <div class="filename-chip">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
         {{ expected_filename }}
       </div>
       <div class="locate-section">
-        <h2>Locate Report File</h2>
-        {% if artifact_type == "pdf" %}
-        <p>Select the HTML report file from the output folder. Locating the HTML report restores all paths in that folder (HTML and PDF).</p>
-        {% else %}
-        <p>Select the HTML report file from its new location on disk.</p>
-        {% endif %}
-        <form id="locate-form" method="post" action="/locate-report">
-          <input type="hidden" name="redirect_url" value="/runs/{{ artifact_type }}/{{ run_id }}">
-          <div class="locate-row">
-            <input type="text" id="locate-file-input" name="file_path"
-                   placeholder="Path to scan output folder (or .html report file)..."
-                   class="locate-input" autocomplete="off" spellcheck="false">
-            {% if !server_mode %}
-            <button type="button" id="browse-locate-btn" class="btn-secondary">Browse&hellip;</button>
-            {% endif %}
-          </div>
-          <div class="warning-banner" id="filename-warning">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <span>Selected file name does not match &mdash; expected <strong>{{ expected_filename }}</strong>. The server will reject a file from a different scan.</span>
-          </div>
-          <div class="btn-row">
-            <button type="submit" id="locate-submit-btn" class="btn-primary" disabled>Restore Report</button>
-            <a class="btn-secondary" href="/view-reports">View Reports</a>
-          </div>
-        </form>
+        <h2>Locate Scan Output Folder</h2>
+        <p>Select the <strong>top-level scan output folder</strong> (the one named like <code>project_20260601-…</code> that contains the <code>html/</code>, <code>json/</code>, and <code>pdf/</code> subfolders). OxideSLOC will find the correct files inside automatically.</p>
+        <div class="locate-row">
+          <input type="text" id="locate-file-input"
+                 placeholder="e.g. C:\Desktop\over-here\project_20260601-0029-…"
+                 class="locate-input" autocomplete="off" spellcheck="false">
+          {% if !server_mode %}
+          <button type="button" id="browse-locate-btn" class="btn-secondary">Browse&hellip;</button>
+          {% endif %}
+        </div>
+        <div class="warning-banner" id="filename-warning">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>Tip: select the <strong>folder</strong>, not an individual file. If you must pick a file directly, its name must match <strong>{{ expected_filename }}</strong>.</span>
+        </div>
+        <div class="error-inline" id="locate-error">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex:0 0 auto;margin-top:2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span id="locate-error-text"></span>
+        </div>
+        <div class="success-inline" id="locate-success">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex:0 0 auto;"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>Scan restored &mdash; loading report&hellip;</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="locate-submit-btn" class="btn-primary" disabled>Restore Report</button>
+          <a class="btn-secondary" href="/view-reports">View Reports</a>
+        </div>
+        <div class="struct-hint">
+          <h3>Expected folder structure &mdash; select the top-level folder</h3>
+          <pre><span class="hl">&#9658; project_20260601-0029-…/</span>   &larr; <strong>select this</strong>
+    html/
+      <span class="hl">{{ expected_filename }}</span>
+    json/
+      result_*.json
+    pdf/
+      report_*.pdf
+    excel/
+      report_*.csv  report_*.xlsx</pre>
+        </div>
       </div>
     </div>
   </div>
@@ -19834,30 +20252,69 @@ struct ErrorTemplate {
     var browseBtn=document.getElementById('browse-locate-btn');
     var submitBtn=document.getElementById('locate-submit-btn');
     var warning=document.getElementById('filename-warning');
+    var errBox=document.getElementById('locate-error');
+    var errText=document.getElementById('locate-error-text');
+    var okBox=document.getElementById('locate-success');
     var expected=meta?meta.getAttribute('data-expected'):'';
+    var runId=meta?meta.getAttribute('data-run-id'):'';
+    var redirectUrl=meta?meta.getAttribute('data-redirect'):'/view-reports';
     function basename(p){return p.replace(/\\/g,'/').split('/').pop()||'';}
+    function showErr(msg){
+      if(errText)errText.textContent=msg;
+      if(errBox)errBox.classList.add('show');
+      if(okBox)okBox.classList.remove('show');
+    }
+    function clearErr(){
+      if(errBox)errBox.classList.remove('show');
+      if(okBox)okBox.classList.remove('show');
+    }
     function validate(){
       var val=inp?inp.value.trim():'';
+      clearErr();
       if(!val){if(submitBtn)submitBtn.disabled=true;if(warning)warning.classList.remove('show');return;}
       if(submitBtn)submitBtn.disabled=false;
       if(warning){
         var name=basename(val);
-        var looksLikeHtmlFile=name.toLowerCase().slice(-5)==='.html';
-        if(expected&&name&&looksLikeHtmlFile&&name!==expected){warning.classList.add('show');}
-        else{warning.classList.remove('show');}
+        var looksLikeFile=name.toLowerCase().slice(-5)==='.html';
+        if(expected&&name&&looksLikeFile&&name!==expected)warning.classList.add('show');
+        else warning.classList.remove('show');
       }
     }
-    if(inp)inp.addEventListener('input',validate);
+    if(inp){inp.addEventListener('input',validate);inp.addEventListener('keydown',function(e){if(e.key==='Enter')submitBtn&&submitBtn.click();});}
     if(browseBtn){
       browseBtn.addEventListener('click',function(){
         browseBtn.disabled=true;browseBtn.textContent='...';
         fetch('/pick-directory')
           .then(function(r){return r.ok?r.json():{cancelled:true};})
-          .then(function(d){
-            browseBtn.disabled=false;browseBtn.textContent='Browse…';
-            if(d&&d.selected_path&&inp){inp.value=d.selected_path;validate();}
-          })
+          .then(function(d){browseBtn.disabled=false;browseBtn.textContent='Browse…';if(d&&d.selected_path&&inp){inp.value=d.selected_path;validate();}})
           .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse…';});
+      });
+    }
+    if(submitBtn){
+      submitBtn.addEventListener('click',function(){
+        var folder=inp?inp.value.trim():'';
+        if(!folder){showErr('Please enter or browse to the scan output folder.');return;}
+        clearErr();
+        submitBtn.disabled=true;submitBtn.textContent='Restoring…';
+        var body=new URLSearchParams();
+        body.set('file_path',folder);
+        body.set('redirect_url',redirectUrl);
+        body.set('expected_run_id',runId);
+        fetch('/locate-report',{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:body.toString()})
+          .then(function(r){return r.json().catch(function(){return{ok:false,message:'Server returned an unexpected response (status '+r.status+').'}; });})
+          .then(function(d){
+            submitBtn.disabled=false;submitBtn.textContent='Restore Report';
+            if(d&&d.ok){
+              if(okBox)okBox.classList.add('show');
+              setTimeout(function(){window.location.href=d.redirect||redirectUrl;},500);
+            } else {
+              showErr(d&&d.message?d.message:'Unknown error. Check that the folder contains the correct scan.');
+            }
+          })
+          .catch(function(e){
+            submitBtn.disabled=false;submitBtn.textContent='Restore Report';
+            showErr('Network error: '+String(e));
+          });
       });
     }
   })();</script>
@@ -20554,7 +21011,7 @@ struct RelocateScanTemplate {
       // Aggregate stats from first (most recent) row
       if (allRows.length) {
         var first = allRows[0];
-        function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
         function setChipVal(id,n){var el=document.getElementById(id);if(!el)return;var compact=slocFmt(n),full=Number(n).toLocaleString();el.innerHTML=compact+(compact!==full?'<span class="stat-chip-exact">'+full+'</span>':'');}
         setChipVal('agg-code', first.dataset.code);
         setChipVal('agg-files', first.dataset.files);
@@ -21262,7 +21719,7 @@ struct HistoryTemplate {
           var ts = r.dataset.timestamp || '';
           if (!latestRow || ts > latestTs) { latestTs = ts; latestRow = r; }
         });
-        function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+        function slocFmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
         function setChipVal(id,n){var el=document.getElementById(id);if(!el)return;var compact=slocFmt(n),full=Number(n).toLocaleString();el.innerHTML=compact+(compact!==full?'<span class="stat-chip-exact">'+full+'</span>':'');}
         var pe = document.getElementById('agg-projects'); if (pe) pe.textContent = Object.keys(projects).filter(Boolean).length;
         if (latestRow) {
@@ -22576,7 +23033,7 @@ struct CompareSelectTemplate {
       var OX='#C45C10', GN='#2A6846', RD='#B23030', GY='#AAAAAA', LGY='#DDDDDD';
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
-      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
       function px(n){return Math.round(n);}
       var el=document.querySelector('[data-folder]'), proj=el?el.getAttribute('data-folder'):'';
       // Language map
@@ -22731,7 +23188,7 @@ struct CompareSelectTemplate {
     (function(){
       var OX='#C45C10',GN='#2A6846',RD='#B23030',GY='#AAAAAA',LGY='#DDDDDD';
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return Math.round(v/1e3)+'K';return v.toLocaleString();}
+      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
       function px(n){return Math.round(n);}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
       function btt(l,v){return ' class="ic-cb" data-ttl="'+esc(l)+'" data-ttv="'+esc(v)+'"';}
@@ -23572,6 +24029,212 @@ ok</div>
   -H "Authorization: Bearer $SLOC_API_KEY" \
   <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;/cancel</pre>
             <button class="curl-copy-btn" data-target="c-run-cancel">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Run Management -->
+    <div class="section">
+      <h2 class="section-title">Run Management</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/runs/<span class="param">{run_id}</span>/bundle</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Download all artifacts for a run as a ZIP archive</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns a <code>.zip</code> archive containing every artifact stored for the run: HTML report, PDF, JSON result, CSV, Excel workbook, and scan config TOML. Useful for offline archiving or migration.</p>
+          <p class="params-heading">Path Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Run UUID from <code>/api/metrics/history</code></td></tr>
+          </table>
+          <details class="schema"><summary>Response</summary>
+<div class="schema-block">200 OK — Content-Type: application/zip
+Content-Disposition: attachment; filename="sloc-run-&lt;run_id&gt;.zip"
+
+404 Not Found — { "error": string }  (run not found or no artifacts)</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-run-bundle">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  -o run.zip \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;/bundle</pre>
+            <button class="curl-copy-btn" data-target="c-run-bundle">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method delete">DELETE</span>
+          <span class="ep-path">/api/runs/<span class="param">{run_id}</span></span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Permanently delete a run and all its artifacts</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Removes all on-disk artifacts for the run (HTML, PDF, JSON, CSV, Excel, scan config), purges the entry from the in-memory cache, and removes it from the persisted scan registry. <strong>This action is irreversible.</strong></p>
+          <p class="params-heading">Path Parameters</p>
+          <table class="params">
+            <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">run_id</td><td class="pt-type">string (UUID)</td><td><span class="pt-req">required</span></td><td>Run UUID to delete</td></tr>
+          </table>
+          <details class="schema"><summary>Response</summary>
+<div class="schema-block">204 No Content — run successfully deleted
+
+500 Internal Server Error — { "error": string }  (filesystem deletion failed)</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-run-delete">curl -X DELETE \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/&lt;run_id&gt;</pre>
+            <button class="curl-copy-btn" data-target="c-run-delete">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/runs/cleanup</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Bulk delete runs older than N days</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">One-shot age-based cleanup. Deletes all on-disk artifacts and registry entries for runs whose timestamp is older than <code>older_than_days</code> days. For automated recurring cleanup, use the Retention Policy endpoints instead.</p>
+          <p class="params-heading">Request Body (application/json)</p>
+          <table class="params">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">older_than_days</td><td class="pt-type">integer</td><td><span class="pt-opt">optional</span></td><td>Delete runs older than this many days. Default: <code>30</code>. Minimum: <code>1</code>.</td></tr>
+          </table>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "deleted": number }  // count of runs removed</div></details>
+          <p class="curl-heading">Example — delete runs older than 60 days</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-runs-cleanup">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days":60}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/runs/cleanup</pre>
+            <button class="curl-copy-btn" data-target="c-runs-cleanup">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Retention Policy -->
+    <div class="section">
+      <h2 class="section-title">Retention Policy</h2>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method get">GET</span>
+          <span class="ep-path">/api/cleanup-policy</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Get the current retention policy and last-run metadata</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Returns the configured auto-cleanup policy (if any) together with the timestamp and count from the last background cleanup pass. Useful for monitoring whether the policy is running as expected.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{
+  "policy": {
+    "enabled":       boolean,
+    "max_age_days":  number | null,   // delete runs older than N days
+    "max_run_count": number | null,   // keep only the N most recent runs
+    "interval_hours": number          // hours between background passes
+  } | null,
+  "last_run_at":      string | null,  // ISO-8601 UTC timestamp
+  "last_run_deleted": number | null   // runs deleted in last pass
+}</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-policy-get">curl -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/cleanup-policy</pre>
+            <button class="curl-copy-btn" data-target="c-policy-get">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/cleanup-policy</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Save or update the retention policy</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Persists a new retention policy to <code>cleanup_policy.json</code>. If <code>enabled</code> is <code>true</code>, the existing background task is stopped and a new one is started at the given interval. Both rules apply when set — a run is deleted if it exceeds the age limit <em>or</em> falls outside the count limit.</p>
+          <p class="params-heading">Request Body (application/json)</p>
+          <table class="params">
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            <tr><td class="pt-name">enabled</td><td class="pt-type">boolean</td><td><span class="pt-req">required</span></td><td>Whether to activate the background cleanup task</td></tr>
+            <tr><td class="pt-name">max_age_days</td><td class="pt-type">integer | null</td><td><span class="pt-opt">optional</span></td><td>Delete runs older than N days. Omit or <code>null</code> to disable age-based cleanup.</td></tr>
+            <tr><td class="pt-name">max_run_count</td><td class="pt-type">integer | null</td><td><span class="pt-opt">optional</span></td><td>Keep only the N most recent runs. Omit or <code>null</code> to disable count-based cleanup.</td></tr>
+            <tr><td class="pt-name">interval_hours</td><td class="pt-type">integer</td><td><span class="pt-req">required</span></td><td>Hours between background cleanup passes. Minimum: <code>1</code>.</td></tr>
+          </table>
+          <details class="schema"><summary>Response</summary>
+<div class="schema-block">204 No Content — policy saved and task (re)started
+
+500 Internal Server Error — { "error": string }</div></details>
+          <p class="curl-heading">Example — keep 30 days, max 100 runs, check daily</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-policy-post">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"max_age_days":30,"max_run_count":100,"interval_hours":24}' \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/cleanup-policy</pre>
+            <button class="curl-copy-btn" data-target="c-policy-post">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method post">POST</span>
+          <span class="ep-path">/api/cleanup-policy/run-now</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Trigger an immediate cleanup pass</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Executes the configured retention policy immediately, outside of the normal background schedule. Returns the number of runs deleted. The policy must already be saved (via <code>POST /api/cleanup-policy</code>) before calling this endpoint, but does not need to be enabled.</p>
+          <details class="schema"><summary>Response schema</summary>
+<div class="schema-block">{ "deleted": number }  // count of runs removed in this pass</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-policy-run-now">curl -X POST \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/cleanup-policy/run-now</pre>
+            <button class="curl-copy-btn" data-target="c-policy-run-now">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ep-card">
+        <div class="ep-header">
+          <span class="method delete">DELETE</span>
+          <span class="ep-path">/api/cleanup-policy</span>
+          <span class="auth-badge protected">Protected</span>
+          <span class="ep-desc">Remove the retention policy and stop the background task</span>
+          <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="ep-body">
+          <p class="ep-desc-full">Clears the saved retention policy and stops the background cleanup task if it is running. Does not delete any existing scan runs.</p>
+          <details class="schema"><summary>Response</summary>
+<div class="schema-block">204 No Content — policy removed and task stopped</div></details>
+          <p class="curl-heading">Example</p>
+          <div class="curl-wrap">
+            <pre class="curl-block" data-curl-id="c-policy-delete">curl -X DELETE \
+  -H "Authorization: Bearer $SLOC_API_KEY" \
+  <span class="base-url-slot">http://127.0.0.1:4317</span>/api/cleanup-policy</pre>
+            <button class="curl-copy-btn" data-target="c-policy-delete">Copy</button>
           </div>
         </div>
       </div>

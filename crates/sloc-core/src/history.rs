@@ -170,3 +170,56 @@ impl ScanRegistry {
             .retain(|e| e.json_path.as_ref().is_none_or(|p| p.exists()));
     }
 }
+
+fn default_interval_hours() -> u32 {
+    24
+}
+
+/// Rules for automatic periodic cleanup of old scan runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupPolicy {
+    pub enabled: bool,
+    /// Delete runs older than this many days. `None` disables age-based cleanup.
+    #[serde(default)]
+    pub max_age_days: Option<u32>,
+    /// Keep only the N most recent runs; delete older ones. `None` disables count-based cleanup.
+    #[serde(default)]
+    pub max_run_count: Option<u32>,
+    /// Hours between automatic cleanup passes (minimum 1, default 24).
+    #[serde(default = "default_interval_hours")]
+    pub interval_hours: u32,
+}
+
+/// Persisted store for the auto-cleanup policy and last-run metadata.
+/// Stored as `cleanup_policy.json` adjacent to `registry.json`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CleanupPolicyStore {
+    pub policy: Option<CleanupPolicy>,
+    /// When the background task last ran a cleanup pass.
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Utc>>,
+    /// Number of runs deleted in the last cleanup pass.
+    #[serde(default)]
+    pub last_run_deleted: Option<u32>,
+}
+
+impl CleanupPolicyStore {
+    #[must_use]
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}

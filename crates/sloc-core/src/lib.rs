@@ -9,7 +9,10 @@ pub mod history;
 pub use baseline::{check_against_baseline, resolve_baselines_path, BaselineEntry, BaselineStore};
 pub use coverage::{aggregate_line_coverage, lookup_coverage, parse_lcov, FileCoverage};
 pub use delta::{compute_delta, FileChangeStatus, FileDelta, ScanComparison, SummaryDelta};
-pub use history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot, WatchedDirsStore};
+pub use history::{
+    CleanupPolicy, CleanupPolicyStore, RegistryEntry, ScanRegistry, ScanSummarySnapshot,
+    WatchedDirsStore,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
