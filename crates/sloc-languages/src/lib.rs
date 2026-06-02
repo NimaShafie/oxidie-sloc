@@ -3206,4 +3206,212 @@ def fn_a():
         assert_eq!(f, 1, "JS function declaration must be counted");
         assert_eq!(t, 0);
     }
+
+    // ── Language detection tests ─────────────────────────────────────────────
+
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    #[test]
+    fn detect_language_rs_extension() {
+        let lang = detect_language(Path::new("foo.rs"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Rust));
+    }
+
+    #[test]
+    fn detect_language_py_extension() {
+        let lang = detect_language(Path::new("foo.py"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Python));
+    }
+
+    #[test]
+    fn detect_language_ts_extension() {
+        let lang = detect_language(Path::new("app.ts"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::TypeScript));
+    }
+
+    #[test]
+    fn detect_language_js_extension() {
+        let lang = detect_language(Path::new("app.js"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::JavaScript));
+    }
+
+    #[test]
+    fn detect_language_go_extension() {
+        let lang = detect_language(Path::new("main.go"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Go));
+    }
+
+    #[test]
+    fn detect_language_c_extension() {
+        let lang = detect_language(Path::new("main.c"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::C));
+    }
+
+    #[test]
+    fn detect_language_cpp_extension() {
+        let lang = detect_language(Path::new("main.cpp"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Cpp));
+    }
+
+    #[test]
+    fn detect_language_java_extension() {
+        let lang = detect_language(Path::new("Main.java"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Java));
+    }
+
+    #[test]
+    fn detect_language_makefile_exact_name() {
+        let lang = detect_language(Path::new("Makefile"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Makefile));
+    }
+
+    #[test]
+    fn detect_language_dockerfile_exact_name() {
+        let lang = detect_language(Path::new("Dockerfile"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Dockerfile));
+    }
+
+    #[test]
+    fn detect_language_rakefile() {
+        let lang = detect_language(Path::new("Rakefile"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Ruby));
+    }
+
+    #[test]
+    fn detect_language_gemfile() {
+        let lang = detect_language(Path::new("Gemfile"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, Some(Language::Ruby));
+    }
+
+    #[test]
+    fn detect_language_unknown_extension_returns_none() {
+        let lang = detect_language(Path::new("foo.xyz123"), None, &BTreeMap::new(), false);
+        assert_eq!(lang, None);
+    }
+
+    #[test]
+    fn detect_language_extension_override() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("h".into(), "cpp".into());
+        let lang = detect_language(Path::new("header.h"), None, &overrides, false);
+        assert_eq!(lang, Some(Language::Cpp));
+    }
+
+    #[test]
+    fn detect_language_shebang_python() {
+        let lang = detect_language(
+            Path::new("script"),
+            Some("#!/usr/bin/env python3"),
+            &BTreeMap::new(),
+            true,
+        );
+        assert_eq!(lang, Some(Language::Python));
+    }
+
+    #[test]
+    fn detect_language_shebang_bash() {
+        let lang = detect_language(
+            Path::new("script"),
+            Some("#!/bin/bash"),
+            &BTreeMap::new(),
+            true,
+        );
+        assert_eq!(lang, Some(Language::Shell));
+    }
+
+    #[test]
+    fn detect_language_shebang_ruby() {
+        let lang = detect_language(
+            Path::new("script"),
+            Some("#!/usr/bin/env ruby"),
+            &BTreeMap::new(),
+            true,
+        );
+        assert_eq!(lang, Some(Language::Ruby));
+    }
+
+    #[test]
+    fn detect_language_shebang_disabled() {
+        // When shebang_detection=false, shebang is ignored
+        let lang = detect_language(
+            Path::new("script"),
+            Some("#!/usr/bin/env python3"),
+            &BTreeMap::new(),
+            false,
+        );
+        assert_eq!(lang, None);
+    }
+
+    #[test]
+    fn from_name_rust() {
+        assert_eq!(Language::from_name("rust"), Some(Language::Rust));
+    }
+
+    #[test]
+    fn from_name_python() {
+        assert_eq!(Language::from_name("python"), Some(Language::Python));
+    }
+
+    #[test]
+    fn from_name_unknown() {
+        assert_eq!(Language::from_name("brainfuck"), None);
+    }
+
+    #[test]
+    fn from_name_roundtrip_all() {
+        // Every language's slug should round-trip through from_name
+        for lang in [
+            Language::C,
+            Language::Cpp,
+            Language::CSharp,
+            Language::Go,
+            Language::Java,
+            Language::JavaScript,
+            Language::Python,
+            Language::Rust,
+            Language::Shell,
+            Language::PowerShell,
+            Language::TypeScript,
+            Language::Assembly,
+            Language::Clojure,
+            Language::Css,
+            Language::Dart,
+            Language::Dockerfile,
+            Language::Elixir,
+            Language::Erlang,
+            Language::FSharp,
+            Language::Groovy,
+            Language::Haskell,
+            Language::Html,
+            Language::Julia,
+            Language::Kotlin,
+            Language::Lua,
+            Language::Makefile,
+            Language::Nim,
+            Language::ObjectiveC,
+            Language::Ocaml,
+            Language::Perl,
+            Language::Php,
+            Language::R,
+            Language::Ruby,
+            Language::Scala,
+            Language::Scss,
+            Language::Sql,
+            Language::Svelte,
+            Language::Swift,
+            Language::Vue,
+            Language::Xml,
+            Language::Zig,
+        ] {
+            let slug = lang.as_slug();
+            let roundtripped = Language::from_name(slug);
+            assert_eq!(
+                roundtripped,
+                Some(lang),
+                "from_name({slug:?}) should return {:?}",
+                lang
+            );
+        }
+    }
 }
