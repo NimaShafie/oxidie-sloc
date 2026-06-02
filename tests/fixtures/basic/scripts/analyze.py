@@ -2,7 +2,7 @@
 """Parse an lcov.info file and print a per-file coverage summary table."""
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 

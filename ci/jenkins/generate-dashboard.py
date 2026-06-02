@@ -346,12 +346,12 @@ def parse_lcov(path: str) -> tuple:
                     try:
                         found += int(line[3:])
                     except ValueError:
-                        pass
+                        continue
                 elif line.startswith("LH:"):
                     try:
                         hit += int(line[3:])
                     except ValueError:
-                        pass
+                        continue
         return (hit, found)
     except Exception:
         return (0, 0)
@@ -380,7 +380,7 @@ def parse_trend_history(path: str) -> list:
                         "files_analyzed": int(row.get("files_analyzed", 0)),
                     })
                 except (ValueError, KeyError):
-                    pass
+                    continue
         return rows
     except Exception:
         return []
