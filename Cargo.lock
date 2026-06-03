@@ -2281,10 +2281,12 @@ name = "sloc-mcp"
 version = "1.5.65"
 dependencies = [
  "anyhow",
+ "axum",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

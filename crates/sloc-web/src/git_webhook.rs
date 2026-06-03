@@ -445,3 +445,331 @@ fn ct_eq(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sloc_git::{ScanScheduleKind, ScanScheduleProvider};
+
+    // ── ct_eq ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ct_eq_equal_strings() {
+        assert!(ct_eq("hello", "hello"));
+    }
+
+    #[test]
+    fn ct_eq_unequal_strings() {
+        assert!(!ct_eq("hello", "world"));
+    }
+
+    #[test]
+    fn ct_eq_empty_strings_equal() {
+        assert!(ct_eq("", ""));
+    }
+
+    #[test]
+    fn ct_eq_different_lengths_unequal() {
+        assert!(!ct_eq("abc", "abcd"));
+        assert!(!ct_eq("abcd", "abc"));
+    }
+
+    #[test]
+    fn ct_eq_one_empty_unequal() {
+        assert!(!ct_eq("", "nonempty"));
+        assert!(!ct_eq("nonempty", ""));
+    }
+
+    #[test]
+    fn ct_eq_case_sensitive() {
+        assert!(!ct_eq("Secret", "secret"));
+    }
+
+    // ── check_github_event_header ─────────────────────────────────────────────
+
+    #[test]
+    fn github_push_event_returns_none() {
+        assert!(check_github_event_header("push").is_none());
+    }
+
+    #[test]
+    fn github_ping_event_returns_200() {
+        let resp = check_github_event_header("ping");
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn github_empty_event_returns_400() {
+        let resp = check_github_event_header("");
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn github_issues_event_returns_200() {
+        let resp = check_github_event_header("issues");
+        assert!(resp.is_some());
+    }
+
+    // ── check_gitlab_event_header ─────────────────────────────────────────────
+
+    #[test]
+    fn gitlab_push_hook_returns_none() {
+        assert!(check_gitlab_event_header("Push Hook").is_none());
+    }
+
+    #[test]
+    fn gitlab_tag_push_hook_returns_none() {
+        assert!(check_gitlab_event_header("Tag Push Hook").is_none());
+    }
+
+    #[test]
+    fn gitlab_merge_request_hook_returns_200() {
+        let resp = check_gitlab_event_header("Merge Request Hook");
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn gitlab_empty_event_returns_400() {
+        let resp = check_gitlab_event_header("");
+        assert!(resp.is_some());
+    }
+
+    // ── matches_token ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn matches_token_empty_secret_never_matches() {
+        let mut s = ScanSchedule::new_webhook(
+            "https://gitlab.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitLab,
+            "test".into(),
+            Some(String::new()),
+        );
+        s.webhook_secret = Some(String::new());
+        assert!(!matches_token(&s, "any-token"));
+    }
+
+    #[test]
+    fn matches_token_no_secret_never_matches() {
+        let mut s = ScanSchedule::new_webhook(
+            "https://gitlab.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitLab,
+            "test".into(),
+            None,
+        );
+        s.webhook_secret = None;
+        assert!(!matches_token(&s, "any-token"));
+    }
+
+    #[test]
+    fn matches_token_correct_token_matches() {
+        let secret = "my-gitlab-secret";
+        let mut s = ScanSchedule::new_webhook(
+            "https://gitlab.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitLab,
+            "test".into(),
+            Some(secret.into()),
+        );
+        s.webhook_secret = Some(secret.into());
+        assert!(matches_token(&s, secret));
+    }
+
+    #[test]
+    fn matches_token_wrong_token_no_match() {
+        let mut s = ScanSchedule::new_webhook(
+            "https://gitlab.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitLab,
+            "test".into(),
+            Some("correct-secret".into()),
+        );
+        s.webhook_secret = Some("correct-secret".into());
+        assert!(!matches_token(&s, "wrong-secret"));
+    }
+
+    // ── matches_hmac ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn matches_hmac_no_secret_always_false() {
+        let mut s = ScanSchedule::new_webhook(
+            "https://github.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitHub,
+            "test".into(),
+            None,
+        );
+        s.webhook_secret = None;
+        let body = b"payload";
+        let verify = |_: &[u8], _: &str, _: &str| true;
+        assert!(!matches_hmac(&s, body, "sig", &verify));
+    }
+
+    #[test]
+    fn matches_hmac_empty_secret_always_false() {
+        let mut s = ScanSchedule::new_webhook(
+            "https://github.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitHub,
+            "test".into(),
+            Some(String::new()),
+        );
+        s.webhook_secret = Some(String::new());
+        let body = b"payload";
+        let verify = |_: &[u8], _: &str, _: &str| true;
+        assert!(!matches_hmac(&s, body, "sig", &verify));
+    }
+
+    #[test]
+    fn matches_hmac_verify_fn_determines_result() {
+        let secret = "webhook-secret";
+        let mut s = ScanSchedule::new_webhook(
+            "https://github.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitHub,
+            "test".into(),
+            Some(secret.into()),
+        );
+        s.webhook_secret = Some(secret.into());
+        let body = b"payload";
+        assert!(matches_hmac(&s, body, "sig", &|_, _, _| true));
+        assert!(!matches_hmac(&s, body, "sig", &|_, _, _| false));
+    }
+
+    // ── build_schedule ────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_schedule_webhook_kind() {
+        let req = CreateScheduleRequest {
+            label: "My webhook".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("github".into()),
+            interval_secs: None,
+            webhook_secret: Some("secret123".into()),
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.kind, ScanScheduleKind::Webhook);
+        assert_eq!(s.repo_url, "https://github.com/org/repo.git");
+        assert_eq!(s.branch, "main");
+        assert_eq!(s.label, "My webhook");
+        assert_eq!(s.webhook_secret.as_deref(), Some("secret123"));
+    }
+
+    #[test]
+    fn build_schedule_poll_kind() {
+        let req = CreateScheduleRequest {
+            label: "My poll".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "develop".into(),
+            kind: "poll".into(),
+            provider: None,
+            interval_secs: Some(600),
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.kind, ScanScheduleKind::Poll);
+        assert_eq!(s.interval_secs, Some(600));
+    }
+
+    #[test]
+    fn build_schedule_poll_defaults_interval_to_300() {
+        let req = CreateScheduleRequest {
+            label: "Poll no interval".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "poll".into(),
+            provider: None,
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.kind, ScanScheduleKind::Poll);
+        assert_eq!(s.interval_secs, Some(300));
+    }
+
+    #[test]
+    fn build_schedule_github_provider() {
+        let req = CreateScheduleRequest {
+            label: "GH".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("github".into()),
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.provider, ScanScheduleProvider::GitHub);
+    }
+
+    #[test]
+    fn build_schedule_gitlab_provider() {
+        let req = CreateScheduleRequest {
+            label: "GL".into(),
+            repo_url: "https://gitlab.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("gitlab".into()),
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.provider, ScanScheduleProvider::GitLab);
+    }
+
+    #[test]
+    fn build_schedule_bitbucket_provider() {
+        let req = CreateScheduleRequest {
+            label: "BB".into(),
+            repo_url: "https://bitbucket.org/ws/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("bitbucket".into()),
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.provider, ScanScheduleProvider::Bitbucket);
+    }
+
+    #[test]
+    fn build_schedule_unknown_provider_defaults_to_any() {
+        let req = CreateScheduleRequest {
+            label: "Any".into(),
+            repo_url: "https://custom.git.server/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("unknown".into()),
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.provider, ScanScheduleProvider::Any);
+    }
+
+    // ── header_str ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn header_str_missing_header_returns_empty() {
+        let headers = HeaderMap::new();
+        assert_eq!(header_str(&headers, "x-github-event"), "");
+    }
+
+    #[test]
+    fn header_str_present_header_returned() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "push".parse().unwrap());
+        assert_eq!(header_str(&headers, "x-github-event"), "push");
+    }
+
+    #[test]
+    fn header_str_case_insensitive_lookup() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "ping".parse().unwrap());
+        // HeaderMap normalises header names to lowercase
+        assert_eq!(header_str(&headers, "X-GitHub-Event"), "ping");
+    }
+}
