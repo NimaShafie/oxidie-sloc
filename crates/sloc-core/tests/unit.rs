@@ -1069,6 +1069,158 @@ fn parse_coverage_auto_unknown_xml_returns_empty() {
     );
 }
 
+// ── Baseline store: remove / get / resolve_baselines_path / print_summary ───
+
+#[test]
+fn baseline_store_get_returns_entry_after_set() {
+    let mut store = BaselineStore::default();
+    store.set(BaselineEntry {
+        name: "v2".into(),
+        saved_at: Utc::now(),
+        run_id: "run-xyz".into(),
+        summary: snapshot(250),
+        json_path: None,
+    });
+    let entry = store.get("v2");
+    assert!(entry.is_some());
+    assert_eq!(entry.unwrap().summary.code_lines, 250);
+}
+
+#[test]
+fn baseline_store_get_returns_none_for_missing_key() {
+    let store = BaselineStore::default();
+    assert!(store.get("nonexistent").is_none());
+}
+
+#[test]
+fn baseline_store_remove_existing_entry_returns_true() {
+    let mut store = BaselineStore::default();
+    store.set(BaselineEntry {
+        name: "to-remove".into(),
+        saved_at: Utc::now(),
+        run_id: "run-rm".into(),
+        summary: snapshot(10),
+        json_path: None,
+    });
+    assert!(
+        store.remove("to-remove"),
+        "remove must return true for existing key"
+    );
+    assert!(
+        store.get("to-remove").is_none(),
+        "entry must be gone after remove"
+    );
+}
+
+#[test]
+fn baseline_store_remove_missing_entry_returns_false() {
+    let mut store = BaselineStore::default();
+    assert!(!store.remove("does-not-exist"));
+}
+
+#[test]
+fn check_against_baseline_zero_baseline_lines_gives_zero_pct() {
+    let mut store = BaselineStore::default();
+    store.set(BaselineEntry {
+        name: "empty".into(),
+        saved_at: Utc::now(),
+        run_id: "run-0".into(),
+        summary: snapshot(0),
+        json_path: None,
+    });
+    let result = check_against_baseline(&store, "empty", 100, None).unwrap();
+    assert_eq!(result.baseline_code_lines, 0);
+    assert!(
+        (result.delta_pct - 0.0).abs() < f64::EPSILON,
+        "delta_pct must be 0.0 when baseline is 0"
+    );
+    assert!(!result.exceeded);
+}
+
+#[test]
+fn check_against_baseline_no_limit_never_exceeds() {
+    let mut store = BaselineStore::default();
+    store.set(BaselineEntry {
+        name: "main".into(),
+        saved_at: Utc::now(),
+        run_id: "run-1".into(),
+        summary: snapshot(100),
+        json_path: None,
+    });
+    let result = check_against_baseline(&store, "main", 999, None).unwrap();
+    assert!(
+        !result.exceeded,
+        "no max_delta_pct means exceeded is never true"
+    );
+}
+
+#[test]
+fn check_against_baseline_negative_delta_never_exceeds() {
+    let mut store = BaselineStore::default();
+    store.set(BaselineEntry {
+        name: "main".into(),
+        saved_at: Utc::now(),
+        run_id: "run-1".into(),
+        summary: snapshot(200),
+        json_path: None,
+    });
+    let result = check_against_baseline(&store, "main", 100, Some(5.0)).unwrap();
+    assert!(result.delta < 0, "delta must be negative");
+    assert!(
+        !result.exceeded,
+        "shrinking code must not exceed positive threshold"
+    );
+}
+
+#[test]
+fn baseline_check_result_print_summary_does_not_panic() {
+    let result = sloc_core::baseline::BaselineCheckResult {
+        baseline_name: "main".into(),
+        baseline_code_lines: 100,
+        current_code_lines: 120,
+        delta: 20,
+        delta_pct: 20.0,
+        exceeded: false,
+        max_delta_pct: Some(30.0),
+    };
+    result.print_summary();
+}
+
+#[test]
+fn baseline_check_result_print_summary_exceeded_does_not_panic() {
+    let result = sloc_core::baseline::BaselineCheckResult {
+        baseline_name: "release".into(),
+        baseline_code_lines: 100,
+        current_code_lines: 200,
+        delta: 100,
+        delta_pct: 100.0,
+        exceeded: true,
+        max_delta_pct: Some(10.0),
+    };
+    result.print_summary();
+}
+
+#[test]
+fn resolve_baselines_path_uses_env_var() {
+    let dir = tempfile::tempdir().unwrap();
+    let custom = dir.path().join("my_baselines.json");
+    std::env::set_var("SLOC_BASELINES_PATH", custom.to_str().unwrap());
+    let resolved = sloc_core::baseline::resolve_baselines_path();
+    std::env::remove_var("SLOC_BASELINES_PATH");
+    assert_eq!(resolved, custom);
+}
+
+#[test]
+fn resolve_baselines_path_default_when_env_unset() {
+    std::env::remove_var("SLOC_BASELINES_PATH");
+    let resolved = sloc_core::baseline::resolve_baselines_path();
+    assert!(
+        resolved.to_string_lossy().contains("baselines.json"),
+        "default path must end with baselines.json, got: {}",
+        resolved.display()
+    );
+}
+
 // ── resolve_coverage_file ─────────────────────────────────────────────────────
 
 #[test]
