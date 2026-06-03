@@ -235,3 +235,149 @@ fn string_arg(args: &Value, key: &str) -> anyhow::Result<String> {
 fn opt_string(args: &Value, key: &str) -> Option<String> {
     args[key].as_str().map(|s| s.to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::McpConfig;
+
+    fn test_server() -> McpServer {
+        McpServer::new(McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![],
+        })
+    }
+
+    #[test]
+    fn tool_list_is_array_with_expected_tools() {
+        let tools = McpServer::tool_list();
+        let arr = tools.as_array().expect("tool_list must be a JSON array");
+        assert!(
+            arr.len() >= 5,
+            "expected at least 5 tools, got {}",
+            arr.len()
+        );
+        let names: Vec<&str> = arr.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"analyze_path"), "must have analyze_path");
+        assert!(
+            names.contains(&"get_metrics_latest"),
+            "must have get_metrics_latest"
+        );
+        assert!(names.contains(&"compare_runs"), "must have compare_runs");
+        assert!(names.contains(&"health_check"), "must have health_check");
+    }
+
+    #[test]
+    fn tool_list_each_has_name_description_schema() {
+        let tools = McpServer::tool_list();
+        for tool in tools.as_array().unwrap() {
+            assert!(tool["name"].is_string(), "each tool must have a name");
+            assert!(
+                tool["description"].is_string(),
+                "each tool must have a description"
+            );
+            assert!(
+                tool["inputSchema"].is_object(),
+                "each tool must have inputSchema"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_initialize_returns_version() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(1),
+            method: "initialize".into(),
+            params: None,
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.result.is_some());
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert!(result["serverInfo"]["name"].is_string());
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_list_returns_tool_array() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(2),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.result.is_some());
+        let tools = &resp.result.unwrap()["tools"];
+        assert!(tools.is_array());
+        assert!(!tools.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_method_returns_method_not_found() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(3),
+            method: "nonexistent/method".into(),
+            params: None,
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::protocol::METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_call_unknown_tool_returns_error() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(4),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "nonexistent_tool", "arguments": {}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_analyze_path_missing_arg_returns_invalid_params() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(5),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "analyze_path", "arguments": {}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::protocol::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn string_arg_present() {
+        let args = json!({"path": "/tmp/test"});
+        let result = string_arg(&args, "path").unwrap();
+        assert_eq!(result, "/tmp/test");
+    }
+
+    #[test]
+    fn string_arg_missing_errors() {
+        let args = json!({});
+        assert!(string_arg(&args, "path").is_err());
+    }
+
+    #[test]
+    fn opt_string_present() {
+        let args = json!({"server_url": "http://localhost:4317"});
+        assert_eq!(
+            opt_string(&args, "server_url"),
+            Some("http://localhost:4317".into())
+        );
+    }
+
+    #[test]
+    fn opt_string_absent() {
+        let args = json!({});
+        assert_eq!(opt_string(&args, "server_url"), None);
+    }
+}

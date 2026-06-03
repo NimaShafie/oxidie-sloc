@@ -9,6 +9,7 @@ pub async fn analyze_path(
     config_file: Option<String>,
     cfg: &McpConfig,
 ) -> Result<Value> {
+    cfg.check_path_allowed(&path)?;
     let tmp = tempfile_path();
     let mut cmd = Command::new(&cfg.bin_path);
     cmd.arg("analyze")
@@ -74,14 +75,6 @@ fn summarize_run(run: &Value) -> Value {
 
 fn tempfile_path() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("sloc-mcp-{}.json", uuid_v4()));
+    p.push(format!("sloc-mcp-{}.json", uuid::Uuid::new_v4().simple()));
     p
-}
-
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:x}-{:x}", t.as_secs(), t.subsec_nanos())
 }

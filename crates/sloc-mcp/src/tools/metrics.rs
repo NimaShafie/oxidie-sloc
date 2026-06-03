@@ -8,7 +8,7 @@ pub async fn get_metrics_latest(
     cfg: &McpConfig,
     http: &HttpClient,
 ) -> Result<Value> {
-    let base = server_url.as_deref().unwrap_or(cfg.server_url()?);
+    let base = cfg.resolve_server_url(server_url.as_deref())?;
     http.get_json(&format!("{base}/api/metrics/latest")).await
 }
 
@@ -18,7 +18,7 @@ pub async fn get_metrics_history(
     cfg: &McpConfig,
     http: &HttpClient,
 ) -> Result<Value> {
-    let base = server_url.as_deref().unwrap_or(cfg.server_url()?);
+    let base = cfg.resolve_server_url(server_url.as_deref())?;
     let limit = limit.unwrap_or(100);
     http.get_json(&format!("{base}/api/metrics/history?limit={limit}"))
         .await
@@ -30,7 +30,7 @@ pub async fn get_run_metrics(
     cfg: &McpConfig,
     http: &HttpClient,
 ) -> Result<Value> {
-    let base = server_url.as_deref().unwrap_or(cfg.server_url()?);
+    let base = cfg.resolve_server_url(server_url.as_deref())?;
     http.get_json(&format!("{base}/api/metrics/{run_id}")).await
 }
 
@@ -39,7 +39,7 @@ pub async fn health_check(
     cfg: &McpConfig,
     http: &HttpClient,
 ) -> Result<Value> {
-    let base = server_url.as_deref().unwrap_or(cfg.server_url()?);
+    let base = cfg.resolve_server_url(server_url.as_deref())?;
     let status = http.get_json(&format!("{base}/api/health")).await?;
     let version = http
         .get_json(&format!("{base}/api/version"))

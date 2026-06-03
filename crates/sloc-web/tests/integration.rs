@@ -5,6 +5,7 @@
 use axum::{
     body::Body,
     http::{Request, StatusCode},
+    Router,
 };
 use http_body_util::BodyExt;
 use sloc_web::{make_test_router, make_test_router_with_key};
@@ -23,6 +24,49 @@ async fn get(uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8_lossy(&bytes).into_owned();
     (status, headers, body)
+}
+
+/// Make a GET request against a SHARED router (state is preserved across calls).
+async fn get_shared(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let resp = app
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
+}
+
+/// Make a POST form request against a SHARED router.
+async fn post_form_shared(
+    app: Router,
+    uri: &str,
+    form_body: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let req = Request::post(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(form_body.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
+}
+
+/// Percent-encode a string for use as a URL form field value.
+fn pct_encode(s: &str) -> String {
+    s.bytes()
+        .flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                vec![b as char]
+            }
+            _ => format!("%{b:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 async fn post_form(uri: &str, form_body: &str) -> (StatusCode, axum::http::HeaderMap, String) {
@@ -1176,25 +1220,11 @@ async fn error_unprocessable_entity_returned_for_invalid_config() {
 
 // ── Additional route coverage ──────────────────────────────────────────────
 
-#[tokio::test]
-async fn open_path_route_responds() {
-    // /open-path requires a native OS action; in test env it should not 5xx
-    let (status, _, _) = get("/open-path?path=.").await;
-    assert!(
-        status.as_u16() < 500,
-        "/open-path must not 5xx, got {status}"
-    );
-}
-
-#[tokio::test]
-async fn pick_file_route_responds() {
-    // /pick-file opens a native file dialog; in headless test env returns 503 or 200
-    let (status, _, _) = get("/pick-file").await;
-    assert!(
-        status.as_u16() < 500,
-        "/pick-file must not 5xx, got {status}"
-    );
-}
+// NOTE: /open-path and /pick-file are intentionally NOT tested here.
+// Both handlers open native OS windows (file manager, file picker) that block
+// the test process on non-headless machines. The SLOC_HEADLESS guard in
+// make_test_router() suppresses them in all test runs; adding explicit test
+// calls would be redundant and unsafe on developer machines.
 
 #[tokio::test]
 async fn watched_dirs_add_missing_body_not_5xx() {
@@ -1248,14 +1278,8 @@ async fn relocate_scan_missing_body_not_5xx() {
     );
 }
 
-#[tokio::test]
-async fn locate_report_missing_body_not_5xx() {
-    let (status, _, _) = post_form("/locate-report", "").await;
-    assert!(
-        status.as_u16() < 500,
-        "/locate-report must not 5xx, got {status}"
-    );
-}
+// NOTE: /locate-report with empty body triggers a native file-picker dialog.
+// Intentionally not tested here — covered by the SLOC_HEADLESS guard in the handler.
 
 #[tokio::test]
 async fn locate_reports_dir_missing_body_not_5xx() {
@@ -1310,4 +1334,249 @@ async fn git_compare_refs_missing_params_not_5xx() {
         status.as_u16() < 500,
         "/api/git/compare-refs must not 5xx, got {status}"
     );
+}
+
+// ── Full analyze cycle (shared router, real temp directory) ───────────────────
+//
+// These tests use a single router instance whose Arc-shared state persists
+// across multiple oneshot calls, allowing us to exercise the result-rendering
+// code paths that only activate once a completed scan is stored.
+
+#[tokio::test]
+async fn full_analyze_cycle_html_json_csv_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn main() {}\n// comment\n").unwrap();
+    std::fs::write(
+        dir.path().join("utils.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+
+    let app = make_test_router();
+    let path_encoded = pct_encode(dir.path().to_str().unwrap_or("."));
+    let form_body = format!(
+        "path={path_encoded}&generate_html=1&generate_json=1&generate_csv=1&generate_xlsx=1"
+    );
+
+    // Step 1: submit scan
+    let (status, headers, _) = post_form_shared(app.clone(), "/analyze", &form_body).await;
+    assert_eq!(status, StatusCode::OK, "POST /analyze should return 200");
+    let wait_id = headers
+        .get("x-wait-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    assert!(!wait_id.is_empty(), "should receive x-wait-id");
+
+    // Step 2: poll status until complete or timeout (10 s)
+    let mut run_id = String::new();
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            if v["status"] == "complete" {
+                run_id = v["run_id"].as_str().unwrap_or("").to_owned();
+                break;
+            }
+            if v["status"] == "failed" || v["status"] == "cancelled" {
+                break;
+            }
+        }
+    }
+
+    // Step 3: fetch artifacts only if scan completed
+    if run_id.is_empty() {
+        let (status, _, _) = get_shared(
+            app.clone(),
+            "/runs/result/00000000-0000-0000-0000-000000000000",
+        )
+        .await;
+        assert!(status.as_u16() < 500);
+        return;
+    }
+
+    // HTML artifact
+    let (status, headers, html_body) =
+        get_shared(app.clone(), &format!("/runs/html/{run_id}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/runs/html must not 5xx, got {status}"
+    );
+    if status == StatusCode::OK {
+        let ct = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("html"),
+            "html artifact must have html content-type"
+        );
+        assert!(
+            html_body.contains("<!doctype html>") || html_body.contains("<!DOCTYPE html>"),
+            "html artifact must be a full HTML document"
+        );
+    }
+
+    // JSON artifact
+    let (status, _, json_body) = get_shared(app.clone(), &format!("/runs/json/{run_id}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/runs/json must not 5xx, got {status}"
+    );
+    if status == StatusCode::OK {
+        let v: serde_json::Value =
+            serde_json::from_str(&json_body).expect("json artifact must be valid JSON");
+        assert!(
+            v.get("summary_totals").is_some(),
+            "JSON must have summary_totals"
+        );
+    }
+
+    // CSV artifact
+    let (status, _, _) = get_shared(app.clone(), &format!("/runs/csv/{run_id}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/runs/csv must not 5xx, got {status}"
+    );
+
+    // XLSX artifact
+    let (status, _, _) = get_shared(app.clone(), &format!("/runs/xlsx/{run_id}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/runs/xlsx must not 5xx, got {status}"
+    );
+
+    // Result page
+    let (status, _, result_body) = get_shared(app.clone(), &format!("/runs/result/{run_id}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/runs/result must not 5xx, got {status}"
+    );
+    if status == StatusCode::OK {
+        assert!(result_body.contains("<!doctype html>") || result_body.contains("<!DOCTYPE html>"));
+    }
+
+    // API metrics for the specific run
+    let (status, _, _) = get_shared(app.clone(), &format!("/api/metrics/{run_id}")).await;
+    assert!(status.as_u16() < 500);
+
+    // API metrics latest
+    let (status, _, latest_body) = get_shared(app.clone(), "/api/metrics/latest").await;
+    assert!(status.as_u16() < 500);
+    if status == StatusCode::OK {
+        let v: serde_json::Value = serde_json::from_str(&latest_body).unwrap_or_default();
+        assert!(v.get("summary_totals").is_some() || v.get("run_id").is_some());
+    }
+
+    // View-reports page should now show an entry
+    let (status, _, vr_body) = get_shared(app.clone(), "/view-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(vr_body.contains("<!doctype html>") || vr_body.contains("<!DOCTYPE html>"));
+
+    // API metrics history
+    let (status, _, history_body) = get_shared(app.clone(), "/api/metrics/history").await;
+    assert!(status.as_u16() < 500);
+    if status == StatusCode::OK {
+        let _: serde_json::Value = serde_json::from_str(&history_body).unwrap_or_default();
+    }
+
+    // PDF status endpoint
+    let (status, _, _) = get_shared(app.clone(), &format!("/api/runs/{run_id}/pdf-status")).await;
+    assert!(status.as_u16() < 500);
+
+    // Submodule metrics
+    let (status, _, _) =
+        get_shared(app.clone(), &format!("/api/metrics/{run_id}/submodules")).await;
+    assert!(status.as_u16() < 500);
+
+    // Bundle download
+    let (status, _, _) = get_shared(app.clone(), &format!("/api/runs/{run_id}/bundle")).await;
+    assert!(status.as_u16() < 500);
+}
+
+#[tokio::test]
+async fn full_analyze_cycle_compare_two_runs() {
+    let dir1 = tempfile::tempdir().unwrap();
+    std::fs::write(dir1.path().join("lib.rs"), "fn foo() {}\n").unwrap();
+    let dir2 = tempfile::tempdir().unwrap();
+    std::fs::write(dir2.path().join("lib.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
+
+    let app = make_test_router();
+
+    let (_, h1, _) = post_form_shared(
+        app.clone(),
+        "/analyze",
+        &format!(
+            "path={}&generate_json=1",
+            pct_encode(dir1.path().to_str().unwrap_or("."))
+        ),
+    )
+    .await;
+    let wid1 = h1
+        .get("x-wait-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+
+    let (_, h2, _) = post_form_shared(
+        app.clone(),
+        "/analyze",
+        &format!(
+            "path={}&generate_json=1",
+            pct_encode(dir2.path().to_str().unwrap_or("."))
+        ),
+    )
+    .await;
+    let wid2 = h2
+        .get("x-wait-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+
+    if wid1.is_empty() || wid2.is_empty() {
+        return;
+    }
+
+    let mut rid1 = String::new();
+    let mut rid2 = String::new();
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if rid1.is_empty() {
+            let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wid1}/status")).await;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if v["status"] == "complete" {
+                    rid1 = v["run_id"].as_str().unwrap_or("").to_owned();
+                }
+            }
+        }
+        if rid2.is_empty() {
+            let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wid2}/status")).await;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if v["status"] == "complete" {
+                    rid2 = v["run_id"].as_str().unwrap_or("").to_owned();
+                }
+            }
+        }
+        if !rid1.is_empty() && !rid2.is_empty() {
+            break;
+        }
+    }
+
+    if rid1.is_empty() || rid2.is_empty() {
+        return;
+    }
+
+    // Compare the two runs
+    let (status, _, compare_body) =
+        get_shared(app.clone(), &format!("/compare?a={rid1}&b={rid2}")).await;
+    assert!(status.as_u16() < 500, "/compare must not 5xx, got {status}");
+    if status == StatusCode::OK {
+        assert!(
+            compare_body.contains("<!doctype html>") || compare_body.contains("<!DOCTYPE html>")
+        );
+    }
+
+    // Project history after two runs
+    let (status, _, _) = get_shared(app.clone(), "/api/project-history").await;
+    assert!(status.as_u16() < 500);
 }

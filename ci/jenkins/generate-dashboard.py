@@ -46,11 +46,20 @@ import json
 import os
 import re
 import sys
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from glob import glob
 from typing import Optional
 import csv
+
+# Use defusedxml when available (preferred — protects against XML bomb / entity expansion).
+# Fall back to stdlib ElementTree which in Python 3.8+ already rejects external entities
+# by default; the remaining risk (billion-laughs) is mitigated by the 10 MB size cap below.
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET  # type: ignore[no-redef]
+
+_MAX_XML_BYTES = 10 * 1024 * 1024  # 10 MB — guard against oversized JUnit/coverage files
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +287,8 @@ def parse_junit(path: str) -> Optional[dict]:
     Returns None on any error (missing file, parse error, etc.).
     """
     if not os.path.isfile(path):
+        return None
+    if os.path.getsize(path) > _MAX_XML_BYTES:
         return None
     try:
         tree = ET.parse(path)

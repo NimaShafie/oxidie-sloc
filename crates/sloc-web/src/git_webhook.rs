@@ -265,15 +265,20 @@ fn matches_hmac<F: Fn(&[u8], &str, &str) -> bool>(
     sig: &str,
     verify: &F,
 ) -> bool {
-    s.webhook_secret
-        .as_ref()
-        .is_none_or(|secret| verify(body, sig, secret))
+    // A schedule without a secret never matches — callers must configure a secret.
+    // Using is_none_or here would allow unauthenticated webhook triggering.
+    match s.webhook_secret.as_deref() {
+        None | Some("") => false,
+        Some(secret) => verify(body, sig, secret),
+    }
 }
 
 fn matches_token(s: &ScanSchedule, token: &str) -> bool {
-    s.webhook_secret
-        .as_ref()
-        .is_none_or(|secret| ct_eq(secret, token))
+    // A schedule without a secret never matches — token must be configured.
+    match s.webhook_secret.as_deref() {
+        None | Some("") => false,
+        Some(secret) => ct_eq(secret, token),
+    }
 }
 
 fn is_valid_github_sig(body: &[u8], sig: &str, secret: &str) -> bool {
@@ -437,11 +442,6 @@ fn header_str(headers: &HeaderMap, name: &str) -> String {
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    use subtle::ConstantTimeEq;
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }

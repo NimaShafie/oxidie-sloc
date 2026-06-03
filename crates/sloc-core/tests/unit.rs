@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Integration and unit tests for sloc-core submodules.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::Utc;
