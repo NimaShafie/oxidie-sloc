@@ -132,12 +132,24 @@ fn try_normalize_bitbucket_cloud(scheme: &str, host: &str, path: &str) -> Option
 
 fn validate_clone_url(url: &str) -> Result<()> {
     let lower = url.to_lowercase();
-    let allowed = ["https://", "http://", "git://", "ssh://", "git@"];
+    // http:// is excluded to prevent SSRF against plaintext internal HTTP services.
+    let allowed = ["https://", "git://", "ssh://", "git@"];
     if !allowed.iter().any(|p| lower.starts_with(p)) {
         bail!(
-            "git URL rejected: only https://, http://, git://, ssh://, and git@ URLs are \
+            "git URL rejected: only https://, git://, ssh://, and git@ URLs are \
              permitted (got {url:?})"
         );
+    }
+    // Block cloud instance metadata endpoints and link-local addresses.
+    let blocked = [
+        "169.254.",
+        "metadata.google.internal",
+        "100.100.100.",
+        "[fd",
+        "[fe80",
+    ];
+    if blocked.iter().any(|b| lower.contains(b)) {
+        bail!("git URL rejected: link-local and metadata service addresses are not permitted");
     }
     Ok(())
 }

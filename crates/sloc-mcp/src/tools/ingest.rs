@@ -11,6 +11,7 @@ pub async fn ingest_result(
     http: &HttpClient,
 ) -> Result<Value> {
     let body: Value = if let Some(path) = json_path {
+        cfg.check_path_allowed(&path)?;
         let content = tokio::fs::read_to_string(&path).await?;
         serde_json::from_str(&content)?
     } else if let Some(inline) = json_inline {
@@ -19,6 +20,6 @@ pub async fn ingest_result(
         anyhow::bail!("either json_path or json_inline is required");
     };
 
-    let base = server_url.as_deref().unwrap_or(cfg.server_url()?);
+    let base = cfg.resolve_server_url(server_url.as_deref())?;
     http.post_json(&format!("{base}/api/ingest"), &body).await
 }

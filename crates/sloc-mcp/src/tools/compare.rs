@@ -9,6 +9,8 @@ pub async fn compare_runs(
     current_path: String,
     cfg: &McpConfig,
 ) -> Result<Value> {
+    cfg.check_path_allowed(&baseline_path)?;
+    cfg.check_path_allowed(&current_path)?;
     let tmp = tempfile_path();
     let output = Command::new(&cfg.bin_path)
         .arg("diff")
@@ -32,13 +34,9 @@ pub async fn compare_runs(
 
 fn tempfile_path() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("sloc-mcp-diff-{}.json", timestamp()));
+    p.push(format!(
+        "sloc-mcp-diff-{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
     p
-}
-
-fn timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

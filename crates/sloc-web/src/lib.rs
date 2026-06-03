@@ -200,6 +200,57 @@ mod win_dialog_focus {
         }
     }
 
+    unsafe fn snapshot_explorer_hwnds(class_w: &[u16]) -> std::collections::HashSet<usize> {
+        let mut existing = std::collections::HashSet::new();
+        let mut prev: HWND = core::ptr::null_mut();
+        loop {
+            let w = FindWindowExW(
+                core::ptr::null_mut(),
+                prev,
+                class_w.as_ptr(),
+                core::ptr::null(),
+            );
+            if w.is_null() {
+                break;
+            }
+            existing.insert(w as usize);
+            prev = w;
+        }
+        existing
+    }
+
+    unsafe fn find_new_explorer_hwnd(
+        class_w: &[u16],
+        existing: &std::collections::HashSet<usize>,
+    ) -> Option<HWND> {
+        let mut prev: HWND = core::ptr::null_mut();
+        loop {
+            let w = FindWindowExW(
+                core::ptr::null_mut(),
+                prev,
+                class_w.as_ptr(),
+                core::ptr::null(),
+            );
+            if w.is_null() {
+                return None;
+            }
+            if !existing.contains(&(w as usize)) {
+                return Some(w);
+            }
+            prev = w;
+        }
+    }
+
+    unsafe fn bring_to_front(hwnd: HWND) {
+        // SW_RESTORE = 9 — same sequence as flash_dialog_when_ready.
+        // SwitchToThisWindow bypasses foreground-lock so the window surfaces
+        // regardless of which process currently has focus.
+        ShowWindow(hwnd, 9);
+        SwitchToThisWindow(hwnd, 1);
+        SetForegroundWindow(hwnd);
+        BringWindowToTop(hwnd);
+    }
+
     /// Opens `path` in Windows Explorer and forces it to the foreground.
     /// ShellExecuteW alone cannot guarantee foreground placement when the
     /// caller is not the foreground process (the browser is).  After launching,
@@ -208,7 +259,6 @@ mod win_dialog_focus {
     /// so the window surfaces regardless of which process currently has focus.
     pub fn open_folder_foreground(path: std::path::PathBuf) {
         std::thread::spawn(move || {
-            use std::collections::HashSet;
             use std::os::windows::ffi::OsStrExt;
 
             let op: Vec<u16> = "explore\0".encode_utf16().collect();
@@ -219,22 +269,7 @@ mod win_dialog_focus {
             unsafe {
                 // Snapshot every existing Explorer window before we launch so
                 // we can identify the newly created one.
-                let mut existing: HashSet<usize> = HashSet::new();
-                let mut prev: HWND = core::ptr::null_mut();
-                loop {
-                    let w = FindWindowExW(
-                        core::ptr::null_mut(),
-                        prev,
-                        class_w.as_ptr(),
-                        core::ptr::null(),
-                    );
-                    if w.is_null() {
-                        break;
-                    }
-                    existing.insert(w as usize);
-                    prev = w;
-                }
-
+                let existing = snapshot_explorer_hwnds(&class_w);
                 let fg_hwnd = GetForegroundWindow();
                 // SW_SHOWNORMAL = 1
                 ShellExecuteW(
@@ -251,26 +286,9 @@ mod win_dialog_focus {
                 // bring it in front of the browser and everything else.
                 for _ in 0..40 {
                     std::thread::sleep(std::time::Duration::from_millis(75));
-                    let mut prev2: HWND = core::ptr::null_mut();
-                    loop {
-                        let w = FindWindowExW(
-                            core::ptr::null_mut(),
-                            prev2,
-                            class_w.as_ptr(),
-                            core::ptr::null(),
-                        );
-                        if w.is_null() {
-                            break;
-                        }
-                        if !existing.contains(&(w as usize)) {
-                            // SW_RESTORE = 9 — same sequence as flash_dialog_when_ready
-                            ShowWindow(w, 9);
-                            SwitchToThisWindow(w, 1);
-                            SetForegroundWindow(w);
-                            BringWindowToTop(w);
-                            return;
-                        }
-                        prev2 = w;
+                    if let Some(w) = find_new_explorer_hwnd(&class_w, &existing) {
+                        bring_to_front(w);
+                        return;
                     }
                 }
 
@@ -278,10 +296,7 @@ mod win_dialog_focus {
                 // CabinetWClass window is first in Z-order to the front.
                 let w = FindWindowW(class_w.as_ptr(), core::ptr::null());
                 if !w.is_null() {
-                    ShowWindow(w, 9);
-                    SwitchToThisWindow(w, 1);
-                    SetForegroundWindow(w);
-                    BringWindowToTop(w);
+                    bring_to_front(w);
                 }
             }
         });
@@ -728,6 +743,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/cleanup-policy/run-now", post(api_run_cleanup_now))
         // ── REST API reference page ────────────────────────────────────────────
         .route("/api-docs", get(api_docs_handler))
+        // ── Prometheus metrics — behind API-key auth ───────────────────────────
+        .route("/metrics", get(metrics_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
@@ -736,7 +753,6 @@ fn build_router(state: AppState) -> Router {
     protected
         .route("/healthz", get(healthz))
         .route("/api/health", get(healthz))
-        .route("/metrics", get(metrics_handler))
         .route("/api/version", get(api_version_handler))
         .route("/api/openapi.yaml", get(openapi_yaml_handler))
         .route("/badge/{metric}", get(badge_handler))
@@ -770,6 +786,8 @@ fn build_router(state: AppState) -> Router {
 
 /// Build a minimal router suitable for integration tests — no TCP binding, no API keys, no TLS.
 pub fn make_test_router() -> Router {
+    // Suppress native OS dialogs (file pickers, open-path) during tests.
+    std::env::set_var("SLOC_HEADLESS", "1");
     let tmp = std::env::temp_dir().join("sloc_test");
     let state = AppState {
         base_config: AppConfig::default(),
@@ -1725,6 +1743,11 @@ async fn pick_directory_handler(
     if state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
     }
+    // Return immediately without opening a dialog in headless / CI environments.
+    if std::env::var("SLOC_HEADLESS").is_ok() {
+        return Json(serde_json::json!({ "selected_path": null, "cancelled": true }))
+            .into_response();
+    }
 
     let is_coverage = query.kind.as_deref() == Some("coverage");
     let title = match query.kind.as_deref() {
@@ -1794,6 +1817,10 @@ async fn pick_directory_handler(
 async fn pick_file_handler(State(state): State<AppState>) -> Response {
     if state.server_mode {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    if std::env::var("SLOC_HEADLESS").is_ok() {
+        return Json(serde_json::json!({ "selected_path": null, "cancelled": true }))
+            .into_response();
     }
     let picked = tokio::task::spawn_blocking(|| {
         #[cfg(all(target_os = "windows", feature = "native-dialog"))]
@@ -2588,6 +2615,41 @@ fn validate_locate_request(
     Ok((html_path, parent))
 }
 
+/// JSON-or-HTML error for locate_report_handler error paths.
+fn locate_handler_err(want_json: bool, msg: String, csp_nonce: &str) -> Response {
+    if want_json {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            axum::Json(serde_json::json!({"ok": false, "message": msg})),
+        )
+            .into_response()
+    } else {
+        locate_report_error(msg, csp_nonce)
+    }
+}
+
+/// JSON-or-redirect success for locate/relocate handler success paths.
+fn redirect_or_json_ok(want_json: bool, redirect: &str) -> Response {
+    if want_json {
+        axum::Json(serde_json::json!({"ok": true, "redirect": redirect})).into_response()
+    } else {
+        axum::response::Redirect::to(redirect).into_response()
+    }
+}
+
+/// Scan `json_candidates` for a run whose run_id matches `expected` (or return the
+/// first parseable run when `expected` is empty).  Returns `(path, run_id)`.
+fn find_json_run_by_id(candidates: &[PathBuf], expected: &str) -> Option<(PathBuf, String)> {
+    for jpath in candidates {
+        if let Ok(run) = read_json(jpath) {
+            if expected.is_empty() || run.tool.run_id == expected {
+                return Some((jpath.clone(), run.tool.run_id.clone()));
+            }
+        }
+    }
+    None
+}
+
 async fn locate_report_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2599,32 +2661,18 @@ async fn locate_report_handler(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("application/json"));
 
-    macro_rules! err {
-        ($msg:expr) => {{
-            let msg: String = $msg;
-            if want_json {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    axum::Json(serde_json::json!({"ok": false, "message": msg})),
-                )
-                    .into_response();
-            }
-            return locate_report_error(msg, &csp_nonce);
-        }};
-    }
-
     let (html_path, parent) = match validate_locate_request(&state, &form.file_path, &csp_nonce) {
         Ok(v) => v,
         Err(resp) => {
             if want_json {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    axum::Json(serde_json::json!({"ok": false,
-                        "message": "No HTML report file found in the selected folder. \
-                                    Make sure you selected the folder that contains your \
-                                    scan output (look for the folder with html/, json/, pdf/ subdirs)."})),
-                )
-                    .into_response();
+                return locate_handler_err(
+                    true,
+                    "No HTML report file found in the selected folder. \
+                     Make sure you selected the folder that contains your \
+                     scan output (look for the folder with html/, json/, pdf/ subdirs)."
+                        .to_string(),
+                    &csp_nonce,
+                );
             }
             return resp;
         }
@@ -2658,33 +2706,25 @@ async fn locate_report_handler(
         .trim()
         .to_string();
 
-    // Read JSONs to find one whose run_id matches (or use the latest if no expectation).
-    let matched_json: Option<(PathBuf, String)> = {
-        let mut found = None;
-        for jpath in &json_candidates {
-            if let Ok(run) = read_json(jpath) {
-                if expected_run_id.is_empty() || run.tool.run_id == expected_run_id {
-                    found = Some((jpath.clone(), run.tool.run_id.clone()));
-                    break;
-                }
-            }
-        }
-        // If we have candidates but none matched the expected run_id, surface a clear error.
-        if found.is_none() && !json_candidates.is_empty() && !expected_run_id.is_empty() {
-            // Read the first parseable JSON to get its actual run_id for the error message.
-            let actual = json_candidates
-                .iter()
-                .find_map(|p| read_json(p).ok().map(|r| r.tool.run_id.clone()))
-                .unwrap_or_else(|| "unknown".to_string());
-            err!(format!(
+    let matched_json = find_json_run_by_id(&json_candidates, &expected_run_id);
+
+    // If we have candidates but none matched the expected run_id, surface a clear error.
+    if matched_json.is_none() && !json_candidates.is_empty() && !expected_run_id.is_empty() {
+        let actual = json_candidates
+            .iter()
+            .find_map(|p| read_json(p).ok().map(|r| r.tool.run_id.clone()))
+            .unwrap_or_else(|| "unknown".to_string());
+        return locate_handler_err(
+            want_json,
+            format!(
                 "This folder contains a different scan.\n\n\
                  Expected run ID : {expected_run_id}\n\
                  Found run ID    : {actual}\n\n\
                  Please select the folder that contains the correct scan output."
-            ));
-        }
-        found
-    };
+            ),
+            &csp_nonce,
+        );
+    }
 
     let safe_redirect = form
         .redirect_url
@@ -2704,11 +2744,7 @@ async fn locate_report_handler(
             drop(reg);
             // Evict the stale in-memory cache so artifact_handler reads fresh from registry.
             state.artifacts.lock().await.remove(&run_id);
-            if want_json {
-                return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
-                    .into_response();
-            }
-            return axum::response::Redirect::to(&safe_redirect).into_response();
+            return redirect_or_json_ok(want_json, &safe_redirect);
         }
         // No existing entry — build one from the JSON.
         match read_json(&json_path) {
@@ -2718,20 +2754,20 @@ async fn locate_report_handler(
                 let _ = reg.save(&state.registry_path);
                 drop(reg);
                 state.artifacts.lock().await.remove(&run_id);
-                if want_json {
-                    return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
-                        .into_response();
-                }
-                return axum::response::Redirect::to(&safe_redirect).into_response();
+                return redirect_or_json_ok(want_json, &safe_redirect);
             }
             Err(e) => {
                 drop(reg);
-                err!(format!(
-                    "Found the scan folder but could not parse the result JSON.\n\n\
-                     The file may have been saved by an older version of OxideSLOC. \
-                     Re-running the analysis will create a fresh, compatible record.\n\n\
-                     Error: {e}"
-                ));
+                return locate_handler_err(
+                    want_json,
+                    format!(
+                        "Found the scan folder but could not parse the result JSON.\n\n\
+                         The file may have been saved by an older version of OxideSLOC. \
+                         Re-running the analysis will create a fresh, compatible record.\n\n\
+                         Error: {e}"
+                    ),
+                    &csp_nonce,
+                );
             }
         }
     }
@@ -2743,11 +2779,7 @@ async fn locate_report_handler(
             let _ = reg.save(&state.registry_path);
             drop(reg);
             state.artifacts.lock().await.remove(&expected_run_id);
-            if want_json {
-                return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
-                    .into_response();
-            }
-            return axum::response::Redirect::to(&safe_redirect).into_response();
+            return redirect_or_json_ok(want_json, &safe_redirect);
         }
     }
 
@@ -2761,12 +2793,16 @@ async fn locate_report_handler(
             html_path.display()
         )
     };
-    err!(format!(
-        "Could not link this report.\n\n\
-         No result_*.json was found in the selected folder. \
-         Make sure you selected the top-level scan output folder \
-         (the one that contains html/, json/, pdf/ subfolders).{hint}"
-    ));
+    locate_handler_err(
+        want_json,
+        format!(
+            "Could not link this report.\n\n\
+             No result_*.json was found in the selected folder. \
+             Make sure you selected the top-level scan output folder \
+             (the one that contains html/, json/, pdf/ subfolders).{hint}"
+        ),
+        &csp_nonce,
+    )
 }
 
 /// Returns the first `result*.json` file found directly inside `dir`, or `None`.
@@ -2857,6 +2893,28 @@ struct RelocateScanForm {
     redirect_url: String,
 }
 
+/// JSON-or-HTML error for relocate_scan_handler folder-level errors.
+/// HTML variant renders the relocate template; JSON returns `{"ok": false, "message": msg}`.
+fn relocate_folder_err(
+    want_json: bool,
+    status: StatusCode,
+    msg: &str,
+    run_id: &str,
+    folder_hint: &str,
+    redirect_url: &str,
+    csp_nonce: &str,
+) -> Response {
+    if want_json {
+        (
+            status,
+            axum::Json(serde_json::json!({"ok": false, "message": msg})),
+        )
+            .into_response()
+    } else {
+        missing_scan_relocate_response(msg, run_id, folder_hint, redirect_url, false, csp_nonce)
+    }
+}
+
 async fn relocate_scan_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2906,43 +2964,25 @@ async fn relocate_scan_handler(
     let folder = match fs::canonicalize(PathBuf::from(form.folder_path.trim())) {
         Ok(p) => strip_unc_prefix(p),
         Err(_) => {
-            if want_json {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    axum::Json(serde_json::json!({
-                        "ok": false,
-                        "message": "Folder not found or path is invalid."
-                    })),
-                )
-                    .into_response();
-            }
-            return missing_scan_relocate_response(
+            return relocate_folder_err(
+                want_json,
+                StatusCode::UNPROCESSABLE_ENTITY,
                 "Folder not found or path is invalid.",
                 &run_id,
                 form.folder_path.trim(),
                 &redirect_url,
-                false,
                 &csp_nonce,
             );
         }
     };
     if !folder.is_dir() {
-        if want_json {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                axum::Json(serde_json::json!({
-                    "ok": false,
-                    "message": "Selected path is not a directory."
-                })),
-            )
-                .into_response();
-        }
-        return missing_scan_relocate_response(
+        return relocate_folder_err(
+            want_json,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "Selected path is not a directory.",
             &run_id,
             &folder.display().to_string(),
             &redirect_url,
-            false,
             &csp_nonce,
         );
     }
@@ -2953,19 +2993,13 @@ async fn relocate_scan_handler(
             "No result JSON files found in the selected folder.\nSearched: {}",
             folder.display()
         );
-        if want_json {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                axum::Json(serde_json::json!({"ok": false, "message": msg})),
-            )
-                .into_response();
-        }
-        return missing_scan_relocate_response(
+        return relocate_folder_err(
+            want_json,
+            StatusCode::UNPROCESSABLE_ENTITY,
             &msg,
             &run_id,
             &folder.display().to_string(),
             &redirect_url,
-            false,
             &csp_nonce,
         );
     }
@@ -2977,19 +3011,13 @@ async fn relocate_scan_handler(
              Searched: {}",
             folder.display()
         );
-        if want_json {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                axum::Json(serde_json::json!({"ok": false, "message": msg})),
-            )
-                .into_response();
-        }
-        return missing_scan_relocate_response(
+        return relocate_folder_err(
+            want_json,
+            StatusCode::UNPROCESSABLE_ENTITY,
             &msg,
             &run_id,
             &folder.display().to_string(),
             &redirect_url,
-            false,
             &csp_nonce,
         );
     };
@@ -3003,11 +3031,7 @@ async fn relocate_scan_handler(
     } else {
         "/compare-scans".to_string()
     };
-    if want_json {
-        return axum::Json(serde_json::json!({"ok": true, "redirect": safe_redirect}))
-            .into_response();
-    }
-    axum::response::Redirect::to(&safe_redirect).into_response()
+    redirect_or_json_ok(want_json, &safe_redirect)
 }
 
 fn find_result_files_by_ext(folder: &std::path::Path, ext: &str) -> Vec<PathBuf> {
@@ -3363,6 +3387,10 @@ async fn open_path_handler(
             "message": "Opening a path in the file manager is only available in local desktop mode."
         }))
         .into_response();
+    }
+    // Skip the OS file-manager call in headless / CI environments.
+    if std::env::var("SLOC_HEADLESS").is_ok() {
+        return Json(serde_json::json!({ "opened": false, "headless": true })).into_response();
     }
     let raw = match query.path.as_deref() {
         Some(p) if !p.is_empty() => p,
@@ -5258,6 +5286,49 @@ fn spawn_cleanup_policy_task(state: AppState) -> tokio::task::JoinHandle<()> {
     })
 }
 
+fn collect_runs_to_delete(
+    reg: &ScanRegistry,
+    max_age_days: Option<u32>,
+    max_run_count: Option<u32>,
+) -> std::collections::HashSet<String> {
+    let mut to_delete = std::collections::HashSet::new();
+    if let Some(days) = max_age_days {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        for e in &reg.entries {
+            if e.timestamp_utc < cutoff {
+                to_delete.insert(e.run_id.clone());
+            }
+        }
+    }
+    if let Some(max_count) = max_run_count {
+        // entries are sorted newest-first; skip the ones we keep
+        for e in reg.entries.iter().skip(max_count as usize) {
+            to_delete.insert(e.run_id.clone());
+        }
+    }
+    to_delete
+}
+
+async fn delete_run_artifacts(state: &AppState, run_id: &str) {
+    let output_dir = {
+        let mut cache = state.artifacts.lock().await;
+        let d = cache.get(run_id).map(|a| a.output_dir.clone());
+        cache.remove(run_id);
+        d
+    };
+    let output_dir = if let Some(d) = output_dir {
+        d
+    } else {
+        let reg = state.registry.lock().await;
+        reg.find_by_run_id(run_id)
+            .map(|e| recover_artifacts_from_registry(e).output_dir)
+            .unwrap_or_default()
+    };
+    if output_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&output_dir).await;
+    }
+}
+
 /// Core cleanup logic shared by the background task and the "Run Now" handler.
 /// Applies both the age limit and the count limit, then updates `last_run_at`.
 /// Returns the number of runs deleted.
@@ -5270,45 +5341,13 @@ async fn run_auto_cleanup(state: &AppState) -> u32 {
         }
     };
 
-    let mut to_delete: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    {
+    let to_delete = {
         let reg = state.registry.lock().await;
-        if let Some(days) = max_age_days {
-            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
-            for e in &reg.entries {
-                if e.timestamp_utc < cutoff {
-                    to_delete.insert(e.run_id.clone());
-                }
-            }
-        }
-        if let Some(max_count) = max_run_count {
-            // entries are sorted newest-first; skip the ones we keep
-            for e in reg.entries.iter().skip(max_count as usize) {
-                to_delete.insert(e.run_id.clone());
-            }
-        }
-    }
+        collect_runs_to_delete(&reg, max_age_days, max_run_count)
+    };
 
-    // Delete on-disk artifacts for each condemned run.
     for run_id in &to_delete {
-        let output_dir = {
-            let mut cache = state.artifacts.lock().await;
-            let d = cache.get(run_id).map(|a| a.output_dir.clone());
-            cache.remove(run_id);
-            d
-        };
-        let output_dir = if let Some(d) = output_dir {
-            d
-        } else {
-            let reg = state.registry.lock().await;
-            reg.find_by_run_id(run_id)
-                .map(|e| recover_artifacts_from_registry(e).output_dir)
-                .unwrap_or_default()
-        };
-        if output_dir.exists() {
-            let _ = tokio::fs::remove_dir_all(&output_dir).await;
-        }
+        delete_run_artifacts(state, run_id).await;
     }
 
     // Purge from registry.
@@ -5882,6 +5921,211 @@ fn pdf_generating_response(run_id: &str, csp_nonce: &str) -> Response {
     Html(html).into_response()
 }
 
+/// Render an `ErrorTemplate` to an HTML string; used by artifact download arms.
+fn render_error_artifact_html(
+    message: String,
+    last_report_url: Option<String>,
+    last_report_label: Option<String>,
+    run_id: Option<String>,
+    error_code: Option<u16>,
+    csp_nonce: &str,
+) -> String {
+    ErrorTemplate {
+        message,
+        last_report_url,
+        last_report_label,
+        run_id,
+        error_code,
+        csp_nonce: csp_nonce.to_owned(),
+        version: env!("CARGO_PKG_VERSION"),
+    }
+    .render()
+    .unwrap_or_else(|_| "<pre>Error.</pre>".to_string())
+}
+
+/// Read a file and serve it as an attachment download.
+fn serve_binary_download(path: &Path, content_type: &str, fallback_filename: &str) -> Response {
+    fs::read(path).map_or_else(
+        |_| StatusCode::NOT_FOUND.into_response(),
+        |bytes| {
+            let filename = path.file_name().map_or_else(
+                || fallback_filename.to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            (
+                [
+                    (header::CONTENT_TYPE, content_type.to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{filename}\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        },
+    )
+}
+
+fn serve_csv_arm(csv_path: Option<PathBuf>, run_id: &str, csp_nonce: &str) -> Response {
+    let Some(path) = csv_path else {
+        let html = render_error_artifact_html(
+            "CSV report was not generated for this run, or was not recorded in \
+             the scan registry."
+                .to_string(),
+            Some(format!("/runs/html/{run_id}")),
+            Some("View HTML Report".to_string()),
+            Some(run_id.to_string()),
+            Some(404),
+            csp_nonce,
+        );
+        return (StatusCode::NOT_FOUND, Html(html)).into_response();
+    };
+    serve_binary_download(&path, "text/csv; charset=utf-8", "report.csv")
+}
+
+fn serve_xlsx_arm(xlsx_path: Option<PathBuf>, run_id: &str, csp_nonce: &str) -> Response {
+    let Some(path) = xlsx_path else {
+        let html = render_error_artifact_html(
+            "Excel report was not generated for this run, or was not recorded in \
+             the scan registry."
+                .to_string(),
+            Some(format!("/runs/html/{run_id}")),
+            Some("View HTML Report".to_string()),
+            Some(run_id.to_string()),
+            Some(404),
+            csp_nonce,
+        );
+        return (StatusCode::NOT_FOUND, Html(html)).into_response();
+    };
+    serve_binary_download(
+        &path,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "report.xlsx",
+    )
+}
+
+fn serve_scan_config_arm(artifact_set: &RunArtifacts) -> Response {
+    let path = artifact_set
+        .scan_config_path
+        .as_deref()
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| find_scan_config_in_dir(&artifact_set.output_dir))
+        .unwrap_or_else(|| artifact_set.output_dir.join("scan-config.json"));
+    fs::read(&path).map_or_else(
+        |_| StatusCode::NOT_FOUND.into_response(),
+        |bytes| {
+            (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/json; charset=utf-8".to_string(),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"scan-config.json\"".to_string(),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        },
+    )
+}
+
+fn serve_submodule_arm(
+    artifact: &str,
+    artifact_set: RunArtifacts,
+    wants_download: bool,
+    csp_nonce: &str,
+    run_id: &str,
+    server_mode: bool,
+) -> Response {
+    if artifact.len() > 128
+        || !artifact
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let filename = format!("{artifact}.html");
+    // Check submodules/ subfolder first (new layout), fall back to root (old layout).
+    let new_layout = artifact_set.output_dir.join("submodules").join(&filename);
+    let path = if new_layout.exists() {
+        new_layout
+    } else {
+        artifact_set.output_dir.join(&filename)
+    };
+    if !path.exists() {
+        let html = render_error_artifact_html(
+            format!(
+                "Sub-report '{artifact}' was not found in the run directory.\n\
+                 Re-run the analysis with 'Detect and separate git submodules' \
+                 and HTML output enabled."
+            ),
+            Some("/view-reports".to_string()),
+            Some("View Reports".to_string()),
+            Some(run_id.to_string()),
+            Some(404),
+            csp_nonce,
+        );
+        return (StatusCode::NOT_FOUND, Html(html)).into_response();
+    }
+    serve_html_artifact(&path, wants_download, csp_nonce, run_id, server_mode)
+}
+
+async fn serve_pdf_arm(
+    state: &AppState,
+    artifact_set: RunArtifacts,
+    wants_download: bool,
+    run_id: &str,
+    csp_nonce: &str,
+) -> Response {
+    let report_title = artifact_set.report_title.clone();
+    let had_pdf_in_registry = artifact_set.pdf_path.is_some();
+    let stale_html_name = artifact_set
+        .html_path
+        .as_deref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned());
+    let path = match resolve_or_queue_pdf(
+        state,
+        artifact_set.pdf_path,
+        artifact_set.json_path.clone(),
+        artifact_set.output_dir.clone(),
+        run_id,
+        &report_title,
+        csp_nonce,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !path.exists() {
+        // Distinguish a stale registry path (folder moved) from an in-progress
+        // background generation. Only show the locate page when the PDF was
+        // already recorded in the registry but the file is now missing.
+        if had_pdf_in_registry {
+            if let Some(expected_filename) = stale_html_name {
+                let html = LocateFileTemplate {
+                    run_id: run_id.to_string(),
+                    artifact_type: "pdf".to_string(),
+                    expected_filename,
+                    server_mode: state.server_mode,
+                    csp_nonce: csp_nonce.to_string(),
+                    version: env!("CARGO_PKG_VERSION"),
+                }
+                .render()
+                .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
+                return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            }
+        }
+        return pdf_generating_response(run_id, csp_nonce);
+    }
+    serve_pdf_artifact(&path, &report_title, run_id, wants_download, csp_nonce)
+}
+
 async fn artifact_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -5908,223 +6152,34 @@ async fn artifact_handler(
                 state.server_mode,
             )
         }
-        "pdf" => {
-            let report_title = artifact_set.report_title.clone();
-            let had_pdf_in_registry = artifact_set.pdf_path.is_some();
-            let stale_html_name = artifact_set
-                .html_path
-                .as_deref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned());
-            let path = match resolve_or_queue_pdf(
-                &state,
-                artifact_set.pdf_path,
-                artifact_set.json_path.clone(),
-                artifact_set.output_dir.clone(),
-                &run_id,
-                &report_title,
-                &csp_nonce,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(r) => return r,
-            };
-            if !path.exists() {
-                // Distinguish a stale registry path (folder moved) from an in-progress
-                // background generation. Only show the locate page when the PDF was
-                // already recorded in the registry but the file is now missing.
-                if had_pdf_in_registry {
-                    if let Some(expected_filename) = stale_html_name {
-                        let html = LocateFileTemplate {
-                            run_id: run_id.clone(),
-                            artifact_type: "pdf".to_string(),
-                            expected_filename,
-                            server_mode: state.server_mode,
-                            csp_nonce: csp_nonce.clone(),
-                            version: env!("CARGO_PKG_VERSION"),
-                        }
-                        .render()
-                        .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
-                        return (StatusCode::NOT_FOUND, Html(html)).into_response();
-                    }
-                }
-                return pdf_generating_response(&run_id, &csp_nonce);
-            }
-            serve_pdf_artifact(&path, &report_title, &run_id, wants_download, &csp_nonce)
-        }
+        "pdf" => serve_pdf_arm(&state, artifact_set, wants_download, &run_id, &csp_nonce).await,
         "json" => {
             let Some(path) = artifact_set.json_path else {
-                let msg = "JSON result was not generated for this run, or was not recorded in \
-                           the scan registry. Re-run the analysis with JSON output enabled."
-                    .to_string();
-                let html = ErrorTemplate {
-                    message: msg,
-                    last_report_url: Some("/view-reports".to_string()),
-                    last_report_label: Some("View Reports".to_string()),
-                    run_id: Some(run_id.clone()),
-                    error_code: Some(404),
-                    csp_nonce: csp_nonce.clone(),
-                    version: env!("CARGO_PKG_VERSION"),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>JSON not available.</pre>".to_string());
+                let html = render_error_artifact_html(
+                    "JSON result was not generated for this run, or was not recorded in \
+                     the scan registry. Re-run the analysis with JSON output enabled."
+                        .to_string(),
+                    Some("/view-reports".to_string()),
+                    Some("View Reports".to_string()),
+                    Some(run_id.clone()),
+                    Some(404),
+                    &csp_nonce,
+                );
                 return (StatusCode::NOT_FOUND, Html(html)).into_response();
             };
             serve_json_artifact(&path, wants_download, &csp_nonce)
         }
-        "csv" => {
-            let Some(path) = artifact_set.csv_path else {
-                let msg = "CSV report was not generated for this run, or was not recorded in \
-                           the scan registry."
-                    .to_string();
-                let html = ErrorTemplate {
-                    message: msg,
-                    last_report_url: Some(format!("/runs/html/{run_id}")),
-                    last_report_label: Some("View HTML Report".to_string()),
-                    run_id: Some(run_id.clone()),
-                    error_code: Some(404),
-                    csp_nonce: csp_nonce.clone(),
-                    version: env!("CARGO_PKG_VERSION"),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>CSV not available.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
-            };
-            fs::read(&path).map_or_else(
-                |_| StatusCode::NOT_FOUND.into_response(),
-                |bytes| {
-                    let filename = path.file_name().map_or_else(
-                        || "report.csv".to_string(),
-                        |n| n.to_string_lossy().into_owned(),
-                    );
-                    (
-                        [
-                            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
-                            (
-                                header::CONTENT_DISPOSITION,
-                                format!("attachment; filename=\"{filename}\""),
-                            ),
-                        ],
-                        bytes,
-                    )
-                        .into_response()
-                },
-            )
-        }
-        "xlsx" => {
-            let Some(path) = artifact_set.xlsx_path else {
-                let msg = "Excel report was not generated for this run, or was not recorded in \
-                           the scan registry."
-                    .to_string();
-                let html = ErrorTemplate {
-                    message: msg,
-                    last_report_url: Some(format!("/runs/html/{run_id}")),
-                    last_report_label: Some("View HTML Report".to_string()),
-                    run_id: Some(run_id.clone()),
-                    error_code: Some(404),
-                    csp_nonce: csp_nonce.clone(),
-                    version: env!("CARGO_PKG_VERSION"),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>Excel not available.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
-            };
-            fs::read(&path).map_or_else(
-                |_| StatusCode::NOT_FOUND.into_response(),
-                |bytes| {
-                    let filename = path.file_name().map_or_else(
-                        || "report.xlsx".to_string(),
-                        |n| n.to_string_lossy().into_owned(),
-                    );
-                    (
-                        [
-                            (
-                                header::CONTENT_TYPE,
-                                "application/vnd.openxmlformats-officedocument\
-                                 .spreadsheetml.sheet"
-                                    .to_string(),
-                            ),
-                            (
-                                header::CONTENT_DISPOSITION,
-                                format!("attachment; filename=\"{filename}\""),
-                            ),
-                        ],
-                        bytes,
-                    )
-                        .into_response()
-                },
-            )
-        }
-        "scan-config" => {
-            let path = artifact_set
-                .scan_config_path
-                .as_deref()
-                .map(std::path::Path::to_path_buf)
-                .or_else(|| find_scan_config_in_dir(&artifact_set.output_dir))
-                .unwrap_or_else(|| artifact_set.output_dir.join("scan-config.json"));
-            fs::read(&path).map_or_else(
-                |_| StatusCode::NOT_FOUND.into_response(),
-                |bytes| {
-                    (
-                        [
-                            (
-                                header::CONTENT_TYPE,
-                                "application/json; charset=utf-8".to_string(),
-                            ),
-                            (
-                                header::CONTENT_DISPOSITION,
-                                "attachment; filename=\"scan-config.json\"".to_string(),
-                            ),
-                        ],
-                        bytes,
-                    )
-                        .into_response()
-                },
-            )
-        }
-        _ if artifact.starts_with("sub_") => {
-            if artifact.len() > 128
-                || !artifact
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                return StatusCode::BAD_REQUEST.into_response();
-            }
-            let filename = format!("{artifact}.html");
-            // Check submodules/ subfolder first (new layout), fall back to root (old layout).
-            let new_layout = artifact_set.output_dir.join("submodules").join(&filename);
-            let path = if new_layout.exists() {
-                new_layout
-            } else {
-                artifact_set.output_dir.join(&filename)
-            };
-            if !path.exists() {
-                let html = ErrorTemplate {
-                    message: format!(
-                        "Sub-report '{artifact}' was not found in the run directory.\n\
-                         Re-run the analysis with 'Detect and separate git submodules' \
-                         and HTML output enabled."
-                    ),
-                    last_report_url: Some("/view-reports".to_string()),
-                    last_report_label: Some("View Reports".to_string()),
-                    run_id: Some(run_id.clone()),
-                    error_code: Some(404),
-                    csp_nonce: csp_nonce.clone(),
-                    version: env!("CARGO_PKG_VERSION"),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>Sub-report not found.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
-            }
-            serve_html_artifact(
-                &path,
-                wants_download,
-                &csp_nonce,
-                &run_id,
-                state.server_mode,
-            )
-        }
+        "csv" => serve_csv_arm(artifact_set.csv_path, &run_id, &csp_nonce),
+        "xlsx" => serve_xlsx_arm(artifact_set.xlsx_path, &run_id, &csp_nonce),
+        "scan-config" => serve_scan_config_arm(&artifact_set),
+        _ if artifact.starts_with("sub_") => serve_submodule_arm(
+            &artifact,
+            artifact_set,
+            wants_download,
+            &csp_nonce,
+            &run_id,
+            state.server_mode,
+        ),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
