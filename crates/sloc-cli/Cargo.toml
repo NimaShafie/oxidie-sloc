@@ -33,6 +33,7 @@ native-dialog = ["sloc-web/native-dialog"]
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+rustls.workspace = true
 chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

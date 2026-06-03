@@ -579,7 +579,7 @@ pub(crate) struct AppState {
     pub(crate) analyze_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) server_mode: bool,
     pub(crate) tls_enabled: bool,
-    pub(crate) api_keys: Vec<secrecy::Secret<String>>,
+    pub(crate) api_keys: Arc<Vec<secrecy::SecretBox<String>>>,
     pub(crate) rate_limiter: Arc<IpRateLimiter>,
     pub(crate) trust_proxy: bool,
     /// Allowlist of proxy IPs that are permitted to set X-Forwarded-For. Only honoured when
@@ -798,7 +798,7 @@ pub fn make_test_router() -> Router {
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode: false,
         tls_enabled: false,
-        api_keys: vec![],
+        api_keys: Arc::new(vec![]),
         rate_limiter: Arc::new(IpRateLimiter::new(
             Duration::from_mins(1),
             600,
@@ -836,7 +836,7 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode: false,
         tls_enabled: false,
-        api_keys: vec![secrecy::Secret::new(api_key.to_owned())],
+        api_keys: Arc::new(vec![secrecy::SecretBox::new(Box::new(api_key.to_owned()))]),
         rate_limiter: Arc::new(IpRateLimiter::new(
             Duration::from_mins(1),
             600,
@@ -863,7 +863,7 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
 }
 
 struct RuntimeSecurityConfig {
-    api_keys: Vec<secrecy::Secret<String>>,
+    api_keys: Vec<secrecy::SecretBox<String>>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
     tls_enabled: bool,
@@ -873,13 +873,13 @@ struct RuntimeSecurityConfig {
 }
 
 fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
-    let api_keys: Vec<secrecy::Secret<String>> = std::env::var("SLOC_API_KEYS")
+    let api_keys: Vec<secrecy::SecretBox<String>> = std::env::var("SLOC_API_KEYS")
         .or_else(|_| std::env::var("SLOC_API_KEY"))
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| secrecy::Secret::new(s.to_owned()))
+        .map(|s| secrecy::SecretBox::new(Box::new(s.to_owned())))
         .collect();
     if server_mode && api_keys.is_empty() {
         println!(
@@ -1025,7 +1025,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode,
         tls_enabled: sec.tls_enabled,
-        api_keys: sec.api_keys,
+        api_keys: Arc::new(sec.api_keys),
         rate_limiter: sec.rate_limiter,
         trust_proxy: sec.trust_proxy,
         trusted_proxy_ips: sec.trusted_proxy_ips,
@@ -25880,5 +25880,244 @@ mod form_config_tests {
     #[test]
     fn split_patterns_single_entry() {
         assert_eq!(split_patterns(Some("src/**")), vec!["src/**"]);
+    }
+}
+
+#[cfg(test)]
+mod utility_tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::time::Duration;
+
+    // ── sanitize_project_label ────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_simple_name() {
+        assert_eq!(sanitize_project_label("myrepo"), "myrepo");
+    }
+
+    #[test]
+    fn sanitize_uppercased_lowercased() {
+        assert_eq!(sanitize_project_label("MyRepo"), "myrepo");
+    }
+
+    #[test]
+    fn sanitize_path_extracts_filename() {
+        assert_eq!(
+            sanitize_project_label("/home/user/my-project"),
+            "my-project"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_uses_last_component() {
+        assert_eq!(sanitize_project_label("/a/b/c/d"), "d");
+    }
+
+    #[test]
+    fn sanitize_spaces_become_hyphens() {
+        assert_eq!(sanitize_project_label("my project"), "my-project");
+    }
+
+    #[test]
+    fn sanitize_non_ascii_become_hyphens() {
+        assert_eq!(sanitize_project_label("proj\u{00e9}ct"), "proj-ct");
+    }
+
+    #[test]
+    fn sanitize_all_special_chars_gives_project() {
+        assert_eq!(sanitize_project_label("!@#$%^"), "project");
+    }
+
+    #[test]
+    fn sanitize_empty_string_gives_project() {
+        assert_eq!(sanitize_project_label(""), "project");
+    }
+
+    #[test]
+    fn sanitize_leading_trailing_hyphens_stripped() {
+        assert_eq!(sanitize_project_label("!myrepo!"), "myrepo");
+    }
+
+    #[test]
+    fn sanitize_alphanumeric_preserved() {
+        assert_eq!(sanitize_project_label("repo123"), "repo123");
+    }
+
+    #[test]
+    fn sanitize_dots_become_hyphens() {
+        assert_eq!(sanitize_project_label("my.repo.name"), "my-repo-name");
+    }
+
+    #[test]
+    fn sanitize_mixed_slashes_uses_filename() {
+        // The Windows path separator — on all platforms Path::file_name still works
+        assert_eq!(sanitize_project_label("project-name"), "project-name");
+    }
+
+    // ── IpRateLimiter ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limiter_allows_first_request() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 5, Duration::from_secs(3600));
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(rl.is_allowed(ip));
+    }
+
+    #[test]
+    fn rate_limiter_blocks_after_limit_reached() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 3, 5, Duration::from_secs(3600));
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(rl.is_allowed(ip));
+        assert!(rl.is_allowed(ip));
+        assert!(rl.is_allowed(ip));
+        assert!(!rl.is_allowed(ip), "4th request must be blocked");
+    }
+
+    #[test]
+    fn rate_limiter_allows_requests_up_to_limit() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 5, 5, Duration::from_secs(3600));
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        for _ in 0..5 {
+            assert!(rl.is_allowed(ip));
+        }
+        assert!(!rl.is_allowed(ip), "6th request must be blocked");
+    }
+
+    #[test]
+    fn rate_limiter_different_ips_are_independent() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 1, 5, Duration::from_secs(3600));
+        let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+        let ip2: IpAddr = "192.168.1.2".parse().unwrap();
+        assert!(rl.is_allowed(ip1));
+        assert!(!rl.is_allowed(ip1), "ip1 blocked after limit");
+        assert!(rl.is_allowed(ip2), "ip2 must be independent");
+    }
+
+    #[test]
+    fn rate_limiter_auth_failure_not_locked_below_threshold() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 3, Duration::from_secs(3600));
+        let ip: IpAddr = "10.0.0.3".parse().unwrap();
+        rl.record_auth_failure(ip);
+        rl.record_auth_failure(ip);
+        assert!(
+            !rl.is_auth_locked_out(ip),
+            "not locked at 2 failures when threshold is 3"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_auth_failure_locked_at_threshold() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 3, Duration::from_secs(3600));
+        let ip: IpAddr = "10.0.0.4".parse().unwrap();
+        rl.record_auth_failure(ip);
+        rl.record_auth_failure(ip);
+        rl.record_auth_failure(ip);
+        assert!(rl.is_auth_locked_out(ip), "must be locked after 3 failures");
+    }
+
+    #[test]
+    fn rate_limiter_auth_failure_different_ips_independent() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 2, Duration::from_secs(3600));
+        let ip1: IpAddr = "10.0.1.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.1.2".parse().unwrap();
+        rl.record_auth_failure(ip1);
+        rl.record_auth_failure(ip1);
+        assert!(rl.is_auth_locked_out(ip1));
+        assert!(!rl.is_auth_locked_out(ip2), "ip2 must not be locked");
+    }
+
+    #[test]
+    fn rate_limiter_high_limit_never_blocks_normal_traffic() {
+        let rl = IpRateLimiter::new(Duration::from_secs(60), 1000, 10, Duration::from_secs(3600));
+        let ip: IpAddr = "127.0.0.2".parse().unwrap();
+        for _ in 0..100 {
+            assert!(rl.is_allowed(ip));
+        }
+    }
+
+    // ── strip_unc_prefix ──────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_unc_plain_path_unchanged() {
+        let p = PathBuf::from("C:\\Users\\user\\project");
+        let result = strip_unc_prefix(p.clone());
+        assert_eq!(result, p);
+    }
+
+    #[test]
+    fn strip_unc_with_drive_prefix_stripped() {
+        let p = PathBuf::from(r"\\?\C:\Users\user\project");
+        let result = strip_unc_prefix(p);
+        assert_eq!(result, PathBuf::from(r"C:\Users\user\project"));
+    }
+
+    #[test]
+    fn strip_unc_with_network_prefix_stripped() {
+        let p = PathBuf::from(r"\\?\UNC\server\share\dir");
+        let result = strip_unc_prefix(p);
+        assert_eq!(result, PathBuf::from(r"\\server\share\dir"));
+    }
+
+    #[test]
+    fn strip_unc_linux_path_unchanged() {
+        let p = PathBuf::from("/home/user/project");
+        let result = strip_unc_prefix(p.clone());
+        assert_eq!(result, p);
+    }
+
+    // ── remote_to_commit_url ──────────────────────────────────────────────────
+
+    #[test]
+    fn remote_to_commit_url_github_https() {
+        let url = remote_to_commit_url("https://github.com/owner/repo.git", "abc1234");
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/commit/abc1234".to_owned())
+        );
+    }
+
+    #[test]
+    fn remote_to_commit_url_github_ssh() {
+        let url = remote_to_commit_url("git@github.com:owner/repo.git", "abc1234");
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/commit/abc1234".to_owned())
+        );
+    }
+
+    #[test]
+    fn remote_to_commit_url_gitlab_uses_dash_commit() {
+        let url = remote_to_commit_url("https://gitlab.com/group/repo.git", "deadbeef");
+        assert_eq!(
+            url,
+            Some("https://gitlab.com/group/repo/-/commit/deadbeef".to_owned())
+        );
+    }
+
+    #[test]
+    fn remote_to_commit_url_bitbucket_uses_commits() {
+        let url = remote_to_commit_url("https://bitbucket.org/workspace/repo.git", "cafebabe");
+        assert_eq!(
+            url,
+            Some("https://bitbucket.org/workspace/repo/commits/cafebabe".to_owned())
+        );
+    }
+
+    #[test]
+    fn remote_to_commit_url_unknown_scheme_returns_none() {
+        let url = remote_to_commit_url("ftp://example.com/repo.git", "abc");
+        assert!(url.is_none());
+    }
+
+    #[test]
+    fn remote_to_commit_url_ssh_gitlab() {
+        let url = remote_to_commit_url("git@gitlab.com:group/repo.git", "sha123");
+        assert!(url.is_some());
+        let u = url.unwrap();
+        assert!(
+            u.contains("/-/commit/sha123"),
+            "gitlab ssh must use /-/commit/"
+        );
     }
 }

@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // Tracing goes to stderr — stdout is reserved for the MCP wire protocol.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
