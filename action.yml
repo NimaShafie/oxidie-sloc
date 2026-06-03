@@ -57,37 +57,41 @@ runs:
   steps:
     - name: Resolve version
       id: resolve
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
       shell: bash
       run: |
-        if [ "${{ inputs.version }}" = "latest" ]; then
+        if [ "$INPUT_VERSION" = "latest" ]; then
           VERSION=$(curl -fsSL \
             https://api.github.com/repos/oxide-sloc/oxide-sloc/releases/latest \
             | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
         else
-          VERSION="${{ inputs.version }}"
+          VERSION="$INPUT_VERSION"
         fi
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Download binary (Linux / macOS)
       if: runner.os != 'Windows'
+      env:
+        RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
       shell: bash
       run: |
-        VERSION="${{ steps.resolve.outputs.version }}"
         if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
           ASSET="oxide-sloc-linux-arm64.tar.gz"
         else
           ASSET="oxide-sloc-linux-x86_64.tar.gz"
         fi
-        URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/${VERSION}/${ASSET}"
+        URL="https://github.com/oxide-sloc/oxide-sloc/releases/download/${RESOLVED_VERSION}/${ASSET}"
         curl -fsSL "$URL" | sudo tar -xz -C /usr/local/bin
         chmod +x /usr/local/bin/oxide-sloc
 
     - name: Download binary (Windows)
       if: runner.os == 'Windows'
+      env:
+        RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
       shell: pwsh
       run: |
-        $VERSION = "${{ steps.resolve.outputs.version }}"
-        $URL = "https://github.com/oxide-sloc/oxide-sloc/releases/download/$VERSION/oxide-sloc-windows-x64.zip"
+        $URL = "https://github.com/oxide-sloc/oxide-sloc/releases/download/$env:RESOLVED_VERSION/oxide-sloc-windows-x64.zip"
         $ZIP  = "$env:RUNNER_TEMP\oxide-sloc.zip"
         $DEST = "$env:RUNNER_TEMP\oxide-sloc-bin"
         Invoke-WebRequest -Uri $URL -OutFile $ZIP -UseBasicParsing
@@ -98,27 +102,33 @@ runs:
 
     - name: Analyze
       id: analyze
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_JSON_OUT: ${{ inputs.json-out }}
+        INPUT_HTML_OUT: ${{ inputs.html-out }}
       shell: bash
       run: |
-        mkdir -p "$(dirname "${{ inputs.json-out }}")"
+        mkdir -p "$(dirname "$INPUT_JSON_OUT")"
         EXTRA=""
-        if [ -n "${{ inputs.html-out }}" ]; then
-          EXTRA="$EXTRA --html-out ${{ inputs.html-out }}"
+        if [ -n "$INPUT_HTML_OUT" ]; then
+          EXTRA="$EXTRA --html-out $INPUT_HTML_OUT"
         fi
-        oxide-sloc analyze "${{ inputs.path }}" \
-          --json-out "${{ inputs.json-out }}" $EXTRA
-        echo "json-path=$(realpath ${{ inputs.json-out }})" >> "$GITHUB_OUTPUT"
+        oxide-sloc analyze "$INPUT_PATH" \
+          --json-out "$INPUT_JSON_OUT" $EXTRA
+        echo "json-path=$(realpath "$INPUT_JSON_OUT")" >> "$GITHUB_OUTPUT"
 
     - name: Parse results
       id: parse
+      env:
+        INPUT_JSON_OUT: ${{ inputs.json-out }}
       shell: bash
       run: |
-        if [ -f "${{ inputs.json-out }}" ]; then
-          CODE=$(jq '.summary_totals.code_lines    // 0' "${{ inputs.json-out }}")
-          CMT=$(jq  '.summary_totals.comment_lines // 0' "${{ inputs.json-out }}")
-          BLK=$(jq  '.summary_totals.blank_lines   // 0' "${{ inputs.json-out }}")
-          TOT=$(jq  '.summary_totals.total_physical_lines // 0' "${{ inputs.json-out }}")
-          FLS=$(jq  '.summary_totals.files_analyzed // 0' "${{ inputs.json-out }}")
+        if [ -f "$INPUT_JSON_OUT" ]; then
+          CODE=$(jq '.summary_totals.code_lines    // 0' "$INPUT_JSON_OUT")
+          CMT=$(jq  '.summary_totals.comment_lines // 0' "$INPUT_JSON_OUT")
+          BLK=$(jq  '.summary_totals.blank_lines   // 0' "$INPUT_JSON_OUT")
+          TOT=$(jq  '.summary_totals.total_physical_lines // 0' "$INPUT_JSON_OUT")
+          FLS=$(jq  '.summary_totals.files_analyzed // 0' "$INPUT_JSON_OUT")
           echo "code-lines=$CODE"    >> "$GITHUB_OUTPUT"
           echo "comment-lines=$CMT" >> "$GITHUB_OUTPUT"
           echo "blank-lines=$BLK"   >> "$GITHUB_OUTPUT"
@@ -131,9 +141,11 @@ runs:
       shell: bash
       env:
         SLOC_API_KEY: ${{ inputs.api-key }}
+        INPUT_JSON_OUT: ${{ inputs.json-out }}
+        INPUT_SERVER_URL: ${{ inputs.server-url }}
       run: |
-        oxide-sloc send "${{ inputs.json-out }}" \
-          --webhook-url "${{ inputs.server-url }}/api/ingest" \
+        oxide-sloc send "$INPUT_JSON_OUT" \
+          --webhook-url "$INPUT_SERVER_URL/api/ingest" \
           ${SLOC_API_KEY:+--webhook-token "$SLOC_API_KEY"}
 
     - name: Archive result

@@ -49,3 +49,5 @@ sloc-report = { path = "../sloc-report", version = "1.5.64" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+serde_json = "1"

@@ -2217,6 +2217,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2261,6 +2262,7 @@ dependencies = [
  "sloc-report",
  "subtle",
  "tar",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "toml",
