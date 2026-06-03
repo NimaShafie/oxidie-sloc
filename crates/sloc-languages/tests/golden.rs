@@ -8,7 +8,7 @@
 /// immediately on CI.
 use std::path::Path;
 
-use sloc_languages::{analyze_text, AnalysisOptions, Language};
+use sloc_languages::{analyze_text, detect_language, AnalysisOptions, Language};
 
 fn corpus(rel: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -580,4 +580,540 @@ fn powershell_basic() {
     assert!(r.total_physical_lines >= 3);
     assert!(r.code_only_lines >= 1);
     assert!(r.single_comment_only_lines >= 1);
+}
+
+// ─── detect_language tests ────────────────────────────────────────────────────
+
+#[test]
+fn detect_by_extension_rs_is_rust() {
+    let path = std::path::Path::new("src/lib.rs");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Rust));
+}
+
+#[test]
+fn detect_by_extension_py_is_python() {
+    let path = std::path::Path::new("app.py");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Python));
+}
+
+#[test]
+fn detect_by_extension_js_is_javascript() {
+    let path = std::path::Path::new("index.js");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::JavaScript));
+}
+
+#[test]
+fn detect_by_extension_ts_is_typescript() {
+    let path = std::path::Path::new("app.ts");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::TypeScript));
+}
+
+#[test]
+fn detect_by_extension_go_is_go() {
+    let path = std::path::Path::new("main.go");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Go));
+}
+
+#[test]
+fn detect_by_extension_c_is_c() {
+    let path = std::path::Path::new("main.c");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::C));
+}
+
+#[test]
+fn detect_by_extension_h_is_c() {
+    let path = std::path::Path::new("header.h");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::C));
+}
+
+#[test]
+fn detect_by_extension_cpp_is_cpp() {
+    let path = std::path::Path::new("main.cpp");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Cpp));
+}
+
+#[test]
+fn detect_by_extension_hpp_is_cpp() {
+    let path = std::path::Path::new("include.hpp");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Cpp));
+}
+
+#[test]
+fn detect_by_extension_java_is_java() {
+    let path = std::path::Path::new("Main.java");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Java));
+}
+
+#[test]
+fn detect_by_extension_cs_is_csharp() {
+    let path = std::path::Path::new("Program.cs");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::CSharp));
+}
+
+#[test]
+fn detect_by_extension_rb_is_ruby() {
+    let path = std::path::Path::new("main.rb");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Ruby));
+}
+
+#[test]
+fn detect_by_extension_php_is_php() {
+    let path = std::path::Path::new("index.php");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Php));
+}
+
+#[test]
+fn detect_by_extension_swift_is_swift() {
+    let path = std::path::Path::new("app.swift");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Swift));
+}
+
+#[test]
+fn detect_by_extension_kt_is_kotlin() {
+    let path = std::path::Path::new("App.kt");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Kotlin));
+}
+
+#[test]
+fn detect_by_extension_scala_is_scala() {
+    let path = std::path::Path::new("App.scala");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Scala));
+}
+
+#[test]
+fn detect_by_extension_dart_is_dart() {
+    let path = std::path::Path::new("main.dart");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Dart));
+}
+
+#[test]
+fn detect_by_extension_lua_is_lua() {
+    let path = std::path::Path::new("init.lua");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Lua));
+}
+
+#[test]
+fn detect_by_extension_sh_is_shell() {
+    let path = std::path::Path::new("build.sh");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Shell));
+}
+
+#[test]
+fn detect_by_extension_ps1_is_powershell() {
+    let path = std::path::Path::new("install.ps1");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::PowerShell));
+}
+
+#[test]
+fn detect_by_extension_sql_is_sql() {
+    let path = std::path::Path::new("query.sql");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Sql));
+}
+
+#[test]
+fn detect_by_extension_css_is_css() {
+    let path = std::path::Path::new("style.css");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Css));
+}
+
+#[test]
+fn detect_by_extension_scss_is_scss() {
+    let path = std::path::Path::new("style.scss");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Scss));
+}
+
+#[test]
+fn detect_by_extension_html_is_html() {
+    let path = std::path::Path::new("index.html");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Html));
+}
+
+#[test]
+fn detect_by_extension_xml_is_xml() {
+    let path = std::path::Path::new("config.xml");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Xml));
+}
+
+#[test]
+fn detect_by_extension_zig_is_zig() {
+    let path = std::path::Path::new("main.zig");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Zig));
+}
+
+#[test]
+fn detect_by_extension_r_is_r() {
+    let path = std::path::Path::new("analysis.r");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::R));
+}
+
+#[test]
+fn detect_by_extension_ml_is_ocaml() {
+    let path = std::path::Path::new("parser.ml");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Ocaml));
+}
+
+#[test]
+fn detect_by_extension_hs_is_haskell() {
+    let path = std::path::Path::new("Main.hs");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Haskell));
+}
+
+#[test]
+fn detect_by_extension_erl_is_erlang() {
+    let path = std::path::Path::new("server.erl");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Erlang));
+}
+
+#[test]
+fn detect_by_extension_ex_is_elixir() {
+    let path = std::path::Path::new("app.ex");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Elixir));
+}
+
+#[test]
+fn detect_by_extension_clj_is_clojure() {
+    let path = std::path::Path::new("core.clj");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Clojure));
+}
+
+#[test]
+fn detect_by_extension_svelte_is_svelte() {
+    let path = std::path::Path::new("App.svelte");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Svelte));
+}
+
+#[test]
+fn detect_by_extension_vue_is_vue() {
+    let path = std::path::Path::new("App.vue");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Vue));
+}
+
+#[test]
+fn detect_by_filename_dockerfile_exact() {
+    let path = std::path::Path::new("Dockerfile");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Dockerfile));
+}
+
+#[test]
+fn detect_by_filename_dockerfile_variant() {
+    let path = std::path::Path::new("Dockerfile.prod");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Dockerfile));
+}
+
+#[test]
+fn detect_by_filename_makefile() {
+    let path = std::path::Path::new("Makefile");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Makefile));
+}
+
+#[test]
+fn detect_by_filename_gnumakefile() {
+    let path = std::path::Path::new("GNUmakefile");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Makefile));
+}
+
+#[test]
+fn detect_by_filename_rakefile_is_ruby() {
+    let path = std::path::Path::new("Rakefile");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Ruby));
+}
+
+#[test]
+fn detect_by_filename_gemfile_is_ruby() {
+    let path = std::path::Path::new("Gemfile");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Ruby));
+}
+
+#[test]
+fn detect_by_shebang_python3() {
+    let path = std::path::Path::new("script");
+    let first_line = "#!/usr/bin/env python3";
+    let lang = detect_language(
+        path,
+        Some(first_line),
+        &std::collections::BTreeMap::new(),
+        true,
+    );
+    assert_eq!(lang, Some(Language::Python));
+}
+
+#[test]
+fn detect_by_shebang_bash() {
+    let path = std::path::Path::new("script");
+    let first_line = "#!/bin/bash";
+    let lang = detect_language(
+        path,
+        Some(first_line),
+        &std::collections::BTreeMap::new(),
+        true,
+    );
+    assert_eq!(lang, Some(Language::Shell));
+}
+
+#[test]
+fn detect_by_shebang_ruby() {
+    let path = std::path::Path::new("script");
+    let first_line = "#!/usr/bin/env ruby";
+    let lang = detect_language(
+        path,
+        Some(first_line),
+        &std::collections::BTreeMap::new(),
+        true,
+    );
+    assert_eq!(lang, Some(Language::Ruby));
+}
+
+#[test]
+fn detect_by_shebang_perl() {
+    let path = std::path::Path::new("script");
+    let first_line = "#!/usr/bin/perl";
+    let lang = detect_language(
+        path,
+        Some(first_line),
+        &std::collections::BTreeMap::new(),
+        true,
+    );
+    assert_eq!(lang, Some(Language::Perl));
+}
+
+#[test]
+fn detect_by_shebang_node() {
+    let path = std::path::Path::new("script");
+    let first_line = "#!/usr/bin/env node";
+    let lang = detect_language(
+        path,
+        Some(first_line),
+        &std::collections::BTreeMap::new(),
+        true,
+    );
+    assert_eq!(lang, Some(Language::JavaScript));
+}
+
+#[test]
+fn detect_shebang_disabled_returns_none_for_extensionless() {
+    let path = std::path::Path::new("script");
+    let first_line = "#!/usr/bin/python3";
+    let lang = detect_language(
+        path,
+        Some(first_line),
+        &std::collections::BTreeMap::new(),
+        false, // shebang_detection = false
+    );
+    assert!(
+        lang.is_none(),
+        "should not detect language without shebang detection enabled"
+    );
+}
+
+#[test]
+fn detect_extension_override_wins_over_default() {
+    let path = std::path::Path::new("app.js");
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("js".to_string(), "typescript".to_string());
+    let lang = detect_language(path, None, &overrides, false);
+    assert_eq!(
+        lang,
+        Some(Language::TypeScript),
+        "extension override should win"
+    );
+}
+
+#[test]
+fn detect_unknown_extension_returns_none() {
+    let path = std::path::Path::new("data.xyz_unknown_extension");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert!(lang.is_none(), "unknown extension should return None");
+}
+
+// ─── Language::from_name ─────────────────────────────────────────────────────
+
+#[test]
+fn from_name_aliases() {
+    assert_eq!(Language::from_name("c++"), Some(Language::Cpp));
+    assert_eq!(Language::from_name("cplusplus"), Some(Language::Cpp));
+    assert_eq!(Language::from_name("c#"), Some(Language::CSharp));
+    assert_eq!(Language::from_name("cs"), Some(Language::CSharp));
+    assert_eq!(Language::from_name("golang"), Some(Language::Go));
+    assert_eq!(Language::from_name("js"), Some(Language::JavaScript));
+    assert_eq!(Language::from_name("py"), Some(Language::Python));
+    assert_eq!(Language::from_name("rs"), Some(Language::Rust));
+    assert_eq!(Language::from_name("sh"), Some(Language::Shell));
+    assert_eq!(Language::from_name("bash"), Some(Language::Shell));
+    assert_eq!(Language::from_name("pwsh"), Some(Language::PowerShell));
+    assert_eq!(Language::from_name("ts"), Some(Language::TypeScript));
+    assert_eq!(Language::from_name("asm"), Some(Language::Assembly));
+    assert_eq!(Language::from_name("clj"), Some(Language::Clojure));
+    assert_eq!(Language::from_name("ex"), Some(Language::Elixir));
+    assert_eq!(Language::from_name("erl"), Some(Language::Erlang));
+    assert_eq!(Language::from_name("f#"), Some(Language::FSharp));
+    assert_eq!(Language::from_name("fs"), Some(Language::FSharp));
+    assert_eq!(Language::from_name("hs"), Some(Language::Haskell));
+    assert_eq!(Language::from_name("htm"), Some(Language::Html));
+    assert_eq!(Language::from_name("jl"), Some(Language::Julia));
+    assert_eq!(Language::from_name("kt"), Some(Language::Kotlin));
+    assert_eq!(Language::from_name("mk"), Some(Language::Makefile));
+    assert_eq!(Language::from_name("make"), Some(Language::Makefile));
+    assert_eq!(Language::from_name("objc"), Some(Language::ObjectiveC));
+    assert_eq!(
+        Language::from_name("objective-c"),
+        Some(Language::ObjectiveC)
+    );
+    assert_eq!(Language::from_name("ml"), Some(Language::Ocaml));
+    assert_eq!(Language::from_name("pl"), Some(Language::Perl));
+    assert_eq!(Language::from_name("rb"), Some(Language::Ruby));
+    assert_eq!(Language::from_name("scala"), Some(Language::Scala));
+    assert_eq!(Language::from_name("sass"), Some(Language::Scss));
+    assert_eq!(Language::from_name("xml"), Some(Language::Xml));
+}
+
+#[test]
+fn from_name_unknown_returns_none() {
+    assert!(Language::from_name("cobol").is_none());
+    assert!(Language::from_name("").is_none());
+    assert!(Language::from_name("brainfuck").is_none());
+}
+
+#[test]
+fn from_name_is_case_insensitive() {
+    assert_eq!(Language::from_name("RUST"), Some(Language::Rust));
+    assert_eq!(Language::from_name("Python"), Some(Language::Python));
+    assert_eq!(
+        Language::from_name("JAVASCRIPT"),
+        Some(Language::JavaScript)
+    );
+}
+
+// ─── Language display_name and as_slug (all variants) ────────────────────────
+
+#[test]
+fn display_name_non_empty_for_all_languages() {
+    use sloc_languages::supported_languages;
+    for lang in supported_languages() {
+        let name = lang.display_name();
+        assert!(!name.is_empty(), "{lang:?} display_name must not be empty");
+    }
+}
+
+#[test]
+fn as_slug_non_empty_for_all_languages() {
+    use sloc_languages::supported_languages;
+    for lang in supported_languages() {
+        let slug = lang.as_slug();
+        assert!(!slug.is_empty(), "{lang:?} as_slug must not be empty");
+        // slugs should only contain lowercase alphanumeric or +
+        assert!(
+            slug.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '+'),
+            "{lang:?} slug '{slug}' contains unexpected characters"
+        );
+    }
+}
+
+#[test]
+fn supported_languages_count_is_41() {
+    use sloc_languages::supported_languages;
+    let count = supported_languages().len();
+    assert_eq!(count, 41, "expected 41 supported languages, got {count}");
+}
+
+// ─── AnalysisOptions non-defaults ────────────────────────────────────────────
+
+#[test]
+fn analyze_with_blank_in_block_comment_false() {
+    let text = "/* block comment\n\n end */\nint x = 1;\n";
+    let opts = sloc_languages::AnalysisOptions {
+        blank_in_block_comment_as_comment: false,
+        ..AnalysisOptions::default()
+    };
+    let result = analyze_text(Language::C, text, opts);
+    let r = &result.raw;
+    // With blank_in_block_comment_as_comment=false, the blank inside the block counts as blank
+    assert!(r.total_physical_lines >= 3);
+}
+
+#[test]
+fn analyze_with_collapse_continuation_lines() {
+    // Shell continuation: line ending with backslash
+    let text = "echo hello \\\n  world\necho done\n";
+    let opts = sloc_languages::AnalysisOptions {
+        collapse_continuation_lines: true,
+        ..AnalysisOptions::default()
+    };
+    let result = analyze_text(Language::Shell, text, opts);
+    // With continuation collapse, logical lines < physical lines
+    assert!(result.raw.total_physical_lines >= 2);
+}
+
+#[test]
+fn analyze_c_family_style_scope_only_c_files() {
+    let text = "void foo() {}\n// comment\n";
+    let opts = sloc_languages::AnalysisOptions {
+        style_lang_scope: sloc_languages::StyleLangScope::CFamilyOnly,
+        ..AnalysisOptions::default()
+    };
+    let c_result = analyze_text(Language::C, text, opts);
+    assert!(
+        c_result.style_analysis.is_some(),
+        "C should get style analysis in CFamilyOnly mode"
+    );
+
+    let rust_result = analyze_text(Language::Rust, text, opts);
+    assert!(
+        rust_result.style_analysis.is_none(),
+        "Rust should NOT get style analysis in CFamilyOnly mode"
+    );
+}
+
+#[test]
+fn analyze_style_disabled() {
+    let text = "void foo() {}\n// comment\n";
+    let opts = sloc_languages::AnalysisOptions {
+        enable_style: false,
+        ..AnalysisOptions::default()
+    };
+    let result = analyze_text(Language::C, text, opts);
+    assert!(
+        result.style_analysis.is_none(),
+        "style analysis should be None when enable_style=false"
+    );
 }

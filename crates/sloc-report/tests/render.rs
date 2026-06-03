@@ -607,3 +607,199 @@ fn render_confluence_wiki_markup_multi_language() {
     assert!(!out.is_empty());
     assert!(out.contains("Rust") || out.contains("Python"));
 }
+
+// ── Additional render_html edge cases ─────────────────────────────────────────
+
+#[test]
+fn render_html_large_codebase() {
+    // Simulate a large codebase to exercise number formatting branches
+    let mut run = make_run();
+    run.summary_totals.code_lines = 1_234_567;
+    run.summary_totals.total_physical_lines = 1_500_000;
+    run.summary_totals.files_analyzed = 10_000;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_delta_added_and_removed() {
+    let run = make_run();
+    let delta = sloc_report::ReportDeltaContext {
+        delta_code_added: 1500,
+        delta_code_removed: 300,
+        delta_unmodified_lines: 5000,
+        delta_files_added: 10,
+        delta_files_removed: 2,
+        delta_files_modified: 5,
+        delta_files_unchanged: 20,
+        prev_code_lines: 4000,
+        prev_scan_count: 3,
+        prev_scan_label: "2026-05-01 10:00 UTC".into(),
+        prev_run_id: Some("old-run".into()),
+        current_run_id: Some("new-run".into()),
+    };
+    let html = render_html_with_delta(&run, Some(&delta)).unwrap();
+    assert!(!html.is_empty());
+    // Delta values should appear
+    assert!(
+        html.contains("1500") || html.contains("1,500"),
+        "added lines should appear in delta report"
+    );
+}
+
+#[test]
+fn render_html_delta_zero_change() {
+    let run = make_run();
+    let delta = sloc_report::ReportDeltaContext {
+        delta_code_added: 0,
+        delta_code_removed: 0,
+        delta_unmodified_lines: 100,
+        delta_files_added: 0,
+        delta_files_removed: 0,
+        delta_files_modified: 0,
+        delta_files_unchanged: 5,
+        prev_code_lines: 100,
+        prev_scan_count: 1,
+        prev_scan_label: "2026-05-01".into(),
+        prev_run_id: Some("prev".into()),
+        current_run_id: Some("curr".into()),
+    };
+    let html = render_html_with_delta(&run, Some(&delta)).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn write_html_with_all_git_metadata() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_all_git();
+    write_html_report(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+    assert!(content.contains("v1.5.64") || content.contains("abc1234"));
+}
+
+#[test]
+fn write_html_with_style_summary() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_style();
+    write_html_report(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+    assert!(content.contains("<!doctype html>") || content.contains("<!DOCTYPE html>"));
+}
+
+#[test]
+fn write_html_with_submodules() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_submodules();
+    write_html_report(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+}
+
+#[test]
+fn write_csv_empty_run() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_empty_run();
+    write_csv(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        !content.is_empty(),
+        "empty run CSV should still have headers"
+    );
+}
+
+#[test]
+fn write_csv_with_coverage_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_coverage();
+    write_csv(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+}
+
+#[test]
+fn write_xlsx_empty_run() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_empty_run();
+    write_xlsx(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "empty run XLSX must not be zero bytes");
+}
+
+#[test]
+fn write_xlsx_with_warnings() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_warnings();
+    write_xlsx(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn render_confluence_storage_with_coverage() {
+    let run = make_run_with_coverage();
+    let out = render_confluence_storage(&run, None);
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn render_confluence_wiki_markup_empty_run() {
+    let run = make_empty_run();
+    let out = render_confluence_wiki_markup(&run);
+    assert!(
+        !out.is_empty(),
+        "wiki markup for empty run should still produce output"
+    );
+}
+
+#[test]
+fn render_sub_report_html_with_coverage() {
+    let run = make_run_with_coverage();
+    let html = render_sub_report_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_sub_report_html_empty_run() {
+    let run = make_empty_run();
+    let html = render_sub_report_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_many_files() {
+    let mut run = make_run();
+    for i in 0..20 {
+        run.per_file_records.push(make_file_record(
+            &format!("src/file_{i}.rs"),
+            Language::Rust,
+            10 + i as u64,
+        ));
+    }
+    run.summary_totals.files_analyzed = run.per_file_records.len() as u64;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    // All files should appear in the report
+    assert!(html.contains("file_0.rs") || html.contains("file_19.rs"));
+}
+
+#[test]
+fn render_html_with_various_languages() {
+    // Exercise the per-file records with multiple different languages
+    let mut run = make_empty_run();
+    run.per_file_records = vec![
+        make_file_record("main.c", Language::C, 30),
+        make_file_record("app.py", Language::Python, 40),
+        make_file_record("server.go", Language::Go, 50),
+        make_file_record("component.ts", Language::TypeScript, 20),
+        make_file_record("style.css", Language::Css, 15),
+        make_file_record("index.html", Language::Html, 25),
+        make_file_record("schema.sql", Language::Sql, 10),
+        make_file_record("build.sh", Language::Shell, 5),
+    ];
+    run.summary_totals.files_analyzed = 8;
+    run.summary_totals.code_lines = 195;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}

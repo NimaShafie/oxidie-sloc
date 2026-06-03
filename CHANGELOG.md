@@ -10,6 +10,45 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.65] — 2026-06-02
+
+### Added
+
+- **SLSA provenance generation** (`.github/workflows/release.yml`): New `compute-slsa-subjects`
+  job aggregates SHA-256 hashes of all release binaries and a `slsa-provenance` job generates
+  a signed `.intoto.jsonl` attestation bundle using the SLSA Generic Generator v2.1.0. The
+  bundle is automatically attached to each GitHub Release, making supply-chain provenance
+  discoverable without querying the Actions API.
+- **Auto-approve workflow** (`.github/workflows/auto-approve.yml`): New workflow that
+  automatically approves pull requests opened by the repository owner (`NimaShafie`), using
+  the pinned `hmarr/auto-approve-action@v4.0.0`. All other contributors continue to go
+  through normal review.
+- **`tempfile` dev-dependency for `sloc-git`** (`crates/sloc-git/Cargo.toml`): Added
+  `tempfile = "3"` as a dev-dependency to support the expanded unit test suite.
+
+### Improved
+
+- **Expanded test coverage** (`sloc-core`, `sloc-git`, `sloc-languages`, `sloc-report`,
+  `sloc-web`): Significant new test coverage added across all major crates — ~2,100 lines of
+  new tests. `sloc-core/tests/unit.rs` gains 487 lines of unit tests; `sloc-git/tests/unit.rs`
+  adds 228 lines; `sloc-languages/tests/golden.rs` adds 538 lines of golden tests; a new
+  `sloc-report/tests/render.rs` module adds 196 lines of render tests; and
+  `sloc-web/tests/integration.rs` gains 626 lines of integration tests.
+- **Helper extraction in `sloc-web`** (`crates/sloc-web/src/lib.rs`): Refactored
+  `locate_report_handler` and `open_path_handler` by extracting `resolve_scan_root`,
+  `gather_json_candidates`, `find_existing_ancestor`, and `resolve_open_target` as standalone
+  helper functions. No behaviour change; reduces nesting depth and improves testability.
+
+### CI
+
+- **OpenSSF Scorecard token** (`.github/workflows/scorecard.yml`): Added `repo_token:
+  ${{ secrets.SCORECARD_TOKEN }}` to the Scorecard action so it can publish results with
+  appropriate permissions.
+- **Dockerfile corpus fixture** (`crates/sloc-languages/tests/corpus/dockerfile/basic.dockerfile`):
+  Updated test fixture to reflect the current golden-test expectations.
+
+---
+
 ## [1.5.64] — 2026-05-27
 
 ### Added

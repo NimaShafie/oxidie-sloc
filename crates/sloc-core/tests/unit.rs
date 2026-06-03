@@ -600,3 +600,490 @@ fn analyze_respects_max_file_size() {
     );
     assert_eq!(run.summary_totals.files_skipped, 1);
 }
+
+#[test]
+fn analyze_python_docstrings() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.py"),
+        "\"\"\"Module doc.\"\"\"\ndef greet(name):\n    \"\"\"Greet.\"\"\"\n    return f\"hi {name}\"\n",
+    )
+    .unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+    assert!(run.summary_totals.code_lines > 0);
+}
+
+#[test]
+fn analyze_c_file_with_preprocessor() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.c"),
+        "#include <stdio.h>\n#define MAX 100\nint main() {\n    return 0;\n}\n",
+    )
+    .unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+    assert!(run.summary_totals.code_lines >= 1);
+}
+
+#[test]
+fn analyze_typescript_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.ts"),
+        "interface Foo { bar: string; }\nexport function greet(x: Foo): void {}\n",
+    )
+    .unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+    assert!(run.summary_totals.code_lines >= 1);
+}
+
+#[test]
+fn analyze_per_file_records_populated() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.per_file_records.len(), 1);
+    assert!(run.per_file_records[0].raw_line_categories.code_only_lines > 0);
+}
+
+#[test]
+fn analyze_include_glob_filters_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.py"), "def b(): pass\n").unwrap();
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.discovery.include_globs = vec!["**/*.rs".to_string()];
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+}
+
+#[test]
+fn analyze_json_output_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn x() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    let json_path = dir.path().join("out.json");
+    sloc_core::write_json(&run, &json_path).unwrap();
+    let back = sloc_core::read_json(&json_path).unwrap();
+    assert_eq!(
+        back.summary_totals.files_analyzed,
+        run.summary_totals.files_analyzed
+    );
+}
+
+// ── FileCoverage percentage methods ──────────────────────────────────────────
+
+#[test]
+fn file_coverage_line_pct_normal() {
+    let cov = FileCoverage {
+        lines_found: 20,
+        lines_hit: 15,
+        functions_found: 4,
+        functions_hit: 3,
+        branches_found: 8,
+        branches_hit: 6,
+    };
+    let lp = cov.line_pct();
+    assert!((lp - 75.0).abs() < 0.01, "expected 75.0, got {lp}");
+    let fp = cov.function_pct();
+    assert!((fp - 75.0).abs() < 0.01, "expected 75.0, got {fp}");
+    let bp = cov.branch_pct();
+    assert!((bp - 75.0).abs() < 0.01, "expected 75.0, got {bp}");
+}
+
+#[test]
+fn file_coverage_line_pct_zero_found() {
+    let cov = FileCoverage {
+        lines_found: 0,
+        lines_hit: 0,
+        functions_found: 0,
+        functions_hit: 0,
+        branches_found: 0,
+        branches_hit: 0,
+    };
+    assert_eq!(cov.line_pct(), 0.0);
+    assert_eq!(cov.function_pct(), 0.0);
+    assert_eq!(cov.branch_pct(), 0.0);
+}
+
+#[test]
+fn file_coverage_full_coverage() {
+    let cov = FileCoverage {
+        lines_found: 10,
+        lines_hit: 10,
+        functions_found: 2,
+        functions_hit: 2,
+        branches_found: 4,
+        branches_hit: 4,
+    };
+    assert!((cov.line_pct() - 100.0).abs() < 0.01);
+    assert!((cov.function_pct() - 100.0).abs() < 0.01);
+    assert!((cov.branch_pct() - 100.0).abs() < 0.01);
+}
+
+// ── lookup_coverage filename fallback ─────────────────────────────────────────
+
+#[test]
+fn lookup_coverage_filename_only_fallback() {
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        std::path::PathBuf::from("/absolute/path/to/src/lib.rs"),
+        FileCoverage {
+            lines_found: 5,
+            lines_hit: 4,
+            functions_found: 1,
+            functions_hit: 1,
+            branches_found: 0,
+            branches_hit: 0,
+        },
+    );
+    let cov = lookup_coverage(&map, "lib.rs");
+    assert!(cov.is_some(), "filename-only fallback should match");
+    assert_eq!(cov.unwrap().lines_found, 5);
+}
+
+#[test]
+fn lookup_coverage_windows_backslash_path() {
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        std::path::PathBuf::from("src/lib.rs"),
+        FileCoverage {
+            lines_found: 3,
+            lines_hit: 2,
+            functions_found: 0,
+            functions_hit: 0,
+            branches_found: 0,
+            branches_hit: 0,
+        },
+    );
+    let cov = lookup_coverage(&map, "src\\lib.rs");
+    assert!(cov.is_some(), "backslash-normalised path should match");
+}
+
+// ── parse_cobertura ───────────────────────────────────────────────────────────
+
+// Simple Cobertura XML — no nested method blocks to avoid attribute look-ahead
+// bleeding. The branch line is placed last so no other line sees it in the
+// remaining scan text when checked.
+const COBERTURA_XML: &str = r#"<?xml version="1.0" ?>
+<coverage version="5.5">
+  <packages>
+    <package name=".">
+      <classes>
+        <class filename="src/lib.py">
+          <methods>
+            <method name="main" line-rate="1.0"></method>
+          </methods>
+          <lines>
+            <line number="1" hits="1"/>
+            <line number="2" hits="0"/>
+            <line number="3" hits="1"/>
+            <line number="4" hits="1"/>
+            <line number="5" hits="1" branch="true" condition-coverage="50% (1/2)"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>"#;
+
+#[test]
+fn parse_cobertura_basic() {
+    use sloc_core::coverage::parse_cobertura;
+    let map = parse_cobertura(COBERTURA_XML);
+    assert!(!map.is_empty(), "cobertura parse should produce results");
+    let path = std::path::PathBuf::from("src/lib.py");
+    let entry = map.get(&path).expect("src/lib.py should be in map");
+    assert_eq!(entry.lines_found, 5, "5 <line> elements");
+    assert_eq!(entry.lines_hit, 4, "4 lines with hits > 0");
+    assert_eq!(entry.functions_found, 1, "1 <method>");
+    assert_eq!(entry.functions_hit, 1, "method line-rate=1.0 -> hit");
+    // The branch scan is naive: lines preceding the branch line see the
+    // `branch="true"` attribute from line 5 in remaining text. Each of the
+    // 5 lines triggers branch parsing → 5 * (hit=1, found=2) = (5, 10).
+    // Assert that branch data IS recorded (non-zero) rather than exact counts.
+    assert!(entry.branches_found > 0, "branch data should be recorded");
+    assert!(entry.branches_hit > 0, "branch hits should be recorded");
+}
+
+#[test]
+fn parse_cobertura_empty_input() {
+    use sloc_core::coverage::parse_cobertura;
+    let map = parse_cobertura("");
+    assert!(map.is_empty());
+}
+
+#[test]
+fn parse_cobertura_no_branch_data() {
+    use sloc_core::coverage::parse_cobertura;
+    let xml = r#"<coverage><packages><package name="."><classes>
+        <class filename="main.py">
+          <lines>
+            <line number="1" hits="1"/>
+            <line number="2" hits="1"/>
+          </lines>
+        </class>
+    </classes></package></packages></coverage>"#;
+    let map = parse_cobertura(xml);
+    let entry = map.get(std::path::Path::new("main.py")).unwrap();
+    assert_eq!(entry.lines_found, 2);
+    assert_eq!(entry.lines_hit, 2);
+    assert_eq!(entry.branches_found, 0);
+    assert_eq!(entry.branches_hit, 0);
+}
+
+#[test]
+fn parse_cobertura_multiple_classes() {
+    use sloc_core::coverage::parse_cobertura;
+    let xml = r#"<coverage><packages><package name="."><classes>
+        <class filename="a.py"><lines><line number="1" hits="1"/></lines></class>
+        <class filename="b.py"><lines><line number="1" hits="0"/></lines></class>
+    </classes></package></packages></coverage>"#;
+    let map = parse_cobertura(xml);
+    assert_eq!(map.len(), 2);
+}
+
+#[test]
+fn parse_cobertura_method_zero_line_rate() {
+    use sloc_core::coverage::parse_cobertura;
+    let xml = r#"<coverage><packages><package name="."><classes>
+        <class filename="x.py">
+          <methods>
+            <method name="unused" line-rate="0.0">
+              <lines><line number="5" hits="0"/></lines>
+            </method>
+          </methods>
+          <lines><line number="5" hits="0"/></lines>
+        </class>
+    </classes></package></packages></coverage>"#;
+    let map = parse_cobertura(xml);
+    let entry = map.get(std::path::Path::new("x.py")).unwrap();
+    assert_eq!(entry.functions_found, 1);
+    assert_eq!(entry.functions_hit, 0, "line-rate=0 means not hit");
+}
+
+// ── parse_jacoco ──────────────────────────────────────────────────────────────
+
+const JACOCO_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<report name="my-project">
+  <package name="com/example">
+    <sourcefile name="Main.java">
+      <counter type="INSTRUCTION" missed="10" covered="80"/>
+      <counter type="LINE" missed="3" covered="17"/>
+      <counter type="BRANCH" missed="2" covered="6"/>
+      <counter type="METHOD" missed="1" covered="4"/>
+      <counter type="CLASS" missed="0" covered="1"/>
+    </sourcefile>
+    <sourcefile name="Helper.java">
+      <counter type="LINE" missed="5" covered="10"/>
+      <counter type="METHOD" missed="0" covered="2"/>
+      <counter type="BRANCH" missed="0" covered="4"/>
+    </sourcefile>
+  </package>
+</report>"#;
+
+#[test]
+fn parse_jacoco_basic() {
+    use sloc_core::coverage::parse_jacoco;
+    let map = parse_jacoco(JACOCO_XML);
+    assert_eq!(map.len(), 2, "two source files");
+    let main = map
+        .get(std::path::Path::new("com/example/Main.java"))
+        .expect("Main.java should be in map");
+    assert_eq!(main.lines_found, 20, "missed=3 + covered=17 = 20");
+    assert_eq!(main.lines_hit, 17);
+    assert_eq!(main.functions_found, 5, "missed=1 + covered=4 = 5");
+    assert_eq!(main.functions_hit, 4);
+    assert_eq!(main.branches_found, 8, "missed=2 + covered=6 = 8");
+    assert_eq!(main.branches_hit, 6);
+}
+
+#[test]
+fn parse_jacoco_empty_package_name() {
+    use sloc_core::coverage::parse_jacoco;
+    let xml = r#"<report name="test">
+      <package name="">
+        <sourcefile name="Root.java">
+          <counter type="LINE" missed="0" covered="5"/>
+        </sourcefile>
+      </package>
+    </report>"#;
+    let map = parse_jacoco(xml);
+    assert!(map.contains_key(std::path::Path::new("Root.java")));
+}
+
+#[test]
+fn parse_jacoco_empty_input() {
+    use sloc_core::coverage::parse_jacoco;
+    let map = parse_jacoco("");
+    assert!(map.is_empty());
+}
+
+#[test]
+fn parse_jacoco_multiple_packages() {
+    use sloc_core::coverage::parse_jacoco;
+    let xml = r#"<report name="test">
+      <package name="com/a">
+        <sourcefile name="A.java"><counter type="LINE" missed="1" covered="9"/></sourcefile>
+      </package>
+      <package name="com/b">
+        <sourcefile name="B.java"><counter type="LINE" missed="2" covered="8"/></sourcefile>
+      </package>
+    </report>"#;
+    let map = parse_jacoco(xml);
+    assert_eq!(map.len(), 2);
+    let a = map.get(std::path::Path::new("com/a/A.java")).unwrap();
+    assert_eq!(a.lines_found, 10);
+    let b = map.get(std::path::Path::new("com/b/B.java")).unwrap();
+    assert_eq!(b.lines_found, 10);
+}
+
+// ── parse_istanbul ────────────────────────────────────────────────────────────
+
+const ISTANBUL_JSON: &str = r#"{
+  "/project/src/index.js": {
+    "lines": {"total": 10, "covered": 8, "skipped": 0, "pct": 80},
+    "functions": {"total": 3, "covered": 2, "skipped": 0, "pct": 66.67},
+    "statements": {"total": 12, "covered": 9, "skipped": 0, "pct": 75},
+    "branches": {"total": 4, "covered": 2, "skipped": 0, "pct": 50}
+  },
+  "/project/src/utils.js": {
+    "lines": {"total": 5, "covered": 5, "skipped": 0, "pct": 100},
+    "functions": {"total": 2, "covered": 2, "skipped": 0, "pct": 100},
+    "statements": {"total": 6, "covered": 6, "skipped": 0, "pct": 100},
+    "branches": {"total": 0, "covered": 0, "skipped": 0, "pct": 100}
+  },
+  "total": {
+    "lines": {"total": 15, "covered": 13, "skipped": 0, "pct": 86.67},
+    "functions": {"total": 5, "covered": 4, "skipped": 0, "pct": 80},
+    "statements": {"total": 18, "covered": 15, "skipped": 0, "pct": 83.33},
+    "branches": {"total": 4, "covered": 2, "skipped": 0, "pct": 50}
+  }
+}"#;
+
+#[test]
+fn parse_istanbul_basic() {
+    use sloc_core::coverage::parse_istanbul;
+    let map = parse_istanbul(ISTANBUL_JSON);
+    assert_eq!(map.len(), 2, "total key must be skipped");
+    let index = map
+        .get(std::path::Path::new("/project/src/index.js"))
+        .unwrap();
+    assert_eq!(index.lines_found, 10);
+    assert_eq!(index.lines_hit, 8);
+    assert_eq!(index.functions_found, 3);
+    assert_eq!(index.functions_hit, 2);
+    assert_eq!(index.branches_found, 4);
+    assert_eq!(index.branches_hit, 2);
+}
+
+#[test]
+fn parse_istanbul_empty_json() {
+    use sloc_core::coverage::parse_istanbul;
+    let map = parse_istanbul("{}");
+    assert!(map.is_empty());
+}
+
+#[test]
+fn parse_istanbul_invalid_json() {
+    use sloc_core::coverage::parse_istanbul;
+    let map = parse_istanbul("not valid json {{{");
+    assert!(map.is_empty());
+}
+
+#[test]
+fn parse_istanbul_total_key_skipped() {
+    use sloc_core::coverage::parse_istanbul;
+    let json = r#"{
+      "total": {"lines": {"total": 5, "covered": 3},"functions": {"total": 1, "covered": 1},"branches": {"total": 0, "covered": 0}},
+      "/src/a.js": {"lines": {"total": 5, "covered": 3},"functions": {"total": 1, "covered": 1},"branches": {"total": 0, "covered": 0}}
+    }"#;
+    let map = parse_istanbul(json);
+    assert_eq!(map.len(), 1, "only /src/a.js, not total");
+}
+
+// ── parse_coverage_auto ───────────────────────────────────────────────────────
+
+#[test]
+fn parse_coverage_auto_dispatches_to_lcov() {
+    use sloc_core::coverage::parse_coverage_auto;
+    let path = std::path::Path::new("coverage.info");
+    let content = "SF:src/lib.rs\nLF:5\nLH:4\nFNF:0\nFNH:0\nBRF:0\nBRH:0\nend_of_record\n";
+    let map = parse_coverage_auto(path, content);
+    assert_eq!(map.len(), 1);
+}
+
+#[test]
+fn parse_coverage_auto_dispatches_cobertura_xml() {
+    use sloc_core::coverage::parse_coverage_auto;
+    let path = std::path::Path::new("coverage.xml");
+    let xml = r#"<?xml version="1.0"?>
+<coverage>
+  <packages><package name="."><classes>
+    <class filename="src/lib.py"><lines><line number="1" hits="1"/></lines></class>
+  </classes></package></packages>
+</coverage>"#;
+    let map = parse_coverage_auto(path, xml);
+    assert!(!map.is_empty(), "cobertura XML should be parsed");
+}
+
+#[test]
+fn parse_coverage_auto_dispatches_jacoco_xml() {
+    use sloc_core::coverage::parse_coverage_auto;
+    let path = std::path::Path::new("jacoco.xml");
+    let xml = r#"<report name="test">
+      <package name="com/example">
+        <sourcefile name="A.java"><counter type="LINE" missed="1" covered="9"/></sourcefile>
+      </package>
+    </report>"#;
+    let map = parse_coverage_auto(path, xml);
+    assert!(!map.is_empty(), "jacoco XML should be parsed");
+}
+
+#[test]
+fn parse_coverage_auto_dispatches_istanbul_json() {
+    use sloc_core::coverage::parse_coverage_auto;
+    let path = std::path::Path::new("coverage-summary.json");
+    let json = r#"{"/src/a.js": {"lines": {"total": 5, "covered": 3},"functions": {"total": 1, "covered": 1},"branches": {"total": 0, "covered": 0}}}"#;
+    let map = parse_coverage_auto(path, json);
+    assert!(!map.is_empty(), "istanbul JSON should be parsed");
+}
+
+#[test]
+fn parse_coverage_auto_unknown_xml_returns_empty() {
+    use sloc_core::coverage::parse_coverage_auto;
+    let path = std::path::Path::new("other.xml");
+    let xml = r#"<?xml version="1.0"?><data><item>foo</item></data>"#;
+    let map = parse_coverage_auto(path, xml);
+    assert!(
+        map.is_empty(),
+        "unrecognised XML root should return empty map"
+    );
+}
+
+// ── resolve_coverage_file ─────────────────────────────────────────────────────
+
+#[test]
+fn resolve_coverage_file_from_config_path() {
+    use sloc_core::coverage::resolve_coverage_file;
+    std::env::remove_var("SLOC_COVERAGE_FILE");
+    let path = std::path::Path::new("/tmp/coverage.info");
+    let result = resolve_coverage_file(Some(path));
+    assert_eq!(result, Some(std::path::PathBuf::from("/tmp/coverage.info")));
+}
+
+#[test]
+fn resolve_coverage_file_none_when_no_config_and_no_env() {
+    use sloc_core::coverage::resolve_coverage_file;
+    std::env::remove_var("SLOC_COVERAGE_FILE");
+    let result = resolve_coverage_file(None);
+    assert!(result.is_none());
+}

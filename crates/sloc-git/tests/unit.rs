@@ -3,7 +3,8 @@
 
 use sloc_git::webhook::verify_github_sig;
 use sloc_git::{
-    normalize_git_url, parse_bitbucket_push, parse_github_push, parse_gitlab_push, WebhookProvider,
+    normalize_git_url, parse_bitbucket_push, parse_github_push, parse_gitlab_push, ScanSchedule,
+    ScanScheduleKind, ScanScheduleProvider, ScheduleStore, WebhookProvider,
 };
 
 // ── normalize_git_url ─────────────────────────────────────────────────────────
@@ -263,4 +264,229 @@ fn webhook_event_serde_roundtrip() {
     assert_eq!(back.branch, event.branch);
     assert_eq!(back.commit_sha, event.commit_sha);
     assert_eq!(back.repo_url, event.repo_url);
+}
+
+// ── ScanScheduleProvider::display_name ───────────────────────────────────────
+
+#[test]
+fn provider_display_name_all_variants() {
+    assert_eq!(ScanScheduleProvider::GitHub.display_name(), "GitHub");
+    assert_eq!(ScanScheduleProvider::GitLab.display_name(), "GitLab");
+    assert_eq!(ScanScheduleProvider::Bitbucket.display_name(), "Bitbucket");
+    assert_eq!(ScanScheduleProvider::Any.display_name(), "Any / Poll");
+}
+
+// ── ScanSchedule constructors ─────────────────────────────────────────────────
+
+#[test]
+fn new_webhook_schedule_has_correct_fields() {
+    let sched = ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "My repo".into(),
+        None,
+    );
+    assert_eq!(sched.repo_url, "https://github.com/org/repo.git");
+    assert_eq!(sched.branch, "main");
+    assert_eq!(sched.kind, ScanScheduleKind::Webhook);
+    assert_eq!(sched.provider, ScanScheduleProvider::GitHub);
+    assert!(sched.enabled);
+    assert!(
+        sched.webhook_secret.is_some(),
+        "should auto-generate a secret"
+    );
+    assert!(sched.interval_secs.is_none());
+    assert!(sched.last_scan_sha.is_none());
+}
+
+#[test]
+fn new_webhook_schedule_custom_secret() {
+    let sched = ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "My repo".into(),
+        Some("my-secret".into()),
+    );
+    assert_eq!(sched.webhook_secret.as_deref(), Some("my-secret"));
+}
+
+#[test]
+fn new_poll_schedule_has_correct_fields() {
+    let sched = ScanSchedule::new_poll(
+        "https://gitlab.com/group/proj.git".into(),
+        "develop".into(),
+        300,
+        "Nightly poll".into(),
+    );
+    assert_eq!(sched.repo_url, "https://gitlab.com/group/proj.git");
+    assert_eq!(sched.branch, "develop");
+    assert_eq!(sched.kind, ScanScheduleKind::Poll);
+    assert_eq!(sched.provider, ScanScheduleProvider::Any);
+    assert_eq!(sched.interval_secs, Some(300));
+    assert!(sched.webhook_secret.is_none());
+    assert!(sched.enabled);
+}
+
+// ── ScheduleStore ─────────────────────────────────────────────────────────────
+
+#[test]
+fn schedule_store_load_missing_returns_default() {
+    let store = ScheduleStore::load(std::path::Path::new("/nonexistent/schedules.json"));
+    assert!(store.schedules.is_empty());
+}
+
+#[test]
+fn schedule_store_save_and_load_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("schedules.json");
+    let mut store = ScheduleStore::default();
+    store.schedules.push(ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "My label".into(),
+        None,
+    ));
+    store.save(&path).unwrap();
+    let loaded = ScheduleStore::load(&path);
+    assert_eq!(loaded.schedules.len(), 1);
+    assert_eq!(
+        loaded.schedules[0].repo_url,
+        "https://github.com/org/repo.git"
+    );
+    assert_eq!(loaded.schedules[0].label, "My label");
+}
+
+#[test]
+fn schedule_store_find_matching_by_url_and_branch() {
+    let mut store = ScheduleStore::default();
+    store.schedules.push(ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "Sched".into(),
+        None,
+    ));
+    store.schedules.push(ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "develop".into(),
+        ScanScheduleProvider::GitHub,
+        "Sched dev".into(),
+        None,
+    ));
+    let matches = store.find_matching("https://github.com/org/repo.git", "main");
+    assert_eq!(matches.len(), 1, "only the main-branch schedule matches");
+}
+
+#[test]
+fn schedule_store_find_matching_normalises_trailing_slash() {
+    let mut store = ScheduleStore::default();
+    store.schedules.push(ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "Sched".into(),
+        None,
+    ));
+    let matches = store.find_matching("https://github.com/org/repo.git/", "main");
+    assert_eq!(matches.len(), 1, "trailing slash should be normalised");
+}
+
+#[test]
+fn schedule_store_find_matching_normalises_dot_git() {
+    let mut store = ScheduleStore::default();
+    store.schedules.push(ScanSchedule::new_webhook(
+        "https://github.com/org/repo".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "Sched".into(),
+        None,
+    ));
+    let matches = store.find_matching("https://github.com/org/repo.git", "main");
+    assert_eq!(
+        matches.len(),
+        1,
+        ".git suffix should be stripped for comparison"
+    );
+}
+
+#[test]
+fn schedule_store_find_matching_disabled_excluded() {
+    let mut store = ScheduleStore::default();
+    let mut sched = ScanSchedule::new_webhook(
+        "https://github.com/org/repo.git".into(),
+        "main".into(),
+        ScanScheduleProvider::GitHub,
+        "Disabled".into(),
+        None,
+    );
+    sched.enabled = false;
+    store.schedules.push(sched);
+    let matches = store.find_matching("https://github.com/org/repo.git", "main");
+    assert!(matches.is_empty(), "disabled schedules must not match");
+}
+
+#[test]
+fn schedule_store_by_id_mut_found() {
+    let mut store = ScheduleStore::default();
+    let sched = ScanSchedule::new_poll(
+        "https://example.com/repo.git".into(),
+        "main".into(),
+        60,
+        "Poll".into(),
+    );
+    let id = sched.id;
+    store.schedules.push(sched);
+    let found = store.by_id_mut(id);
+    assert!(found.is_some());
+    found.unwrap().enabled = false;
+    assert!(!store.schedules[0].enabled);
+}
+
+#[test]
+fn schedule_store_by_id_mut_not_found() {
+    let mut store = ScheduleStore::default();
+    let result = store.by_id_mut(uuid::Uuid::new_v4());
+    assert!(result.is_none());
+}
+
+#[test]
+fn schedule_store_remove_existing() {
+    let mut store = ScheduleStore::default();
+    let sched = ScanSchedule::new_poll(
+        "https://example.com/repo.git".into(),
+        "main".into(),
+        60,
+        "Poll".into(),
+    );
+    let id = sched.id;
+    store.schedules.push(sched);
+    assert_eq!(store.schedules.len(), 1);
+    store.remove(id);
+    assert!(store.schedules.is_empty(), "schedule should be removed");
+}
+
+#[test]
+fn schedule_store_remove_nonexistent_is_noop() {
+    let mut store = ScheduleStore::default();
+    store.schedules.push(ScanSchedule::new_poll(
+        "https://example.com/repo.git".into(),
+        "main".into(),
+        60,
+        "Poll".into(),
+    ));
+    store.remove(uuid::Uuid::new_v4()); // random ID, no match
+    assert_eq!(store.schedules.len(), 1, "unrelated schedule must remain");
+}
+
+#[test]
+fn schedule_store_empty_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("schedules.json");
+    let store = ScheduleStore::default();
+    store.save(&path).unwrap();
+    let loaded = ScheduleStore::load(&path);
+    assert!(loaded.schedules.is_empty());
 }

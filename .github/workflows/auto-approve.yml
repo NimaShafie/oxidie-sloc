@@ -1,0 +1,20 @@
+name: Auto-approve owner PRs
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  auto-approve:
+    name: Auto-approve PRs from repo owner
+    runs-on: ubuntu-latest
+    # Only approve PRs opened by the repo owner — all other contributors go through normal review
+    if: github.actor == 'NimaShafie'
+    steps:
+      - name: Approve PR
+        uses: hmarr/auto-approve-action@44888193675f29a83e04faf4002fa8c0b537b1e4  # v4.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
