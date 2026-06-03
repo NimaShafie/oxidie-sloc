@@ -332,3 +332,162 @@ pub(crate) async fn auth_login_post(
         resp
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── sanitize_next ────────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_next_accepts_simple_path() {
+        assert_eq!(sanitize_next("/dashboard"), "/dashboard");
+    }
+
+    #[test]
+    fn sanitize_next_accepts_path_with_query() {
+        assert_eq!(sanitize_next("/scan?path=."), "/scan?path=.");
+    }
+
+    #[test]
+    fn sanitize_next_accepts_root() {
+        assert_eq!(sanitize_next("/"), "/");
+    }
+
+    #[test]
+    fn sanitize_next_accepts_nested_path() {
+        assert_eq!(
+            sanitize_next("/api/runs/some-id/status"),
+            "/api/runs/some-id/status"
+        );
+    }
+
+    #[test]
+    fn sanitize_next_rejects_double_slash_open_redirect() {
+        assert_eq!(sanitize_next("//evil.com/steal"), "/");
+    }
+
+    #[test]
+    fn sanitize_next_rejects_absolute_url_with_scheme() {
+        assert_eq!(sanitize_next("https://evil.com"), "/");
+    }
+
+    #[test]
+    fn sanitize_next_rejects_javascript_scheme() {
+        assert_eq!(sanitize_next("javascript://xss"), "/");
+    }
+
+    #[test]
+    fn sanitize_next_rejects_exact_login_path() {
+        assert_eq!(sanitize_next("/auth/login"), "/");
+    }
+
+    #[test]
+    fn sanitize_next_rejects_login_path_with_query() {
+        assert_eq!(sanitize_next("/auth/login?next=/foo"), "/");
+    }
+
+    #[test]
+    fn sanitize_next_rejects_empty_string() {
+        assert_eq!(sanitize_next(""), "/");
+    }
+
+    #[test]
+    fn sanitize_next_rejects_relative_path_without_leading_slash() {
+        assert_eq!(sanitize_next("dashboard"), "/");
+    }
+
+    // ── urlencode_path ───────────────────────────────────────────────────────
+
+    #[test]
+    fn urlencode_path_passes_through_safe_chars() {
+        assert_eq!(urlencode_path("/scan?path=."), "/scan?path=.");
+    }
+
+    #[test]
+    fn urlencode_path_preserves_alphanumeric_and_path_chars() {
+        let s = "/abc/DEF/123?foo=bar&baz=qux#anchor";
+        assert_eq!(urlencode_path(s), s);
+    }
+
+    #[test]
+    fn urlencode_path_encodes_spaces() {
+        assert_eq!(urlencode_path("/path with space"), "/path%20with%20space");
+    }
+
+    #[test]
+    fn urlencode_path_encodes_plus_sign() {
+        assert!(
+            urlencode_path("/a+b").contains("%2B"),
+            "'+' must be percent-encoded"
+        );
+    }
+
+    #[test]
+    fn urlencode_path_encodes_angle_brackets() {
+        let encoded = urlencode_path("<script>");
+        assert!(
+            encoded.contains("%3C") && encoded.contains("%3E"),
+            "angle brackets must be encoded"
+        );
+    }
+
+    #[test]
+    fn urlencode_path_empty_string() {
+        assert_eq!(urlencode_path(""), "");
+    }
+
+    #[test]
+    fn urlencode_path_preserves_tilde_and_underscore() {
+        assert_eq!(urlencode_path("/~user_name"), "/~user_name");
+    }
+
+    // ── extract_session_cookie ───────────────────────────────────────────────
+
+    #[test]
+    fn extract_session_cookie_found_single() {
+        assert_eq!(
+            extract_session_cookie("sloc_session=abc123"),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn extract_session_cookie_found_among_multiple() {
+        assert_eq!(
+            extract_session_cookie("other=val; sloc_session=mysession; another=x"),
+            Some("mysession")
+        );
+    }
+
+    #[test]
+    fn extract_session_cookie_not_found() {
+        assert_eq!(extract_session_cookie("other=value; unrelated=abc"), None);
+    }
+
+    #[test]
+    fn extract_session_cookie_empty_header() {
+        assert_eq!(extract_session_cookie(""), None);
+    }
+
+    #[test]
+    fn extract_session_cookie_partial_name_no_match() {
+        assert_eq!(extract_session_cookie("sloc_session_extra=abc"), None);
+    }
+
+    #[test]
+    fn extract_session_cookie_first_wins() {
+        assert_eq!(
+            extract_session_cookie("sloc_session=first; sloc_session=second"),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn extract_session_cookie_with_extra_whitespace() {
+        assert_eq!(
+            extract_session_cookie("  sloc_session  =  token_val  "),
+            Some("token_val")
+        );
+    }
+}
