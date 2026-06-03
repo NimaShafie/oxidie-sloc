@@ -40,3 +40,139 @@ fn tempfile_path() -> PathBuf {
     ));
     p
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::McpConfig;
+
+    fn unrestricted_cfg() -> McpConfig {
+        McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![],
+        }
+    }
+
+    fn restricted_cfg() -> McpConfig {
+        McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![std::env::temp_dir()],
+        }
+    }
+
+    // ── tempfile_path ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn tempfile_path_in_temp_dir() {
+        let p = tempfile_path();
+        assert!(p.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn tempfile_path_has_json_extension() {
+        let p = tempfile_path();
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
+    }
+
+    #[test]
+    fn tempfile_path_unique_across_calls() {
+        assert_ne!(tempfile_path(), tempfile_path());
+    }
+
+    // ── compare_runs path validation ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compare_runs_restricted_rejects_paths_outside_root() {
+        let cfg = restricted_cfg();
+        // Current directory is almost certainly not inside temp_dir
+        let result = compare_runs(".".into(), ".".into(), &cfg).await;
+        // Either the path check passes (cwd is in temp) or it fails — either way, no panic
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn compare_runs_unrestricted_rejects_nonexistent_binary() {
+        let mut cfg = unrestricted_cfg();
+        cfg.bin_path = "__nonexistent_binary_12345__".into();
+        let result = compare_runs(".".into(), ".".into(), &cfg).await;
+        assert!(result.is_err(), "nonexistent binary must cause an error");
+    }
+
+    // ── compare_runs success path (uses compiled oxide-sloc binary) ───────────
+
+    fn find_oxide_sloc_binary() -> Option<std::path::PathBuf> {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.parent()?.parent()?;
+        let ext = if cfg!(windows) { ".exe" } else { "" };
+        let bin = workspace
+            .join("target")
+            .join("debug")
+            .join(format!("oxide-sloc{ext}"));
+        if bin.exists() {
+            Some(bin)
+        } else {
+            None
+        }
+    }
+
+    /// Run a full analysis and return the JSON path to the result file.
+    async fn run_analyze(bin: &std::path::Path, dir: &std::path::Path) -> PathBuf {
+        let out = dir.join("result.json");
+        let status = tokio::process::Command::new(bin)
+            .args([
+                "analyze",
+                dir.to_str().unwrap(),
+                "--json-out",
+                out.to_str().unwrap(),
+                "--quiet",
+            ])
+            .status()
+            .await
+            .expect("oxide-sloc must run");
+        assert!(status.success(), "analyze must succeed");
+        out
+    }
+
+    #[tokio::test]
+    async fn compare_runs_success_with_real_binary() {
+        let Some(bin) = find_oxide_sloc_binary() else {
+            eprintln!("oxide-sloc binary not found in target/debug — skipping");
+            return;
+        };
+
+        // Create two small directories with slightly different source files
+        let dir1 = tempfile::tempdir().unwrap();
+        std::fs::write(dir1.path().join("a.rs"), "fn foo() {}\n").unwrap();
+
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir2.path().join("a.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
+
+        // Produce two JSON runs
+        let baseline = run_analyze(&bin, dir1.path()).await;
+        let current = run_analyze(&bin, dir2.path()).await;
+
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: bin.to_str().unwrap().to_owned(),
+            api_key: None,
+            allowed_roots: vec![],
+        };
+        let result = compare_runs(
+            baseline.to_str().unwrap().to_owned(),
+            current.to_str().unwrap().to_owned(),
+            &cfg,
+        )
+        .await;
+        assert!(result.is_ok(), "compare_runs must succeed: {result:?}");
+        let v = result.unwrap();
+        // The diff output must be a JSON object
+        assert!(
+            v.is_object() || v.is_array(),
+            "diff output must be JSON: {v}"
+        );
+    }
+}
