@@ -728,3 +728,184 @@ fn urlencoding_encode(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // ── ConfluenceTier default ────────────────────────────────────────────────
+
+    #[test]
+    fn tier_default_is_cloud() {
+        assert_eq!(ConfluenceTier::default(), ConfluenceTier::Cloud);
+    }
+
+    // ── ConfluenceConfig::is_cloud_url / effective_tier ───────────────────────
+
+    #[test]
+    fn effective_tier_atlassian_net_is_cloud() {
+        let cfg = ConfluenceConfig {
+            tier: ConfluenceTier::Server,
+            base_url: "https://mycompany.atlassian.net".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_tier(), &ConfluenceTier::Cloud);
+    }
+
+    #[test]
+    fn effective_tier_server_url_is_server() {
+        let cfg = ConfluenceConfig {
+            tier: ConfluenceTier::Server,
+            base_url: "https://confluence.corp.com".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_tier(), &ConfluenceTier::Server);
+    }
+
+    #[test]
+    fn effective_tier_cloud_flag_overrides_non_cloud_url() {
+        let cfg = ConfluenceConfig {
+            tier: ConfluenceTier::Cloud,
+            base_url: "https://confluence.corp.com".into(),
+            ..Default::default()
+        };
+        // tier field is Cloud, so effective_tier must also be Cloud
+        assert_eq!(cfg.effective_tier(), &ConfluenceTier::Cloud);
+    }
+
+    // ── ConfluenceConfigStore::is_configured ──────────────────────────────────
+
+    #[test]
+    fn is_configured_no_config_returns_false() {
+        let store = ConfluenceConfigStore { config: None };
+        assert!(!store.is_configured());
+    }
+
+    #[test]
+    fn is_configured_empty_base_url_returns_false() {
+        let store = ConfluenceConfigStore {
+            config: Some(ConfluenceConfig {
+                base_url: String::new(),
+                credential: "token".into(),
+                ..Default::default()
+            }),
+        };
+        assert!(!store.is_configured());
+    }
+
+    #[test]
+    fn is_configured_empty_credential_returns_false() {
+        let store = ConfluenceConfigStore {
+            config: Some(ConfluenceConfig {
+                base_url: "https://mycompany.atlassian.net".into(),
+                credential: String::new(),
+                ..Default::default()
+            }),
+        };
+        assert!(!store.is_configured());
+    }
+
+    #[test]
+    fn is_configured_both_fields_set_returns_true() {
+        let store = ConfluenceConfigStore {
+            config: Some(ConfluenceConfig {
+                base_url: "https://mycompany.atlassian.net".into(),
+                credential: "my-api-token".into(),
+                ..Default::default()
+            }),
+        };
+        assert!(store.is_configured());
+    }
+
+    // ── ConfluenceConfigStore::save / load round-trip ─────────────────────────
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("confluence.json");
+
+        let original = ConfluenceConfigStore {
+            config: Some(ConfluenceConfig {
+                tier: ConfluenceTier::Server,
+                base_url: "https://confluence.corp.com".into(),
+                username: "alice".into(),
+                credential: "secret".into(),
+                space_key: "DEV".into(),
+                parent_page_id: Some("12345".into()),
+                schedule_auto_post: std::collections::HashMap::new(),
+            }),
+        };
+
+        original.save(&path).expect("save must succeed");
+
+        // credential is #[serde(skip)] so it won't be in the file
+        let loaded = ConfluenceConfigStore::load(&path);
+        assert!(loaded.config.is_some());
+        let cfg = loaded.config.as_ref().unwrap();
+        assert_eq!(cfg.base_url, "https://confluence.corp.com");
+        assert_eq!(cfg.username, "alice");
+        assert_eq!(cfg.space_key, "DEV");
+        assert_eq!(cfg.parent_page_id.as_deref(), Some("12345"));
+        // credential is skipped in serialization
+        assert!(cfg.credential.is_empty());
+    }
+
+    #[test]
+    fn load_nonexistent_file_returns_default() {
+        let store = ConfluenceConfigStore::load(std::path::Path::new(
+            "/nonexistent/__sloc_test_confluence__.json",
+        ));
+        assert!(store.config.is_none());
+        assert!(!store.is_configured());
+    }
+
+    #[test]
+    fn save_empty_store_then_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.json");
+        let store = ConfluenceConfigStore { config: None };
+        store.save(&path).expect("save empty store must succeed");
+        let loaded = ConfluenceConfigStore::load(&path);
+        assert!(loaded.config.is_none());
+    }
+
+    // ── urlencoding_encode ────────────────────────────────────────────────────
+
+    #[test]
+    fn encode_alphanumeric_unchanged() {
+        assert_eq!(urlencoding_encode("HelloWorld123"), "HelloWorld123");
+    }
+
+    #[test]
+    fn encode_unreserved_chars_unchanged() {
+        assert_eq!(urlencoding_encode("-_.~"), "-_.~");
+    }
+
+    #[test]
+    fn encode_space_becomes_plus() {
+        assert_eq!(urlencoding_encode("hello world"), "hello+world");
+    }
+
+    #[test]
+    fn encode_slash_percent_encoded() {
+        assert_eq!(urlencoding_encode("a/b"), "a%2Fb");
+    }
+
+    #[test]
+    fn encode_ampersand_percent_encoded() {
+        assert_eq!(urlencoding_encode("a&b"), "a%26b");
+    }
+
+    #[test]
+    fn encode_empty_string() {
+        assert_eq!(urlencoding_encode(""), "");
+    }
+
+    #[test]
+    fn encode_mixed_content() {
+        let result = urlencoding_encode("My Report 2024/01");
+        assert!(result.contains("My+Report+2024"));
+        assert!(result.contains("%2F01"));
+    }
+}

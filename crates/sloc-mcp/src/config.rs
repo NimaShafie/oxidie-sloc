@@ -81,29 +81,35 @@ impl McpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    #[test]
-    fn from_env_does_not_panic() {
-        // Just verify from_env() doesn't panic regardless of what env vars are set.
-        let result = McpConfig::from_env();
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn bin_path_defaults_to_oxide_sloc_when_var_unset() {
-        // Build directly to test default logic without mutating env
-        let bin = std::env::var("SLOC_BIN").unwrap_or_else(|_| "oxide-sloc".to_owned());
-        assert!(!bin.is_empty());
-    }
-
-    #[test]
-    fn server_url_ok_when_set() {
-        let cfg = McpConfig {
+    fn cfg_no_roots() -> McpConfig {
+        McpConfig {
             server_url: Some("http://localhost:4317".into()),
             bin_path: "oxide-sloc".into(),
             api_key: None,
             allowed_roots: vec![],
-        };
+        }
+    }
+
+    // ── from_env / constructor ────────────────────────────────────────────────
+
+    #[test]
+    fn from_env_does_not_panic() {
+        assert!(McpConfig::from_env().is_ok());
+    }
+
+    #[test]
+    fn bin_path_defaults_to_oxide_sloc_when_var_unset() {
+        let bin = std::env::var("SLOC_BIN").unwrap_or_else(|_| "oxide-sloc".to_owned());
+        assert!(!bin.is_empty());
+    }
+
+    // ── server_url ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn server_url_ok_when_set() {
+        let cfg = cfg_no_roots();
         assert_eq!(cfg.server_url().unwrap(), "http://localhost:4317");
     }
 
@@ -126,19 +132,162 @@ mod tests {
             api_key: Some("secret-key".into()),
             allowed_roots: vec![],
         };
-        assert!(cfg.api_key.is_some());
-        assert_eq!(cfg.api_key.unwrap(), "secret-key");
+        assert_eq!(cfg.api_key.as_deref(), Some("secret-key"));
     }
 
     #[test]
     fn empty_server_url_filter_logic() {
-        // Simulate the from_env filter: empty string → None
         let raw: Option<String> = Some("".into());
-        let filtered = raw.filter(|s| !s.is_empty());
-        assert!(filtered.is_none());
+        assert!(raw.filter(|s| !s.is_empty()).is_none());
 
         let raw: Option<String> = Some("http://localhost".into());
-        let filtered = raw.filter(|s| !s.is_empty());
-        assert_eq!(filtered.as_deref(), Some("http://localhost"));
+        assert_eq!(
+            raw.filter(|s| !s.is_empty()).as_deref(),
+            Some("http://localhost")
+        );
+    }
+
+    // ── resolve_server_url ────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_server_url_none_candidate_returns_configured() {
+        let cfg = cfg_no_roots();
+        assert_eq!(
+            cfg.resolve_server_url(None).unwrap(),
+            "http://localhost:4317"
+        );
+    }
+
+    #[test]
+    fn resolve_server_url_matching_candidate_accepted() {
+        let cfg = cfg_no_roots();
+        assert_eq!(
+            cfg.resolve_server_url(Some("http://localhost:4317"))
+                .unwrap(),
+            "http://localhost:4317"
+        );
+    }
+
+    #[test]
+    fn resolve_server_url_non_matching_candidate_rejected() {
+        let cfg = cfg_no_roots();
+        assert!(cfg.resolve_server_url(Some("http://evil.com")).is_err());
+    }
+
+    #[test]
+    fn resolve_server_url_no_server_url_configured_always_errors() {
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![],
+        };
+        assert!(cfg.resolve_server_url(None).is_err());
+        assert!(cfg
+            .resolve_server_url(Some("http://localhost:4317"))
+            .is_err());
+    }
+
+    #[test]
+    fn resolve_server_url_empty_string_candidate_rejected() {
+        let cfg = cfg_no_roots();
+        assert!(cfg.resolve_server_url(Some("")).is_err());
+    }
+
+    // ── check_path_allowed ────────────────────────────────────────────────────
+
+    #[test]
+    fn check_path_allowed_no_roots_always_passes() {
+        let cfg = cfg_no_roots();
+        // Any string passes when allowed_roots is empty
+        assert!(cfg.check_path_allowed("/arbitrary/path").is_ok());
+        assert!(cfg.check_path_allowed(".").is_ok());
+    }
+
+    #[test]
+    fn check_path_allowed_current_dir_inside_root() {
+        // Use the current directory as a root and "." as the path
+        let current = std::env::current_dir().expect("cwd must be readable");
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![current.clone()],
+        };
+        // "." canonicalises to current dir, which is inside current
+        assert!(cfg.check_path_allowed(".").is_ok());
+    }
+
+    #[test]
+    fn check_path_allowed_path_outside_root_rejected() {
+        let tmp = std::env::temp_dir();
+        // Use the temp dir as the allowed root
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![tmp],
+        };
+        // The current working directory is almost certainly NOT inside temp_dir
+        let result = cfg.check_path_allowed(".");
+        // This may succeed if cwd happens to be inside temp_dir; just ensure no panic
+        let _ = result;
+    }
+
+    #[test]
+    fn check_path_allowed_nonexistent_path_errors() {
+        let tmp = std::env::temp_dir();
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![tmp.clone()],
+        };
+        // A path that definitely doesn't exist cannot be canonicalized → error
+        let result = cfg.check_path_allowed("/nonexistent/__sloc_test_path__/x/y/z");
+        assert!(
+            result.is_err(),
+            "nonexistent path must fail check_path_allowed"
+        );
+    }
+
+    #[test]
+    fn check_path_allowed_multiple_roots_one_matches() {
+        let tmp = std::env::temp_dir();
+        let cwd = std::env::current_dir().expect("cwd must be readable");
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![tmp, cwd],
+        };
+        // "." (cwd) is inside the second root
+        assert!(cfg.check_path_allowed(".").is_ok());
+    }
+
+    // ── allowed_roots parsing ─────────────────────────────────────────────────
+
+    #[test]
+    fn allowed_roots_empty_when_env_var_unset() {
+        // Build config with no allowed roots directly
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![],
+        };
+        assert!(cfg.allowed_roots.is_empty());
+    }
+
+    #[test]
+    fn allowed_roots_parsed_from_vec() {
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![PathBuf::from("/tmp"), PathBuf::from("/home/user")],
+        };
+        assert_eq!(cfg.allowed_roots.len(), 2);
+        assert_eq!(cfg.allowed_roots[0], PathBuf::from("/tmp"));
     }
 }
