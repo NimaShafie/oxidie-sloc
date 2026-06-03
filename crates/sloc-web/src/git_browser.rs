@@ -1213,3 +1213,209 @@ fn make_label(repo: &str, ref_name: &str) -> String {
 fn json_error(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_valid_git_ref ─────────────────────────────────────────────────────
+
+    #[test]
+    fn valid_ref_simple_branch_name() {
+        assert!(is_valid_git_ref("main"));
+    }
+
+    #[test]
+    fn valid_ref_develop_branch() {
+        assert!(is_valid_git_ref("develop"));
+    }
+
+    #[test]
+    fn valid_ref_with_slash() {
+        assert!(is_valid_git_ref("feature/my-branch"));
+    }
+
+    #[test]
+    fn valid_ref_tag_with_dots() {
+        assert!(is_valid_git_ref("v1.0.0"));
+    }
+
+    #[test]
+    fn valid_ref_sha_hex_string() {
+        assert!(is_valid_git_ref("a1b2c3d4e5f678901234567890abcdef01234567"));
+    }
+
+    #[test]
+    fn valid_ref_with_at_sign() {
+        assert!(is_valid_git_ref("refs@HEAD"));
+    }
+
+    #[test]
+    fn valid_ref_with_plus() {
+        assert!(is_valid_git_ref("refs/tags/v1.0+patch"));
+    }
+
+    #[test]
+    fn valid_ref_exactly_256_chars() {
+        let r = "a".repeat(256);
+        assert!(is_valid_git_ref(&r), "256-char ref must be valid");
+    }
+
+    #[test]
+    fn valid_ref_with_underscore() {
+        assert!(is_valid_git_ref("release_candidate_1"));
+    }
+
+    #[test]
+    fn valid_ref_with_hyphen() {
+        assert!(is_valid_git_ref("my-feature-branch"));
+    }
+
+    #[test]
+    fn valid_ref_nested_path() {
+        assert!(is_valid_git_ref("refs/heads/main"));
+    }
+
+    #[test]
+    fn invalid_ref_empty_string() {
+        assert!(!is_valid_git_ref(""));
+    }
+
+    #[test]
+    fn invalid_ref_257_chars_too_long() {
+        let r = "a".repeat(257);
+        assert!(!is_valid_git_ref(&r), "257-char ref must be invalid");
+    }
+
+    #[test]
+    fn invalid_ref_starts_with_slash() {
+        assert!(!is_valid_git_ref("/etc/passwd"));
+    }
+
+    #[test]
+    fn invalid_ref_contains_double_dot() {
+        assert!(!is_valid_git_ref("branch..other"));
+    }
+
+    #[test]
+    fn invalid_ref_path_traversal_attempt() {
+        assert!(!is_valid_git_ref("../../etc/passwd"));
+    }
+
+    #[test]
+    fn invalid_ref_contains_space() {
+        assert!(!is_valid_git_ref("branch name"));
+    }
+
+    #[test]
+    fn invalid_ref_semicolon_injection() {
+        assert!(!is_valid_git_ref("branch;rm -rf /"));
+    }
+
+    #[test]
+    fn invalid_ref_backtick_injection() {
+        assert!(!is_valid_git_ref("branch`cmd`"));
+    }
+
+    #[test]
+    fn invalid_ref_dollar_sign() {
+        assert!(!is_valid_git_ref("$PATH"));
+    }
+
+    #[test]
+    fn invalid_ref_angle_bracket() {
+        assert!(!is_valid_git_ref("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn invalid_ref_newline() {
+        assert!(!is_valid_git_ref("branch\ninjected"));
+    }
+
+    #[test]
+    fn invalid_ref_null_byte() {
+        assert!(!is_valid_git_ref("branch\0name"));
+    }
+
+    #[test]
+    fn invalid_ref_pipe_char() {
+        assert!(!is_valid_git_ref("branch|cmd"));
+    }
+
+    #[test]
+    fn invalid_ref_exclamation_mark() {
+        assert!(!is_valid_git_ref("branch!"));
+    }
+
+    // ── make_label ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn make_label_simple_repo_url() {
+        assert_eq!(
+            make_label("https://github.com/owner/myrepo", "main"),
+            "myrepo_at_main_sloc"
+        );
+    }
+
+    #[test]
+    fn make_label_repo_url_with_git_extension() {
+        assert_eq!(
+            make_label("https://github.com/owner/myrepo.git", "v1.0"),
+            "myrepo_at_v1.0_sloc"
+        );
+    }
+
+    #[test]
+    fn make_label_trailing_slash_stripped() {
+        assert_eq!(
+            make_label("https://github.com/owner/myrepo/", "main"),
+            "myrepo_at_main_sloc"
+        );
+    }
+
+    #[test]
+    fn make_label_ref_slash_becomes_underscore() {
+        let label = make_label("https://github.com/owner/repo", "feature/my-branch");
+        assert_eq!(label, "repo_at_feature_my-branch_sloc");
+    }
+
+    #[test]
+    fn make_label_at_sign_in_ref_becomes_underscore() {
+        let label = make_label("https://github.com/owner/repo", "v1@tag");
+        assert_eq!(label, "repo_at_v1_tag_sloc");
+    }
+
+    #[test]
+    fn make_label_plus_in_ref_becomes_underscore() {
+        let label = make_label("https://github.com/owner/repo", "v1.0+patch");
+        assert_eq!(label, "repo_at_v1.0_patch_sloc");
+    }
+
+    #[test]
+    fn make_label_compare_ref_name() {
+        assert_eq!(
+            make_label("https://github.com/owner/repo.git", "compare"),
+            "repo_at_compare_sloc"
+        );
+    }
+
+    #[test]
+    fn make_label_short_sha() {
+        let label = make_label("https://github.com/owner/repo", "a1b2c3d4");
+        assert_eq!(label, "repo_at_a1b2c3d4_sloc");
+    }
+
+    #[test]
+    fn make_label_gitlub_style_path() {
+        assert_eq!(
+            make_label("https://gitlab.com/group/subgroup/myproject.git", "main"),
+            "myproject_at_main_sloc"
+        );
+    }
+
+    #[test]
+    fn make_label_empty_repo_uses_rsplit_fallback() {
+        let label = make_label("", "main");
+        assert_eq!(label, "_at_main_sloc");
+    }
+}
