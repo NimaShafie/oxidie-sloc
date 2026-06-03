@@ -2650,6 +2650,23 @@ fn find_json_run_by_id(candidates: &[PathBuf], expected: &str) -> Option<(PathBu
     None
 }
 
+fn resolve_scan_root(html_path: &Path, parent: &Path) -> PathBuf {
+    html_path
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| parent.to_path_buf())
+}
+
+fn gather_json_candidates(scan_root: &Path, parent: &Path) -> Vec<PathBuf> {
+    let mut hits = collect_result_json_candidates(scan_root);
+    if hits.is_empty() {
+        hits = collect_result_json_candidates(parent);
+    }
+    hits.sort();
+    hits
+}
+
 async fn locate_report_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2680,23 +2697,9 @@ async fn locate_report_handler(
 
     // Search for result_*.json in the HTML's parent and also its grandparent (handles
     // layouts where HTML is in a named subdir like html/ alongside json/, pdf/, etc.).
-    let scan_root_owned: PathBuf;
-    let scan_root: &Path = {
-        scan_root_owned = html_path
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| parent.clone());
-        &scan_root_owned
-    };
-    let json_candidates = {
-        let mut hits = collect_result_json_candidates(scan_root);
-        if hits.is_empty() {
-            hits = collect_result_json_candidates(&parent);
-        }
-        hits.sort();
-        hits
-    };
+    let scan_root_owned = resolve_scan_root(&html_path, &parent);
+    let scan_root: &Path = &scan_root_owned;
+    let json_candidates = gather_json_candidates(scan_root, &parent);
 
     // If the expected_run_id was provided, find a JSON that matches it exactly.
     let expected_run_id = form
@@ -3377,6 +3380,34 @@ struct OpenPathQuery {
     path: Option<String>,
 }
 
+fn find_existing_ancestor(raw: &str) -> Result<PathBuf, (StatusCode, &'static str)> {
+    let mut ancestor = std::path::Path::new(raw);
+    loop {
+        match ancestor.parent() {
+            Some(p) => {
+                ancestor = p;
+                if ancestor.is_dir() {
+                    break;
+                }
+            }
+            None => return Err((StatusCode::BAD_REQUEST, "no existing ancestor found")),
+        }
+    }
+    Ok(ancestor.to_path_buf())
+}
+
+async fn resolve_open_target(raw: &str) -> Result<PathBuf, (StatusCode, &'static str)> {
+    match tokio::fs::canonicalize(raw).await {
+        Ok(canonical) if canonical.is_file() => match canonical.parent() {
+            Some(p) => Ok(p.to_path_buf()),
+            None => Err((StatusCode::BAD_REQUEST, "path has no parent")),
+        },
+        Ok(canonical) if canonical.is_dir() => Ok(canonical),
+        Ok(_) => Err((StatusCode::BAD_REQUEST, "path is not a file or directory")),
+        Err(_) => find_existing_ancestor(raw),
+    }
+}
+
 async fn open_path_handler(
     State(state): State<AppState>,
     Query(query): Query<OpenPathQuery>,
@@ -3400,34 +3431,9 @@ async fn open_path_handler(
     // Resolve the target directory. If the path doesn't exist yet (e.g. the output
     // dir hasn't been created by a scan), walk up to the nearest existing ancestor
     // so the file explorer still opens somewhere useful.
-    let target = match tokio::fs::canonicalize(raw).await {
-        Ok(canonical) if canonical.is_file() => match canonical.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return (StatusCode::BAD_REQUEST, "path has no parent").into_response(),
-        },
-        Ok(canonical) if canonical.is_dir() => canonical,
-        Ok(_) => {
-            return (StatusCode::BAD_REQUEST, "path is not a file or directory").into_response()
-        }
-        Err(_) => {
-            // Path doesn't exist — find nearest existing ancestor directory.
-            let mut ancestor = std::path::Path::new(raw);
-            loop {
-                match ancestor.parent() {
-                    Some(p) => {
-                        ancestor = p;
-                        if ancestor.is_dir() {
-                            break;
-                        }
-                    }
-                    None => {
-                        return (StatusCode::BAD_REQUEST, "no existing ancestor found")
-                            .into_response();
-                    }
-                }
-            }
-            ancestor.to_path_buf()
-        }
+    let target = match resolve_open_target(raw).await {
+        Ok(p) => p,
+        Err((code, msg)) => return (code, msg).into_response(),
     };
 
     #[cfg(target_os = "windows")]
