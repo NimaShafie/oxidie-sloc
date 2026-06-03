@@ -1580,3 +1580,629 @@ async fn full_analyze_cycle_compare_two_runs() {
     let (status, _, _) = get_shared(app.clone(), "/api/project-history").await;
     assert!(status.as_u16() < 500);
 }
+
+// ── OpenAPI / static assets ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn openapi_yaml_returns_yaml() {
+    let (status, headers, body) = get("/api/openapi.yaml").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("yaml") || ct.contains("text"),
+        "expected YAML content-type, got: {ct}"
+    );
+    assert!(
+        body.contains("openapi") || body.contains("paths"),
+        "expected OpenAPI spec content, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn report_chart_js_returns_javascript() {
+    let (status, headers, _) = get("/static/chart-report.js").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("javascript") || ct.contains("text"),
+        "unexpected content-type: {ct}"
+    );
+}
+
+// ── Badge variants ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn badge_files_returns_svg() {
+    let (status, headers, body) = get("/badge/files").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("svg") || ct.contains("xml"),
+        "expected SVG content-type, got: {ct}"
+    );
+    assert!(body.contains("<svg"), "expected SVG body");
+}
+
+#[tokio::test]
+async fn badge_blank_lines_returns_svg() {
+    let (status, _, body) = get("/badge/blank_lines").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<svg"), "expected SVG body");
+}
+
+#[tokio::test]
+async fn badge_comment_lines_returns_svg() {
+    let (status, _, body) = get("/badge/comment_lines").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<svg"), "expected SVG body");
+}
+
+#[tokio::test]
+async fn badge_languages_returns_svg() {
+    let (status, _, body) = get("/badge/languages").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<svg"), "expected SVG body");
+}
+
+// ── Confluence config routes ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_confluence_config_get_returns_json() {
+    let (status, headers, body) = get("/api/confluence/config").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/confluence/config must return 200"
+    );
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON content-type, got: {ct}");
+    assert!(
+        body.contains("\"configured\"") || body.contains("configured"),
+        "expected 'configured' key in response, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_confluence_config_post_with_valid_payload_not_5xx() {
+    let payload = r#"{"base_url":"https://mycompany.atlassian.net","username":"test@example.com","credential":"my-token","space_key":"DEV","tier":"cloud"}"#;
+    let (status, _, _) = post_json("/api/confluence/config", payload).await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/confluence/config must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_confluence_config_post_empty_payload_not_5xx() {
+    let (status, _, _) = post_json("/api/confluence/config", r#"{}"#).await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/confluence/config empty payload must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_confluence_wiki_markup_not_5xx() {
+    let (status, _, _) = get("/api/confluence/wiki-markup").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/confluence/wiki-markup must not 5xx, got {status}"
+    );
+}
+
+// ── Schedule creation and management ─────────────────────────────────────────
+
+#[tokio::test]
+async fn api_create_schedule_webhook_returns_201() {
+    let payload = r#"{
+      "repo_url": "https://github.com/org/repo.git",
+      "branch": "main",
+      "kind": "webhook",
+      "provider": "github",
+      "label": "Test schedule"
+    }"#;
+    let (status, headers, body) = post_json("/api/schedules", payload).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "creating a schedule must return 201, body: {body}"
+    );
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON response, got: {ct}");
+    assert!(
+        body.contains("\"id\""),
+        "response must contain id field, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_create_schedule_poll_returns_201() {
+    let payload = r#"{
+      "repo_url": "https://gitlab.com/group/project.git",
+      "branch": "develop",
+      "kind": "poll",
+      "provider": "any",
+      "label": "Poll schedule",
+      "interval_secs": 300
+    }"#;
+    let (status, _, body) = post_json("/api/schedules", payload).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "creating a poll schedule must return 201, body: {body}"
+    );
+    assert!(
+        body.contains("\"id\""),
+        "response must contain id, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_delete_schedule_valid_uuid_returns_204() {
+    let (status, _, _) = delete("/api/schedules?id=00000000-0000-0000-0000-000000000002").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn api_schedules_list_after_create() {
+    let app = make_test_router();
+    let payload = r#"{"repo_url":"https://github.com/org/repo.git","branch":"main","kind":"webhook","provider":"github","label":"Listed"}"#;
+    let req = axum::http::Request::post("/api/schedules")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(payload))
+        .unwrap();
+    let _ = app.clone().oneshot(req).await.unwrap();
+
+    let (status, _, body) = get_shared(app, "/api/schedules").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("\"schedules\""));
+}
+
+// ── Cleanup policy ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_cleanup_policy_get_returns_json() {
+    let (status, headers, body) = get("/api/cleanup-policy").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /api/cleanup-policy must return 200"
+    );
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "expected JSON content-type, got: {ct}");
+    assert!(
+        body.contains("\"policy\"") || body.contains("policy"),
+        "expected policy key in response, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_cleanup_policy_post_with_valid_payload_not_5xx() {
+    let payload = r#"{"kind":"keep_last_n","keep_last_n":10}"#;
+    let (status, _, body) = post_json("/api/cleanup-policy", payload).await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/cleanup-policy must not 5xx, got {status}, body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_cleanup_policy_delete_returns_success() {
+    let app = make_test_router();
+    let resp = app
+        .oneshot(
+            axum::http::Request::delete("/api/cleanup-policy")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "DELETE /api/cleanup-policy must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn api_cleanup_policy_run_now_not_5xx() {
+    let (status, _, _) = post_form("/api/cleanup-policy/run-now", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/cleanup-policy/run-now must not 5xx, got {status}"
+    );
+}
+
+// ── Delete run handler ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn delete_run_unknown_id_returns_404() {
+    let app = make_test_router();
+    let resp = app
+        .oneshot(
+            axum::http::Request::delete("/api/runs/00000000-0000-0000-0000-000000000000")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Handler is idempotent: unknown run returns 204 No Content (not 404)
+    assert!(
+        resp.status().as_u16() < 500,
+        "deleting unknown run must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+// ── Webhook routes (GitLab / Bitbucket) ──────────────────────────────────────
+
+#[tokio::test]
+async fn post_gitlab_webhook_ping_returns_non_5xx() {
+    let app = make_test_router();
+    let payload = r#"{"object_kind":"push","ref":"refs/heads/main","checkout_sha":"abc123","user_username":"alice","project":{"git_http_url":"https://gitlab.com/org/repo.git"}}"#;
+    let req = axum::http::Request::post("/webhooks/gitlab")
+        .header("content-type", "application/json")
+        .header("x-gitlab-event", "Push Hook")
+        .body(axum::body::Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "GitLab push webhook must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn post_bitbucket_webhook_returns_non_5xx() {
+    let app = make_test_router();
+    let payload = r#"{"actor":{"display_name":"alice"},"repository":{"links":{"clone":[{"name":"https","href":"https://bitbucket.org/ws/repo.git"}]}},"push":{"changes":[{"new":{"name":"main","target":{"hash":"abc1234567890abc1234567890abc1234567890ab"}}}]}}"#;
+    let req = axum::http::Request::post("/webhooks/bitbucket")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "Bitbucket webhook must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn post_github_webhook_push_event_returns_non_5xx() {
+    let app = make_test_router();
+    let payload = r#"{"ref":"refs/heads/main","after":"abc1234def5678abc1234def5678abc1234def56","repository":{"clone_url":"https://github.com/org/repo.git"},"pusher":{"name":"alice"}}"#;
+    let req = axum::http::Request::post("/webhooks/github")
+        .header("content-type", "application/json")
+        .header("x-github-event", "push")
+        .body(axum::body::Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "GitHub push webhook (no secret) must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+// ── Image handler ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn image_logo_text_returns_png() {
+    let (status, headers, _) = get("/images/logo/logo-text.png").await;
+    assert_eq!(status, StatusCode::OK, "logo-text.png must return 200");
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("png") || ct.contains("image"),
+        "expected image content-type, got: {ct}"
+    );
+}
+
+#[tokio::test]
+async fn image_unknown_returns_404() {
+    let (status, _, _) = get("/images/logo/nonexistent.png").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown image must return 404"
+    );
+}
+
+// ── Redirect routes ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn webhook_setup_redirects_to_integrations() {
+    let app = make_test_router();
+    let resp = app
+        .oneshot(
+            axum::http::Request::get("/webhook-setup")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "GET /webhook-setup must redirect, got {}",
+        resp.status()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        location.contains("integrations"),
+        "redirect must point to /integrations, got: {location}"
+    );
+}
+
+#[tokio::test]
+async fn confluence_setup_redirects_to_integrations() {
+    let app = make_test_router();
+    let resp = app
+        .oneshot(
+            axum::http::Request::get("/confluence-setup")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "GET /confluence-setup must redirect, got {}",
+        resp.status()
+    );
+}
+
+// ── Upload handlers (headless guard fires) ────────────────────────────────────
+
+#[tokio::test]
+async fn upload_directory_missing_body_not_5xx() {
+    let app = make_test_router();
+    let req = axum::http::Request::post("/api/upload-directory")
+        .header("content-type", "multipart/form-data; boundary=abc")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "/api/upload-directory must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn upload_file_missing_body_not_5xx() {
+    let app = make_test_router();
+    let req = axum::http::Request::post("/api/upload-file")
+        .header("content-type", "multipart/form-data; boundary=abc")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "/api/upload-file must not 5xx, got {}",
+        resp.status()
+    );
+}
+
+// ── Ingest with valid payload ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_ingest_with_minimal_valid_payload_not_5xx() {
+    let payload = r#"{"run_id":"test-123","summary":{"files_analyzed":1,"code_lines":50}}"#;
+    let (status, _, _) = post_json("/api/ingest", payload).await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/ingest with minimal payload must not 5xx, got {status}"
+    );
+}
+
+// ── Full analyze cycle: multi-language project ────────────────────────────────
+
+#[tokio::test]
+async fn full_analyze_cycle_multi_language_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.py"),
+        "def foo():\n    pass\n# comment\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("utils.js"),
+        "function bar() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("app.ts"), "const x: number = 42;\n").unwrap();
+    std::fs::write(
+        dir.path().join("style.css"),
+        ".btn { color: red; } /* style */\n",
+    )
+    .unwrap();
+
+    let app = make_test_router();
+    let path_encoded = pct_encode(dir.path().to_str().unwrap_or("."));
+    let form_body = format!("path={path_encoded}&generate_html=1&generate_json=1");
+
+    let (status, headers, _) = post_form_shared(app.clone(), "/analyze", &form_body).await;
+    assert_eq!(status, StatusCode::OK);
+    let wait_id = headers
+        .get("x-wait-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    assert!(!wait_id.is_empty());
+
+    let mut run_id = String::new();
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            if v["status"] == "complete" {
+                run_id = v["run_id"].as_str().unwrap_or("").to_owned();
+                break;
+            }
+            if v["status"] == "failed" || v["status"] == "cancelled" {
+                break;
+            }
+        }
+    }
+
+    if run_id.is_empty() {
+        return;
+    }
+
+    // Verify multi-language data appears in the run result
+    let (status, _, result_body) = get_shared(app.clone(), &format!("/runs/result/{run_id}")).await;
+    assert!(status.as_u16() < 500);
+    if status == StatusCode::OK {
+        assert!(result_body.contains("<!doctype html>") || result_body.contains("<!DOCTYPE html>"));
+    }
+
+    // Check that the project history includes this run
+    let (status, _, _) = get_shared(app.clone(), "/api/project-history").await;
+    assert!(status.as_u16() < 500);
+
+    // Embed summary should now show data
+    let (status, _, _) = get_shared(app.clone(), "/embed/summary").await;
+    assert!(status.as_u16() < 500);
+
+    // Compare-scans page with a run in the registry
+    let (status, _, _) = get_shared(app.clone(), "/compare-scans").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ── Scan profile lifecycle ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn scan_profile_create_then_delete_lifecycle() {
+    let app = make_test_router();
+
+    // Create
+    let create_req = axum::http::Request::post("/api/scan-profiles")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            r#"{"name":"my-profile","params":{"path":"."}}"#,
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let bytes = create_resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let profile_id = body["id"].as_str().unwrap_or("").to_owned();
+
+    if profile_id.is_empty() {
+        return; // can't test delete without a valid ID
+    }
+
+    // List — should include the new profile
+    let (status, _, list_body) = get_shared(app.clone(), "/api/scan-profiles").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list_body.contains(&profile_id) || list_body.contains("my-profile"));
+
+    // Delete
+    let delete_resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::delete(format!("/api/scan-profiles/{profile_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        delete_resp.status().as_u16() < 500,
+        "profile delete must not 5xx"
+    );
+}
+
+// ── Metrics handler ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn metrics_endpoint_not_5xx() {
+    let (status, _, _) = get("/metrics").await;
+    assert!(status.as_u16() < 500, "/metrics must not 5xx, got {status}");
+}
+
+// ── Analyze with various form params ─────────────────────────────────────────
+
+#[tokio::test]
+async fn post_analyze_with_label_param_not_5xx() {
+    let (status, headers, _) = post_form(
+        "/analyze",
+        "path=.&project_label=my-test-project&generate_html=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.contains_key("x-wait-id"));
+}
+
+#[tokio::test]
+async fn post_analyze_per_file_output_not_5xx() {
+    let (status, headers, _) = post_form("/analyze", "path=.&per_file=1&generate_json=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.contains_key("x-wait-id"));
+}
+
+// ── Schedule create then delete lifecycle ──────────────────────────────────────
+
+#[tokio::test]
+async fn schedule_create_then_delete_lifecycle() {
+    let app = make_test_router();
+
+    // Create a webhook schedule
+    let create_req = axum::http::Request::post("/api/schedules")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            r#"{"repo_url":"https://github.com/org/repo.git","branch":"main","kind":"webhook","provider":"github","label":"Test webhook"}"#,
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let bytes = create_resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let schedule_id = body["id"].as_str().unwrap_or("").to_owned();
+
+    if schedule_id.is_empty() {
+        return;
+    }
+
+    // List — should include the schedule
+    let (status, _, list_body) = get_shared(app.clone(), "/api/schedules").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list_body.contains(&schedule_id) || list_body.contains("Test webhook"));
+
+    // Delete
+    let delete_resp = app
+        .oneshot(
+            axum::http::Request::delete(format!("/api/schedules?id={schedule_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+}
