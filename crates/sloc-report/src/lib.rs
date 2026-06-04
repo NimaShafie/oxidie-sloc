@@ -2843,7 +2843,11 @@ struct WarningOpportunityRow {
     .pager-btn { padding:6px 16px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface-2); color:var(--text); font-size:13px; font-weight:700; cursor:pointer; transition:background .15s,color .15s; }
     .pager-btn:hover:not(:disabled) { background:var(--accent); color:#fff; border-color:var(--accent); }
     .pager-btn:disabled { opacity:.4; cursor:default; }
-    .pager-info { font-size:13px; color:var(--muted); font-weight:600; min-width:180px; text-align:center; }
+    .pager-info { font-size:13px; color:var(--muted); font-weight:600; min-width:120px; text-align:center; }
+    .pager-edge { font-size:12px; padding:5px 10px; }
+    .pager-jump-wrap { font-size:13px; color:var(--muted); font-weight:600; display:flex; align-items:center; gap:5px; white-space:nowrap; }
+    .pager-jump { width:52px; padding:3px 5px; border-radius:6px; border:1px solid var(--line-strong); background:var(--surface); color:var(--text); font-size:13px; font-weight:700; text-align:center; -moz-appearance:textfield; }
+    .pager-jump::-webkit-inner-spin-button,.pager-jump::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
     .table-shell { border: 1px solid var(--line); border-radius: 16px; overflow: auto; background: var(--surface-2); max-height: 900px; }
     /* Clip wrapper: hides the scrollbar track that hangs 8px past the right edge */
     .table-shell-clip { overflow: hidden !important; max-height: none !important; }
@@ -3697,7 +3701,7 @@ struct WarningOpportunityRow {
               <button type="button" class="chart-tab" data-comp-tab="pct">Composition %</button>
             </div>
             </div>
-            <div id="composition-chart" class="chart-container"><div id="canvas-comp-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-comp"></canvas></div><div id="comp-custom-legend" style="display:flex;justify-content:center;gap:20px;margin-top:8px;flex-wrap:wrap;"></div></div>
+            <div id="composition-chart" class="chart-container" style="overflow:hidden;"><div id="comp-svg-container"></div></div>
           </div>
         </section>
       </div>
@@ -3953,9 +3957,12 @@ struct WarningOpportunityRow {
               </table>
             </div>
             <div id="sft-pagination" class="pagination-bar">
+              <button id="sft-first" class="pager-btn pager-edge" disabled title="First page">&#8676; First</button>
               <button id="sft-prev" class="pager-btn" disabled>&#8592; Prev</button>
+              <span class="pager-jump-wrap">Page <input id="sft-page-jump" class="pager-jump" type="number" min="1" value="1" title="Jump to page"> of <span id="sft-page-total">&#8212;</span></span>
               <span id="sft-page-info" class="pager-info"></span>
               <button id="sft-next" class="pager-btn">Next &#8594;</button>
+              <button id="sft-last" class="pager-btn pager-edge" title="Last page">Last &#8677;</button>
             </div>
           </div>
         </div>
@@ -4107,9 +4114,12 @@ struct WarningOpportunityRow {
         </div>
         </div>
         <div id="per-file-pagination" class="pagination-bar">
+          <button id="pf-first" class="pager-btn pager-edge" disabled title="First page">&#8676; First</button>
           <button id="pf-prev" class="pager-btn" disabled>&#8592; Prev</button>
+          <span class="pager-jump-wrap">Page <input id="pf-page-jump" class="pager-jump" type="number" min="1" value="1" title="Jump to page"> of <span id="pf-page-total">&#8212;</span></span>
           <span id="pf-page-info" class="pager-info"></span>
           <button id="pf-next" class="pager-btn">Next &#8594;</button>
+          <button id="pf-last" class="pager-btn pager-edge" title="Last page">Last &#8677;</button>
         </div>
       </section>
 
@@ -4138,9 +4148,12 @@ struct WarningOpportunityRow {
         </div>
         </div>
         <div id="skipped-pagination" class="pagination-bar">
+          <button id="sk-first" class="pager-btn pager-edge" disabled title="First page">&#8676; First</button>
           <button id="sk-prev" class="pager-btn" disabled>&#8592; Prev</button>
+          <span class="pager-jump-wrap">Page <input id="sk-page-jump" class="pager-jump" type="number" min="1" value="1" title="Jump to page"> of <span id="sk-page-total">&#8212;</span></span>
           <span id="sk-page-info" class="pager-info"></span>
           <button id="sk-next" class="pager-btn">Next &#8594;</button>
+          <button id="sk-last" class="pager-btn pager-edge" title="Last page">Last &#8677;</button>
         </div>
       </section>
 
@@ -4475,16 +4488,20 @@ struct WarningOpportunityRow {
         });
       });
 
-      // ── Per-file table pagination ─────────────────────────────────────────────
+      // ── Per-file table pagination ────────────────────────────────────────────
       (function () {
         var table = document.getElementById('per-file-table');
         if (!table) return;
         var tbody = table.tBodies[0];
         var searchInput = document.getElementById('per-file-search');
         var pageSizeSelect = document.getElementById('per-file-page-size');
+        var firstBtn = document.getElementById('pf-first');
         var prevBtn = document.getElementById('pf-prev');
         var nextBtn = document.getElementById('pf-next');
+        var lastBtn = document.getElementById('pf-last');
         var pageInfo = document.getElementById('pf-page-info');
+        var jumpInput = document.getElementById('pf-page-jump');
+        var pageTotal = document.getElementById('pf-page-total');
         var countLabel = document.getElementById('per-file-count-label');
         var filteredRows = [];
         var currentPage = 1;
@@ -4527,8 +4544,13 @@ struct WarningOpportunityRow {
           if (countLabel) {
             countLabel.textContent = (total < totalAll && total > 0) ? '(' + total.toLocaleString() + ' matching)' : '';
           }
-          if (prevBtn) prevBtn.disabled = currentPage <= 1 || ps === Infinity;
-          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || ps === Infinity;
+          var edgeDisabled = ps === Infinity;
+          if (firstBtn) firstBtn.disabled = currentPage <= 1 || edgeDisabled;
+          if (prevBtn) prevBtn.disabled = currentPage <= 1 || edgeDisabled;
+          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || edgeDisabled;
+          if (lastBtn) lastBtn.disabled = currentPage >= totalPages || edgeDisabled;
+          if (jumpInput) { jumpInput.value = currentPage; jumpInput.max = totalPages; jumpInput.disabled = edgeDisabled; }
+          if (pageTotal) pageTotal.textContent = totalPages.toLocaleString();
         }
 
         if (searchInput) {
@@ -4541,6 +4563,9 @@ struct WarningOpportunityRow {
         if (pageSizeSelect) {
           pageSizeSelect.addEventListener('change', function () { currentPage = 1; render(); });
         }
+        if (firstBtn) {
+          firstBtn.addEventListener('click', function () { currentPage = 1; render(); });
+        }
         if (prevBtn) {
           prevBtn.addEventListener('click', function () { if (currentPage > 1) { currentPage--; render(); } });
         }
@@ -4550,6 +4575,23 @@ struct WarningOpportunityRow {
             var totalPages = ps === Infinity ? 1 : Math.ceil(filteredRows.length / ps);
             if (currentPage < totalPages) { currentPage++; render(); }
           });
+        }
+        if (lastBtn) {
+          lastBtn.addEventListener('click', function () {
+            var ps = getPageSize();
+            currentPage = ps === Infinity ? 1 : Math.max(1, Math.ceil(filteredRows.length / ps));
+            render();
+          });
+        }
+        if (jumpInput) {
+          function pfJump() {
+            var ps = getPageSize();
+            var totalPages = ps === Infinity ? 1 : Math.max(1, Math.ceil(filteredRows.length / ps));
+            var v = parseInt(jumpInput.value, 10);
+            if (!isNaN(v)) { currentPage = Math.max(1, Math.min(v, totalPages)); render(); }
+          }
+          jumpInput.addEventListener('change', pfJump);
+          jumpInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') pfJump(); });
         }
         table.addEventListener('sloc-sorted', function () { applyFilter(); });
         window._pfPaginationReset = function () { currentPage = 1; applyFilter(); };
@@ -4563,9 +4605,13 @@ struct WarningOpportunityRow {
         var tbody = table.tBodies[0];
         var searchInput = document.getElementById('skipped-search');
         var pageSizeSelect = document.getElementById('skipped-page-size');
+        var firstBtn = document.getElementById('sk-first');
         var prevBtn = document.getElementById('sk-prev');
         var nextBtn = document.getElementById('sk-next');
+        var lastBtn = document.getElementById('sk-last');
         var pageInfo = document.getElementById('sk-page-info');
+        var jumpInput = document.getElementById('sk-page-jump');
+        var pageTotal = document.getElementById('sk-page-total');
         var countLabel = document.getElementById('skipped-count-label');
         var filteredRows = [];
         var currentPage = 1;
@@ -4608,8 +4654,13 @@ struct WarningOpportunityRow {
           if (countLabel) {
             countLabel.textContent = (total < totalAll && total > 0) ? '(' + total.toLocaleString() + ' matching)' : '';
           }
-          if (prevBtn) prevBtn.disabled = currentPage <= 1 || ps === Infinity;
-          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || ps === Infinity;
+          var edgeDisabled = ps === Infinity;
+          if (firstBtn) firstBtn.disabled = currentPage <= 1 || edgeDisabled;
+          if (prevBtn) prevBtn.disabled = currentPage <= 1 || edgeDisabled;
+          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || edgeDisabled;
+          if (lastBtn) lastBtn.disabled = currentPage >= totalPages || edgeDisabled;
+          if (jumpInput) { jumpInput.value = currentPage; jumpInput.max = totalPages; jumpInput.disabled = edgeDisabled; }
+          if (pageTotal) pageTotal.textContent = totalPages.toLocaleString();
         }
 
         if (searchInput) {
@@ -4622,6 +4673,9 @@ struct WarningOpportunityRow {
         if (pageSizeSelect) {
           pageSizeSelect.addEventListener('change', function () { currentPage = 1; render(); });
         }
+        if (firstBtn) {
+          firstBtn.addEventListener('click', function () { currentPage = 1; render(); });
+        }
         if (prevBtn) {
           prevBtn.addEventListener('click', function () { if (currentPage > 1) { currentPage--; render(); } });
         }
@@ -4631,6 +4685,23 @@ struct WarningOpportunityRow {
             var totalPages = ps === Infinity ? 1 : Math.ceil(filteredRows.length / ps);
             if (currentPage < totalPages) { currentPage++; render(); }
           });
+        }
+        if (lastBtn) {
+          lastBtn.addEventListener('click', function () {
+            var ps = getPageSize();
+            currentPage = ps === Infinity ? 1 : Math.max(1, Math.ceil(filteredRows.length / ps));
+            render();
+          });
+        }
+        if (jumpInput) {
+          function skJump() {
+            var ps = getPageSize();
+            var totalPages = ps === Infinity ? 1 : Math.max(1, Math.ceil(filteredRows.length / ps));
+            var v = parseInt(jumpInput.value, 10);
+            if (!isNaN(v)) { currentPage = Math.max(1, Math.min(v, totalPages)); render(); }
+          }
+          jumpInput.addEventListener('change', skJump);
+          jumpInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') skJump(); });
         }
         table.addEventListener('sloc-sorted', function () { applyFilter(); });
         applyFilter();
@@ -5296,128 +5367,74 @@ struct WarningOpportunityRow {
         }
       })();
 
-      // ── Language Composition ─────────────────────────────────────────────────
-      var compChart = null;
+      // ── Language Composition (SVG — matches /runs/result behaviour) ──────────
       (function() {
-        var wrap = document.getElementById('canvas-comp-wrap');
-        var canvas = document.getElementById('canvas-comp');
-        if (!canvas) return;
-        var data = D.slice(0, 15);
-        var compMode = 'absolute';
-        if (wrap) wrap.style.height = Math.max(90, Math.min(432, data.length * 25 + 44)) + 'px';
-        function renderComp() {
-          var c = clr(), isPct = compMode === 'pct';
-          var tot = function(d){ return (d.code||0)+(d.comments||0)+(d.blanks||0)||1; };
-          var codeD = data.map(function(d){ return isPct ? (d.code||0)/tot(d)*100 : d.code||0; });
-          var cmD   = data.map(function(d){ return isPct ? (d.comments||0)/tot(d)*100 : d.comments||0; });
-          var blD   = data.map(function(d){ return isPct ? (d.blanks||0)/tot(d)*100 : d.blanks||0; });
-          var tickCb = isPct ? function(v){return v.toFixed(0)+'%';} : function(v){return fmt(v);};
-          if (compChart) {
-            compChart.data.datasets[0].data = codeD;
-            compChart.data.datasets[1].data = cmD;
-            compChart.data.datasets[2].data = blD;
-            compChart.options.scales.x.ticks.callback = tickCb;
-            compChart.update('none'); return;
+        var el = document.getElementById('comp-svg-container');
+        if (!el || !D || !D.length) return;
+        var cData = D.slice(0, 15);
+        var cMode = 'absolute';
+        var CX = OX, CG = GN, CB = '#BBBBBB';
+        var CFONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+        function cEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        function cPx(n){return Math.round(n);}
+        function cTT(l,v){return ' class="rchit" data-ttl="'+String(l).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" data-ttv="'+String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"';}
+        function cLT(l,v){return ' data-ttl="'+l+'" data-ttv="'+v.replace(/"/g,'&quot;')+'"';}
+        function renderCompSVG() {
+          var isPct = cMode === 'pct';
+          var totC=cData.reduce(function(a,d){return a+(d.code||0);},0);
+          var totCm=cData.reduce(function(a,d){return a+(d.comments||0);},0);
+          var totBl=cData.reduce(function(a,d){return a+(d.blanks||0);},0);
+          var totAll=totC+totCm+totBl||1;
+          var svgW=Math.max(320,el.offsetWidth||540);
+          var LW=108,legendH=24,topPad=4,bH=18,rHb=26;
+          var BW=Math.max(120,svgW-LW-84);
+          var SH=cData.length*rHb+legendH+topPad+10;
+          var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          if(isPct){
+            cData.forEach(function(d,i){
+              var t2=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
+              var cW=(d.code||0)/t2*BW,cmW=(d.comments||0)/t2*BW,blW=(d.blanks||0)/t2*BW;
+              var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
+              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
+              if(cW>0.5)s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';x+=cW;
+              if(cmW>0.5)s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';x+=cmW;
+              if(blW>0.5)s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';
+              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+Math.round((d.code||0)/t2*100)+'%</text>';
+            });
+          } else {
+            var maxT=Math.max.apply(null,cData.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);})) || 1;
+            cData.forEach(function(d,i){
+              var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
+              var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
+              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
+              if(cW>0.5)s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';x+=cW;
+              if(cmW>0.5)s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';x+=cmW;
+              if(blW>0.5)s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';
+              var phys=d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0);
+              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+            });
           }
-          compChart = new Chart(canvas, {
-            type: 'bar',
-            data: {
-              labels: data.map(function(d){ return d.lang; }),
-              datasets: [
-                { label:'Code',     data: codeD, backgroundColor: OX, borderRadius: 3 },
-                { label:'Comments', data: cmD,   backgroundColor: GN, borderRadius: 3 },
-                { label:'Blanks',   data: blD,   backgroundColor: GY, borderRadius: 3 }
-              ]
-            },
-            options: {
-              indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-              animation: { duration: 500, easing: 'easeOutQuart' },
-              layout: { padding: { right: 64 } },
-              scales: {
-                x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: tickCb } },
-                y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
-              },
-              plugins: {
-                legend: { display: false },
-                tooltip: {
-                  mode: 'index', axis: 'y', intersect: false,
-                  callbacks: {
-                    title: function(items) { return items.length ? items[0].label : ''; },
-                    label: function(ctx) {
-                      var val = isPct
-                        ? '  ' + ctx.dataset.label + ': ' + ctx.parsed.x.toFixed(1) + '% of physical lines'
-                        : '  ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.x) + ' lines';
-                      return val;
-                    },
-                    footer: function(items) {
-                      if (isPct) return '';
-                      var tot2 = items.reduce(function(s,i){return s+(i.parsed.x||0);},0);
-                      return 'Total: ' + Number(tot2).toLocaleString() + ' lines';
-                    }
-                  }
-                }
-              }
-            },
-            plugins: [makeStackedEndPlugin(function(total, idx) {
-              if (compMode === 'pct') return '';
-              var d = data[idx]; return fmt(Math.round(d && d.physical ? d.physical : total));
-            })]
-          });
-          ALL_CHARTS.push(compChart);
-          wireCompLegend();
-        }
-        function wireCompLegend() {
-          var legEl = document.getElementById('comp-custom-legend');
-          if (!legEl || !compChart) return;
-          var cols = [OX, GN, GY];
-          var labels = ['Code', 'Comments', 'Blanks'];
-          var totC2 = data.reduce(function(a,d){return a+(d.code||0);},0);
-          var totCm2 = data.reduce(function(a,d){return a+(d.comments||0);},0);
-          var totBl2 = data.reduce(function(a,d){return a+(d.blanks||0);},0);
-          var totAll2 = totC2+totCm2+totBl2||1;
-          var rawTotals = [totC2, totCm2, totBl2];
-          legEl.innerHTML = '';
-          labels.forEach(function(lbl, idx) {
-            var pct = Math.round(rawTotals[idx]/totAll2*100);
-            var ttv = fmt(rawTotals[idx])+' total ('+pct+'%)';
-            var span = document.createElement('span');
-            span.setAttribute('data-ds-idx', String(idx));
-            span.setAttribute('data-ttl', lbl);
-            span.setAttribute('data-ttv', ttv);
-            span.style.cssText = 'display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:700;user-select:none;transition:opacity .15s;';
-            var sw = document.createElement('span');
-            sw.style.cssText = 'display:inline-block;width:12px;height:12px;background:'+cols[idx]+';border-radius:2px;flex-shrink:0;';
-            span.appendChild(sw);
-            span.appendChild(document.createTextNode(lbl));
-            legEl.appendChild(span);
-          });
-          var items = legEl.querySelectorAll('[data-ds-idx]');
-          for (var k = 0; k < items.length; k++) {
-            (function(item, idx) {
-              item.addEventListener('mouseenter', function() {
-                compChart.data.datasets.forEach(function(ds, i) {
-                  ds.backgroundColor = i === idx ? cols[i] : cols[i]+'28';
-                });
-                compChart.update('none');
-                for (var j = 0; j < items.length; j++) items[j].style.opacity = items[j]===item?'1':'0.45';
-              });
-              item.addEventListener('mouseleave', function() {
-                compChart.data.datasets.forEach(function(ds, i) { ds.backgroundColor = cols[i]; });
-                compChart.update('none');
-                for (var j = 0; j < items.length; j++) items[j].style.opacity = '';
-              });
-            })(items[k], parseInt(items[k].getAttribute('data-ds-idx'), 10));
-          }
+          var ly=SH-legendH+4;
+          var ttC=cLT('Code lines',fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)');
+          var ttCm=cLT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
+          var ttBl=cLT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
+          s+='<g data-kind="code" style="cursor:pointer;"><rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/><rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+CX+'"'+ttC+'/><text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text></g>';
+          s+='<g data-kind="comment" style="cursor:pointer;"><rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/><rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+CG+'"'+ttCm+'/><text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text></g>';
+          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
+          s+='</svg>';
+          el.innerHTML=s;
+          wireMixLegend(el.querySelector('svg'));
         }
         document.querySelectorAll('[data-comp-tab]').forEach(function(btn){
           btn.addEventListener('click', function(){
             document.querySelectorAll('[data-comp-tab]').forEach(function(b){b.classList.remove('active');});
             btn.classList.add('active');
-            compMode = btn.getAttribute('data-comp-tab');
-            renderComp();
+            cMode=btn.getAttribute('data-comp-tab');
+            renderCompSVG();
           });
         });
-        renderComp();
+        renderCompSVG();
+        window.addEventListener('resize', renderCompSVG);
       })();
 
       // ── Scatter / Bubble chart ────────────────────────────────────────────────
@@ -5629,16 +5646,19 @@ struct WarningOpportunityRow {
         var SEM_LABELS = { functions:'Functions', classes:'Classes / Types', variables:'Variables',
                            imports:'Imports', tests:'Tests' };
         var SEM_COLS = { functions:OX, classes:'#4472C4', variables:GN, imports:'#805099', tests:'#B23030' };
+        var SEM_HCOLS = { functions:'#d97020', classes:'#5a8ad8', variables:'#3a8a5e', imports:'#9a68b3', tests:'#cc4545' };
         var semChart = null;
         function renderSemantic() {
           var mKey = semSel ? semSel.value : 'functions';
           var data = SEM_D.slice().sort(function(a,b){return (b[mKey]||0)-(a[mKey]||0);}).slice(0,15);
           var c = clr();
           var col = SEM_COLS[mKey] || OX;
+          var hCol = SEM_HCOLS[mKey] || '#d97020';
           if (semChart) {
             semChart.data.labels = data.map(function(d){return d.lang;});
             semChart.data.datasets[0].data = data.map(function(d){return d[mKey]||0;});
             semChart.data.datasets[0].backgroundColor = col;
+            semChart.data.datasets[0].hoverBackgroundColor = hCol;
             semChart.data.datasets[0].label = SEM_LABELS[mKey]||mKey;
             semChart.update('none'); return;
           }
@@ -5648,11 +5668,13 @@ struct WarningOpportunityRow {
               labels: data.map(function(d){return d.lang;}),
               datasets: [{ label: SEM_LABELS[mKey]||mKey,
                 data: data.map(function(d){return d[mKey]||0;}),
-                backgroundColor: col, borderRadius: 4 }]
+                backgroundColor: col, hoverBackgroundColor: hCol,
+                borderRadius: 4, borderWidth: 0, hoverBorderWidth: 0 }]
             },
             options: {
               responsive: true, maintainAspectRatio: false,
               animation: { duration: 500, easing: 'easeOutQuart' },
+              transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
               layout: { padding: { top: 18 } },
               scales: {
                 x: { grid: { display: false }, ticks: { color: c.text } },
@@ -6647,8 +6669,12 @@ struct WarningOpportunityRow {
       });
       tbody.innerHTML=html||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
       var pageInfo=document.getElementById('sft-page-info');
+      var firstBtn=document.getElementById('sft-first');
       var prevBtn=document.getElementById('sft-prev');
       var nextBtn=document.getElementById('sft-next');
+      var lastBtn=document.getElementById('sft-last');
+      var jumpInput=document.getElementById('sft-page-jump');
+      var pageTotal=document.getElementById('sft-page-total');
       var countLabel=document.getElementById('sft-count-label');
       if(pageInfo){
         if(total===0){pageInfo.textContent='No results';}
@@ -6656,8 +6682,13 @@ struct WarningOpportunityRow {
         else{pageInfo.textContent=(start+1)+'–'+end+' of '+total.toLocaleString()+' files';}
       }
       if(countLabel){countLabel.textContent=(total<totalAll&&total>0)?'('+total.toLocaleString()+' matching)':'';}
-      if(prevBtn)prevBtn.disabled=sftCurrentPage<=1||ps===Infinity;
-      if(nextBtn)nextBtn.disabled=sftCurrentPage>=totalPages||ps===Infinity;
+      var edgeOff=ps===Infinity;
+      if(firstBtn)firstBtn.disabled=sftCurrentPage<=1||edgeOff;
+      if(prevBtn)prevBtn.disabled=sftCurrentPage<=1||edgeOff;
+      if(nextBtn)nextBtn.disabled=sftCurrentPage>=totalPages||edgeOff;
+      if(lastBtn)lastBtn.disabled=sftCurrentPage>=totalPages||edgeOff;
+      if(jumpInput){jumpInput.value=sftCurrentPage;jumpInput.max=totalPages;jumpInput.disabled=edgeOff;}
+      if(pageTotal)pageTotal.textContent=totalPages.toLocaleString();
     }
     function initStyleTable(){
       if(!FILE_DATA.length){
@@ -6693,14 +6724,33 @@ struct WarningOpportunityRow {
       }
       var pageSel=document.getElementById('sft-page-size');
       if(pageSel){pageSel.addEventListener('change',function(){sftCurrentPage=1;renderSftTable();});}
-      var prevBtn=document.getElementById('sft-prev');
-      var nextBtn=document.getElementById('sft-next');
-      if(prevBtn){prevBtn.addEventListener('click',function(){if(sftCurrentPage>1){sftCurrentPage--;renderSftTable();}});}
-      if(nextBtn){nextBtn.addEventListener('click',function(){
+      var sftFirstBtn=document.getElementById('sft-first');
+      var sftPrevBtn=document.getElementById('sft-prev');
+      var sftNextBtn=document.getElementById('sft-next');
+      var sftLastBtn=document.getElementById('sft-last');
+      var sftJumpInput=document.getElementById('sft-page-jump');
+      if(sftFirstBtn){sftFirstBtn.addEventListener('click',function(){sftCurrentPage=1;renderSftTable();});}
+      if(sftPrevBtn){sftPrevBtn.addEventListener('click',function(){if(sftCurrentPage>1){sftCurrentPage--;renderSftTable();}});}
+      if(sftNextBtn){sftNextBtn.addEventListener('click',function(){
         var ps=sftGetPageSize();
         var totalPages=ps===Infinity?1:Math.ceil(sftFilteredRows.length/ps);
         if(sftCurrentPage<totalPages){sftCurrentPage++;renderSftTable();}
       });}
+      if(sftLastBtn){sftLastBtn.addEventListener('click',function(){
+        var ps=sftGetPageSize();
+        sftCurrentPage=ps===Infinity?1:Math.max(1,Math.ceil(sftFilteredRows.length/ps));
+        renderSftTable();
+      });}
+      if(sftJumpInput){
+        function sftJump(){
+          var ps=sftGetPageSize();
+          var totalPages=ps===Infinity?1:Math.max(1,Math.ceil(sftFilteredRows.length/ps));
+          var v=parseInt(sftJumpInput.value,10);
+          if(!isNaN(v)){sftCurrentPage=Math.max(1,Math.min(v,totalPages));renderSftTable();}
+        }
+        sftJumpInput.addEventListener('change',sftJump);
+        sftJumpInput.addEventListener('keydown',function(e){if(e.key==='Enter')sftJump();});
+      }
     }
     function init(){initTabs();initStyleTable();}
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();

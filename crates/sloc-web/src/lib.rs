@@ -13056,20 +13056,32 @@ struct SubmoduleRow {
     .cov-scan-none .cov-scan-title { color:var(--muted); font-weight:500; }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
-    .loading-card { width: min(730px, calc(100vw - 40px)); border-radius: 18px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 20px 48px rgba(0,0,0,0.22); padding: 36px 42px; }
-    .progress-bar { width:100%; height:6px; margin-top:0; background: var(--surface-3); border-radius:999px; overflow:hidden; margin-bottom:0; }
+    .loading-card { width: min(840px, calc(100vw - 40px)); border-radius: 20px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 24px 56px rgba(0,0,0,0.26); padding: 42px 48px; }
+    .progress-bar { width:100%; height:9px; margin-top:0; background: var(--surface-3); border-radius:999px; overflow:hidden; margin-bottom:0; }
     .progress-bar span { display:block; width:42%; height:100%; background: linear-gradient(90deg, var(--accent-2), var(--oxide,#d37a4c)); animation: pulseBar 1.6s ease-in-out infinite; }
     @keyframes pulseBar { 0% { transform: translateX(-100%) scaleX(0.5); } 50% { transform: translateX(0%) scaleX(0.5); } 100% { transform: translateX(200%) scaleX(0.5); } }
-    .lc-badge { display:inline-flex;align-items:center;gap:8px;background:rgba(111,155,255,0.12);border:1px solid rgba(111,155,255,0.28);border-radius:999px;padding:5px 14px 5px 10px;font-size:12px;font-weight:700;color:var(--accent-2);margin-bottom:16px; }
-    .lc-dot { width:9px;height:9px;border-radius:50%;background:var(--accent-2);animation:lcPulse 1.4s ease-in-out infinite;flex:0 0 auto; }
-    @keyframes lcPulse { 0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.7);} }
-    .lc-title { font-size:1.25rem;font-weight:800;margin:0 0 6px; }
-    .lc-sub { color:var(--muted);font-size:0.88rem;margin:0 0 16px; }
-    .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:16px; }
-    .lc-metrics { display:flex;gap:16px;margin-bottom:20px; }
-    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:14px 28px;flex:0 0 auto;min-width:140px; }
-    .lc-metric-label { font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px; }
-    .lc-metric-value { font-size:1.2rem;font-weight:700;color:var(--text); }
+    .lc-badge { display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,rgba(211,122,76,0.16),rgba(184,93,51,0.08));border:1.5px solid rgba(211,122,76,0.44);border-radius:10px;padding:8px 18px 8px 13px;font-size:12px;font-weight:800;color:var(--oxide,#d37a4c);text-transform:uppercase;letter-spacing:.07em;margin-bottom:20px;box-shadow:0 2px 16px rgba(211,122,76,0.16); }
+    .lc-dot-wrap { position:relative;width:14px;height:14px;flex:0 0 auto; }
+    .lc-dot { position:absolute;inset:2px;border-radius:50%;background:var(--oxide,#d37a4c);animation:lcPulse 1.4s ease-in-out infinite; }
+    .lc-dot-ring { position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--oxide,#d37a4c);animation:lcRing 1.4s ease-out infinite; }
+    @keyframes lcPulse { 0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.45;transform:scale(0.7);} }
+    @keyframes lcRing { 0%{opacity:0.65;transform:scale(0.5);}100%{opacity:0;transform:scale(2.2);} }
+    .lc-title { font-size:1.44rem;font-weight:800;margin:0 0 6px; }
+    .lc-sub { color:var(--muted);font-size:0.9rem;margin:0 0 18px; }
+    .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:18px;display:flex;align-items:center;gap:10px; }
+    .lc-metrics { display:flex;gap:14px;margin-bottom:16px;flex-wrap:wrap; }
+    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:16px 32px;flex:0 0 auto;min-width:160px; }
+    .lc-metric-label { font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px; }
+    .lc-metric-value { font-size:1.38rem;font-weight:800;color:var(--text); }
+    .lc-stage-desc { font-size:12px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin-bottom:18px;line-height:1.5;transition:opacity .3s; }
+    .lc-steps { display:flex;align-items:center;gap:0;margin-bottom:18px; }
+    .lc-step { display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;color:var(--muted);border:1.5px solid transparent;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;transition:all .25s; }
+    .lc-step.active { color:var(--oxide,#d37a4c);background:rgba(211,122,76,0.1);border-color:rgba(211,122,76,0.32); }
+    .lc-step.done { color:var(--muted);opacity:0.55; }
+    .lc-step-num { width:18px;height:18px;border-radius:50%;background:rgba(150,140,130,0.2);color:var(--muted);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;flex:0 0 auto; }
+    .lc-step.active .lc-step-num { background:var(--oxide,#d37a4c);color:#fff; }
+    .lc-step.done .lc-step-num { background:rgba(80,180,100,0.22);color:#2d8a45; }
+    .lc-step-arrow { color:var(--line-strong,#ccc);font-size:16px;padding:0 1px;flex:0 0 auto;line-height:1; }
     .lc-warn { background:rgba(230,160,50,0.12);border:1px solid rgba(230,160,50,0.3);border-radius:8px;padding:10px 14px;font-size:12px;color:#8a6a10;margin-top:14px; }
     .lc-err { background:rgba(180,40,40,0.08);border:1px solid rgba(180,40,40,0.25);border-radius:8px;padding:12px 16px;margin-top:14px; }
     .lc-err strong { display:block;color:#8b1f1f;margin-bottom:4px;font-size:13px; }
@@ -13225,14 +13237,25 @@ struct SubmoduleRow {
 
   <div class="loading" id="loading">
     <div class="loading-card">
-      <div class="lc-badge" id="lc-badge"><span class="lc-dot"></span>Analysis running</div>
+      <div class="lc-badge" id="lc-badge"><span class="lc-dot-wrap"><span class="lc-dot"></span><span class="lc-dot-ring"></span></span>Analysis running</div>
       <h2 class="lc-title" id="lc-title">Analyzing your project…</h2>
       <p class="lc-sub">Scanning files, detecting languages, and counting lines — stay for a live view of the results.</p>
-      <div class="lc-path" id="lc-path"></div>
+      <div class="lc-path" id="lc-path"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="flex:0 0 auto;opacity:0.45"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span id="lc-path-text"></span></div>
+      <div class="lc-steps" id="lc-steps">
+        <div class="lc-step active" id="lc-step-1"><span class="lc-step-num">1</span>Discover</div>
+        <div class="lc-step-arrow">›</div>
+        <div class="lc-step" id="lc-step-2"><span class="lc-step-num">2</span>Analyze</div>
+        <div class="lc-step-arrow">›</div>
+        <div class="lc-step" id="lc-step-3"><span class="lc-step-num">3</span>Report</div>
+        <div class="lc-step-arrow">›</div>
+        <div class="lc-step" id="lc-step-4"><span class="lc-step-num">4</span>Done</div>
+      </div>
+      <div class="lc-stage-desc" id="lc-stage-desc">Initializing language analyzers and loading configuration…</div>
       <div class="lc-metrics" id="lc-metrics">
         <div class="lc-metric"><div class="lc-metric-label">Elapsed</div><div class="lc-metric-value" id="lc-elapsed">0s</div></div>
         <div class="lc-metric"><div class="lc-metric-label">Phase</div><div class="lc-metric-value" id="lc-phase">Starting</div></div>
         <div class="lc-metric hidden" id="lc-files-card"><div class="lc-metric-label">Files</div><div class="lc-metric-value" id="lc-files">0</div></div>
+        <div class="lc-metric hidden" id="lc-speed-card"><div class="lc-metric-label">Speed</div><div class="lc-metric-value" id="lc-speed">—</div></div>
       </div>
       <div class="progress-bar" id="lc-progress-bar"><span></span></div>
       <div class="lc-warn hidden" id="lc-warn">This is taking longer than usual. Large repositories can take several minutes — the analysis is still running.</div>
@@ -14108,6 +14131,9 @@ int main() { … }   ← code
         if (cancelBtn) { cancelBtn.style.display = ""; cancelBtn.disabled = false; cancelBtn.textContent = "✕ Cancel scan"; }
         var el = document.getElementById("lc-elapsed"); if (el) el.textContent = "0s";
         var ph = document.getElementById("lc-phase"); if (ph) ph.textContent = "Starting";
+        var sd = document.getElementById("lc-stage-desc"); if (sd) sd.textContent = "Initializing language analyzers and loading configuration…";
+        for (var ri=1;ri<=4;ri++){var rs=document.getElementById("lc-step-"+ri);if(!rs)continue;rs.classList.remove("active","done");if(ri===1)rs.classList.add("active");}
+        var rsc=document.getElementById("lc-speed-card");if(rsc)rsc.classList.add("hidden");
         var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "";
         var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "";
         var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
@@ -14124,7 +14150,7 @@ int main() { … }   ← code
         var pathVal = (gitRepo || (formData.get("path") || "")).toString();
         var displayPath = (gitRepo && gitRef) ? pathVal + " @ " + gitRef : pathVal;
 
-        var pathEl = document.getElementById("lc-path");
+        var pathEl = document.getElementById("lc-path-text");
         if (pathEl) pathEl.textContent = displayPath;
 
         ["lc-err","lc-warn","lc-actions","lc-cancelled"].forEach(function(id) {
@@ -14138,6 +14164,9 @@ int main() { … }   ← code
         var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
         var elapsed0 = document.getElementById("lc-elapsed"); if (elapsed0) elapsed0.textContent = "0s";
         var phase0   = document.getElementById("lc-phase");   if (phase0)   phase0.textContent   = "Starting";
+        var sd0 = document.getElementById("lc-stage-desc"); if (sd0) sd0.textContent = "Initializing language analyzers and loading configuration…";
+        for (var si=1;si<=4;si++){var ss=document.getElementById("lc-step-"+si);if(!ss)continue;ss.classList.remove("active","done");if(si===1)ss.classList.add("active");}
+        var sc0=document.getElementById("lc-speed-card");if(sc0)sc0.classList.add("hidden");
 
         if (loading) loading.classList.add("active");
 
@@ -14148,11 +14177,26 @@ int main() { … }   ← code
           if (el) el.textContent = s < 60 ? s + "s" : Math.floor(s/60) + "m " + (s%60) + "s";
         }, 1000);
 
-        var warnShown = false, pollRetries = 0, activeWaitId = null;
+        var warnShown = false, pollRetries = 0, activeWaitId = null, lastFd = 0, lastFdTime = Date.now();
 
         function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
 
-        function lcSetPhase(txt) { var el = document.getElementById("lc-phase"); if (el) el.textContent = txt; }
+        var PHASE_DESC = {
+          'Starting': 'Initializing language analyzers and loading configuration…',
+          'Scanning files': 'Walking the directory tree, applying scope filters, and reading file bytes…',
+          'Running': 'Running the lexical state machine across all discovered source files…',
+          'Writing reports': 'Rendering the HTML report and saving JSON artifacts to disk…',
+          'Done': 'Analysis complete — loading your results…',
+          'Failed': 'Analysis encountered an error. Check the path and permissions, then try again.'
+        };
+        var PHASE_STEP = {'Starting':1,'Scanning files':1,'Running':2,'Writing reports':3,'Done':4};
+        function lcSetPhase(txt) {
+          var el = document.getElementById("lc-phase"); if (el) el.textContent = txt;
+          var desc = document.getElementById("lc-stage-desc");
+          if (desc) desc.textContent = PHASE_DESC[txt] || (txt + '…');
+          var step = PHASE_STEP[txt] || 1;
+          for (var i=1;i<=4;i++){var s=document.getElementById("lc-step-"+i);if(!s)continue;s.classList.remove("active","done");if(i<step)s.classList.add("done");else if(i===step)s.classList.add("active");}
+        }
 
         function lcShowCancelled() {
           clearInterval(elapsedTimer);
@@ -14223,6 +14267,14 @@ int main() { … }   ← code
                   if (card) card.classList.remove("hidden");
                   var el = document.getElementById("lc-files");
                   if (el) el.textContent = fmt(fd) + " / " + fmt(ft);
+                  var now = Date.now();
+                  var fdelta = fd - lastFd, tdelta = (now - lastFdTime) / 1000;
+                  if (fdelta > 0 && tdelta > 0.4) {
+                    var fps = Math.round(fdelta / tdelta);
+                    var spEl = document.getElementById("lc-speed"); if (spEl) spEl.textContent = fmt(fps) + "/s";
+                    var spCard = document.getElementById("lc-speed-card"); if (spCard) spCard.classList.remove("hidden");
+                  }
+                  lastFd = fd; lastFdTime = now;
                 }
                 setTimeout(function() { lcPoll(waitId); }, 1500);
               }
@@ -26198,5 +26250,1015 @@ mod utility_tests {
             git_clone_dest(url, &dir),
             "same URL must always give same clone dest"
         );
+    }
+
+    // ── fmt_delta ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fmt_delta_positive_has_plus_prefix() {
+        assert_eq!(fmt_delta(5), "+5");
+    }
+
+    #[test]
+    fn fmt_delta_negative_no_plus_prefix() {
+        assert_eq!(fmt_delta(-3), "-3");
+    }
+
+    #[test]
+    fn fmt_delta_zero() {
+        assert_eq!(fmt_delta(0), "0");
+    }
+
+    // ── delta_class ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn delta_class_positive_is_pos() {
+        assert_eq!(delta_class(1), "pos");
+    }
+
+    #[test]
+    fn delta_class_negative_is_neg() {
+        assert_eq!(delta_class(-1), "neg");
+    }
+
+    #[test]
+    fn delta_class_zero_is_zero_class() {
+        assert_eq!(delta_class(0), "zero");
+    }
+
+    // ── fmt_pct ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fmt_pct_zero_baseline_returns_em_dash() {
+        assert_eq!(fmt_pct(100, 0), "\u{2014}");
+    }
+
+    #[test]
+    fn fmt_pct_positive_delta_has_plus_sign() {
+        let result = fmt_pct(10, 100);
+        assert!(result.starts_with('+'), "expected + prefix, got: {result}");
+    }
+
+    #[test]
+    fn fmt_pct_negative_delta_no_plus_sign() {
+        let result = fmt_pct(-10, 100);
+        assert!(!result.starts_with('+'), "unexpected + in: {result}");
+        assert!(result.contains('%'));
+    }
+
+    #[test]
+    fn fmt_pct_near_zero_returns_pm_zero() {
+        assert_eq!(fmt_pct(0, 1000), "\u{00b1}0%");
+    }
+
+    // ── summary_delta ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn summary_delta_no_prev_returns_dash_na() {
+        let (display, class) = summary_delta(10, None);
+        assert_eq!(display, "\u{2014}");
+        assert_eq!(class, "na");
+    }
+
+    #[test]
+    fn summary_delta_increase_is_positive() {
+        let (display, class) = summary_delta(15, Some(10));
+        assert_eq!(display, "+5");
+        assert_eq!(class, "pos");
+    }
+
+    #[test]
+    fn summary_delta_decrease_is_negative() {
+        let (display, class) = summary_delta(5, Some(10));
+        assert_eq!(display, "-5");
+        assert_eq!(class, "neg");
+    }
+
+    // ── nth_weekday_of_month ──────────────────────────────────────────────────
+
+    #[test]
+    fn nth_weekday_first_monday_jan_2024_is_in_first_week() {
+        use chrono::Datelike;
+        let d = nth_weekday_of_month(2024, 1, chrono::Weekday::Mon, 1);
+        assert_eq!(d.year(), 2024);
+        assert_eq!(d.month(), 1);
+        assert_eq!(d.weekday(), chrono::Weekday::Mon);
+        assert!(d.day() <= 7);
+    }
+
+    #[test]
+    fn nth_weekday_second_sunday_march_2024_is_10th() {
+        use chrono::Datelike;
+        let d = nth_weekday_of_month(2024, 3, chrono::Weekday::Sun, 2);
+        assert_eq!(d.weekday(), chrono::Weekday::Sun);
+        assert_eq!(d.month(), 3);
+        assert_eq!(d.day(), 10, "2nd Sunday in March 2024 is the 10th");
+    }
+
+    // ── is_pacific_dst / fmt_la_time / fmt_la_time_meta ───────────────────────
+
+    #[test]
+    fn is_pacific_dst_july_is_true() {
+        let dt: chrono::DateTime<chrono::Utc> = "2024-07-15T20:00:00Z".parse().unwrap();
+        assert!(is_pacific_dst(dt), "July must be PDT");
+    }
+
+    #[test]
+    fn is_pacific_dst_january_is_false() {
+        let dt: chrono::DateTime<chrono::Utc> = "2024-01-15T20:00:00Z".parse().unwrap();
+        assert!(!is_pacific_dst(dt), "January must be PST");
+    }
+
+    #[test]
+    fn fmt_la_time_summer_shows_pdt() {
+        let dt: chrono::DateTime<chrono::Utc> = "2024-07-15T20:00:00Z".parse().unwrap();
+        let result = fmt_la_time(dt);
+        assert!(
+            result.ends_with("PDT"),
+            "summer must use PDT, got: {result}"
+        );
+    }
+
+    #[test]
+    fn fmt_la_time_winter_shows_pst() {
+        let dt: chrono::DateTime<chrono::Utc> = "2024-01-15T20:00:00Z".parse().unwrap();
+        let result = fmt_la_time(dt);
+        assert!(
+            result.ends_with("PST"),
+            "winter must use PST, got: {result}"
+        );
+    }
+
+    #[test]
+    fn fmt_la_time_meta_summer_shows_pdt() {
+        let dt: chrono::DateTime<chrono::Utc> = "2024-08-01T12:00:00Z".parse().unwrap();
+        let result = fmt_la_time_meta(dt);
+        assert!(
+            result.ends_with("PDT"),
+            "meta summer must use PDT, got: {result}"
+        );
+    }
+
+    #[test]
+    fn fmt_la_time_meta_winter_shows_pst() {
+        let dt: chrono::DateTime<chrono::Utc> = "2024-12-01T12:00:00Z".parse().unwrap();
+        let result = fmt_la_time_meta(dt);
+        assert!(
+            result.ends_with("PST"),
+            "meta winter must use PST, got: {result}"
+        );
+    }
+
+    // ── fmt_git_date ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn fmt_git_date_valid_iso_returns_some() {
+        assert!(fmt_git_date("2024-07-15T20:00:00Z").is_some());
+    }
+
+    #[test]
+    fn fmt_git_date_invalid_returns_none() {
+        assert!(fmt_git_date("not-a-date").is_none());
+    }
+
+    // ── format_number ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_number_zero() {
+        assert_eq!(format_number(0), "0");
+    }
+
+    #[test]
+    fn format_number_three_digits_no_comma() {
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn format_number_four_digits_has_comma() {
+        assert_eq!(format_number(1000), "1,000");
+    }
+
+    #[test]
+    fn format_number_seven_digits_two_commas() {
+        assert_eq!(format_number(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn format_number_one_million() {
+        assert_eq!(format_number(1_000_000), "1,000,000");
+    }
+
+    // ── badge_text_px / render_badge_svg ──────────────────────────────────────
+
+    #[test]
+    fn badge_text_px_empty_is_zero() {
+        assert_eq!(badge_text_px(""), 0);
+    }
+
+    #[test]
+    fn badge_text_px_narrow_chars_smaller_than_normal() {
+        assert!(
+            badge_text_px("if") < badge_text_px("ab"),
+            "'if' must be narrower than 'ab'"
+        );
+    }
+
+    #[test]
+    fn badge_text_px_m_is_wider_than_a() {
+        assert!(
+            badge_text_px("m") > badge_text_px("a"),
+            "'m' must be wider than 'a'"
+        );
+    }
+
+    #[test]
+    fn render_badge_svg_contains_label_and_value() {
+        let svg = render_badge_svg("coverage", "95%", "#4c1");
+        assert!(svg.contains("coverage") && svg.contains("95%"));
+    }
+
+    #[test]
+    fn render_badge_svg_contains_color() {
+        let svg = render_badge_svg("sloc", "12K", "#e05d44");
+        assert!(svg.contains("#e05d44"), "SVG must contain fill color");
+    }
+
+    #[test]
+    fn render_badge_svg_escapes_ampersand_in_label() {
+        let svg = render_badge_svg("test&label", "ok", "#4c1");
+        assert!(svg.contains("&amp;") && !svg.contains("test&label"));
+    }
+
+    // ── build_pdf_filename ────────────────────────────────────────────────────
+
+    #[test]
+    fn build_pdf_filename_slugifies_title() {
+        let name = build_pdf_filename("My Project Report", "abc-def-1234");
+        assert!(name.starts_with("my_project_report_") && name.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn build_pdf_filename_uses_last_run_id_segment() {
+        let name = build_pdf_filename("project", "uuid-part1-part2-ABCD");
+        assert!(name.contains("ABCD"), "must use last segment of run_id");
+    }
+
+    #[test]
+    fn build_pdf_filename_empty_title_uses_report_prefix() {
+        let name = build_pdf_filename("", "abc-def-9999");
+        assert!(name.starts_with("report_") && name.ends_with(".pdf"));
+    }
+
+    // ── swap_inline_chart_js_for_static ───────────────────────────────────────
+
+    #[test]
+    fn swap_chart_js_replaces_inline_block() {
+        let html = "<html><head><script>// inline source</script></head><body></body></html>";
+        let result = swap_inline_chart_js_for_static(html.to_string());
+        assert!(result.contains(r#"src="/static/chart-report.js""#));
+        assert!(!result.contains("inline source"));
+    }
+
+    #[test]
+    fn swap_chart_js_no_head_returns_unchanged() {
+        let html = "<body>no head here</body>";
+        assert_eq!(swap_inline_chart_js_for_static(html.to_string()), html);
+    }
+
+    #[test]
+    fn swap_chart_js_no_script_in_head_unchanged() {
+        let html = "<html><head><style>.x{}</style></head><body></body></html>";
+        let result = swap_inline_chart_js_for_static(html.to_string());
+        assert!(!result.contains("chart-report.js"));
+    }
+
+    // ── patch_html_nonce ──────────────────────────────────────────────────────
+
+    #[test]
+    fn patch_html_nonce_replaces_old_nonce() {
+        let html = r#"<style nonce="old-nonce-123">body{}</style>"#;
+        let result = patch_html_nonce(html, "new-nonce-456");
+        assert!(result.contains(r#"nonce="new-nonce-456""#));
+        assert!(!result.contains("old-nonce-123"));
+    }
+
+    #[test]
+    fn patch_html_nonce_injects_into_bare_style() {
+        let html = "<style>body{color:red;}</style>";
+        let result = patch_html_nonce(html, "fresh-nonce");
+        assert!(result.contains(r#"<style nonce="fresh-nonce">"#));
+    }
+
+    #[test]
+    fn patch_html_nonce_injects_into_bare_script() {
+        let html = "<script>console.log(1);</script>";
+        let result = patch_html_nonce(html, "abc");
+        assert!(result.contains(r#"<script nonce="abc">"#));
+    }
+
+    // ── is_html_report_file / find_html_report_in_dir / find_html_report_in_tree ──
+
+    #[test]
+    fn is_html_report_file_result_html_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result_20240101.html");
+        std::fs::write(&path, b"<html></html>").unwrap();
+        assert!(is_html_report_file(&path));
+    }
+
+    #[test]
+    fn is_html_report_file_report_html_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report_abc.html");
+        std::fs::write(&path, b"<html></html>").unwrap();
+        assert!(is_html_report_file(&path));
+    }
+
+    #[test]
+    fn is_html_report_file_index_html_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.html");
+        std::fs::write(&path, b"<html></html>").unwrap();
+        assert!(!is_html_report_file(&path));
+    }
+
+    #[test]
+    fn is_html_report_file_nonexistent_returns_false() {
+        assert!(!is_html_report_file(Path::new(
+            "/nonexistent/result_xyz.html"
+        )));
+    }
+
+    #[test]
+    fn find_html_report_in_dir_finds_result_html() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("result_xyz.html"), b"<html></html>").unwrap();
+        assert!(find_html_report_in_dir(dir.path()).is_some());
+    }
+
+    #[test]
+    fn find_html_report_in_dir_empty_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_html_report_in_dir(dir.path()).is_none());
+    }
+
+    #[test]
+    fn find_html_report_in_tree_finds_in_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("run-001");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("result_abc.html"), b"<html></html>").unwrap();
+        assert!(find_html_report_in_tree(dir.path()).is_some());
+    }
+
+    // ── derive_project_label ──────────────────────────────────────────────────
+
+    #[test]
+    fn derive_project_label_with_git_repo_and_ref() {
+        let label = derive_project_label(
+            Some("https://github.com/owner/my-repo.git"),
+            Some("main"),
+            "/fallback/path",
+        );
+        assert!(!label.is_empty(), "label must not be empty");
+        assert!(
+            label.contains("my") || label.contains("repo"),
+            "got: {label}"
+        );
+    }
+
+    #[test]
+    fn derive_project_label_fallback_to_path() {
+        let label = derive_project_label(None, None, "/path/to/myproject");
+        assert_eq!(label, "myproject");
+    }
+
+    #[test]
+    fn derive_project_label_empty_git_fields_use_path() {
+        let label = derive_project_label(Some(""), Some(""), "/home/user/cool-app");
+        assert_eq!(label, "cool-app");
+    }
+
+    // ── derive_file_stem ──────────────────────────────────────────────────────
+
+    #[test]
+    fn derive_file_stem_with_commit_appends_sha() {
+        assert_eq!(
+            derive_file_stem("myproject", Some("a1b2c3")),
+            "myproject_a1b2c3"
+        );
+    }
+
+    #[test]
+    fn derive_file_stem_without_commit_returns_label() {
+        assert_eq!(derive_file_stem("myproject", None), "myproject");
+    }
+
+    #[test]
+    fn derive_file_stem_empty_commit_returns_label() {
+        assert_eq!(derive_file_stem("myproject", Some("")), "myproject");
+    }
+
+    // ── split_patterns ────────────────────────────────────────────────────────
+
+    #[test]
+    fn split_patterns_none_is_empty() {
+        assert!(split_patterns(None).is_empty());
+    }
+
+    #[test]
+    fn split_patterns_empty_string_is_empty() {
+        assert!(split_patterns(Some("")).is_empty());
+    }
+
+    #[test]
+    fn split_patterns_comma_separated() {
+        assert_eq!(
+            split_patterns(Some("foo,bar,baz")),
+            vec!["foo", "bar", "baz"]
+        );
+    }
+
+    #[test]
+    fn split_patterns_newline_separated() {
+        assert_eq!(
+            split_patterns(Some("foo\nbar\nbaz")),
+            vec!["foo", "bar", "baz"]
+        );
+    }
+
+    #[test]
+    fn split_patterns_trims_whitespace() {
+        assert_eq!(split_patterns(Some("  foo  ,  bar  ")), vec!["foo", "bar"]);
+    }
+
+    // ── make_git_label ────────────────────────────────────────────────────────
+
+    #[test]
+    fn make_git_label_empty_repo_empty_result() {
+        assert_eq!(make_git_label("", "main"), "");
+    }
+
+    #[test]
+    fn make_git_label_empty_ref_empty_result() {
+        assert_eq!(make_git_label("https://github.com/owner/repo", ""), "");
+    }
+
+    #[test]
+    fn make_git_label_basic_format() {
+        assert_eq!(
+            make_git_label("https://github.com/owner/my-repo.git", "main"),
+            "my-repo_at_main_sloc"
+        );
+    }
+
+    #[test]
+    fn make_git_label_slash_in_ref_replaced() {
+        let label = make_git_label("https://example.com/repo.git", "feature/my-branch");
+        assert!(
+            !label.contains('/'),
+            "slash in ref must be replaced: {label}"
+        );
+    }
+
+    // ── format_dir_size ───────────────────────────────────────────────────────
+
+    #[test]
+    fn format_dir_size_bytes() {
+        assert_eq!(format_dir_size(500), "500 B");
+    }
+
+    #[test]
+    fn format_dir_size_kilobytes() {
+        assert_eq!(format_dir_size(2048), "2 KB");
+    }
+
+    #[test]
+    fn format_dir_size_megabytes() {
+        assert!(format_dir_size(5 * 1_048_576).contains("MB"));
+    }
+
+    #[test]
+    fn format_dir_size_gigabytes() {
+        assert!(format_dir_size(2 * 1_073_741_824).contains("GB"));
+    }
+
+    #[test]
+    fn format_dir_size_zero() {
+        assert_eq!(format_dir_size(0), "0 B");
+    }
+
+    // ── civil_from_days ───────────────────────────────────────────────────────
+
+    #[test]
+    fn civil_from_days_epoch() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn civil_from_days_one_year_later() {
+        assert_eq!(civil_from_days(365), (1971, 1, 1));
+    }
+
+    #[test]
+    fn civil_from_days_31_days_is_feb_1_1970() {
+        assert_eq!(civil_from_days(31), (1970, 2, 1));
+    }
+
+    // ── format_system_time ────────────────────────────────────────────────────
+
+    #[test]
+    fn format_system_time_unix_epoch_formats_correctly() {
+        assert_eq!(format_system_time(UNIX_EPOCH), "1970-01-01 00:00");
+    }
+
+    #[test]
+    fn format_system_time_31_days_after_epoch() {
+        let t = UNIX_EPOCH + Duration::from_secs(31 * 86_400);
+        assert_eq!(format_system_time(t), "1970-02-01 00:00");
+    }
+
+    #[test]
+    fn format_system_time_before_epoch_returns_dash() {
+        if let Some(before) = UNIX_EPOCH.checked_sub(Duration::from_secs(1)) {
+            assert_eq!(format_system_time(before), "-");
+        }
+    }
+
+    // ── detect_language_name ──────────────────────────────────────────────────
+
+    #[test]
+    fn detect_language_name_dot_c() {
+        assert_eq!(detect_language_name("main.c"), Some("C"));
+    }
+
+    #[test]
+    fn detect_language_name_dot_h() {
+        assert_eq!(detect_language_name("defs.h"), Some("C"));
+    }
+
+    #[test]
+    fn detect_language_name_dot_cpp() {
+        assert_eq!(detect_language_name("algo.cpp"), Some("C++"));
+    }
+
+    #[test]
+    fn detect_language_name_dot_py() {
+        assert_eq!(detect_language_name("script.py"), Some("Python"));
+    }
+
+    #[test]
+    fn detect_language_name_dot_ps1() {
+        assert_eq!(detect_language_name("Deploy.ps1"), Some("PowerShell"));
+    }
+
+    #[test]
+    fn detect_language_name_dot_cs() {
+        assert_eq!(detect_language_name("Program.cs"), Some("C#"));
+    }
+
+    #[test]
+    fn detect_language_name_dot_sh() {
+        assert_eq!(detect_language_name("run.sh"), Some("Shell"));
+    }
+
+    #[test]
+    fn detect_language_name_unknown_txt() {
+        assert_eq!(detect_language_name("notes.txt"), None);
+    }
+
+    // ── language_icon_file ────────────────────────────────────────────────────
+
+    #[test]
+    fn language_icon_file_c() {
+        assert_eq!(language_icon_file("C"), Some("c.png"));
+    }
+
+    #[test]
+    fn language_icon_file_python() {
+        assert_eq!(language_icon_file("Python"), Some("python.png"));
+    }
+
+    #[test]
+    fn language_icon_file_dockerfile() {
+        assert_eq!(language_icon_file("Dockerfile"), Some("docker.png"));
+    }
+
+    #[test]
+    fn language_icon_file_rust_is_none() {
+        assert!(language_icon_file("Rust").is_none());
+    }
+
+    #[test]
+    fn language_icon_file_unknown_is_none() {
+        assert!(language_icon_file("Fortran").is_none());
+    }
+
+    // ── language_inline_svg ───────────────────────────────────────────────────
+
+    #[test]
+    fn language_inline_svg_rust_is_svg() {
+        let svg = language_inline_svg("Rust").unwrap();
+        assert!(svg.starts_with("<svg"));
+    }
+
+    #[test]
+    fn language_inline_svg_typescript_is_some() {
+        assert!(language_inline_svg("TypeScript").is_some());
+    }
+
+    #[test]
+    fn language_inline_svg_unknown_is_none() {
+        assert!(language_inline_svg("Fortran").is_none());
+    }
+
+    // ── classify_preview_file ─────────────────────────────────────────────────
+
+    #[test]
+    fn classify_preview_file_c_supported() {
+        assert!(matches!(
+            classify_preview_file("main.c"),
+            PreviewKind::Supported
+        ));
+    }
+
+    #[test]
+    fn classify_preview_file_python_supported() {
+        assert!(matches!(
+            classify_preview_file("script.py"),
+            PreviewKind::Supported
+        ));
+    }
+
+    #[test]
+    fn classify_preview_file_png_skipped() {
+        assert!(matches!(
+            classify_preview_file("image.png"),
+            PreviewKind::Skipped
+        ));
+    }
+
+    #[test]
+    fn classify_preview_file_zip_skipped() {
+        assert!(matches!(
+            classify_preview_file("archive.zip"),
+            PreviewKind::Skipped
+        ));
+    }
+
+    #[test]
+    fn classify_preview_file_min_js_skipped() {
+        assert!(matches!(
+            classify_preview_file("bundle.min.js"),
+            PreviewKind::Skipped
+        ));
+    }
+
+    #[test]
+    fn classify_preview_file_rs_unsupported() {
+        assert!(matches!(
+            classify_preview_file("main.rs"),
+            PreviewKind::Unsupported
+        ));
+    }
+
+    // ── preview_relative_path ─────────────────────────────────────────────────
+
+    #[test]
+    fn preview_relative_path_strips_root() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project/src/main.c");
+        assert_eq!(preview_relative_path(&root, &path), "src/main.c");
+    }
+
+    #[test]
+    fn preview_relative_path_unrooted_includes_filename() {
+        let root = PathBuf::from("/other");
+        let path = PathBuf::from("/project/src/main.c");
+        let result = preview_relative_path(&root, &path);
+        assert!(result.contains("main.c"));
+    }
+
+    #[test]
+    fn preview_relative_path_uses_forward_slashes() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project/a/b/c.py");
+        assert!(!preview_relative_path(&root, &path).contains('\\'));
+    }
+
+    // ── wildcard_match ────────────────────────────────────────────────────────
+
+    #[test]
+    fn wildcard_match_exact_equal() {
+        assert!(wildcard_match("foo", "foo"));
+    }
+
+    #[test]
+    fn wildcard_match_exact_mismatch() {
+        assert!(!wildcard_match("foo", "bar"));
+    }
+
+    #[test]
+    fn wildcard_match_star_suffix() {
+        assert!(wildcard_match("*.rs", "main.rs"));
+    }
+
+    #[test]
+    fn wildcard_match_star_middle_requires_suffix() {
+        assert!(!wildcard_match("a*b", "ac"));
+    }
+
+    #[test]
+    fn wildcard_match_question_mark_single_char() {
+        assert!(wildcard_match("f?o", "foo"));
+    }
+
+    #[test]
+    fn wildcard_match_double_star_nested() {
+        assert!(wildcard_match("src/**", "src/a/b/c.rs"));
+    }
+
+    #[test]
+    fn wildcard_match_star_directory_entry() {
+        assert!(wildcard_match("vendor/*", "vendor/crate"));
+    }
+
+    #[test]
+    fn wildcard_match_no_cross_prefix() {
+        assert!(!wildcard_match("src/*.rs", "tests/foo.rs"));
+    }
+
+    // ── should_skip_preview_directory ────────────────────────────────────────
+
+    #[test]
+    fn should_skip_empty_relative_is_false() {
+        assert!(!should_skip_preview_directory("", &["vendor".to_string()]));
+    }
+
+    #[test]
+    fn should_skip_matching_pattern() {
+        assert!(should_skip_preview_directory(
+            "vendor",
+            &["vendor".to_string()]
+        ));
+    }
+
+    #[test]
+    fn should_skip_non_matching() {
+        assert!(!should_skip_preview_directory(
+            "src",
+            &["vendor".to_string()]
+        ));
+    }
+
+    #[test]
+    fn should_skip_wildcard_prefix() {
+        assert!(should_skip_preview_directory(
+            "target/debug",
+            &["target*".to_string()]
+        ));
+    }
+
+    // ── should_include_preview_file ───────────────────────────────────────────
+
+    #[test]
+    fn should_include_empty_relative_always_true() {
+        assert!(should_include_preview_file("", &[], &[]));
+    }
+
+    #[test]
+    fn should_include_no_patterns_includes_all() {
+        assert!(should_include_preview_file("src/main.c", &[], &[]));
+    }
+
+    #[test]
+    fn should_include_excluded_by_pattern() {
+        assert!(!should_include_preview_file(
+            "vendor/lib.c",
+            &[],
+            &["vendor/*".to_string()]
+        ));
+    }
+
+    #[test]
+    fn should_include_include_pattern_filters() {
+        assert!(!should_include_preview_file(
+            "tests/test_foo.c",
+            &["src/*".to_string()],
+            &[]
+        ));
+    }
+
+    // ── escape_html ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_html_ampersand() {
+        assert_eq!(escape_html("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn escape_html_angle_brackets() {
+        assert_eq!(escape_html("<br>"), "&lt;br&gt;");
+    }
+
+    #[test]
+    fn escape_html_double_quote() {
+        assert_eq!(escape_html(r#"say "hello""#), "say &quot;hello&quot;");
+    }
+
+    #[test]
+    fn escape_html_single_quote() {
+        assert_eq!(escape_html("it's"), "it&#39;s");
+    }
+
+    #[test]
+    fn escape_html_plain_text_unchanged() {
+        assert_eq!(escape_html("hello world"), "hello world");
+    }
+
+    // ── sum_added / removed / unmodified code lines ───────────────────────────
+
+    fn make_mixed_scan_comparison() -> sloc_core::ScanComparison {
+        sloc_core::ScanComparison {
+            summary: sloc_core::SummaryDelta {
+                baseline_run_id: "base".to_string(),
+                current_run_id: "curr".to_string(),
+                baseline_timestamp: chrono::Utc::now(),
+                current_timestamp: chrono::Utc::now(),
+                baseline_files: 4,
+                current_files: 4,
+                files_analyzed_delta: 0,
+                baseline_code: 330,
+                current_code: 400,
+                code_lines_delta: 70,
+                baseline_comments: 0,
+                current_comments: 0,
+                comment_lines_delta: 0,
+                blank_lines_delta: 0,
+                total_lines_delta: 70,
+                coverage_lines_hit_delta: None,
+                coverage_line_pct_delta: None,
+                baseline_coverage_line_pct: None,
+                current_coverage_line_pct: None,
+            },
+            file_deltas: vec![
+                sloc_core::FileDelta {
+                    relative_path: "added.rs".to_string(),
+                    language: Some("Rust".to_string()),
+                    status: FileChangeStatus::Added,
+                    baseline_code: 0,
+                    current_code: 100,
+                    code_delta: 100,
+                    baseline_comment: 0,
+                    current_comment: 0,
+                    comment_delta: 0,
+                    baseline_blank: 0,
+                    current_blank: 0,
+                    blank_delta: 0,
+                    total_delta: 100,
+                },
+                sloc_core::FileDelta {
+                    relative_path: "removed.rs".to_string(),
+                    language: Some("Rust".to_string()),
+                    status: FileChangeStatus::Removed,
+                    baseline_code: 50,
+                    current_code: 0,
+                    code_delta: -50,
+                    baseline_comment: 0,
+                    current_comment: 0,
+                    comment_delta: 0,
+                    baseline_blank: 0,
+                    current_blank: 0,
+                    blank_delta: 0,
+                    total_delta: -50,
+                },
+                sloc_core::FileDelta {
+                    relative_path: "modified.rs".to_string(),
+                    language: Some("Rust".to_string()),
+                    status: FileChangeStatus::Modified,
+                    baseline_code: 80,
+                    current_code: 100,
+                    code_delta: 20,
+                    baseline_comment: 0,
+                    current_comment: 0,
+                    comment_delta: 0,
+                    baseline_blank: 0,
+                    current_blank: 0,
+                    blank_delta: 0,
+                    total_delta: 20,
+                },
+                sloc_core::FileDelta {
+                    relative_path: "unchanged.rs".to_string(),
+                    language: Some("Rust".to_string()),
+                    status: FileChangeStatus::Unchanged,
+                    baseline_code: 200,
+                    current_code: 200,
+                    code_delta: 0,
+                    baseline_comment: 0,
+                    current_comment: 0,
+                    comment_delta: 0,
+                    baseline_blank: 0,
+                    current_blank: 0,
+                    blank_delta: 0,
+                    total_delta: 0,
+                },
+            ],
+            files_added: 1,
+            files_removed: 1,
+            files_modified: 1,
+            files_unchanged: 1,
+        }
+    }
+
+    #[test]
+    fn sum_added_counts_added_and_positive_modified() {
+        let cmp = make_mixed_scan_comparison();
+        assert_eq!(sum_added_code_lines(&cmp), 120);
+    }
+
+    #[test]
+    fn sum_removed_counts_removed_baseline() {
+        let cmp = make_mixed_scan_comparison();
+        assert_eq!(sum_removed_code_lines(&cmp), 50);
+    }
+
+    #[test]
+    fn sum_unmodified_counts_unchanged_files() {
+        let cmp = make_mixed_scan_comparison();
+        assert_eq!(sum_unmodified_code_lines(&cmp), 200);
+    }
+
+    // ── detect_coverage_tool ──────────────────────────────────────────────────
+
+    #[test]
+    fn detect_coverage_tool_rust_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), b"[package]").unwrap();
+        let (tool, cmd) = detect_coverage_tool(dir.path());
+        assert_eq!(tool, Some("cargo-llvm-cov"));
+        assert!(cmd.is_some());
+    }
+
+    #[test]
+    fn detect_coverage_tool_java_gradle() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("build.gradle"), b"apply plugin: 'java'").unwrap();
+        let (tool, _) = detect_coverage_tool(dir.path());
+        assert_eq!(tool, Some("jacoco"));
+    }
+
+    #[test]
+    fn detect_coverage_tool_python_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), b"[tool.poetry]").unwrap();
+        let (tool, _) = detect_coverage_tool(dir.path());
+        assert_eq!(tool, Some("pytest-cov"));
+    }
+
+    #[test]
+    fn detect_coverage_tool_unknown_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tool, cmd) = detect_coverage_tool(dir.path());
+        assert!(tool.is_none() && cmd.is_none());
+    }
+
+    // ── sanitize_path_str / display_path ─────────────────────────────────────
+
+    #[test]
+    fn sanitize_path_str_unc_drive_stripped() {
+        assert_eq!(sanitize_path_str("//?/C:/Users/user"), "C:/Users/user");
+    }
+
+    #[test]
+    fn sanitize_path_str_unc_network_stripped() {
+        assert_eq!(sanitize_path_str("//?/UNC/server/share"), "//server/share");
+    }
+
+    #[test]
+    fn sanitize_path_str_plain_path_unchanged() {
+        assert_eq!(
+            sanitize_path_str("/home/user/project"),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn display_path_plain_linux_unchanged() {
+        assert_eq!(
+            display_path(Path::new("/home/user/project")),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn display_path_unc_drive_stripped() {
+        let result = display_path(Path::new(r"\\?\C:\Users\user"));
+        assert_eq!(result, r"C:\Users\user");
+    }
+
+    #[test]
+    fn display_path_unc_network_stripped() {
+        let result = display_path(Path::new(r"\\?\UNC\server\share"));
+        assert_eq!(result, r"\\server\share");
     }
 }
