@@ -3966,22 +3966,30 @@ fn build_submodule_row(
 ) -> SubmoduleRow {
     let safe = sanitize_project_label(&s.name);
     let artifact_key = format!("sub_{safe}");
+    let pdf_artifact_key = format!("sub_{safe}_pdf");
     let html_url = if run.effective_configuration.discovery.submodule_breakdown {
         let parent_path = run
             .input_roots
             .first()
             .map_or("", std::string::String::as_str);
         let sub_run = build_sub_run(run, s, parent_path);
-        render_sub_report_html(&sub_run).ok().and_then(|sub_html| {
-            let sub_dir = run_dir.join("submodules");
-            let _ = fs::create_dir_all(&sub_dir);
-            let path = sub_dir.join(format!("{artifact_key}.html"));
-            if fs::write(&path, sub_html.as_bytes()).is_ok() {
-                Some(format!("/runs/{artifact_key}/{run_id}"))
-            } else {
-                None
-            }
-        })
+        let pdf_server_url = format!("/runs/{pdf_artifact_key}/{run_id}");
+        render_sub_report_html(&sub_run, Some(&pdf_server_url))
+            .ok()
+            .and_then(|sub_html| {
+                let sub_dir = run_dir.join("submodules");
+                let _ = fs::create_dir_all(&sub_dir);
+                let html_path = sub_dir.join(format!("{artifact_key}.html"));
+                if fs::write(&html_path, sub_html.as_bytes()).is_ok() {
+                    // Pre-generate the sub-report PDF using the programmatic renderer
+                    // so "View PDF" never needs to spawn Chrome for submodules.
+                    let pdf_path = sub_dir.join(format!("{artifact_key}.pdf"));
+                    let _ = write_pdf_from_run(&sub_run, &pdf_path);
+                    Some(format!("/runs/{artifact_key}/{run_id}"))
+                } else {
+                    None
+                }
+            })
     } else {
         None
     };
@@ -4789,6 +4797,11 @@ fn render_result_page(
         .as_deref()
         .zip(run.git_commit_long.as_deref())
         .and_then(|(remote, sha)| remote_to_commit_url(remote, sha));
+    let git_branch_url = run
+        .git_remote_url
+        .as_deref()
+        .zip(run.git_branch.as_deref())
+        .and_then(|(remote, branch)| remote_to_branch_url(remote, branch));
     let scan_performed_by = run.environment.ci_name.clone().unwrap_or_else(|| {
         format!(
             "{} / {}",
@@ -4893,6 +4906,7 @@ fn render_result_page(
                 .sum()
         }),
         git_branch,
+        git_branch_url,
         git_commit,
         git_commit_long,
         git_author,
@@ -5869,6 +5883,7 @@ fn pdf_generating_response(run_id: &str, csp_nonce: &str) -> Response {
                      .page{{width:100%;max-width:1720px;margin:0 auto;padding:60px 24px;\
                      display:flex;align-items:center;justify-content:center;\
                      min-height:calc(100vh - 56px);}}\
+                     @media (max-width:1920px) {{ .top-nav-inner {{ max-width:1500px; }} .page {{ max-width:1500px; }} }}\
                      .panel{{background:var(--surface);border:1px solid var(--line);\
                      border-radius:var(--radius);box-shadow:var(--shadow);\
                      padding:48px 56px;text-align:center;max-width:480px;width:100%;}}\
@@ -6039,6 +6054,66 @@ fn serve_scan_config_arm(artifact_set: &RunArtifacts) -> Response {
     )
 }
 
+/// Serve a per-submodule PDF using the programmatic renderer (`write_pdf_from_run`).
+/// The PDF is pre-generated at scan time; if missing it is rebuilt on demand from the
+/// parent JSON + submodule summary. Chrome is never involved for sub-report PDFs.
+/// Artifact format: `sub_{safe}_pdf` — strips the `_pdf` suffix to locate the file.
+async fn serve_submodule_pdf_arm(
+    artifact: &str,
+    artifact_set: RunArtifacts,
+    wants_download: bool,
+    run_id: &str,
+    csp_nonce: &str,
+) -> Response {
+    // "sub_benchmark_pdf" → base = "sub_benchmark"
+    let base = artifact.trim_end_matches("_pdf");
+    let sub_dir = artifact_set.output_dir.join("submodules");
+    let pdf_path = sub_dir.join(format!("{base}.pdf"));
+
+    if !pdf_path.exists() {
+        // On-demand fallback: rebuild the sub-run from the parent JSON and regenerate.
+        let derived_safe = base.trim_start_matches("sub_");
+        let rebuilt = artifact_set.json_path.as_deref().and_then(|jp| {
+            let parent_run = read_json(jp).ok()?;
+            let sub = parent_run
+                .submodule_summaries
+                .iter()
+                .find(|s| sanitize_project_label(&s.name) == derived_safe)?
+                .clone();
+            let parent_path = parent_run.input_roots.first().cloned().unwrap_or_default();
+            Some((parent_run, sub, parent_path))
+        });
+
+        if let Some((parent_run, sub, parent_path)) = rebuilt {
+            let sub_run = build_sub_run(&parent_run, &sub, &parent_path);
+            let pp = pdf_path.clone();
+            let _ = tokio::task::spawn_blocking(move || write_pdf_from_run(&sub_run, &pp)).await;
+        }
+    }
+
+    if !pdf_path.exists() {
+        let html = render_error_artifact_html(
+            "Sub-report PDF could not be generated — re-run the scan with submodule breakdown \
+             enabled."
+                .to_string(),
+            Some("/view-reports".to_string()),
+            Some("View Reports".to_string()),
+            Some(run_id.to_string()),
+            Some(404),
+            csp_nonce,
+        );
+        return (StatusCode::NOT_FOUND, Html(html)).into_response();
+    }
+
+    serve_pdf_artifact(
+        &pdf_path,
+        &artifact_set.report_title,
+        run_id,
+        wants_download,
+        csp_nonce,
+    )
+}
+
 fn serve_submodule_arm(
     artifact: &str,
     artifact_set: RunArtifacts,
@@ -6178,6 +6253,10 @@ async fn artifact_handler(
         "csv" => serve_csv_arm(artifact_set.csv_path, &run_id, &csp_nonce),
         "xlsx" => serve_xlsx_arm(artifact_set.xlsx_path, &run_id, &csp_nonce),
         "scan-config" => serve_scan_config_arm(&artifact_set),
+        _ if artifact.starts_with("sub_") && artifact.ends_with("_pdf") => {
+            serve_submodule_pdf_arm(&artifact, artifact_set, wants_download, &run_id, &csp_nonce)
+                .await
+        }
         _ if artifact.starts_with("sub_") => serve_submodule_arm(
             &artifact,
             artifact_set,
@@ -6472,32 +6551,34 @@ struct CompareFileDeltaRow {
 /// Recompute `summary_totals` from the current `per_file_records` slice.
 /// Used when `per_file_records` has been narrowed to a submodule subset.
 fn recompute_summary_from_records(run: &mut AnalysisRun) {
-    let files_analyzed = run
-        .per_file_records
-        .iter()
-        .filter(|r| r.language.is_some())
-        .count() as u64;
-    let code_lines: u64 = run
-        .per_file_records
-        .iter()
-        .map(|r| r.effective_counts.code_lines)
-        .sum();
-    let comment_lines: u64 = run
-        .per_file_records
-        .iter()
-        .map(|r| r.effective_counts.comment_lines)
-        .sum();
-    let blank_lines: u64 = run
-        .per_file_records
-        .iter()
-        .map(|r| r.effective_counts.blank_lines)
-        .sum();
-    run.summary_totals.files_analyzed = files_analyzed;
-    run.summary_totals.files_considered = files_analyzed;
-    run.summary_totals.code_lines = code_lines;
-    run.summary_totals.comment_lines = comment_lines;
-    run.summary_totals.blank_lines = blank_lines;
-    run.summary_totals.total_physical_lines = code_lines + comment_lines + blank_lines;
+    let mut totals = SummaryTotals::default();
+    for r in &run.per_file_records {
+        if r.language.is_some() {
+            totals.files_analyzed += 1;
+        }
+        totals.total_physical_lines += r.raw_line_categories.total_physical_lines;
+        totals.code_lines += r.effective_counts.code_lines;
+        totals.comment_lines += r.effective_counts.comment_lines;
+        totals.blank_lines += r.effective_counts.blank_lines;
+        totals.mixed_lines_separate += r.effective_counts.mixed_lines_separate;
+        totals.functions += r.raw_line_categories.functions;
+        totals.classes += r.raw_line_categories.classes;
+        totals.variables += r.raw_line_categories.variables;
+        totals.imports += r.raw_line_categories.imports;
+        totals.test_count += r.raw_line_categories.test_count;
+        totals.test_assertion_count += r.raw_line_categories.test_assertion_count;
+        totals.test_suite_count += r.raw_line_categories.test_suite_count;
+        if let Some(cov) = &r.coverage {
+            totals.coverage_lines_found += u64::from(cov.lines_found);
+            totals.coverage_lines_hit += u64::from(cov.lines_hit);
+            totals.coverage_functions_found += u64::from(cov.functions_found);
+            totals.coverage_functions_hit += u64::from(cov.functions_hit);
+            totals.coverage_branches_found += u64::from(cov.branches_found);
+            totals.coverage_branches_hit += u64::from(cov.branches_hit);
+        }
+    }
+    totals.files_considered = totals.files_analyzed;
+    run.summary_totals = totals;
 }
 
 fn fmt_delta(n: i64) -> String {
@@ -7412,15 +7493,50 @@ fn apply_submodule_filter(
             }
         },
     );
+
+    // Aggregate per-file metrics for this submodule — SubmoduleSummary only stores
+    // basic SLOC totals, so test_count and coverage must be computed from file records.
+    let sub_files: Vec<_> = run
+        .per_file_records
+        .iter()
+        .filter(|r| r.submodule.as_deref() == Some(sub.name.as_str()))
+        .collect();
+    let test_count: u64 = sub_files
+        .iter()
+        .map(|r| r.raw_line_categories.test_count)
+        .sum();
+    #[allow(clippy::cast_precision_loss)]
+    let coverage_line_pct: Option<f64> = {
+        let found: u64 = sub_files
+            .iter()
+            .filter_map(|r| r.coverage.as_ref())
+            .map(|c| u64::from(c.lines_found))
+            .sum();
+        let hit: u64 = sub_files
+            .iter()
+            .filter_map(|r| r.coverage.as_ref())
+            .map(|c| u64::from(c.lines_hit))
+            .sum();
+        if found > 0 {
+            let pct = (hit as f64 / found as f64) * 100.0;
+            Some((pct * 10.0).round() / 10.0)
+        } else {
+            None
+        }
+    };
+
     Some(MetricsHistoryEntry {
         code_lines: sub.code_lines,
         comment_lines: sub.comment_lines,
         blank_lines: sub.blank_lines,
         physical_lines: sub.total_physical_lines,
         files_analyzed: sub.files_analyzed,
+        files_skipped: 0,
+        test_count,
         html_url: sub_html_url,
         has_pdf: false,
         submodule_links: vec![],
+        coverage_line_pct,
         ..base
     })
 }
@@ -7767,6 +7883,7 @@ async fn trend_report_handler(
     .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
     .tz-select:focus{{border-color:var(--oxide);}}
     .page{{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}}
+    @media (max-width:1920px) {{ .top-nav-inner {{ max-width:1500px; }} .page {{ max-width:1500px; }} }}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
     h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
     .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
@@ -9621,6 +9738,7 @@ async fn test_metrics_handler(
     .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
     .tz-select:focus{{border-color:var(--oxide);}}
     .page{{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}}
+    @media (max-width:1920px) {{ .top-nav-inner {{ max-width:1500px; }} .page {{ max-width:1500px; }} }}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}}
     h1{{margin:0 0 4px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}}
     .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
@@ -11133,6 +11251,11 @@ fn generate_offline_index(
         .as_deref()
         .zip(run.git_commit_long.as_deref())
         .and_then(|(remote, sha)| remote_to_commit_url(remote, sha));
+    let git_branch_url = run
+        .git_remote_url
+        .as_deref()
+        .zip(run.git_branch.as_deref())
+        .and_then(|(remote, branch)| remote_to_branch_url(remote, branch));
     let scan_performed_by = run.environment.ci_name.clone().unwrap_or_else(|| {
         format!(
             "{} / {}",
@@ -11270,6 +11393,7 @@ fn generate_offline_index(
                 .sum()
         }),
         git_branch: run.git_branch.clone(),
+        git_branch_url,
         git_commit: run.git_commit_short.clone(),
         git_commit_long: run.git_commit_long.clone(),
         git_author: run.git_commit_author.clone(),
@@ -11582,6 +11706,41 @@ pub fn build_sub_run(
         .collect();
     let mut config = parent.effective_configuration.clone();
     config.reporting.report_title = format!("{} — {}", config.reporting.report_title, sub.name);
+
+    // Aggregate semantic metrics that SubmoduleSummary doesn't store.
+    let mut functions = 0u64;
+    let mut classes = 0u64;
+    let mut variables = 0u64;
+    let mut imports = 0u64;
+    let mut test_count = 0u64;
+    let mut test_assertion_count = 0u64;
+    let mut test_suite_count = 0u64;
+    let mut mixed_lines_separate = 0u64;
+    let mut coverage_lines_found = 0u64;
+    let mut coverage_lines_hit = 0u64;
+    let mut coverage_functions_found = 0u64;
+    let mut coverage_functions_hit = 0u64;
+    let mut coverage_branches_found = 0u64;
+    let mut coverage_branches_hit = 0u64;
+    for r in &sub_files {
+        functions += r.raw_line_categories.functions;
+        classes += r.raw_line_categories.classes;
+        variables += r.raw_line_categories.variables;
+        imports += r.raw_line_categories.imports;
+        test_count += r.raw_line_categories.test_count;
+        test_assertion_count += r.raw_line_categories.test_assertion_count;
+        test_suite_count += r.raw_line_categories.test_suite_count;
+        mixed_lines_separate += r.effective_counts.mixed_lines_separate;
+        if let Some(cov) = &r.coverage {
+            coverage_lines_found += u64::from(cov.lines_found);
+            coverage_lines_hit += u64::from(cov.lines_hit);
+            coverage_functions_found += u64::from(cov.functions_found);
+            coverage_functions_hit += u64::from(cov.functions_hit);
+            coverage_branches_found += u64::from(cov.branches_found);
+            coverage_branches_hit += u64::from(cov.branches_hit);
+        }
+    }
+
     AnalysisRun {
         tool: parent.tool.clone(),
         environment: parent.environment.clone(),
@@ -11595,20 +11754,20 @@ pub fn build_sub_run(
             code_lines: sub.code_lines,
             comment_lines: sub.comment_lines,
             blank_lines: sub.blank_lines,
-            mixed_lines_separate: 0,
-            functions: 0,
-            classes: 0,
-            variables: 0,
-            imports: 0,
-            test_count: 0,
-            test_assertion_count: 0,
-            test_suite_count: 0,
-            coverage_lines_found: 0,
-            coverage_lines_hit: 0,
-            coverage_functions_found: 0,
-            coverage_functions_hit: 0,
-            coverage_branches_found: 0,
-            coverage_branches_hit: 0,
+            mixed_lines_separate,
+            functions,
+            classes,
+            variables,
+            imports,
+            test_count,
+            test_assertion_count,
+            test_suite_count,
+            coverage_lines_found,
+            coverage_lines_hit,
+            coverage_functions_found,
+            coverage_functions_hit,
+            coverage_branches_found,
+            coverage_branches_hit,
         },
         totals_by_language: sub.language_summaries.clone(),
         per_file_records: sub_files,
@@ -11685,6 +11844,28 @@ fn remote_to_commit_url(remote: &str, sha: &str) -> Option<String> {
         Some(format!("{}/commits/{}", base, sha))
     } else {
         Some(format!("{}/commit/{}", base, sha))
+    }
+}
+
+/// Convert a git remote URL (https or git@) + branch name into a browser-openable
+/// branch page URL for the most common hosting platforms.
+fn remote_to_branch_url(remote: &str, branch: &str) -> Option<String> {
+    let base = if let Some(rest) = remote.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        format!("https://{}/{}", host, path.trim_end_matches(".git"))
+    } else if remote.starts_with("https://") || remote.starts_with("http://") {
+        remote
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_owned()
+    } else {
+        return None;
+    };
+    let base = base.trim_end_matches('/');
+    if base.contains("gitlab.com") || base.contains("gitlab.") {
+        Some(format!("{}/-/tree/{}", base, branch))
+    } else {
+        Some(format!("{}/tree/{}", base, branch))
     }
 }
 
@@ -12673,6 +12854,7 @@ struct SubmoduleRow {
     .status-dot { width: 8px; height: 8px; border-radius: 999px; background: #26d768; box-shadow: 0 0 0 4px rgba(38,215,104,0.14); flex:0 0 auto; }
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page { max-width: 1720px; margin: 0 auto; padding: 18px 24px 36px; width: 100%; display: flex; flex-direction: column; }
+    @media (max-width: 1920px) { .top-nav-inner { max-width: 1500px; } .page { max-width: 1500px; } }
     .summary-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
     .workbench-strip { display:flex; align-items:stretch; gap:16px; margin-bottom: 18px; flex-wrap: nowrap; overflow: visible; }
     .workbench-box { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); transition: transform .2s ease, box-shadow .2s ease; }
@@ -13069,10 +13251,10 @@ struct SubmoduleRow {
     .lc-title { font-size:1.44rem;font-weight:800;margin:0 0 6px; }
     .lc-sub { color:var(--muted);font-size:0.9rem;margin:0 0 18px; }
     .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:18px;display:flex;align-items:center;gap:10px; }
-    .lc-metrics { display:flex;gap:14px;margin-bottom:16px;flex-wrap:wrap; }
-    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:16px 32px;flex:0 0 auto;min-width:160px; }
+    .lc-metrics { display:flex;gap:12px;margin-bottom:16px; }
+    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:14px 18px;flex:1 1 0;min-width:0; }
     .lc-metric-label { font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px; }
-    .lc-metric-value { font-size:1.38rem;font-weight:800;color:var(--text); }
+    .lc-metric-value { font-size:1.2rem;font-weight:800;color:var(--text); }
     .lc-stage-desc { font-size:12px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin-bottom:18px;line-height:1.5;transition:opacity .3s; }
     .lc-steps { display:flex;align-items:center;gap:0;margin-bottom:18px; }
     .lc-step { display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;color:var(--muted);border:1.5px solid transparent;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;transition:all .25s; }
@@ -13081,7 +13263,7 @@ struct SubmoduleRow {
     .lc-step-num { width:18px;height:18px;border-radius:50%;background:rgba(150,140,130,0.2);color:var(--muted);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;flex:0 0 auto; }
     .lc-step.active .lc-step-num { background:var(--oxide,#d37a4c);color:#fff; }
     .lc-step.done .lc-step-num { background:rgba(80,180,100,0.22);color:#2d8a45; }
-    .lc-step-arrow { color:var(--line-strong,#ccc);font-size:16px;padding:0 1px;flex:0 0 auto;line-height:1; }
+    .lc-step-arrow { color:var(--line-strong,#ccc);font-size:16px;padding:0 8px;flex:0 0 auto;line-height:1; }
     .lc-warn { background:rgba(230,160,50,0.12);border:1px solid rgba(230,160,50,0.3);border-radius:8px;padding:10px 14px;font-size:12px;color:#8a6a10;margin-top:14px; }
     .lc-err { background:rgba(180,40,40,0.08);border:1px solid rgba(180,40,40,0.25);border-radius:8px;padding:12px 16px;margin-top:14px; }
     .lc-err strong { display:block;color:#8b1f1f;margin-bottom:4px;font-size:13px; }
@@ -13255,7 +13437,7 @@ struct SubmoduleRow {
         <div class="lc-metric"><div class="lc-metric-label">Elapsed</div><div class="lc-metric-value" id="lc-elapsed">0s</div></div>
         <div class="lc-metric"><div class="lc-metric-label">Phase</div><div class="lc-metric-value" id="lc-phase">Starting</div></div>
         <div class="lc-metric hidden" id="lc-files-card"><div class="lc-metric-label">Files</div><div class="lc-metric-value" id="lc-files">0</div></div>
-        <div class="lc-metric hidden" id="lc-speed-card"><div class="lc-metric-label">Speed</div><div class="lc-metric-value" id="lc-speed">—</div></div>
+        <div class="lc-metric hidden" id="lc-speed-card"><div class="lc-metric-label">Files/sec</div><div class="lc-metric-value" id="lc-speed">—</div></div>
       </div>
       <div class="progress-bar" id="lc-progress-bar"><span></span></div>
       <div class="lc-warn hidden" id="lc-warn">This is taking longer than usual. Large repositories can take several minutes — the analysis is still running.</div>
@@ -14144,6 +14326,12 @@ int main() { … }   ← code
       var lcDismissBtn = document.getElementById("lc-dismiss");
       if (lcDismissBtn) lcDismissBtn.addEventListener("click", dismissAnalysisModal);
 
+      // When the browser restores this page from bfcache (Back button after navigating to results),
+      // the loading overlay would still be showing its active state. Dismiss it immediately.
+      window.addEventListener("pageshow", function(e) {
+        if (e.persisted) { dismissAnalysisModal(); }
+      });
+
       function startAsyncAnalysis(formData) {
         var gitRepo = (formData.get("git_repo") || "").toString();
         var gitRef  = (formData.get("git_ref")  || "").toString();
@@ -14271,7 +14459,7 @@ int main() { … }   ← code
                   var fdelta = fd - lastFd, tdelta = (now - lastFdTime) / 1000;
                   if (fdelta > 0 && tdelta > 0.4) {
                     var fps = Math.round(fdelta / tdelta);
-                    var spEl = document.getElementById("lc-speed"); if (spEl) spEl.textContent = fmt(fps) + "/s";
+                    var spEl = document.getElementById("lc-speed"); if (spEl) spEl.textContent = fmt(fps);
                     var spCard = document.getElementById("lc-speed-card"); if (spCard) spCard.classList.remove("hidden");
                   }
                   lastFd = fd; lastFdTime = now;
@@ -15643,14 +15831,13 @@ int main() { … }   ← code
           html += '<div class="cov-scan-title">Scanning project for coverage files…</div>';
         } else if (state === "found") {
           var tb = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
-          html += '<div class="cov-scan-title">Using this file' + tb + '</div>';
+          html += '<div class="cov-scan-title">Coverage file auto-detected! ' + tb + '</div>';
           html += '<div class="cov-scan-sub">' + escapeHtml(opts.found) + '</div>';
-          html += '<div class="cov-scan-actions"><button type="button" class="cov-scan-use cov-scan-remove">Remove this file</button></div>';
+          html += '<div class="cov-scan-actions"><button type="button" class="cov-scan-use cov-scan-remove">Remove</button></div>';
         } else if (state === "hint") {
           var tb2 = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
-          html += '<div class="cov-scan-title">' + tb2 + ' detected &mdash; no coverage file found yet</div>';
-          html += '<div class="cov-scan-sub">Generate one with:</div>';
-          html += '<div class="cov-scan-actions"><code class="cov-scan-cmd">' + escapeHtml(opts.hint) + '</code></div>';
+          html += '<div class="cov-scan-title">' + tb2 + ' project &mdash; no coverage report found yet</div>';
+          html += '<div class="cov-scan-sub">Generate a report with your test framework\'s coverage tool, then browse to the output file. Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML</div>';
         } else if (state === "none") {
           html += '<div class="cov-scan-title">No coverage files detected in this project</div>';
           html += '<div class="cov-scan-sub">Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML</div>';
@@ -16178,6 +16365,7 @@ struct IndexTemplate {
     .status-dot{width:8px;height:8px;border-radius:999px;background:#26d768;box-shadow:0 0 0 4px rgba(38,215,104,0.14);flex:0 0 auto;}
     .server-status-wrap{position:relative;display:inline-flex;}.server-online-pill{cursor:default;}.server-status-tip{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}.server-status-tip::before{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}.server-status-wrap:hover .server-status-tip,.server-status-wrap:focus-within .server-status-tip{display:block;}
     .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 12px;position:relative;z-index:1;}
+    @media (max-width:1920px) { .top-nav-inner { max-width:1500px; } .page { max-width:1500px; } }
     .hero{text-align:center;margin:0 auto 18px;}
     .hero-logo-wrap{display:inline-block;cursor:default;}
     .hero-logo{width:66px;height:73px;object-fit:contain;margin-bottom:0;filter:drop-shadow(0 8px 22px rgba(184,93,51,0.30));display:block;}
@@ -17524,6 +17712,7 @@ struct ScanSetupTemplate {
     @media(max-width:560px) { .run-id-row { grid-template-columns:1fr; } }
     .run-id-chip { display:flex; flex-direction:column; gap:5px; padding:12px 14px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent); color:var(--text); position:relative; cursor:default; transition:transform 0.18s ease,box-shadow 0.18s ease; min-width:0; }
     .run-id-chip[data-copy] { cursor:pointer; }
+    a.run-id-chip { text-decoration:none; cursor:pointer; }
     .run-id-chip:hover { transform:translateY(-3px); box-shadow:0 8px 24px rgba(0,0,0,0.15); z-index:10; }
     .run-id-chip.muted-chip { border-left-color:var(--line-strong); }
     .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:var(--accent); display:flex; align-items:center; gap:4px; }
@@ -17750,11 +17939,11 @@ struct ScanSetupTemplate {
           {% when Some with (long_sha) %}
           {% match git_commit_url %}
             {% when Some with (commit_url) %}
-            <span class="run-id-chip" data-copy="{{ long_sha }}">
+            <a class="run-id-chip" href="{{ commit_url }}" target="_blank" rel="noopener">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit<svg class="chip-label-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left:4px;opacity:0.7;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>
-              <a href="{{ commit_url }}" target="_blank" rel="noopener" class="run-id-chip-value commit-link-value" onclick="event.stopPropagation()">{{ long_sha }}</a>
+              <span class="run-id-chip-value">{{ long_sha }}</span>
               <span class="chip-tooltip">Open commit on version control — click to navigate</span>
-            </span>
+            </a>
             {% when None %}
             <span class="run-id-chip" data-copy="{{ long_sha }}">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
@@ -17771,11 +17960,20 @@ struct ScanSetupTemplate {
         {% endmatch %}
         {% match git_branch %}
           {% when Some with (branch) %}
-          <span class="run-id-chip">
-            <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
-            <span class="run-id-chip-value">{{ branch }}</span>
-            <span class="chip-tooltip">Git branch active at scan time</span>
-          </span>
+          {% match git_branch_url %}
+            {% when Some with (branch_url) %}
+            <a class="run-id-chip" href="{{ branch_url }}" target="_blank" rel="noopener">
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch<svg class="chip-label-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left:4px;opacity:0.7;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>
+              <span class="run-id-chip-value">{{ branch }}</span>
+              <span class="chip-tooltip">Open branch on version control — click to navigate</span>
+            </a>
+            {% when None %}
+            <span class="run-id-chip">
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
+              <span class="run-id-chip-value">{{ branch }}</span>
+              <span class="chip-tooltip">Git branch active at scan time</span>
+            </span>
+          {% endmatch %}
           {% when None %}
           <span class="run-id-chip muted-chip">
             <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
@@ -19478,6 +19676,7 @@ struct ResultTemplate {
     delta_unmodified_lines: Option<u64>,
     // git context
     git_branch: Option<String>,
+    git_branch_url: Option<String>,
     git_commit: Option<String>,
     git_commit_long: Option<String>,
     git_author: Option<String>,
@@ -19756,6 +19955,12 @@ struct ResultTemplate {
       }
 
       setTimeout(poll, pollInterval);
+
+      // If the browser restores this page from bfcache (Back after viewing results),
+      // timers may be frozen; kick off a fresh poll so we either redirect or resume.
+      window.addEventListener("pageshow", function(e) {
+        if (e.persisted) { setTimeout(poll, 200); }
+      });
     })();
   </script>
   <footer class="site-footer">
@@ -19889,6 +20094,7 @@ struct ScanWaitTemplate {
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
     .page{width:100%;max-width:1720px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    @media (max-width:1920px) { .top-nav-inner { max-width:1500px; } .page { max-width:1500px; } }
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 18px;font-size:28px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .error-box{border-radius:16px;border:1px solid var(--line);background:var(--surface-2);padding:16px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:13px;}
@@ -20937,6 +21143,7 @@ struct RelocateScanTemplate {
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
     .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}
+    @media (max-width:1920px) { .top-nav-inner { max-width:1500px; } .page { max-width:1500px; } }
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
     .panel-header h1{margin:0;font-size:24px;font-weight:850;letter-spacing:-0.03em;}
@@ -21647,6 +21854,7 @@ struct HistoryTemplate {
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
     .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}
+    @media (max-width:1920px) { .top-nav-inner { max-width:1500px; } .page { max-width:1500px; } }
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
     .panel-header h1{margin:0 0 6px;font-size:24px;font-weight:850;letter-spacing:-0.03em;}
@@ -22417,6 +22625,7 @@ struct CompareSelectTemplate {
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
     .page{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}
+    @media (max-width:1920px) { .top-nav-inner { max-width:1500px; } .page { max-width:1500px; } }
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:18px;}
     .hero{background:linear-gradient(180deg,rgba(255,255,255,0.20),transparent),var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 28px 28px;margin-bottom:18px;}
     .hero-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:20px;flex-wrap:wrap;}

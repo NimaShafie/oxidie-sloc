@@ -464,14 +464,14 @@ fn render_html_delta_shows_added_lines() {
 #[test]
 fn render_sub_report_html_ok() {
     let run = make_run();
-    let html = render_sub_report_html(&run).unwrap();
+    let html = render_sub_report_html(&run, None).unwrap();
     assert!(!html.is_empty());
 }
 
 #[test]
 fn render_sub_report_html_multi_language() {
     let run = make_multi_lang_run();
-    let html = render_sub_report_html(&run).unwrap();
+    let html = render_sub_report_html(&run, None).unwrap();
     assert!(!html.is_empty());
     assert!(html.contains("Rust"));
 }
@@ -762,14 +762,14 @@ fn render_confluence_wiki_markup_empty_run() {
 #[test]
 fn render_sub_report_html_with_coverage() {
     let run = make_run_with_coverage();
-    let html = render_sub_report_html(&run).unwrap();
+    let html = render_sub_report_html(&run, None).unwrap();
     assert!(!html.is_empty());
 }
 
 #[test]
 fn render_sub_report_html_empty_run() {
     let run = make_empty_run();
-    let html = render_sub_report_html(&run).unwrap();
+    let html = render_sub_report_html(&run, None).unwrap();
     assert!(!html.is_empty());
 }
 

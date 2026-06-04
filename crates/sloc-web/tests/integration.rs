@@ -1579,6 +1579,100 @@ async fn full_analyze_cycle_compare_two_runs() {
     // Project history after two runs
     let (status, _, _) = get_shared(app.clone(), "/api/project-history").await;
     assert!(status.as_u16() < 500);
+
+    // ── Exercise large handlers with populated registry data ───────────────────
+
+    // trend_report_handler (~1363 lines) — covered by hitting route with real data
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert!(
+        status.as_u16() < 500,
+        "/trend-reports with data must not 5xx"
+    );
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /trend-reports with data"
+    );
+
+    // test_metrics_handler (~1363 lines) — covered by hitting route with real data
+    let (status, _, body) = get_shared(app.clone(), "/test-metrics").await;
+    assert!(
+        status.as_u16() < 500,
+        "/test-metrics with data must not 5xx"
+    );
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /test-metrics with data"
+    );
+
+    // embed handler with a known run_id (exercises render_embed_widget with data)
+    let (status, _, body) = get_shared(app.clone(), &format!("/embed/summary?run_id={rid1}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/embed/summary with run_id must not 5xx"
+    );
+    assert!(!body.is_empty(), "expected non-empty embed widget");
+
+    // embed handler in dark mode
+    let (status, _, _) = get_shared(
+        app.clone(),
+        &format!("/embed/summary?run_id={rid1}&theme=dark"),
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "/embed/summary dark mode must not 5xx"
+    );
+
+    // api_metrics_latest_handler — populated registry returns metrics JSON
+    let (status, _, body) = get_shared(app.clone(), "/api/metrics/latest").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/metrics/latest with data must not 5xx"
+    );
+    assert!(
+        body.contains("code_lines") || body.contains("files"),
+        "expected metrics JSON"
+    );
+
+    // api_metrics_run_handler — lookup by specific run_id
+    let (status, _, body) = get_shared(app.clone(), &format!("/api/metrics/{rid1}")).await;
+    assert!(status.as_u16() < 500, "/api/metrics/:id must not 5xx");
+    assert!(!body.is_empty(), "expected metrics JSON for run");
+
+    // api_metrics_history_handler
+    let (status, _, _) = get_shared(app.clone(), "/api/metrics/history").await;
+    assert!(status.as_u16() < 500, "/api/metrics/history must not 5xx");
+
+    // api_metrics_submodules_handler
+    let (status, _, _) = get_shared(app.clone(), "/api/metrics/submodules").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/metrics/submodules must not 5xx"
+    );
+
+    // confluence wiki markup with a valid run_id (exercises the found-run path)
+    let (status, _, _) = get_shared(
+        app.clone(),
+        &format!("/api/confluence/wiki-markup?run_id={rid1}"),
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "wiki-markup with valid run_id must not 5xx"
+    );
+
+    // pdf-status handler with known run_id
+    let (status, _, _) = get_shared(app.clone(), &format!("/api/runs/{rid1}/pdf-status")).await;
+    assert!(status.as_u16() < 500, "pdf-status must not 5xx");
+
+    // download bundle handler
+    let (status, _, _) = get_shared(app.clone(), &format!("/api/runs/{rid1}/bundle")).await;
+    assert!(status.as_u16() < 500, "bundle download must not 5xx");
+
+    // history page
+    let (status, _, body) = get_shared(app.clone(), "/view-reports").await;
+    assert!(status.as_u16() < 500, "/view-reports must not 5xx");
+    assert!(body.contains("<html"), "expected HTML from /view-reports");
 }
 
 // ── OpenAPI / static assets ──────────────────────────────────────────────────
