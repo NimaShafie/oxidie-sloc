@@ -65,6 +65,9 @@ def _extract_finding(d, project_root, seen):
 
 
 def main():
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <input_json> <output_json> [project_root]", file=sys.stderr)
+        sys.exit(1)
     src, out = sys.argv[1], sys.argv[2]
     project_root = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
     rules, issues, seen = {}, [], set()

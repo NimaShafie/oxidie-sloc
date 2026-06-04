@@ -55,7 +55,7 @@ def add_rect(slide, left, top, width, height, fill_rgb=None, line_rgb=None, line
 
 def add_text(slide, text, left, top, width, height,
              font_name="Segoe UI", font_size=Pt(18), bold=False, italic=False,
-             color=CHARCOAL, align=PP_ALIGN.LEFT, wrap=True, word_wrap=True):
+             color=CHARCOAL, align=PP_ALIGN.LEFT, word_wrap=True):
     txBox = slide.shapes.add_textbox(left, top, width, height)
     tf = txBox.text_frame
     tf.word_wrap = word_wrap
@@ -118,11 +118,16 @@ def bullet_block(slide, items, left, top, width, height,
         else:
             p = tf.add_paragraph()
         p.space_before = Pt(6)
-        run = p.add_run()
-        run.text = f"•  {item}"
-        run.font.name = "Segoe UI"
-        run.font.size = font_size
-        run.font.color.rgb = color
+        bullet_run = p.add_run()
+        bullet_run.text = "•  "
+        bullet_run.font.name = "Segoe UI"
+        bullet_run.font.size = font_size
+        bullet_run.font.color.rgb = bullet_color
+        text_run = p.add_run()
+        text_run.text = item
+        text_run.font.name = "Segoe UI"
+        text_run.font.size = font_size
+        text_run.font.color.rgb = color
     return txBox
 
 

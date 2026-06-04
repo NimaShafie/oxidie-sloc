@@ -55,6 +55,48 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Convert an SSH or HTTPS remote URL to a plain HTTPS base URL.
+/// `git@github.com:owner/repo.git` → `https://github.com/owner/repo`
+/// `https://github.com/owner/repo.git` → `https://github.com/owner/repo`
+fn normalize_remote_url(remote_url: &str) -> Option<String> {
+    let url = remote_url.trim();
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        let path = path.trim_end_matches(".git");
+        return Some(format!("https://{host}/{path}"));
+    }
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return Some(url.trim_end_matches(".git").to_string());
+    }
+    None
+}
+
+/// Derive a direct link to the given commit SHA on the hosting forge.
+pub(crate) fn derive_commit_url(remote_url: &str, sha: &str) -> Option<String> {
+    let base = normalize_remote_url(remote_url)?;
+    let lower = base.to_lowercase();
+    if lower.contains("bitbucket.org") {
+        Some(format!("{base}/commits/{sha}"))
+    } else if lower.contains("gitlab.") {
+        Some(format!("{base}/-/commit/{sha}"))
+    } else {
+        Some(format!("{base}/commit/{sha}"))
+    }
+}
+
+/// Derive a direct link to the given branch on the hosting forge.
+pub(crate) fn derive_branch_url(remote_url: &str, branch: &str) -> Option<String> {
+    let base = normalize_remote_url(remote_url)?;
+    let lower = base.to_lowercase();
+    if lower.contains("bitbucket.org") {
+        Some(format!("{base}/branch/{branch}"))
+    } else if lower.contains("gitlab.") {
+        Some(format!("{base}/-/tree/{branch}"))
+    } else {
+        Some(format!("{base}/tree/{branch}"))
+    }
+}
+
 /// Optional delta context for embedding a "Changes vs. Previous Scan" panel
 /// in the HTML report. Pass `None` to omit the panel (CLI, sub-reports).
 pub struct ReportDeltaContext {
@@ -523,6 +565,16 @@ fn render_html_inner(
         prev_run_id: delta_ctx
             .and_then(|d| d.prev_run_id.clone())
             .unwrap_or_default(),
+        git_commit_url: run
+            .git_remote_url
+            .as_deref()
+            .zip(run.git_commit_long.as_deref())
+            .and_then(|(remote, sha)| derive_commit_url(remote, sha)),
+        git_branch_url: run
+            .git_remote_url
+            .as_deref()
+            .zip(run.git_branch.as_deref())
+            .and_then(|(remote, branch)| derive_branch_url(remote, branch)),
     };
 
     template.render().context("failed to render HTML report")
@@ -2711,17 +2763,21 @@ struct WarningOpportunityRow {
     @media(max-width:560px) { .run-id-row { grid-template-columns: 1fr; } }
     .run-id-chip { display:flex; flex-direction:column; gap:5px; padding:12px 14px; border-radius:10px; background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent); color:var(--text); position:relative; cursor:default; transition:transform 0.18s ease, box-shadow 0.18s ease; }
     .run-id-chip[data-copy] { cursor:pointer; }
+    a.run-id-chip-link { text-decoration:none; cursor:pointer; }
+    a.run-id-chip-link:hover { transform:translateY(-3px); box-shadow:0 8px 24px rgba(0,0,0,0.15); z-index:10; border-left-color:var(--oxide); }
     .run-id-chip:hover { transform:translateY(-3px); box-shadow:0 8px 24px rgba(0,0,0,0.15); z-index:10; }
     .run-id-chip.muted-chip { border-left-color:var(--line-strong); }
-    .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:var(--accent); }
+    .run-id-chip-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; color:var(--accent); display:flex; align-items:center; gap:4px; }
     .run-id-chip.muted-chip .run-id-chip-label { color:var(--muted-2); }
     .run-id-chip-value { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
     .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity 0.18s ease; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
     .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .run-id-chip:hover .chip-tooltip { opacity:1; }
+    a.run-id-chip-link:hover .chip-tooltip { opacity:1; }
     .chip-copy-icon { display:inline-block; margin-left:5px; font-size:10px; opacity:0.55; vertical-align:middle; }
     .chip-label-icon { display:inline-block; vertical-align:middle; margin-right:3px; margin-top:-1px; opacity:0.8; }
+    .chip-popout-icon { display:inline-block; vertical-align:middle; margin-left:4px; opacity:0.6; flex-shrink:0; }
     .run-id-short-badge { font-family:ui-monospace,monospace; font-size:13px; font-weight:700; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:2px 8px; letter-spacing:0.04em; white-space:nowrap; vertical-align:middle; }
     body.dark-theme .run-id-short-badge { color:var(--muted-2); }
     .author-handle { font-size:11px; font-weight:600; color:var(--muted-2); margin-left:1.5em; font-family:ui-monospace,monospace; }
@@ -3426,11 +3482,19 @@ struct WarningOpportunityRow {
               <span class="chip-tooltip">Unique identifier for this analysis run — click to copy</span>
             </span>
             {% if let Some(long_commit) = run.git_commit_long %}
+            {% if let Some(commit_url) = git_commit_url %}
+            <a class="run-id-chip run-id-chip-link" href="{{ commit_url }}" target="_blank" rel="noopener noreferrer" title="Open commit in source control">
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit<svg class="chip-popout-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>
+              <span class="run-id-chip-value">{{ long_commit }}</span>
+              <span class="chip-tooltip">Opens commit in source control — new tab</span>
+            </a>
+            {% else %}
             <span class="run-id-chip" data-copy="{{ long_commit }}">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
               <span class="run-id-chip-value">{{ long_commit }}</span>
               <span class="chip-tooltip">Full commit SHA for the scanned state — click to copy</span>
             </span>
+            {% endif %}
             {% else %}
             <span class="run-id-chip muted-chip">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><line x1="1" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="23" y2="12"/></svg>Git Commit</span>
@@ -3439,11 +3503,19 @@ struct WarningOpportunityRow {
             </span>
             {% endif %}
             {% if let Some(branch) = run.git_branch %}
+            {% if let Some(branch_url) = git_branch_url %}
+            <a class="run-id-chip run-id-chip-link" href="{{ branch_url }}" target="_blank" rel="noopener noreferrer" title="Open branch in source control">
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch<svg class="chip-popout-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>
+              <span class="run-id-chip-value">{{ branch }}</span>
+              <span class="chip-tooltip">Opens branch in source control — new tab</span>
+            </a>
+            {% else %}
             <span class="run-id-chip">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
               <span class="run-id-chip-value">{{ branch }}</span>
               <span class="chip-tooltip">Git branch scanned for this report</span>
             </span>
+            {% endif %}
             {% else %}
             <span class="run-id-chip muted-chip">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
@@ -3625,7 +3697,7 @@ struct WarningOpportunityRow {
               <button type="button" class="chart-tab" data-comp-tab="pct">Composition %</button>
             </div>
             </div>
-            <div id="composition-chart" class="chart-container"><div id="canvas-comp-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-comp"></canvas></div></div>
+            <div id="composition-chart" class="chart-container"><div id="canvas-comp-wrap" style="position:relative;min-height:150px;"><canvas id="canvas-comp"></canvas></div><div id="comp-custom-legend" style="display:flex;justify-content:center;gap:20px;margin-top:8px;flex-wrap:wrap;"></div></div>
           </div>
         </section>
       </div>
@@ -3856,7 +3928,13 @@ struct WarningOpportunityRow {
           </div>
           <!-- Per-file style table -->
           <div style="margin-top:22px;">
-            <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px;">Per-File Style Details</div>
+            <div class="toolbar" style="margin-bottom:8px;">
+              <div class="toolbar-left">
+                <span style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);">Per-File Style Details</span>
+                <input id="sft-search" class="search" type="search" placeholder="Filter files, languages, guides..." style="margin-left:12px;" />
+                <div class="page-size-row"><label class="page-size-label">Show:</label><select id="sft-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="sft-count-label" class="page-count-label"></span></div>
+              </div>
+            </div>
             <div class="table-scroll-wrap">
               <table class="style-file-table" id="style-file-table">
                 <thead>
@@ -3873,6 +3951,11 @@ struct WarningOpportunityRow {
                   <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">Loading...</td></tr>
                 </tbody>
               </table>
+            </div>
+            <div id="sft-pagination" class="pagination-bar">
+              <button id="sft-prev" class="pager-btn" disabled>&#8592; Prev</button>
+              <span id="sft-page-info" class="pager-info"></span>
+              <button id="sft-next" class="pager-btn">Next &#8594;</button>
             </div>
           </div>
         </div>
@@ -5255,34 +5338,7 @@ struct WarningOpportunityRow {
                 y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
               },
               plugins: {
-                legend: {
-                  position: 'bottom', labels: { color: c.text },
-                  onHover: function(e, item, leg) {
-                    var chart = leg.chart, idx = item.datasetIndex;
-                    var cols = [OX, GN, GY];
-                    chart.data.datasets.forEach(function(ds, i) {
-                      ds.backgroundColor = i === idx ? cols[i] : cols[i] + '28';
-                    });
-                    chart.update('none');
-                    var tt = document.getElementById('r-tt');
-                    if (tt && e && e.native) {
-                      var totV = chart.data.datasets[idx].data.reduce(function(a,v){return a+(v||0);},0);
-                      var totAllV = chart.data.datasets.reduce(function(a,ds){return a+ds.data.reduce(function(b,v){return b+(v||0);},0);},0)||1;
-                      var pct = Math.round(totV/totAllV*100);
-                      tt.innerHTML = '<strong>'+chart.data.datasets[idx].label+'</strong><br>'+fmt(totV)+' total ('+pct+'%)';
-                      var nx=e.native.clientX+16, ny=e.native.clientY-12;
-                      if(nx+240>window.innerWidth-8) nx=e.native.clientX-240-8;
-                      tt.style.left=nx+'px'; tt.style.top=ny+'px'; tt.style.display='block';
-                    }
-                  },
-                  onLeave: function(e, item, leg) {
-                    var chart = leg.chart;
-                    var cols = [OX, GN, GY];
-                    chart.data.datasets.forEach(function(ds, i) { ds.backgroundColor = cols[i]; });
-                    chart.update('none');
-                    var tt = document.getElementById('r-tt'); if(tt) tt.style.display='none';
-                  }
-                },
+                legend: { display: false },
                 tooltip: {
                   mode: 'index', axis: 'y', intersect: false,
                   callbacks: {
@@ -5308,6 +5364,50 @@ struct WarningOpportunityRow {
             })]
           });
           ALL_CHARTS.push(compChart);
+          wireCompLegend();
+        }
+        function wireCompLegend() {
+          var legEl = document.getElementById('comp-custom-legend');
+          if (!legEl || !compChart) return;
+          var cols = [OX, GN, GY];
+          var labels = ['Code', 'Comments', 'Blanks'];
+          var totC2 = data.reduce(function(a,d){return a+(d.code||0);},0);
+          var totCm2 = data.reduce(function(a,d){return a+(d.comments||0);},0);
+          var totBl2 = data.reduce(function(a,d){return a+(d.blanks||0);},0);
+          var totAll2 = totC2+totCm2+totBl2||1;
+          var rawTotals = [totC2, totCm2, totBl2];
+          legEl.innerHTML = '';
+          labels.forEach(function(lbl, idx) {
+            var pct = Math.round(rawTotals[idx]/totAll2*100);
+            var ttv = fmt(rawTotals[idx])+' total ('+pct+'%)';
+            var span = document.createElement('span');
+            span.setAttribute('data-ds-idx', String(idx));
+            span.setAttribute('data-ttl', lbl);
+            span.setAttribute('data-ttv', ttv);
+            span.style.cssText = 'display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:700;user-select:none;transition:opacity .15s;';
+            var sw = document.createElement('span');
+            sw.style.cssText = 'display:inline-block;width:12px;height:12px;background:'+cols[idx]+';border-radius:2px;flex-shrink:0;';
+            span.appendChild(sw);
+            span.appendChild(document.createTextNode(lbl));
+            legEl.appendChild(span);
+          });
+          var items = legEl.querySelectorAll('[data-ds-idx]');
+          for (var k = 0; k < items.length; k++) {
+            (function(item, idx) {
+              item.addEventListener('mouseenter', function() {
+                compChart.data.datasets.forEach(function(ds, i) {
+                  ds.backgroundColor = i === idx ? cols[i] : cols[i]+'28';
+                });
+                compChart.update('none');
+                for (var j = 0; j < items.length; j++) items[j].style.opacity = items[j]===item?'1':'0.45';
+              });
+              item.addEventListener('mouseleave', function() {
+                compChart.data.datasets.forEach(function(ds, i) { ds.backgroundColor = cols[i]; });
+                compChart.update('none');
+                for (var j = 0; j < items.length; j++) items[j].style.opacity = '';
+              });
+            })(items[k], parseInt(items[k].getAttribute('data-ds-idx'), 10));
+          }
         }
         document.querySelectorAll('[data-comp-tab]').forEach(function(btn){
           btn.addEventListener('click', function(){
@@ -5706,19 +5806,25 @@ struct WarningOpportunityRow {
         var counts = HIST_D.map(function(d){return d.count||0;});
         var total = counts.reduce(function(a,b){return a+b;},0);
         var c = clr();
+        var fsBg = ['#2A6846','#4472C4','#C45C10','#D4A017','#B23030'];
+        var fsHv = ['#3a8a5e','#5a8ad8','#d97020','#e8b520','#cc4545'];
         var fsChart = new Chart(canvas, {
           type: 'bar',
           data: {
             labels: labels,
             datasets: [{ label: 'Files',
               data: counts,
-              backgroundColor: ['#2A6846','#4472C4','#C45C10','#D4A017','#B23030'],
-              borderRadius: 6
+              backgroundColor: fsBg,
+              hoverBackgroundColor: fsHv,
+              borderRadius: 6,
+              borderWidth: 0,
+              hoverBorderWidth: 0
             }]
           },
           options: {
             responsive: true, maintainAspectRatio: false,
             animation: { duration: 500, easing: 'easeOutQuart' },
+            transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
             layout: { padding: { top: 18 } },
             scales: {
               x: { grid: { display: false }, ticks: { color: c.text, font: { size: 11 } } },
@@ -6281,6 +6387,8 @@ struct WarningOpportunityRow {
       document.addEventListener('mousemove', function(e) {
         if(tt.style.display!=='none') move(e);
       });
+      window.addEventListener('blur', function() { hide(); });
+      document.addEventListener('visibilitychange', function() { if(document.hidden) hide(); });
     })();
     // Auto-populate title on any td that is visually truncated but has no explicit title
     requestAnimationFrame(function() {
@@ -6481,9 +6589,16 @@ struct WarningOpportunityRow {
       return html;
     }
     var sftRows=[];
-    function renderSftTable(){
-      var tbody=document.getElementById('style-file-tbody');
-      if(!tbody)return;
+    var sftFilteredRows=[];
+    var sftCurrentPage=1;
+    function sftGetPageSize(){
+      var sel=document.getElementById('sft-page-size');
+      var v=sel?sel.value:'20';
+      return v==='all'?Infinity:parseInt(v,10);
+    }
+    function sftApplyFilter(){
+      var inp=document.getElementById('sft-search');
+      var q=inp?inp.value.toLowerCase():'';
       var sorted=sftRows.slice();
       if(sftSortKey){
         sorted.sort(function(a,b){
@@ -6492,8 +6607,29 @@ struct WarningOpportunityRow {
           return av<bv?-1*sftSortDir:av>bv?1*sftSortDir:0;
         });
       }
+      sftFilteredRows=q===''?sorted:sorted.filter(function(f){
+        return (f.path||'').toLowerCase().indexOf(q)>=0
+          ||(f.lang||'').toLowerCase().indexOf(q)>=0
+          ||(f.guide||'').toLowerCase().indexOf(q)>=0
+          ||(f.indent||'').toLowerCase().indexOf(q)>=0;
+      });
+      sftCurrentPage=1;
+      renderSftTable();
+    }
+    function renderSftTable(){
+      var tbody=document.getElementById('style-file-tbody');
+      if(!tbody)return;
+      var ps=sftGetPageSize();
+      var total=sftFilteredRows.length;
+      var totalAll=sftRows.length;
+      var totalPages=ps===Infinity?1:Math.max(1,Math.ceil(total/ps));
+      if(sftCurrentPage>totalPages)sftCurrentPage=totalPages;
+      if(sftCurrentPage<1)sftCurrentPage=1;
+      var start=ps===Infinity?0:(sftCurrentPage-1)*ps;
+      var end=ps===Infinity?total:Math.min(start+ps,total);
+      var page=sftFilteredRows.slice(start,end);
       var html='';
-      sorted.forEach(function(f){
+      page.forEach(function(f){
         var barW=Math.round(f.score);
         var guide=f.guide&&f.guide!=='Unknown'?f.guide:'';
         var badge=guide?buildGuideHtml(guide):'<span style="color:var(--muted);">—</span>';
@@ -6510,6 +6646,18 @@ struct WarningOpportunityRow {
           +'</tr>';
       });
       tbody.innerHTML=html||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
+      var pageInfo=document.getElementById('sft-page-info');
+      var prevBtn=document.getElementById('sft-prev');
+      var nextBtn=document.getElementById('sft-next');
+      var countLabel=document.getElementById('sft-count-label');
+      if(pageInfo){
+        if(total===0){pageInfo.textContent='No results';}
+        else if(ps===Infinity){pageInfo.textContent='All '+total.toLocaleString()+' files';}
+        else{pageInfo.textContent=(start+1)+'–'+end+' of '+total.toLocaleString()+' files';}
+      }
+      if(countLabel){countLabel.textContent=(total<totalAll&&total>0)?'('+total.toLocaleString()+' matching)':'';}
+      if(prevBtn)prevBtn.disabled=sftCurrentPage<=1||ps===Infinity;
+      if(nextBtn)nextBtn.disabled=sftCurrentPage>=totalPages||ps===Infinity;
     }
     function initStyleTable(){
       if(!FILE_DATA.length){
@@ -6518,7 +6666,8 @@ struct WarningOpportunityRow {
         return;
       }
       sftRows=FILE_DATA.slice();
-      renderSftTable();
+      sftFilteredRows=sftRows.slice();
+      sftApplyFilter();
       // Wire up sortable column headers
       var ths=document.querySelectorAll('#style-file-table thead th[data-sort-key]');
       for(var i=0;i<ths.length;i++){(function(th){
@@ -6534,9 +6683,24 @@ struct WarningOpportunityRow {
           th.classList.add(sftSortDir===1?'sft-sort-asc':'sft-sort-desc');
           var tind=th.querySelector('.style-sort-ind');
           if(tind)tind.textContent=sftSortDir===1?'\u25B2':'\u25BC';
-          renderSftTable();
+          sftApplyFilter();
         });
       })(ths[i]);}
+      var searchInput=document.getElementById('sft-search');
+      if(searchInput){
+        var sftTimer=null;
+        searchInput.addEventListener('input',function(){clearTimeout(sftTimer);sftTimer=setTimeout(sftApplyFilter,200);});
+      }
+      var pageSel=document.getElementById('sft-page-size');
+      if(pageSel){pageSel.addEventListener('change',function(){sftCurrentPage=1;renderSftTable();});}
+      var prevBtn=document.getElementById('sft-prev');
+      var nextBtn=document.getElementById('sft-next');
+      if(prevBtn){prevBtn.addEventListener('click',function(){if(sftCurrentPage>1){sftCurrentPage--;renderSftTable();}});}
+      if(nextBtn){nextBtn.addEventListener('click',function(){
+        var ps=sftGetPageSize();
+        var totalPages=ps===Infinity?1:Math.ceil(sftFilteredRows.length/ps);
+        if(sftCurrentPage<totalPages){sftCurrentPage++;renderSftTable();}
+      });}
     }
     function init(){initTabs();initStyleTable();}
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
@@ -6643,6 +6807,12 @@ struct ReportTemplate<'a> {
     /// `--html-out` and `--pdf-out`), this holds the relative URL to that PDF.
     /// The "View PDF" button navigates directly to it instead of the server route.
     standalone_pdf_url: Option<String>,
+    /// Direct link to the commit on the hosting forge (GitHub, Bitbucket, GitLab, …).
+    /// `None` when the remote URL is absent or unrecognised.
+    git_commit_url: Option<String>,
+    /// Direct link to the branch on the hosting forge.
+    /// `None` when the remote URL or branch is absent/unrecognised.
+    git_branch_url: Option<String>,
     /// Whether any style data was collected.
     has_style_data: bool,
     /// Number of language groups in the style summary (0 when none).
@@ -7677,4 +7847,293 @@ pub fn render_confluence_wiki_markup(run: &AnalysisRun) -> String {
     );
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // ── base64_encode ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn base64_encode_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_encode_one_byte() {
+        assert_eq!(base64_encode(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn base64_encode_two_bytes() {
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+    }
+
+    #[test]
+    fn base64_encode_three_bytes_no_padding() {
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+    }
+
+    #[test]
+    fn base64_encode_hello() {
+        assert_eq!(base64_encode(b"Hello"), "SGVsbG8=");
+    }
+
+    #[test]
+    fn base64_encode_roundtrip_length_multiple_of_3() {
+        let data = b"abcdef";
+        let encoded = base64_encode(data);
+        assert_eq!(encoded.len(), 8);
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn base64_encode_all_zeros() {
+        assert_eq!(base64_encode(&[0u8, 0, 0]), "AAAA");
+    }
+
+    #[test]
+    fn base64_encode_binary_data() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_encode(&data);
+        assert!(!encoded.is_empty());
+        assert!(encoded
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
+    }
+
+    // ── json_escape ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_escape_no_special_chars() {
+        assert_eq!(json_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn json_escape_backslash() {
+        assert_eq!(json_escape(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn json_escape_double_quote() {
+        assert_eq!(json_escape(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn json_escape_both_special_chars() {
+        assert_eq!(json_escape(r#"a\"b"#), r#"a\\\"b"#);
+    }
+
+    #[test]
+    fn json_escape_empty_string() {
+        assert_eq!(json_escape(""), "");
+    }
+
+    #[test]
+    fn json_escape_only_backslashes() {
+        assert_eq!(json_escape(r"\\"), r"\\\\");
+    }
+
+    // ── coverage_pct_str ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_pct_str_zero_found_returns_empty() {
+        assert_eq!(coverage_pct_str(0, 0), "");
+    }
+
+    #[test]
+    fn coverage_pct_str_full_coverage() {
+        assert_eq!(coverage_pct_str(100, 100), "100.0");
+    }
+
+    #[test]
+    fn coverage_pct_str_half_coverage() {
+        assert_eq!(coverage_pct_str(50, 100), "50.0");
+    }
+
+    #[test]
+    fn coverage_pct_str_one_decimal_precision() {
+        let s = coverage_pct_str(7, 10);
+        assert_eq!(s, "70.0");
+    }
+
+    #[test]
+    fn coverage_pct_str_zero_hit_but_found() {
+        assert_eq!(coverage_pct_str(0, 10), "0.0");
+    }
+
+    #[test]
+    fn coverage_pct_str_non_round_percentage() {
+        let s = coverage_pct_str(1, 3);
+        assert!(!s.is_empty());
+        assert!(s.contains('.'), "result must have decimal point");
+    }
+
+    // ── coverage_class ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_class_zero_found_is_muted() {
+        assert_eq!(coverage_class(0, 0), "muted");
+    }
+
+    #[test]
+    fn coverage_class_100_pct_is_good() {
+        assert_eq!(coverage_class(100, 100), "good");
+    }
+
+    #[test]
+    fn coverage_class_80_pct_is_good() {
+        assert_eq!(coverage_class(80, 100), "good");
+    }
+
+    #[test]
+    fn coverage_class_79_pct_is_warn() {
+        assert_eq!(coverage_class(79, 100), "warn");
+    }
+
+    #[test]
+    fn coverage_class_60_pct_is_warn() {
+        assert_eq!(coverage_class(60, 100), "warn");
+    }
+
+    #[test]
+    fn coverage_class_59_pct_is_danger() {
+        assert_eq!(coverage_class(59, 100), "danger");
+    }
+
+    #[test]
+    fn coverage_class_zero_hit_is_danger() {
+        assert_eq!(coverage_class(0, 100), "danger");
+    }
+
+    // ── format_test_density ──────────────────────────────────────────────────────
+
+    #[test]
+    fn format_test_density_zero_code_returns_zero() {
+        assert_eq!(format_test_density(0, 5), "0.0");
+    }
+
+    #[test]
+    fn format_test_density_zero_tests_returns_zero() {
+        assert_eq!(format_test_density(100, 0), "0.0");
+    }
+
+    #[test]
+    fn format_test_density_both_zero() {
+        assert_eq!(format_test_density(0, 0), "0.0");
+    }
+
+    #[test]
+    fn format_test_density_1_test_per_1000_lines() {
+        assert_eq!(format_test_density(1000, 1), "1.0");
+    }
+
+    #[test]
+    fn format_test_density_10_tests_per_100_lines() {
+        assert_eq!(format_test_density(100, 10), "100.0");
+    }
+
+    #[test]
+    fn format_test_density_fractional() {
+        let s = format_test_density(1000, 3);
+        assert!(!s.is_empty());
+        assert!(s.contains('.'));
+    }
+
+    // ── html_esc ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn html_esc_no_special_chars() {
+        assert_eq!(html_esc("hello"), "hello");
+    }
+
+    #[test]
+    fn html_esc_ampersand() {
+        assert_eq!(html_esc("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn html_esc_less_than() {
+        assert_eq!(html_esc("a<b"), "a&lt;b");
+    }
+
+    #[test]
+    fn html_esc_greater_than() {
+        assert_eq!(html_esc("a>b"), "a&gt;b");
+    }
+
+    #[test]
+    fn html_esc_double_quote() {
+        assert_eq!(html_esc(r#"a"b"#), "a&quot;b");
+    }
+
+    #[test]
+    fn html_esc_all_special_chars() {
+        assert_eq!(
+            html_esc(r#"<a href="x&y">z</a>"#),
+            "&lt;a href=&quot;x&amp;y&quot;&gt;z&lt;/a&gt;"
+        );
+    }
+
+    #[test]
+    fn html_esc_empty_string() {
+        assert_eq!(html_esc(""), "");
+    }
+
+    // ── png_data_uri ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn png_data_uri_has_correct_prefix() {
+        let uri = png_data_uri(b"\x89PNG\r\n\x1a\n");
+        assert!(uri.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn png_data_uri_non_empty_for_non_empty_input() {
+        let uri = png_data_uri(b"fake-png-bytes");
+        assert!(uri.len() > "data:image/png;base64,".len());
+    }
+
+    // ── load_custom_logo ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn load_custom_logo_nonexistent_file_returns_none() {
+        let result = load_custom_logo(std::path::Path::new("/nonexistent/__sloc_logo__.png"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_custom_logo_png_file_returns_data_uri() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("logo.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nfake-png-data").unwrap();
+        let result = load_custom_logo(&path);
+        assert!(result.is_some());
+        let uri = result.unwrap();
+        assert!(uri.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn load_custom_logo_svg_file_uses_svg_mime() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("logo.svg");
+        std::fs::write(&path, b"<svg></svg>").unwrap();
+        let result = load_custom_logo(&path);
+        assert!(result.is_some());
+        let uri = result.unwrap();
+        assert!(uri.starts_with("data:image/svg+xml;base64,"));
+    }
+
+    #[test]
+    fn load_custom_logo_unknown_extension_treated_as_png() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("logo.bin");
+        std::fs::write(&path, b"some-bytes").unwrap();
+        let result = load_custom_logo(&path);
+        assert!(result.is_some());
+        let uri = result.unwrap();
+        assert!(uri.starts_with("data:image/png;base64,"));
+    }
 }

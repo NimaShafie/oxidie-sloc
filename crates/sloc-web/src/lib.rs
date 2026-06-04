@@ -8104,6 +8104,8 @@ async fn trend_report_handler(
     function showTT(e,html){{tt.innerHTML=html;tt.style.display='block';moveTT(e);}}
     function moveTT(e){{var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}}
     function hideTT(){{tt.style.display='none';}}
+    window.addEventListener('blur',function(){{hideTT();}});
+    document.addEventListener('visibilitychange',function(){{if(document.hidden)hideTT();}});
 
     function statExact(compact, full){{
       return compact!==full?'<span class="stat-chip-exact">'+full+'</span>':'';
@@ -11613,14 +11615,14 @@ pub fn build_sub_run(
         skipped_file_records: vec![],
         warnings: vec![],
         submodule_summaries: vec![],
-        git_commit_short: parent.git_commit_short.clone(),
-        git_commit_long: parent.git_commit_long.clone(),
-        git_branch: parent.git_branch.clone(),
-        git_commit_author: parent.git_commit_author.clone(),
-        git_commit_date: parent.git_commit_date.clone(),
-        git_tags: parent.git_tags.clone(),
-        git_nearest_tag: parent.git_nearest_tag.clone(),
-        git_remote_url: parent.git_remote_url.clone(),
+        git_commit_short: sub.git_commit_short.clone(),
+        git_commit_long: sub.git_commit_long.clone(),
+        git_branch: sub.git_branch.clone(),
+        git_commit_author: sub.git_commit_author.clone(),
+        git_commit_date: sub.git_commit_date.clone(),
+        git_tags: None,
+        git_nearest_tag: None,
+        git_remote_url: sub.git_remote_url.clone(),
         style_summary: None,
     }
 }
@@ -16009,6 +16011,8 @@ int main() { … }   ← code
       el.addEventListener('mouseenter',function(){txt.textContent=el.getAttribute('data-wb-tip');pos(el);});
       el.addEventListener('mouseleave',function(){tip.style.display='none';});
     });
+    window.addEventListener('blur',function(){tip.style.display='none';});
+    document.addEventListener('visibilitychange',function(){if(document.hidden)tip.style.display='none';});
   })();
   (function(){
     function fixArtifactHintSpacing(){
@@ -18500,6 +18504,8 @@ struct ScanSetupTemplate {
           var el=document.getElementById('r-tt');
           if(el&&el.style.display!=='none')rTT.m(e);
         });
+        window.addEventListener('blur',function(){rTT.h();});
+        document.addEventListener('visibilitychange',function(){if(document.hidden)rTT.h();});
       })();
 
       // ── Language overview charts ───────────────────────────────────────────
@@ -23412,6 +23418,8 @@ struct CompareSelectTemplate {
     window.icTT=function(e,t,v){if(!_icTT)return;_icTT.innerHTML='<strong>'+t+'</strong><br>'+v;_icTT.style.display='block';window.icMT(e);};
     window.icMT=function(e){if(!_icTT)return;var x=e.clientX+16,y=e.clientY-10,r=_icTT.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;_icTT.style.left=x+'px';_icTT.style.top=y+'px';};
     window.icHT=function(){if(_icTT)_icTT.style.display='none';};
+    window.addEventListener('blur',function(){window.icHT();});
+    document.addEventListener('visibilitychange',function(){if(document.hidden)window.icHT();});
     (function(){
       var OX='#C45C10',GN='#2A6846',RD='#B23030',GY='#AAAAAA',LGY='#DDDDDD';
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
@@ -26118,6 +26126,77 @@ mod utility_tests {
         assert!(
             u.contains("/-/commit/sha123"),
             "gitlab ssh must use /-/commit/"
+        );
+    }
+
+    // ── git_clone_dest ────────────────────────────────────────────────────────
+
+    #[test]
+    fn git_clone_dest_github_url_produces_safe_name() {
+        let dir = PathBuf::from("/tmp/clones");
+        let dest = git_clone_dest("https://github.com/owner/repo.git", &dir);
+        let name = dest.file_name().unwrap().to_string_lossy();
+        assert!(!name.is_empty());
+        assert!(
+            name.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.'),
+            "clone dest must only contain safe chars, got: {name}"
+        );
+    }
+
+    #[test]
+    fn git_clone_dest_is_inside_clones_dir() {
+        let dir = PathBuf::from("/tmp/clones");
+        let dest = git_clone_dest("https://github.com/owner/repo.git", &dir);
+        assert!(
+            dest.starts_with(&dir),
+            "clone dest must be inside clones_dir"
+        );
+    }
+
+    #[test]
+    fn git_clone_dest_truncates_to_80_chars_max() {
+        let long_url = "https://github.com/".to_string() + &"a".repeat(200);
+        let dir = PathBuf::from("/tmp/clones");
+        let dest = git_clone_dest(&long_url, &dir);
+        let name = dest.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.len() <= 80,
+            "clone dest name must be at most 80 chars, got {} chars: {name}",
+            name.len()
+        );
+    }
+
+    #[test]
+    fn git_clone_dest_special_chars_replaced_with_underscore() {
+        let dir = PathBuf::from("/tmp/clones");
+        let dest = git_clone_dest("git@github.com:owner/repo.git", &dir);
+        let name = dest.file_name().unwrap().to_string_lossy();
+        assert!(
+            !name.contains('@') && !name.contains(':') && !name.contains('/'),
+            "special chars must be replaced in clone dest, got: {name}"
+        );
+    }
+
+    #[test]
+    fn git_clone_dest_different_urls_differ() {
+        let dir = PathBuf::from("/tmp/clones");
+        let a = git_clone_dest("https://github.com/owner/repo-a.git", &dir);
+        let b = git_clone_dest("https://github.com/owner/repo-b.git", &dir);
+        assert_ne!(
+            a, b,
+            "different repos must produce different clone dest names"
+        );
+    }
+
+    #[test]
+    fn git_clone_dest_same_url_same_result() {
+        let dir = PathBuf::from("/tmp/clones");
+        let url = "https://github.com/owner/repo.git";
+        assert_eq!(
+            git_clone_dest(url, &dir),
+            git_clone_dest(url, &dir),
+            "same URL must always give same clone dest"
         );
     }
 }
