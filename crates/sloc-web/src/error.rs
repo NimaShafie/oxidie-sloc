@@ -48,3 +48,72 @@ pub fn unprocessable_entity(message: &str) -> Response {
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+
+    async fn body_str(resp: Response) -> (StatusCode, String) {
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn not_found_returns_404() {
+        let (status, body) = body_str(not_found("thing not found")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("thing not found"));
+        assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn bad_request_returns_400() {
+        let (status, body) = body_str(bad_request("invalid input")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("invalid input"));
+        assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn internal_returns_500() {
+        let (status, body) = body_str(internal("server blew up")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("server blew up"));
+        assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn unprocessable_entity_returns_422() {
+        let (status, body) = body_str(unprocessable_entity("bad data")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("bad data"));
+        assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn not_found_empty_message() {
+        let (status, body) = body_str(not_found("")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn responses_are_json_content_type() {
+        use axum::http::header;
+        let fns: Vec<fn(&str) -> Response> =
+            vec![not_found, bad_request, internal, unprocessable_entity];
+        for f in fns {
+            let resp = f("msg");
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(ct.contains("json"), "expected JSON content-type, got: {ct}");
+        }
+    }
+}
