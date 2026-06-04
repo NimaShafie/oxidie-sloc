@@ -725,7 +725,7 @@ fn write_sub_html_reports(run: &AnalysisRun, dir: &Path, quiet: bool) -> Result<
     for sub in &run.submodule_summaries {
         let safe = sloc_web::sanitize_project_label(&sub.name);
         let sub_run = sloc_web::build_sub_run(run, sub, parent_path);
-        let html = sloc_report::render_sub_report_html(&sub_run)
+        let html = sloc_report::render_sub_report_html(&sub_run, None)
             .with_context(|| format!("rendering sub-report for '{}'", sub.name))?;
         let out_path = dir.join(format!("sub_{safe}.html"));
         std::fs::write(&out_path, html.as_bytes())
@@ -833,11 +833,21 @@ async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
             summary: sloc_core::ScanSummarySnapshot {
                 files_analyzed: run.summary_totals.files_analyzed,
                 files_skipped: run.summary_totals.files_skipped,
+                total_physical_lines: run.summary_totals.total_physical_lines,
                 code_lines: run.summary_totals.code_lines,
                 comment_lines: run.summary_totals.comment_lines,
                 blank_lines: run.summary_totals.blank_lines,
-                total_physical_lines: run.summary_totals.total_physical_lines,
-                ..Default::default()
+                functions: run.summary_totals.functions,
+                classes: run.summary_totals.classes,
+                variables: run.summary_totals.variables,
+                imports: run.summary_totals.imports,
+                test_count: run.summary_totals.test_count,
+                coverage_lines_found: run.summary_totals.coverage_lines_found,
+                coverage_lines_hit: run.summary_totals.coverage_lines_hit,
+                coverage_functions_found: run.summary_totals.coverage_functions_found,
+                coverage_functions_hit: run.summary_totals.coverage_functions_hit,
+                coverage_branches_found: run.summary_totals.coverage_branches_found,
+                coverage_branches_hit: run.summary_totals.coverage_branches_hit,
             },
             json_path: args.json_out.clone(),
         });

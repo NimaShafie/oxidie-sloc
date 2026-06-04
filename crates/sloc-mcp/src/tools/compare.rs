@@ -175,4 +175,51 @@ mod tests {
             "diff output must be JSON: {v}"
         );
     }
+
+    #[tokio::test]
+    async fn compare_runs_with_nonexistent_json_paths_fails() {
+        let Some(bin) = find_oxide_sloc_binary() else {
+            eprintln!("oxide-sloc binary not found in target/debug — skipping");
+            return;
+        };
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: bin.to_str().unwrap().to_owned(),
+            api_key: None,
+            allowed_roots: vec![],
+        };
+        // Passing paths to non-existent JSON files makes oxide-sloc diff fail with non-zero exit,
+        // which exercises the `!output.status.success()` bail branch.
+        let result = compare_runs(
+            "/nonexistent/__sloc_baseline_xyz__.json".to_owned(),
+            "/nonexistent/__sloc_current_xyz__.json".to_owned(),
+            &cfg,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "diff with nonexistent JSON paths must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_runs_path_not_in_allowed_roots_is_rejected() {
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            // Restrict to only the system temp dir — current dir is almost certainly elsewhere
+            allowed_roots: vec!["/nonexistent/__no_such_allowed_root__".into()],
+        };
+        let result = compare_runs(
+            "/some/baseline.json".to_owned(),
+            "/some/current.json".to_owned(),
+            &cfg,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "disallowed path must return an error, got Ok"
+        );
+    }
 }

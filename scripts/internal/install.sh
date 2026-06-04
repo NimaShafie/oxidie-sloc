@@ -583,6 +583,33 @@ if ! command -v cargo &>/dev/null; then
         TOOLS_DIR="$REPO_ROOT/.tools"
         mkdir -p "$TOOLS_DIR"
 
+        # Trust the signing CA before extracting toolchain binaries, so Windows can
+        # verify the publisher signature when AV scans newly written PE files.
+        trust_ca_cert
+
+        if [[ "$PLATFORM" == windows ]]; then
+            _tools_w="$(cygpath -w "$TOOLS_DIR" 2>/dev/null || echo "$TOOLS_DIR")"
+            _target_w="$(cygpath -w "$REPO_ROOT/target" 2>/dev/null || echo "$REPO_ROOT/target")"
+            _vendor_w="$(cygpath -w "$VENDOR_DIR" 2>/dev/null || echo "$VENDOR_DIR")"
+            echo ""
+            echo " NOTE: The next step extracts ~200 Rust compiler binaries."
+            echo "       Antivirus may flag this activity. Affected directories:"
+            echo "         .tools/   target/release/   vendor/"
+            echo "       Attempting to add Windows Defender exclusions automatically..."
+            powershell.exe -NoProfile -NonInteractive -Command "
+try {
+    \$paths = @('$_tools_w', '$_target_w', '$_vendor_w')
+    Add-MpPreference -ExclusionPath \$paths -ErrorAction Stop
+    Write-Output ' [OK] Defender exclusions added for build directories.'
+} catch {
+    Write-Output ' [NOTE] Auto-exclusion failed (may need admin). If AV blocks the build,'
+    Write-Output '        add these folder exclusions in Windows Security manually:'
+    Write-Output '          .tools/   target/release/   vendor/'
+}
+" 2>/dev/null || true
+            echo ""
+        fi
+
         echo " Extracting toolchain archive..."
         if [[ "$PLATFORM" == windows ]]; then
             # Windows: Git Bash tar records rustup's proxy hardlinks (cargo.exe,
