@@ -156,8 +156,8 @@ pub fn render_html_with_delta(
 /// # Errors
 ///
 /// Returns an error if template rendering or configuration serialization fails.
-pub fn render_sub_report_html(run: &AnalysisRun) -> Result<String> {
-    render_html_inner(run, true, None, None)
+pub fn render_sub_report_html(run: &AnalysisRun, pdf_url: Option<&str>) -> Result<String> {
+    render_html_inner(run, true, pdf_url, None)
 }
 
 fn load_custom_logo(path: &std::path::Path) -> Option<String> {
@@ -2742,6 +2742,7 @@ struct WarningOpportunityRow {
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
     .page { max-width: 1720px; margin: 0 auto; padding: 32px 24px 40px; }
+    @media (max-width: 1920px) { .top-nav-inner { max-width: 1500px; } .page { max-width: 1500px; } }
     .summary-grid { display:grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:10px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
@@ -3521,11 +3522,19 @@ struct WarningOpportunityRow {
             </span>
             {% endif %}
             {% else %}
+            {% if is_sub_report %}
+            <span class="run-id-chip">
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
+              <span class="run-id-chip-value">Submodule</span>
+              <span class="chip-tooltip">Submodules are pinned to a specific commit — no branch ref</span>
+            </span>
+            {% else %}
             <span class="run-id-chip muted-chip">
               <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
               <span class="run-id-chip-value">Not detected</span>
               <span class="chip-tooltip">No Git branch was found for this scan</span>
             </span>
+            {% endif %}
             {% endif %}
             {% if let Some(author) = run.git_commit_author %}
             <span class="run-id-chip" data-author="{{ author }}">

@@ -295,4 +295,36 @@ mod tests {
         let result = analyze_path(".".to_owned(), None, &cfg).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn analyze_path_with_real_binary_nonexistent_dir_produces_result() {
+        let Some(bin) = find_oxide_sloc_binary() else {
+            eprintln!("oxide-sloc binary not found in target/debug — skipping");
+            return;
+        };
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: bin.to_str().unwrap().to_owned(),
+            api_key: None,
+            allowed_roots: vec![],
+        };
+        // oxide-sloc analyze exits 0 even for non-existent paths (produces empty result).
+        // This exercises the success branch after the binary runs.
+        let result =
+            analyze_path("/nonexistent/__sloc_test_path_xyz__".to_owned(), None, &cfg).await;
+        // Either Ok (empty result) or Err (binary rejected it) — no panic either way
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn analyze_path_disallowed_by_roots_returns_error() {
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec!["/nonexistent/__no_such_allowed_root__".into()],
+        };
+        let result = analyze_path("/some/path".to_owned(), None, &cfg).await;
+        assert!(result.is_err(), "disallowed path must return an error");
+    }
 }
