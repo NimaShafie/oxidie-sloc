@@ -268,6 +268,24 @@ pub struct SubmoduleSummary {
     pub comment_lines: u64,
     pub blank_lines: u64,
     pub language_summaries: Vec<LanguageSummary>,
+    /// Short commit SHA (7 chars) of the submodule's own HEAD at scan time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit_short: Option<String>,
+    /// Full commit SHA of the submodule's own HEAD at scan time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit_long: Option<String>,
+    /// Branch name active in the submodule at scan time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    /// Author of the submodule's most recent commit at scan time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit_author: Option<String>,
+    /// ISO 8601 author-date of the submodule's most recent commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit_date: Option<String>,
+    /// URL of the submodule's `origin` remote as recorded in its `.git/config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -867,7 +885,7 @@ fn process_submodules(config: &AppConfig, analyzed: &mut [FileRecord]) -> Vec<Su
         }
     }
 
-    build_submodule_summaries(analyzed, &submodules)
+    build_submodule_summaries(analyzed, &submodules, &root)
 }
 
 /// Assemble the final `AnalysisRun` from collected records and metadata.
@@ -1655,6 +1673,7 @@ pub fn detect_submodules(root: &Path) -> Vec<(String, PathBuf)> {
 fn build_submodule_summaries(
     analyzed: &[FileRecord],
     submodules: &[(String, PathBuf)],
+    root: &Path,
 ) -> Vec<SubmoduleSummary> {
     submodules
         .iter()
@@ -1674,6 +1693,8 @@ fn build_submodule_summaries(
             let blank_lines = files.iter().map(|f| f.effective_counts.blank_lines).sum();
             let language_summaries = build_language_summaries_from_slice(&files);
 
+            let git = detect_git_for_run(&root.join(path));
+
             SubmoduleSummary {
                 name: name.clone(),
                 relative_path: path.to_string_lossy().replace('\\', "/"),
@@ -1683,6 +1704,12 @@ fn build_submodule_summaries(
                 comment_lines,
                 blank_lines,
                 language_summaries,
+                git_commit_short: git.commit_short,
+                git_commit_long: git.commit_long,
+                git_branch: git.branch,
+                git_commit_author: git.author,
+                git_commit_date: git.commit_date,
+                git_remote_url: git.remote_url,
             }
         })
         .filter(|s| s.files_analyzed > 0)

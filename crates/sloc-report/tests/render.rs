@@ -7,15 +7,15 @@
 use chrono::Utc;
 use sloc_config::AppConfig;
 use sloc_core::{
-    AnalysisRun, EffectiveCounts, EnvironmentMetadata, FileCoverage, FileRecord, FileStatus,
-    LanguageStyleGroup, LanguageSummary, StyleSummary, SubmoduleSummary, SummaryTotals,
-    ToolMetadata,
+    AnalysisRun, EffectiveCounts, EnvironmentMetadata, FileChangeStatus, FileCoverage, FileDelta,
+    FileRecord, FileStatus, LanguageStyleGroup, LanguageSummary, ScanComparison, StyleSummary,
+    SubmoduleSummary, SummaryDelta, SummaryTotals, ToolMetadata,
 };
 use sloc_languages::{Language, ParseMode, RawLineCounts};
 use sloc_report::{
     render_confluence_storage, render_confluence_wiki_markup, render_html, render_html_with_delta,
-    render_sub_report_html, write_csv, write_html as write_html_report, write_xlsx,
-    ReportDeltaContext,
+    render_sub_report_html, write_csv, write_diff_csv, write_diff_xlsx,
+    write_html as write_html_report, write_html_with_pdf_link, write_xlsx, ReportDeltaContext,
 };
 
 // ── Fixture helpers ───────────────────────────────────────────────────────────
@@ -271,6 +271,12 @@ fn make_run_with_submodules() -> AnalysisRun {
         comment_lines: 20,
         blank_lines: 20,
         language_summaries: vec![make_lang_summary(Language::C, 5, 160)],
+        git_commit_short: None,
+        git_commit_long: None,
+        git_branch: None,
+        git_commit_author: None,
+        git_commit_date: None,
+        git_remote_url: None,
     }];
     run
 }
@@ -800,6 +806,430 @@ fn render_html_with_various_languages() {
     ];
     run.summary_totals.files_analyzed = 8;
     run.summary_totals.code_lines = 195;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+// ── write_html_with_pdf_link ──────────────────────────────────────────────────
+
+#[test]
+fn write_html_with_pdf_link_same_dir_embeds_relative_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let html_path = dir.path().join("report.html");
+    let pdf_path = dir.path().join("my-unique-sloc-report-xyz.pdf");
+    let run = make_run();
+    write_html_with_pdf_link(&run, &html_path, Some(&pdf_path)).unwrap();
+    let content = std::fs::read_to_string(&html_path).unwrap();
+    assert!(!content.is_empty());
+    assert!(content.contains("<!doctype html>") || content.contains("<!DOCTYPE html>"));
+    // Same dir → filename should appear as data-standalone-pdf attribute
+    assert!(
+        content.contains("my-unique-sloc-report-xyz.pdf"),
+        "same-dir PDF filename must appear in HTML as data-standalone-pdf"
+    );
+}
+
+#[test]
+fn write_html_with_pdf_link_different_dir_omits_pdf_url() {
+    let html_dir = tempfile::tempdir().unwrap();
+    let pdf_dir = tempfile::tempdir().unwrap();
+    let html_path = html_dir.path().join("report.html");
+    let pdf_path = pdf_dir.path().join("my-cross-dir-report.pdf");
+    let run = make_run();
+    write_html_with_pdf_link(&run, &html_path, Some(&pdf_path)).unwrap();
+    let content = std::fs::read_to_string(&html_path).unwrap();
+    assert!(!content.is_empty());
+    // Different dirs → no data-standalone-pdf attribute should appear with this filename
+    assert!(
+        !content.contains("data-standalone-pdf=\"my-cross-dir-report.pdf\""),
+        "cross-dir PDF must not appear as data-standalone-pdf attribute"
+    );
+}
+
+#[test]
+fn write_html_with_pdf_link_none_behaves_like_write_html() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run();
+    write_html_with_pdf_link(&run, tmp.path(), None).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+    assert!(content.contains("<!doctype html>") || content.contains("<!DOCTYPE html>"));
+}
+
+// ── write_diff_csv ────────────────────────────────────────────────────────────
+
+fn make_scan_comparison() -> ScanComparison {
+    ScanComparison {
+        summary: SummaryDelta {
+            baseline_run_id: "base-run-1".into(),
+            current_run_id: "curr-run-2".into(),
+            baseline_timestamp: Utc::now(),
+            current_timestamp: Utc::now(),
+            baseline_files: 5,
+            current_files: 6,
+            files_analyzed_delta: 1,
+            baseline_code: 500,
+            current_code: 600,
+            code_lines_delta: 100,
+            baseline_comments: 50,
+            current_comments: 55,
+            comment_lines_delta: 5,
+            blank_lines_delta: 10,
+            total_lines_delta: 115,
+            coverage_lines_hit_delta: None,
+            coverage_line_pct_delta: None,
+            baseline_coverage_line_pct: None,
+            current_coverage_line_pct: None,
+        },
+        file_deltas: vec![
+            FileDelta {
+                relative_path: "src/new.rs".into(),
+                language: Some("Rust".into()),
+                status: FileChangeStatus::Added,
+                baseline_code: 0,
+                current_code: 80,
+                code_delta: 80,
+                baseline_comment: 0,
+                current_comment: 5,
+                comment_delta: 5,
+                baseline_blank: 0,
+                current_blank: 10,
+                blank_delta: 10,
+                total_delta: 95,
+            },
+            FileDelta {
+                relative_path: "src/old.rs".into(),
+                language: Some("Rust".into()),
+                status: FileChangeStatus::Modified,
+                baseline_code: 100,
+                current_code: 120,
+                code_delta: 20,
+                baseline_comment: 10,
+                current_comment: 10,
+                comment_delta: 0,
+                baseline_blank: 5,
+                current_blank: 5,
+                blank_delta: 0,
+                total_delta: 20,
+            },
+        ],
+        files_added: 1,
+        files_removed: 0,
+        files_modified: 1,
+        files_unchanged: 4,
+    }
+}
+
+#[test]
+fn write_diff_csv_creates_nonempty_file() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = make_scan_comparison();
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty(), "diff CSV must not be empty");
+}
+
+#[test]
+fn write_diff_csv_contains_header_sections() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = make_scan_comparison();
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("Diff Summary"),
+        "must contain summary section"
+    );
+    assert!(
+        content.contains("File Deltas"),
+        "must contain file deltas section"
+    );
+}
+
+#[test]
+fn write_diff_csv_contains_run_ids() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = make_scan_comparison();
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("base-run-1"),
+        "must contain baseline run ID"
+    );
+    assert!(
+        content.contains("curr-run-2"),
+        "must contain current run ID"
+    );
+}
+
+#[test]
+fn write_diff_csv_contains_file_paths() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = make_scan_comparison();
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        content.contains("src/new.rs"),
+        "must contain added file path"
+    );
+    assert!(
+        content.contains("src/old.rs"),
+        "must contain modified file path"
+    );
+}
+
+#[test]
+fn write_diff_csv_contains_status_labels() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = make_scan_comparison();
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(content.contains("Added"), "must label added files");
+    assert!(content.contains("Modified"), "must label modified files");
+}
+
+#[test]
+fn write_diff_csv_empty_comparison() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = ScanComparison {
+        summary: SummaryDelta {
+            baseline_run_id: "a".into(),
+            current_run_id: "b".into(),
+            baseline_timestamp: Utc::now(),
+            current_timestamp: Utc::now(),
+            baseline_files: 0,
+            current_files: 0,
+            files_analyzed_delta: 0,
+            baseline_code: 0,
+            current_code: 0,
+            code_lines_delta: 0,
+            baseline_comments: 0,
+            current_comments: 0,
+            comment_lines_delta: 0,
+            blank_lines_delta: 0,
+            total_lines_delta: 0,
+            coverage_lines_hit_delta: None,
+            coverage_line_pct_delta: None,
+            baseline_coverage_line_pct: None,
+            current_coverage_line_pct: None,
+        },
+        file_deltas: vec![],
+        files_added: 0,
+        files_removed: 0,
+        files_modified: 0,
+        files_unchanged: 0,
+    };
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        !content.is_empty(),
+        "empty comparison CSV must still have headers"
+    );
+    assert!(content.contains("Diff Summary"));
+}
+
+// ── write_diff_xlsx ───────────────────────────────────────────────────────────
+
+#[test]
+fn write_diff_xlsx_creates_nonempty_file() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = make_scan_comparison();
+    write_diff_xlsx(&cmp, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "diff XLSX must not be empty");
+}
+
+#[test]
+fn write_diff_xlsx_empty_comparison() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let cmp = ScanComparison {
+        summary: SummaryDelta {
+            baseline_run_id: "a".into(),
+            current_run_id: "b".into(),
+            baseline_timestamp: Utc::now(),
+            current_timestamp: Utc::now(),
+            baseline_files: 0,
+            current_files: 0,
+            files_analyzed_delta: 0,
+            baseline_code: 0,
+            current_code: 0,
+            code_lines_delta: 0,
+            baseline_comments: 0,
+            current_comments: 0,
+            comment_lines_delta: 0,
+            blank_lines_delta: 0,
+            total_lines_delta: 0,
+            coverage_lines_hit_delta: None,
+            coverage_line_pct_delta: None,
+            baseline_coverage_line_pct: None,
+            current_coverage_line_pct: None,
+        },
+        file_deltas: vec![],
+        files_added: 0,
+        files_removed: 0,
+        files_modified: 0,
+        files_unchanged: 0,
+    };
+    write_diff_xlsx(&cmp, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(
+        meta.len() > 0,
+        "empty comparison XLSX must not be empty (has headers)"
+    );
+}
+
+#[test]
+fn write_diff_xlsx_with_all_statuses() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut cmp = make_scan_comparison();
+    cmp.file_deltas.push(FileDelta {
+        relative_path: "src/removed.rs".into(),
+        language: Some("Rust".into()),
+        status: FileChangeStatus::Removed,
+        baseline_code: 50,
+        current_code: 0,
+        code_delta: -50,
+        baseline_comment: 5,
+        current_comment: 0,
+        comment_delta: -5,
+        baseline_blank: 3,
+        current_blank: 0,
+        blank_delta: -3,
+        total_delta: -58,
+    });
+    cmp.file_deltas.push(FileDelta {
+        relative_path: "src/stable.rs".into(),
+        language: Some("Rust".into()),
+        status: FileChangeStatus::Unchanged,
+        baseline_code: 30,
+        current_code: 30,
+        code_delta: 0,
+        baseline_comment: 3,
+        current_comment: 3,
+        comment_delta: 0,
+        baseline_blank: 2,
+        current_blank: 2,
+        blank_delta: 0,
+        total_delta: 0,
+    });
+    write_diff_xlsx(&cmp, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+// ── render_html edge cases ────────────────────────────────────────────────────
+
+#[test]
+fn render_html_with_no_git_metadata() {
+    let mut run = make_run();
+    run.git_branch = None;
+    run.git_commit_short = None;
+    run.git_commit_long = None;
+    run.git_commit_author = None;
+    run.git_tags = None;
+    run.git_nearest_tag = None;
+    run.git_commit_date = None;
+    run.git_remote_url = None;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_confluence_storage_special_chars_in_project_name() {
+    let mut run = make_run();
+    run.effective_configuration.reporting.report_title = "Project <Alpha> & \"Beta\"".into();
+    let out = render_confluence_storage(&run, None);
+    assert!(!out.is_empty());
+    // The project name special chars must be HTML-escaped in the output
+    assert!(
+        out.contains("&lt;Alpha&gt;"),
+        "angle brackets in project name must be escaped to &lt;&gt;"
+    );
+    assert!(
+        out.contains("&amp;"),
+        "ampersand in project name must be escaped to &amp;"
+    );
+    // The raw unescaped tag must NOT appear inside a text context
+    assert!(
+        !out.contains("Project <Alpha>"),
+        "raw unescaped project name must not appear"
+    );
+}
+
+#[test]
+fn render_confluence_wiki_markup_with_all_git_metadata() {
+    let run = make_run_with_all_git();
+    let out = render_confluence_wiki_markup(&run);
+    assert!(!out.is_empty());
+    assert!(out.contains("h2."), "must have h2 headings");
+}
+
+#[test]
+fn write_csv_with_style_summary() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_style();
+    write_csv(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+}
+
+#[test]
+fn write_xlsx_with_coverage_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_coverage();
+    write_xlsx(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn render_html_with_12_plus_languages() {
+    // Exercises the .take(12) limit in build_lang_chart_json
+    let mut run = make_empty_run();
+    let langs_list = [
+        Language::Rust,
+        Language::Python,
+        Language::TypeScript,
+        Language::Go,
+        Language::C,
+        Language::Cpp,
+        Language::Java,
+        Language::JavaScript,
+        Language::CSharp,
+        Language::Ruby,
+        Language::Shell,
+        Language::Sql,
+        Language::Kotlin,
+        Language::Swift,
+    ];
+    for (i, lang) in langs_list.iter().enumerate() {
+        run.per_file_records.push(make_file_record(
+            &format!("file_{i}.{i}"),
+            *lang,
+            10 + i as u64,
+        ));
+        run.totals_by_language
+            .push(make_lang_summary(*lang, 1, 10 + i as u64));
+    }
+    run.summary_totals.files_analyzed = langs_list.len() as u64;
+    run.summary_totals.code_lines = 200;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_file_size_histogram_all_buckets() {
+    // Exercise all 5 histogram buckets: Tiny(<50), Small(50-199), Medium(200-499), Large(500-999), Huge(>=1000)
+    let mut run = make_empty_run();
+    run.per_file_records = vec![
+        make_file_record("tiny.rs", Language::Rust, 10),
+        make_file_record("small.rs", Language::Rust, 100),
+        make_file_record("medium.rs", Language::Rust, 300),
+        make_file_record("large.rs", Language::Rust, 750),
+        make_file_record("huge.rs", Language::Rust, 1500),
+    ];
+    run.totals_by_language = vec![make_lang_summary(Language::Rust, 5, 2660)];
+    run.summary_totals.files_analyzed = 5;
+    run.summary_totals.code_lines = 2660;
     let html = render_html(&run).unwrap();
     assert!(!html.is_empty());
 }

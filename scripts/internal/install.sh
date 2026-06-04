@@ -266,9 +266,9 @@ build_with_progress() {
         if [[ "$compiled" -eq 0 ]]; then
             # Phase 1: show verification sub-steps; step 2 advances at ~60s, step 3 at ~120s
             local ic_vs2 ic_vs3
-            if   [[ $elapsed -lt 60  ]]; then ic_vs2="$frame"; ic_vs3='\xe2\x97\x8b'
-            elif [[ $elapsed -lt 120 ]]; then ic_vs2="$frame"; ic_vs3="$frame"
-            else                               ic_vs2="$frame"; ic_vs3="$frame"
+            if   [[ $elapsed -lt 60  ]]; then ic_vs2="$frame";          ic_vs3='\xe2\x97\x8b'
+            elif [[ $elapsed -lt 120 ]]; then ic_vs2='\xe2\x9c\x93';   ic_vs3="$frame"
+            else                               ic_vs2='\xe2\x9c\x93';   ic_vs3='\xe2\x9c\x93'
             fi
             printf "     Scan steps:\033[K\n"
             printf "     \xe2\x9c\x93  Read Cargo.lock (%d packages)\033[K\n"  "$total_pkgs"
