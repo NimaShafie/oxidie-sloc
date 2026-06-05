@@ -48,7 +48,7 @@ fn make_file_record(path: &str, code: u64) -> FileRecord {
     }
 }
 
-fn make_lang_summary(code: u64) -> LanguageSummary {
+const fn make_lang_summary(code: u64) -> LanguageSummary {
     LanguageSummary {
         language: Language::Rust,
         files: 1,
@@ -73,6 +73,7 @@ fn make_lang_summary(code: u64) -> LanguageSummary {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn make_run_with_files(files: Vec<(&str, u64)>) -> AnalysisRun {
     let code_total: u64 = files.iter().map(|(_, c)| c).sum();
     let records: Vec<FileRecord> = files.iter().map(|(p, c)| make_file_record(p, *c)).collect();
@@ -700,6 +701,7 @@ fn file_coverage_line_pct_normal() {
 }
 
 #[test]
+#[allow(clippy::float_cmp)] // returns exactly 0.0 when found == 0
 fn file_coverage_line_pct_zero_found() {
     let cov = FileCoverage {
         lines_found: 0,

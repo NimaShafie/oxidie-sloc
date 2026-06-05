@@ -171,7 +171,7 @@ impl ScanRegistry {
     }
 }
 
-fn default_interval_hours() -> u32 {
+const fn default_interval_hours() -> u32 {
     24
 }
 

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
 //! Style-guide analysis for C# and F#.
-//! C# guides: Microsoft (.NET), Google C#, StyleCop.
+//! C# guides: Microsoft (.NET), Google C#, `StyleCop`.
 //! F# guides: Microsoft F#, FSharp.Formatting.
 
 use super::common::{

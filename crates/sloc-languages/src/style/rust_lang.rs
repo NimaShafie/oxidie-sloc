@@ -4,7 +4,10 @@
 //! Style-guide analysis for Rust.
 //! Guides: Official rustfmt defaults, Mozilla Rust, Rust API Guidelines.
 
-use super::common::*;
+use super::common::{
+    classify_indent, scan_base_metrics, score_indent_4, score_line100, score_line120, score_line80,
+    weighted_score, IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+};
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();
@@ -30,7 +33,7 @@ pub fn analyze(text: &str) -> StyleAnalysis {
             let name = rest.split('(').next().unwrap_or("").trim();
             if name.contains('_') && name == name.to_lowercase() {
                 snake_case_fn += 1;
-            } else if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+            } else if name.chars().next().is_some_and(char::is_uppercase) {
                 camel_case_fn += 1;
             }
         }
@@ -85,7 +88,7 @@ fn score_rust(
     let tc = if total == 0 {
         0.50_f32
     } else {
-        let ratio = trailing_commas as f32 / total as f32;
+        let ratio = f64::from(trailing_commas) / f64::from(total);
         if ratio > 0.02 {
             1.0
         } else if ratio > 0.005 {

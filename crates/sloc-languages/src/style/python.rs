@@ -32,9 +32,9 @@ pub fn analyze(text: &str) -> StyleAnalysis {
 
     let quote_val = if single_q == 0 && double_q == 0 {
         "\u{2014}"
-    } else if double_q as f32 / (single_q + double_q) as f32 >= 0.70 {
+    } else if f64::from(double_q) / f64::from(single_q + double_q) >= 0.70 {
         "Double quotes"
-    } else if single_q as f32 / (single_q + double_q) as f32 >= 0.70 {
+    } else if f64::from(single_q) / f64::from(single_q + double_q) >= 0.70 {
         "Single quotes"
     } else {
         "Mixed"
@@ -71,6 +71,7 @@ fn has_type_hints(trimmed: &str) -> bool {
         && (trimmed.contains(": ") || trimmed.contains("->"))
 }
 
+#[allow(clippy::cast_precision_loss)] // counts bounded well within f32 precision
 fn score_double_quotes(double: u32, single: u32) -> f32 {
     let t = double + single;
     if t == 0 {

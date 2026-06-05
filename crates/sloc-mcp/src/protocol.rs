@@ -30,7 +30,7 @@ pub const INTERNAL_ERROR: i32 = -32603;
 pub const PARSE_ERROR: i32 = -32700;
 
 impl McpResponse {
-    pub fn ok(id: Value, result: Value) -> Self {
+    pub const fn ok(id: Value, result: Value) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
@@ -51,7 +51,7 @@ impl McpResponse {
         }
     }
 
-    pub fn parse_error(e: serde_json::Error) -> Self {
+    pub fn parse_error(e: &serde_json::Error) -> Self {
         Self {
             jsonrpc: "2.0",
             id: Value::Null,
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn mcp_response_parse_error_has_null_id() {
         let bad_json = serde_json::from_str::<Value>("{invalid}").unwrap_err();
-        let resp = McpResponse::parse_error(bad_json);
+        let resp = McpResponse::parse_error(&bad_json);
         assert_eq!(resp.id, Value::Null);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, PARSE_ERROR);

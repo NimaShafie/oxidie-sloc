@@ -1,22 +1,21 @@
-use anyhow::Result;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    /// Base URL of a running oxide-sloc server. From SLOC_SERVER_URL.
+    /// Base URL of a running oxide-sloc server. From `SLOC_SERVER_URL`.
     pub server_url: Option<String>,
-    /// Path to the oxide-sloc binary. From SLOC_BIN; defaults to "oxide-sloc".
+    /// Path to the oxide-sloc binary. From `SLOC_BIN`; defaults to "oxide-sloc".
     pub bin_path: String,
-    /// Bearer token for the server. From SLOC_API_KEY.
+    /// Bearer token for the server. From `SLOC_API_KEY`.
     pub api_key: Option<String>,
-    /// Allowlist of directories that analyze_path / compare_runs may scan.
-    /// Populated from SLOC_MCP_ALLOWED_ROOTS (colon-separated on Unix, semicolon on Windows).
+    /// Allowlist of directories that `analyze_path` / `compare_runs` may scan.
+    /// Populated from `SLOC_MCP_ALLOWED_ROOTS` (colon-separated on Unix, semicolon on Windows).
     /// Empty means no restriction (suitable for trusted local use only).
     pub allowed_roots: Vec<PathBuf>,
 }
 
 impl McpConfig {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> Self {
         let server_url = std::env::var("SLOC_SERVER_URL")
             .ok()
             .filter(|s| !s.is_empty());
@@ -29,12 +28,12 @@ impl McpConfig {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .collect();
-        Ok(Self {
+        Self {
             server_url,
             bin_path,
             api_key,
             allowed_roots,
-        })
+        }
     }
 
     pub fn server_url(&self) -> anyhow::Result<&str> {
@@ -63,9 +62,9 @@ impl McpConfig {
         )
     }
 
-    /// Validate that `url` matches the configured SLOC_SERVER_URL.
-    /// If no server_url is configured this always returns an error (unsafe to proceed).
-    /// If `candidate` is None, uses the configured server_url directly.
+    /// Validate that `url` matches the configured `SLOC_SERVER_URL`.
+    /// If no `server_url` is configured this always returns an error (unsafe to proceed).
+    /// If `candidate` is None, uses the configured `server_url` directly.
     pub fn resolve_server_url<'a>(&'a self, candidate: Option<&'a str>) -> anyhow::Result<&'a str> {
         let configured = self.server_url()?;
         match candidate {
@@ -96,7 +95,7 @@ mod tests {
 
     #[test]
     fn from_env_does_not_panic() {
-        assert!(McpConfig::from_env().is_ok());
+        let _ = McpConfig::from_env();
     }
 
     #[test]
@@ -137,8 +136,8 @@ mod tests {
 
     #[test]
     fn empty_server_url_filter_logic() {
-        let raw: Option<String> = Some("".into());
-        assert!(raw.filter(|s| !s.is_empty()).is_none());
+        let raw: Option<String> = Some(String::new());
+        assert!(raw.as_ref().is_none_or(String::is_empty));
 
         let raw: Option<String> = Some("http://localhost".into());
         assert_eq!(
@@ -212,7 +211,7 @@ mod tests {
             server_url: None,
             bin_path: "oxide-sloc".into(),
             api_key: None,
-            allowed_roots: vec![current.clone()],
+            allowed_roots: vec![current],
         };
         // "." canonicalises to current dir, which is inside current
         assert!(cfg.check_path_allowed(".").is_ok());
@@ -241,7 +240,7 @@ mod tests {
             server_url: None,
             bin_path: "oxide-sloc".into(),
             api_key: None,
-            allowed_roots: vec![tmp.clone()],
+            allowed_roots: vec![tmp],
         };
         // A path that definitely doesn't exist cannot be canonicalized → error
         let result = cfg.check_path_allowed("/nonexistent/__sloc_test_path__/x/y/z");

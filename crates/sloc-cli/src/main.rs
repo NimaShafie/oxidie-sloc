@@ -721,7 +721,7 @@ fn write_sub_html_reports(run: &AnalysisRun, dir: &Path, quiet: bool) -> Result<
     }
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating sub-html dir {}", dir.display()))?;
-    let parent_path = run.input_roots.first().map(String::as_str).unwrap_or("");
+    let parent_path = run.input_roots.first().map_or("", String::as_str);
     for sub in &run.submodule_summaries {
         let safe = sloc_web::sanitize_project_label(&sub.name);
         let sub_run = sloc_web::build_sub_run(run, sub, parent_path);

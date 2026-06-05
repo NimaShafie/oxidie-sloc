@@ -34,7 +34,7 @@ pub async fn analyze_path(
     Ok(summarize_run(&run))
 }
 
-pub(crate) fn summarize_run(run: &Value) -> Value {
+pub fn summarize_run(run: &Value) -> Value {
     let totals = &run["summary_totals"];
     let languages: Vec<Value> = run["totals_by_language"]
         .as_array()

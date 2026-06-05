@@ -1736,8 +1736,7 @@ fn dominant_indent_label(files: &[&StyleAnalysis]) -> String {
         .iter()
         .enumerate()
         .max_by_key(|(_, v)| *v)
-        .map(|(i, _)| i)
-        .unwrap_or(5)]
+        .map_or(5, |(i, _)| i)]
     .to_string()
 }
 

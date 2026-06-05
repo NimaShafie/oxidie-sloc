@@ -10,6 +10,68 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.66] — 2026-06-04
+
+### Improved
+
+- **Clippy compliance across all crates** (`sloc-languages`, `sloc-core`, `sloc-report`,
+  `sloc-web`, `sloc-cli`, `sloc-config`, `sloc-git`, `sloc-mcp`): Resolved all outstanding
+  Clippy warnings across the workspace. Changes include:
+  - `#[must_use]` attributes added to all pure functions in `sloc-languages/style/` helpers
+    (`IndentStyle::display`, `classify_indent`, `weighted_score`, `score_indent_*`,
+    `score_line*`, `count_over`, `top_guide`, `scan_base_metrics`, `BraceStyle::display`,
+    `classify_brace`) and in `sloc-core`, `sloc-report`, and `sloc-languages`.
+  - `const fn` conversions for deterministic helpers: `score_indent_2/4/tabs`,
+    `BraceStyle::display`, `IndentStyle::display`, `ptr_display`, `score_ptr_type`,
+    `score_ptr_name`, `default_interval_hours`, `should_style_analyse`,
+    `McpResponse::ok`, and `const fn score_indent_*`.
+  - Integer-to-float casts switched from `as f32` to `f64::from()` throughout
+    `classify_indent`, `classify_brace`, `score_line80/n`, `classify_ptr`, and JS/C++
+    style analyzers — eliminates `clippy::cast_precision_loss` at the source.
+  - `.map(...).unwrap_or(...)` replaced with `.map_or(...)` across `sloc-cli`,
+    `sloc-core`, `sloc-report`, and `sloc-languages`.
+  - Let-else (`let Some(x) = … else { return }`) replaces match-on-option in
+    `scan_indent` (`sloc-languages/style/common.rs`).
+  - Wildcard `use super::common::*` replaced with explicit imports in
+    `sloc-languages/style/rust_lang.rs`.
+  - `char::is_uppercase` passed as a function pointer instead of a closure in
+    `rust_lang::analyze`.
+  - `#[allow(clippy::...)]` annotations with inline justification comments added
+    where suppression is intentional (`cast_precision_loss`, `suboptimal_flops`,
+    `too_many_lines`, `fn_params_excessive_bools`, `similar_names`).
+
+- **`McpConfig::from_env` simplified** (`crates/sloc-mcp/src/config.rs`): Method now
+  returns `Self` instead of `Result<Self>` — environment-variable parsing is infallible;
+  the `Result` wrapper was misleading. Call sites updated accordingly; the unit test
+  `from_env_does_not_panic` updated to match.
+
+- **`McpResponse::parse_error` takes a reference** (`crates/sloc-mcp/src/protocol.rs`):
+  Parameter changed from `serde_json::Error` (owned) to `&serde_json::Error` to avoid
+  unnecessary ownership transfer. `McpResponse::ok` converted to `const fn`.
+
+- **`u32::try_from` for usize→u32 casts** (`sloc-languages/style/common.rs`,
+  `sloc-languages/style/js.rs`): `count_over`, `scan_base_metrics`, and JS analyzer
+  replace `as u32` casts with `u32::try_from(...).unwrap_or(u32::MAX)` to avoid
+  `clippy::cast_possible_truncation`.
+
+- **`opt_string` / `string_arg` use function pointers** (`crates/sloc-mcp/src/server.rs`):
+  `.map(|s| s.to_owned())` replaced with `.map(str::to_owned)` in both helpers.
+
+- **Doc comment identifier quoting** (`sloc-config`, `sloc-mcp`, `sloc-web`): Env-var
+  names and function identifiers in doc comments now use backticks (`SLOC_SERVER_URL`,
+  `analyze_path`, `CabinetWClass`, `SwitchToThisWindow`, etc.) for correct rustdoc
+  rendering.
+
+- **`nsf` scoring logic corrected** (`sloc-languages/style/js.rs`): `nsf` (no-semicolons
+  score) was computed as `if !semis { 1.0 } else { 0.0 }` — rewritten as the cleaner
+  `if semis { 0.0 } else { 1.0 }` removing the negated-bool Clippy hint.
+
+- **Format string modernisation** (`sloc-git/tests/unit.rs`, `sloc-languages/src/lib.rs`):
+  Old-style `format!("… {}", var)` with separate arg updated to inline `{var:?}` /
+  `{args:?}` capture syntax.
+
+---
+
 ## [1.5.65] — 2026-06-02
 
 ### Added

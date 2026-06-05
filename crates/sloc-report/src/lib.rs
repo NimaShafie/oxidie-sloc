@@ -330,7 +330,7 @@ fn build_style_file_json(run: &AnalysisRun) -> String {
             Some(format!(
                 r#"{{"path":"{}","lang":"{}","family":"{}","indent":"{}","guide":"{}","score":{},"signals":[{}]}}"#,
                 json_escape(&f.relative_path),
-                json_escape(f.language.map(|l| l.display_name()).unwrap_or("\u{2014}")),
+                json_escape(f.language.map_or("\u{2014}", |l| l.display_name())),
                 json_escape(&s.language_family),
                 json_escape(s.indent_style.display()),
                 json_escape(&s.dominant_guide),
@@ -535,8 +535,7 @@ fn render_html_inner(
         style_lang_count: run
             .style_summary
             .as_ref()
-            .map(|ss| ss.by_language.len())
-            .unwrap_or(0),
+            .map_or(0, |ss| ss.by_language.len()),
         style_score_threshold: run.effective_configuration.analysis.style_score_threshold,
         style_chart_json: run
             .style_summary
@@ -550,15 +549,15 @@ fn render_html_inner(
         },
         style_summary: run.style_summary.clone(),
         has_delta: delta_ctx.is_some(),
-        delta_code_added: delta_ctx.map(|d| d.delta_code_added).unwrap_or(0),
-        delta_code_removed: delta_ctx.map(|d| d.delta_code_removed).unwrap_or(0),
-        delta_unmodified_lines: delta_ctx.map(|d| d.delta_unmodified_lines).unwrap_or(0),
-        delta_files_added: delta_ctx.map(|d| d.delta_files_added).unwrap_or(0),
-        delta_files_removed: delta_ctx.map(|d| d.delta_files_removed).unwrap_or(0),
-        delta_files_modified: delta_ctx.map(|d| d.delta_files_modified).unwrap_or(0),
-        delta_files_unchanged: delta_ctx.map(|d| d.delta_files_unchanged).unwrap_or(0),
-        prev_code_lines: delta_ctx.map(|d| d.prev_code_lines).unwrap_or(0),
-        prev_scan_count: delta_ctx.map(|d| d.prev_scan_count).unwrap_or(0),
+        delta_code_added: delta_ctx.map_or(0, |d| d.delta_code_added),
+        delta_code_removed: delta_ctx.map_or(0, |d| d.delta_code_removed),
+        delta_unmodified_lines: delta_ctx.map_or(0, |d| d.delta_unmodified_lines),
+        delta_files_added: delta_ctx.map_or(0, |d| d.delta_files_added),
+        delta_files_removed: delta_ctx.map_or(0, |d| d.delta_files_removed),
+        delta_files_modified: delta_ctx.map_or(0, |d| d.delta_files_modified),
+        delta_files_unchanged: delta_ctx.map_or(0, |d| d.delta_files_unchanged),
+        prev_code_lines: delta_ctx.map_or(0, |d| d.prev_code_lines),
+        prev_scan_count: delta_ctx.map_or(0, |d| d.prev_scan_count),
         prev_scan_label: delta_ctx
             .map(|d| d.prev_scan_label.clone())
             .unwrap_or_default(),
@@ -597,6 +596,9 @@ pub fn write_html(run: &AnalysisRun, output_path: &Path) -> Result<()> {
 /// button in the report opens the PDF directly (e.g. from a Jenkins HTML
 /// Publisher artifact directory) instead of calling the oxide-sloc server route.
 /// Pass `pdf_path = None` to get the same behaviour as [`write_html`].
+///
+/// # Errors
+/// Returns an error if HTML rendering or file I/O fails.
 pub fn write_html_with_pdf_link(
     run: &AnalysisRun,
     output_path: &Path,
@@ -758,10 +760,9 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
         )
     };
 
-    let (header_tmpl, footer_tmpl) = match &banner_text {
-        Some(t) => (Some(make_banner_tmpl(t)), Some(make_banner_tmpl(t))),
-        None => (None, None),
-    };
+    let (header_tmpl, footer_tmpl) = banner_text.as_ref().map_or((None, None), |t| {
+        (Some(make_banner_tmpl(t)), Some(make_banner_tmpl(t)))
+    });
 
     let pdf_bytes = tab
         .print_to_pdf(Some(PrintToPdfOptions {
@@ -919,7 +920,11 @@ struct PdfCtx<'a> {
     tbl_hdr_h: f32,
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines
+)]
 fn pdf_render_page1_header(
     ctx: &PdfCtx<'_>,
     run: &AnalysisRun,
@@ -1267,7 +1272,7 @@ fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> 
     y
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn pdf_table_render_section(
     ctx: &PdfCtx<'_>,
     x: f32,
@@ -1326,7 +1331,11 @@ fn pdf_table_render_section(
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops,
+    clippy::similar_names
+)]
 fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
     let tot = &run.summary_totals;
     let half_w = (2.0f32.mul_add(-ctx.margin, ctx.w) - 4.0) / 2.0;
@@ -1394,6 +1403,7 @@ fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
     );
 }
 
+#[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn pdf_render_page1_footer(
     ctx: &PdfCtx<'_>,
     run: &AnalysisRun,
@@ -1454,7 +1464,9 @@ fn per_file_row_bg(ri: usize) -> printpdf::Rgb {
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::suboptimal_flops
 )]
 fn pdf_render_per_file_pages(
     doc: &printpdf::PdfDocumentReference,
@@ -1664,7 +1676,12 @@ fn pdf_render_per_file_pages(
 /// Draws below the metric tables: a section header, four summary chips, and a
 /// per-language mini-table showing the top style guide and N-col compliance.
 /// Returns the y coordinate of the bottom of the rendered section.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines,
+    clippy::suboptimal_flops
+)]
 fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f32) -> f32 {
     use printpdf::{Color, Mm, Rgb};
     const HDR_H: f32 = 5.5;

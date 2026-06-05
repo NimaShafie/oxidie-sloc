@@ -595,7 +595,7 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
 }
 
 /// Returns `true` when `language` should be style-analysed under `scope`.
-fn should_style_analyse(language: Language, scope: StyleLangScope) -> bool {
+const fn should_style_analyse(language: Language, scope: StyleLangScope) -> bool {
     match scope {
         StyleLangScope::CFamilyOnly => {
             matches!(language, Language::C | Language::Cpp | Language::ObjectiveC)
@@ -3410,8 +3410,7 @@ def fn_a():
             assert_eq!(
                 roundtripped,
                 Some(lang),
-                "from_name({slug:?}) should return {:?}",
-                lang
+                "from_name({slug:?}) should return {lang:?}"
             );
         }
     }

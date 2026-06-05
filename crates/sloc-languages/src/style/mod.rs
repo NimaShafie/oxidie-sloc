@@ -20,6 +20,7 @@ use crate::Language;
 
 /// Run style analysis for the given language and source text.
 /// Returns `None` for languages where no style guide heuristics are defined.
+#[must_use]
 pub fn analyze_style(language: Language, text: &str) -> Option<StyleAnalysis> {
     match language {
         // C family

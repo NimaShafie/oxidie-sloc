@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let config = McpConfig::from_env()?;
+    let config = McpConfig::from_env();
     let srv = McpServer::new(config);
 
     let stdin = BufReader::new(tokio::io::stdin());
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         }
         let response: McpResponse = match serde_json::from_str::<McpRequest>(&line) {
             Ok(req) => srv.dispatch(req).await,
-            Err(e) => McpResponse::parse_error(e),
+            Err(e) => McpResponse::parse_error(&e),
         };
         let mut json = serde_json::to_string(&response)?;
         json.push('\n');
