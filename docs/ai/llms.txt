@@ -1,0 +1,79 @@
+# oxide-sloc
+
+> IEEE 1045-1992 SLOC analysis workbench — CLI, web UI, MCP server, 41 languages, offline-first.
+
+oxide-sloc counts source lines of code (SLOC), detects unit tests, and produces HTML and PDF
+reports. It runs as a CLI tool, a localhost web UI (Axum, port 4317), and an MCP server that
+AI agents can call directly without any API key or network configuration.
+
+## Key capabilities
+
+- Analyze 41 languages with a hand-rolled lexical state machine (IEEE 1045-1992 compliant)
+- Counts: code lines, comment lines, blank lines, compiler directives, functions, classes, tests
+- Per-file, per-language, and workspace-level aggregation with configurable policies
+- HTML reports (Askama templates, light/dark theme) and PDF via headless Chromium
+- REST API with full OpenAPI 3.1 spec at `/api/openapi.yaml`
+- MCP server (7 tools) for direct AI agent integration — no config needed beyond pointing at the binary
+- Offline-first: single `git clone` is sufficient to build with no internet connection
+- CI/CD: GitHub Actions marketplace action, Jenkins, GitLab CI, Bitbucket, Azure DevOps
+- Git integration: branch/tag/commit browser, webhooks, scan scheduling, submodule breakdown
+- SVG badge endpoint (`/badge/{metric}`) for embedding live metrics in READMEs
+
+## MCP tools (model context protocol)
+
+The `sloc-mcp` binary exposes these tools to AI agents:
+
+| Tool | What it does |
+|---|---|
+| `analyze_path` | Run analysis on a local directory; returns SLOC, test count, per-language breakdown |
+| `get_metrics_latest` | Fetch metrics from the most recent scan on a running server |
+| `get_metrics_history` | Fetch time-series scan history (timestamps, git refs, SLOC counts) |
+| `get_run_metrics` | Fetch metrics for a specific run by UUID |
+| `compare_runs` | Diff two JSON result files; returns net SLOC delta, language changes, test changes |
+| `health_check` | Verify the server is reachable and return its version |
+| `ingest_result` | Push a headless scan result into a running server's registry |
+
+MCP config: `mcp.json` at the repo root. Tool schemas: `docs/mcp/tool-definitions.json`.
+
+## CLI quick reference
+
+```bash
+# Analyze a directory
+oxide-sloc analyze ./my-repo --plain
+oxide-sloc analyze ./my-repo --per-file --json-out out/result.json --html-out out/report.html
+
+# Re-render a saved JSON result
+oxide-sloc report result.json --pdf-out result.pdf
+
+# Compare two runs
+oxide-sloc diff baseline.json current.json
+
+# Start the web UI at http://127.0.0.1:4317
+oxide-sloc serve
+oxide-sloc            # same — serve is the default subcommand
+```
+
+## Installation
+
+```bash
+cargo install oxide-sloc --locked
+```
+
+Also available via winget, Chocolatey, Scoop, Homebrew, Nix, DEB/RPM packages, and Docker.
+
+## Supported languages (41)
+
+Assembly, C, C++, C#, Clojure, CSS, Dart, Dockerfile, Elixir, Erlang, F#, Go, Groovy, Haskell,
+HTML, Java, JavaScript, Julia, Kotlin, Lua, Makefile, Nim, Objective-C, OCaml, Perl, PHP,
+PowerShell, Python, R, Ruby, Rust, Scala, SCSS/Sass, Shell, SQL, Svelte, Swift, TypeScript,
+Vue, XML/SVG, Zig.
+
+Note: TOML, Markdown, and YAML are intentionally excluded — no meaningful SLOC metric applies.
+
+## Links
+
+- Repository: https://github.com/oxide-sloc/oxide-sloc
+- OpenAPI spec: https://github.com/oxide-sloc/oxide-sloc/blob/main/docs/openapi.yaml
+- MCP tool definitions: https://github.com/oxide-sloc/oxide-sloc/blob/main/docs/mcp/tool-definitions.json
+- Function call definitions: https://github.com/oxide-sloc/oxide-sloc/blob/main/docs/mcp/function-definitions.json
+- Full detail: /llms-full.txt

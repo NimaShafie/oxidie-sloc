@@ -513,6 +513,13 @@ struct RunResultContext {
     prev_entry: Option<RegistryEntry>,
     prev_scan_count: usize,
     project_path: String,
+    /// COCOMO mode chosen by the user in the scan wizard ("organic" | "semi_detached" | "embedded").
+    cocomo_mode: String,
+    /// Per-file complexity alert threshold: files above this are highlighted. 0 = off.
+    complexity_alert: u32,
+    /// Whether duplicate files should be excluded from displayed SLOC totals.
+    #[allow(dead_code)]
+    exclude_duplicates: bool,
 }
 
 /// State of a background async scan, keyed by `wait_id` in `AppState::async_runs`.
@@ -755,6 +762,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/health", get(healthz))
         .route("/api/version", get(api_version_handler))
         .route("/api/openapi.yaml", get(openapi_yaml_handler))
+        .route("/llms.txt", get(llms_txt_handler))
+        .route("/llms-full.txt", get(llms_full_txt_handler))
         .route("/badge/{metric}", get(badge_handler))
         .route("/static/chart.js", get(chart_js_handler))
         .route("/static/chart-report.js", get(report_chart_js_handler))
@@ -1718,6 +1727,35 @@ async fn openapi_yaml_handler() -> impl IntoResponse {
     )
 }
 
+static LLMS_TXT: &str = include_str!("../../../docs/ai/llms.txt");
+static LLMS_FULL_TXT: &str = include_str!("../../../docs/ai/llms-full.txt");
+
+async fn llms_txt_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LLMS_TXT,
+    )
+}
+
+async fn llms_full_txt_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LLMS_FULL_TXT,
+    )
+}
+
 async fn api_docs_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -1786,6 +1824,12 @@ struct AnalyzeForm {
     style_analysis_enabled: Option<String>,
     style_score_threshold: Option<String>,
     style_lang_scope: Option<String>,
+    /// COCOMO I mode ("organic" | "semi_detached" | "embedded"). Defaults to organic.
+    cocomo_mode: Option<String>,
+    /// Cyclomatic complexity alert threshold. Files above this are highlighted. Empty = off.
+    complexity_alert: Option<String>,
+    /// Whether to exclude duplicate files from displayed SLOC totals.
+    exclude_duplicates: Option<String>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -4245,6 +4289,16 @@ async fn analyze_handler(
             form.output_dir.clone()
         },
         clones_dir: state.git_clones_dir.clone(),
+        cocomo_mode: form
+            .cocomo_mode
+            .clone()
+            .unwrap_or_else(|| "organic".to_string()),
+        complexity_alert: form
+            .complexity_alert
+            .as_deref()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0),
+        exclude_duplicates: form.exclude_duplicates.as_deref() == Some("enabled"),
     };
 
     tokio::spawn(run_analysis_task(task));
@@ -4281,6 +4335,9 @@ struct AnalysisTask {
     project_path: String,
     output_dir: Option<String>,
     clones_dir: PathBuf,
+    cocomo_mode: String,
+    complexity_alert: u32,
+    exclude_duplicates: bool,
 }
 
 #[allow(clippy::too_many_lines)] // sequential async workflow; extracting more helpers adds no clarity
@@ -4438,6 +4495,9 @@ async fn run_analysis_task(task: AnalysisTask) {
         prev_entry: prev_entry.clone(),
         prev_scan_count,
         project_path: task.project_path.clone(),
+        cocomo_mode: task.cocomo_mode.clone(),
+        complexity_alert: task.complexity_alert,
+        exclude_duplicates: task.exclude_duplicates,
     };
 
     let artifact_result = persist_run_artifacts(
@@ -4942,6 +5002,59 @@ fn render_result_page(
     );
     let test_count = run.summary_totals.test_count;
 
+    // ── New metrics ──────────────────────────────────────────────────────────
+    let cyclomatic_complexity = run.summary_totals.cyclomatic_complexity;
+    let lsloc = run.summary_totals.lsloc;
+    let uloc = run.uloc;
+    let dryness_pct_str = run.dryness_pct.map_or(String::new(), |d| format!("{d:.1}"));
+    let duplicate_group_count = run.duplicate_groups.len();
+
+    // Re-compute COCOMO with the mode selected in the scan wizard.
+    let ctx = &artifacts.result_context;
+    let (
+        has_cocomo,
+        cocomo_effort_str,
+        cocomo_duration_str,
+        cocomo_staff_str,
+        cocomo_ksloc_str,
+        cocomo_mode_label,
+    ) = {
+        let ksloc = run.summary_totals.code_lines as f64 / 1_000.0;
+        let mode_str = ctx.cocomo_mode.as_str();
+        let (a, b, c, d, label): (f64, f64, f64, f64, &str) = match mode_str {
+            "semi_detached" => (3.0, 1.12, 2.5, 0.35, "Semi-detached"),
+            "embedded" => (3.6, 1.20, 2.5, 0.32, "Embedded"),
+            _ => (2.4, 1.05, 2.5, 0.38, "Organic"),
+        };
+        let effort = a * ksloc.powf(b);
+        let duration = c * effort.powf(d);
+        let staff = if duration > 0.0 {
+            effort / duration
+        } else {
+            0.0
+        };
+        if run.summary_totals.code_lines > 0 {
+            (
+                true,
+                format!("{:.2}", (effort * 100.0).round() / 100.0),
+                format!("{:.2}", (duration * 100.0).round() / 100.0),
+                format!("{:.2}", (staff * 100.0).round() / 100.0),
+                format!("{:.2}", (ksloc * 100.0).round() / 100.0),
+                label.to_string(),
+            )
+        } else {
+            (
+                false,
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                label.to_string(),
+            )
+        }
+    };
+    let complexity_alert = ctx.complexity_alert;
+
     let template = ResultTemplate {
         version: env!("CARGO_PKG_VERSION"),
         report_title: run.effective_configuration.reporting.report_title.clone(),
@@ -5157,6 +5270,18 @@ fn render_result_page(
             .report_header_footer
             .clone(),
         is_offline: false,
+        cyclomatic_complexity,
+        lsloc,
+        uloc,
+        dryness_pct_str,
+        duplicate_group_count,
+        has_cocomo,
+        cocomo_effort_str,
+        cocomo_duration_str,
+        cocomo_staff_str,
+        cocomo_ksloc_str,
+        cocomo_mode_label,
+        complexity_alert,
     };
 
     Html(
@@ -11555,6 +11680,30 @@ fn generate_offline_index(
             .report_header_footer
             .clone(),
         is_offline: true,
+        cyclomatic_complexity: run.summary_totals.cyclomatic_complexity,
+        lsloc: run.summary_totals.lsloc,
+        uloc: run.uloc,
+        dryness_pct_str: run.dryness_pct.map_or(String::new(), |d| format!("{d:.1}")),
+        duplicate_group_count: run.duplicate_groups.len(),
+        has_cocomo: run.cocomo.is_some(),
+        cocomo_effort_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.effort_person_months)),
+        cocomo_duration_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.duration_months)),
+        cocomo_staff_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.avg_staff)),
+        cocomo_ksloc_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.ksloc)),
+        cocomo_mode_label: "Organic".to_string(),
+        complexity_alert: 0,
     };
 
     if let Ok(html) = template.render() {
@@ -11896,6 +12045,8 @@ pub fn build_sub_run(
             coverage_functions_hit,
             coverage_branches_found,
             coverage_branches_hit,
+            cyclomatic_complexity: 0,
+            lsloc: None,
         },
         totals_by_language: sub.language_summaries.clone(),
         per_file_records: sub_files,
@@ -11911,6 +12062,11 @@ pub fn build_sub_run(
         git_nearest_tag: None,
         git_remote_url: sub.git_remote_url.clone(),
         style_summary: None,
+        cocomo: None,
+        uloc: 0,
+        dryness_pct: None,
+        duplicate_groups: vec![],
+        duplicates_excluded: 0,
     }
 }
 
@@ -14142,6 +14298,70 @@ int main() { … }   ← code
                   <div class="field-help-title">Always tracked — not configurable &nbsp;·&nbsp; What these settings change</div>
                   <h4>Comment and blank-line basics &amp; Lines on the boundary</h4>
                   <div class="advanced-rule-description">Pure comment lines, multi-line comment blocks, blank lines, and total physical lines are always included by every supported analyzer. The settings on this page only affect lines that live on the boundary between code and comments — for example <code style="font-size:12px;">x = 1  # counter</code>, which contains both executable code and inline comment text. Every other category is always counted the same regardless of these settings.</div>
+                </div>
+              </div>
+
+              <div class="subsection-bar">Advanced Metrics</div>
+              <div class="scan-rules-grid">
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">COCOMO mode</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Cost estimation model</h4>
+                    <select name="cocomo_mode" id="cocomo_mode">
+                      <option value="organic" selected>Organic — small team, familiar domain (default)</option>
+                      <option value="semi_detached">Semi-detached — mixed constraints</option>
+                      <option value="embedded">Embedded — tight hardware/OS constraints</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Selects the COCOMO I Basic mode used to estimate development effort, schedule, and team size from code SLOC.<br /><strong>Organic</strong> — small teams with good experience on similar problems (most software projects).<br /><strong>Semi-detached</strong> — mixed experience; some novel aspects; medium-sized projects.<br /><strong>Embedded</strong> — tight hardware, OS, or real-time constraints; high innovation; large projects.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># Organic:      Effort = 2.4 × KSLOC^1.05
+# Semi-detached: Effort = 3.0 × KSLOC^1.12
+# Embedded:     Effort = 3.6 × KSLOC^1.20
+# All modes: Schedule = 2.5 × Effort^d</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Complexity alert</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Complexity score alert threshold</h4>
+                    <input type="number" name="complexity_alert" id="complexity_alert" min="0" max="9999" placeholder="e.g. 100 — leave blank for no alert" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;" />
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> When set, files whose total cyclomatic complexity score exceeds this threshold are highlighted in the results page with an accent border.<br /><strong>Complexity score</strong> counts branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a fast lexical approximation of McCabe complexity.<br /><strong>Common thresholds:</strong> 50 for a simple project, 100–200 for medium, 300+ for large repos.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># 0 or blank = no alert (default)
+# 50  = flag any file with &gt; 50 branch points
+# 100 = flag any file with &gt; 100 branch points
+# Files above the threshold are highlighted
+# in the result page metric strip.</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Duplicate handling</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Duplicate file detection</h4>
+                    <select name="exclude_duplicates" id="exclude_duplicates">
+                      <option value="disabled" selected>Detect and report only (default)</option>
+                      <option value="enabled">Detect and exclude from SLOC totals</option>
+                    </select>
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Detects files with identical content (bit-for-bit copies) that would otherwise inflate SLOC counts.<br /><strong>Detect and report only</strong> — duplicates are counted normally in totals; a "Duplicate groups" chip in the result page shows how many groups exist (default).<br /><strong>Detect and exclude</strong> — only one file per identical-content group contributes to code/comment/blank line totals; the rest are silently excluded.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># A repo with 3 identical config files:
+# detect only   → all 3 counted in SLOC
+# exclude dupes → 1 counted, 2 excluded
+# Duplicate groups chip always shows the count.</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row" style="grid-column:1/-1;">
+                  <div class="always-tracked-tip" style="margin:0;width:100%;">
+                    <div class="always-tracked-tip-icon">ℹ</div>
+                    <div class="always-tracked-tip-body">
+                      <div class="field-help-title">Always computed &mdash; every scan produces these automatically</div>
+                      <h4>Cyclomatic complexity &nbsp;·&nbsp; Logical SLOC &nbsp;·&nbsp; ULOC &amp; DRYness &nbsp;·&nbsp; COCOMO estimate</h4>
+                      <div class="advanced-rule-description">These four metrics are computed on every scan at no extra cost. <strong>Cyclomatic complexity</strong> counts branch keywords per file. <strong>Logical SLOC</strong> counts executable statements (available for C-family, Python, Ruby, Shell, and more). <strong>ULOC</strong> (Unique Lines of Code) de-duplicates identical lines across the whole project; DRYness % = ULOC ÷ Code Lines. <strong>COCOMO I</strong> converts total SLOC into effort, schedule, and team-size estimates. All appear in the results page — the settings above only affect how they are displayed or whether edge cases are excluded.</div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -16443,6 +16663,24 @@ struct IndexTemplate {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OxideSLOC — local code analysis - metrics, history and reports</title>
   <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "oxide-sloc",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Windows, Linux",
+    "description": "IEEE 1045-1992 SLOC analysis workbench — CLI, web UI, MCP server, 41 languages, offline-first. Counts code, comment, and blank lines; detects unit tests; produces HTML and PDF reports.",
+    "softwareVersion": "{{ version }}",
+    "author": { "@type": "Person", "name": "Nima Shafie", "url": "https://github.com/NimaShafie" },
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "url": "https://github.com/oxide-sloc/oxide-sloc",
+    "downloadUrl": "https://github.com/oxide-sloc/oxide-sloc/releases",
+    "featureList": "41 language analysis, IEEE 1045-1992 SLOC counting, HTML and PDF reports, REST API, MCP server, CI/CD integration, trend reports, test metrics, git integration",
+    "programmingLanguage": "Rust",
+    "keywords": "sloc, code analysis, source lines of code, metrics, MCP, AI agent"
+  }
+  </script>
   <style nonce="{{ csp_nonce }}">
     :root {
       --radius:18px; --bg:#f5efe8; --surface:rgba(255,255,255,0.86); --surface-2:#fbf7f2;
@@ -18211,6 +18449,64 @@ struct ScanSetupTemplate {
         </div>
       </div>
 
+      <!-- New metrics: complexity, LSLOC, ULOC, duplicates -->
+      {% if cyclomatic_complexity > 0 || uloc > 0 || duplicate_group_count > 0 %}
+      <div class="summary-strip" style="margin-top:12px;">
+        {% if cyclomatic_complexity > 0 %}
+        <div class="stat-chip" data-raw="{{ cyclomatic_complexity }}" {% if complexity_alert > 0 && cyclomatic_complexity > complexity_alert as u64 %}style="border-color:var(--oxide-2);"{% endif %}>
+          <div class="stat-chip-label">Complexity score</div>
+          <div class="stat-chip-val">{{ cyclomatic_complexity }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a lexical approximation of McCabe cyclomatic complexity.{% if complexity_alert > 0 %} Alert threshold: {{ complexity_alert }}.{% endif %}</div>
+        </div>
+        {% endif %}
+        {% if let Some(ls) = lsloc %}
+        <div class="stat-chip" data-raw="{{ ls }}">
+          <div class="stat-chip-label">Logical SLOC</div>
+          <div class="stat-chip-val">{{ ls }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Logical SLOC: count of executable statements (semicolons for C/Java/Go/Rust; non-continuation lines for Python/Ruby/Shell). Normalises across formatting styles.</div>
+        </div>
+        {% endif %}
+        {% if uloc > 0 %}
+        <div class="stat-chip" data-raw="{{ uloc }}">
+          <div class="stat-chip-label">Unique SLOC (ULOC)</div>
+          <div class="stat-chip-val">{{ uloc }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Unique Lines of Code: distinct non-blank code lines across all files.{% if dryness_pct_str != "" %} DRYness: {{ dryness_pct_str }}% (higher = less copy-paste).{% endif %}</div>
+        </div>
+        {% endif %}
+        {% if duplicate_group_count > 0 %}
+        <div class="stat-chip" data-raw="{{ duplicate_group_count }}" style="border-color:rgba(179,93,51,0.4);">
+          <div class="stat-chip-label">Duplicate groups</div>
+          <div class="stat-chip-val">{{ duplicate_group_count }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Groups of files with identical content detected. These may inflate SLOC counts. Enable "Exclude duplicates" in the scan settings to remove them from totals.</div>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {% if has_cocomo %}
+      <div class="compare-banner" style="margin-top:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:14px 18px;">
+        <div class="compare-banner-body" style="gap:16px;">
+          <div class="compare-banner-meta">
+            <span class="compare-label">COCOMO I — {{ cocomo_mode_label }} mode</span>
+            <div class="compare-banner-stats" style="margin-top:6px;flex-wrap:wrap;gap:14px;">
+              <span><strong>{{ cocomo_effort_str }}</strong> person-months</span>
+              <span class="compare-arrow">·</span>
+              <span><strong>{{ cocomo_duration_str }}</strong> months schedule</span>
+              <span class="compare-arrow">·</span>
+              <span><strong>{{ cocomo_staff_str }}</strong> avg. engineers</span>
+              <span class="compare-arrow">·</span>
+              <span>Input: <strong>{{ cocomo_ksloc_str }}K</strong> SLOC</span>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px;">Estimate only — COCOMO I (Basic). Actual effort varies widely by team experience and domain complexity.</div>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
       {% if let Some(prev_id) = prev_run_id %}{% if let Some(prev_ts) = prev_run_timestamp %}
       <div class="compare-banner">
         <div class="compare-banner-body">
@@ -19844,6 +20140,30 @@ struct ResultTemplate {
     /// True when rendering a static offline file (index.html); hides server-only actions.
     #[allow(dead_code)]
     is_offline: bool,
+    /// Total cyclomatic complexity score across all analyzed files.
+    cyclomatic_complexity: u64,
+    /// Logical SLOC (statement count) when available; None for unsupported languages.
+    lsloc: Option<u64>,
+    /// Unique Lines of Code across all analyzed files.
+    uloc: u64,
+    /// Pre-formatted DRYness percentage string (e.g. "82.3") or empty when not available.
+    dryness_pct_str: String,
+    /// Number of duplicate file groups detected.
+    duplicate_group_count: usize,
+    /// Whether a COCOMO estimate is available to display.
+    has_cocomo: bool,
+    /// Pre-formatted COCOMO effort (person-months), e.g. "14.32".
+    cocomo_effort_str: String,
+    /// Pre-formatted COCOMO schedule (months), e.g. "6.18".
+    cocomo_duration_str: String,
+    /// Pre-formatted average team size, e.g. "2.32".
+    cocomo_staff_str: String,
+    /// Pre-formatted KSLOC input to COCOMO, e.g. "12.53".
+    cocomo_ksloc_str: String,
+    /// COCOMO mode label shown in the card (e.g. "Organic").
+    cocomo_mode_label: String,
+    /// Per-file complexity alert threshold. 0 = off (no highlighting).
+    complexity_alert: u32,
 }
 
 #[derive(Template)]
@@ -25727,6 +26047,9 @@ mod form_config_tests {
             style_analysis_enabled: None,
             style_score_threshold: None,
             style_lang_scope: None,
+            cocomo_mode: None,
+            complexity_alert: None,
+            exclude_duplicates: None,
         }
     }
 

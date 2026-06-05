@@ -201,6 +201,11 @@ fn fixture_base_run(id: &str) -> AnalysisRun {
         git_commit_date: None,
         git_remote_url: None,
         style_summary: None,
+        cocomo: None,
+        uloc: 0,
+        dryness_pct: None,
+        duplicate_groups: vec![],
+        duplicates_excluded: 0,
     }
 }
 
@@ -233,6 +238,9 @@ fn fixture_file_record(path: &str, lang: Language, code: u64) -> FileRecord {
         submodule: None,
         coverage: None,
         style_analysis: None,
+        cyclomatic_complexity: None,
+        lsloc: None,
+        content_hash: 0,
     }
 }
 
@@ -258,6 +266,8 @@ fn fixture_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummar
         coverage_functions_hit: 0,
         coverage_branches_found: 0,
         coverage_branches_hit: 0,
+        cyclomatic_complexity: 0,
+        lsloc: None,
     }
 }
 

@@ -250,6 +250,23 @@ struct AnalyzeArgs {
     /// this directory as sub_<name>.html (mirrors the web UI artifact layout).
     #[arg(long, value_name = "DIR")]
     sub_html_out_dir: Option<PathBuf>,
+
+    /// Exclude duplicate files (identical content) from SLOC totals.
+    /// Duplicate groups are always reported regardless of this flag.
+    #[arg(long)]
+    no_duplicates: bool,
+
+    /// Show COCOMO I cost estimate in terminal output (person-months, schedule, team size).
+    #[arg(long)]
+    cocomo: bool,
+
+    /// Show Logical SLOC (statement count) alongside physical line counts.
+    #[arg(long)]
+    lsloc: bool,
+
+    /// Exit with code 6 if any file's cyclomatic complexity exceeds this threshold.
+    #[arg(long, value_name = "N")]
+    max_complexity: Option<u32>,
 }
 
 // ── report ────────────────────────────────────────────────────────────────────
@@ -864,6 +881,30 @@ async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
         args.fail_below,
         args.fail_on_budget,
     );
+
+    // Cyclomatic complexity gate: exit 6 if any file exceeds the threshold.
+    if let Some(max_cc) = args.max_complexity {
+        let violators: Vec<_> = run
+            .per_file_records
+            .iter()
+            .filter(|f| f.cyclomatic_complexity.is_some_and(|cc| cc > max_cc))
+            .collect();
+        if !violators.is_empty() {
+            eprintln!(
+                "error: {} file(s) exceed --max-complexity {} (exit 6)",
+                violators.len(),
+                max_cc
+            );
+            for f in violators.iter().take(10) {
+                eprintln!(
+                    "  {} complexity={}",
+                    f.relative_path,
+                    f.cyclomatic_complexity.unwrap_or(0)
+                );
+            }
+            std::process::exit(6);
+        }
+    }
 
     // Baseline growth check.
     if let Some(baseline_name) = &args.fail_above_baseline {
@@ -1613,6 +1654,24 @@ fn print_plain_summary(run: &AnalysisRun) {
         "mixed_lines_separate={}",
         run.summary_totals.mixed_lines_separate
     );
+    println!(
+        "cyclomatic_complexity={}",
+        run.summary_totals.cyclomatic_complexity
+    );
+    if let Some(lsloc) = run.summary_totals.lsloc {
+        println!("lsloc={lsloc}");
+    }
+    println!("uloc={}", run.uloc);
+    if let Some(dry) = run.dryness_pct {
+        println!("dryness_pct={:.1}", dry);
+    }
+    println!("duplicate_groups={}", run.duplicate_groups.len());
+    if let Some(ref c) = run.cocomo {
+        println!("cocomo_ksloc={:.2}", c.ksloc);
+        println!("cocomo_effort_person_months={:.2}", c.effort_person_months);
+        println!("cocomo_duration_months={:.2}", c.duration_months);
+        println!("cocomo_avg_staff={:.2}", c.avg_staff);
+    }
     if let Some(ref ss) = run.style_summary {
         println!("style_files_analyzed={}", ss.files_analyzed);
         println!("style_common_indent={}", ss.common_indent_style);
@@ -1659,6 +1718,53 @@ fn print_totals_header(run: &AnalysisRun, col: bool) {
             "  {}  {}",
             paint!(col, "36", "Mixed separate :"),
             run.summary_totals.mixed_lines_separate
+        );
+    }
+    if run.summary_totals.cyclomatic_complexity > 0 {
+        println!(
+            "  {}  {}",
+            paint!(col, "36", "Complexity     :"),
+            run.summary_totals.cyclomatic_complexity
+        );
+    }
+    if let Some(lsloc) = run.summary_totals.lsloc {
+        println!("  {}  {}", paint!(col, "36", "Logical SLOC   :"), lsloc);
+    }
+    if run.uloc > 0 {
+        let dry_str = run
+            .dryness_pct
+            .map_or(String::new(), |d| format!("  ({:.1}% unique)", d));
+        println!(
+            "  {}  {}{}",
+            paint!(col, "36", "ULOC           :"),
+            run.uloc,
+            dry_str
+        );
+    }
+    if !run.duplicate_groups.is_empty() {
+        println!(
+            "  {}  {} group(s)",
+            paint!(col, "33", "Duplicates     :"),
+            run.duplicate_groups.len()
+        );
+    }
+    if let Some(ref c) = run.cocomo {
+        println!();
+        println!("{}", paint!(col, "1", "COCOMO I Estimate (Organic)"));
+        println!(
+            "  {}  {:.2} person-months",
+            paint!(col, "36", "Effort         :"),
+            c.effort_person_months
+        );
+        println!(
+            "  {}  {:.2} months",
+            paint!(col, "36", "Schedule       :"),
+            c.duration_months
+        );
+        println!(
+            "  {}  {:.2} avg. engineers",
+            paint!(col, "36", "Team size      :"),
+            c.avg_staff
         );
     }
 }

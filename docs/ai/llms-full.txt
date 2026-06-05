@@ -1,0 +1,242 @@
+# oxide-sloc — full LLM context
+
+> IEEE 1045-1992 SLOC analysis workbench — CLI, web UI, MCP server, 41 languages, offline-first.
+
+oxide-sloc counts source lines of code (SLOC), detects unit tests, and produces HTML and PDF
+reports. It is written entirely in Rust and ships as a CLI tool, a localhost Axum web server
+(port 4317 by default), and an MCP server binary (`sloc-mcp`) that AI agents can call directly.
+
+Author: Nima Shafie. License: AGPL-3.0-or-later.
+
+---
+
+## Architecture — 7-crate workspace
+
+| Crate | Purpose |
+|---|---|
+| `sloc-config` | `AppConfig` TOML schema, enums (`MixedLinePolicy`, `BinaryFileBehavior`, …) |
+| `sloc-languages` | Language detection + hand-rolled lexical line analyzer (41 languages) |
+| `sloc-core` | File discovery, decoding, aggregation — `analyze()` entry point |
+| `sloc-git` | Git CLI wrappers, webhook parsing, scan-schedule store |
+| `sloc-report` | HTML rendering (Askama) + PDF via headless Chromium |
+| `sloc-web` | Axum web server, REST API, form handlers, artifact storage |
+| `sloc-cli` | clap CLI — `analyze`, `report`, `serve`, `diff`, `init`, `send` subcommands |
+| `sloc-mcp` | MCP server binary exposing 7 tools to AI agents |
+
+Data flow: CLI/web form → `AppConfig` → `sloc_core::analyze()` → file discovery → decoding →
+language detection → `sloc_languages::analyze_text()` → `AnalysisRun` → HTML/PDF/JSON artifact.
+
+---
+
+## MCP server — AI agent integration
+
+The `sloc-mcp` binary implements the Model Context Protocol (MCP). Configure it in `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "oxide-sloc": {
+      "command": "sloc-mcp",
+      "args": [],
+      "env": {
+        "SLOC_SERVER_URL": "http://127.0.0.1:4317",
+        "SLOC_BIN": "oxide-sloc"
+      }
+    }
+  }
+}
+```
+
+### MCP tools (7)
+
+**analyze_path** — Run oxide-sloc on a local path. Returns SLOC, comments, blanks, functions,
+classes, test count, and a per-language breakdown.
+- Required: `path` (string) — absolute or relative filesystem path
+- Optional: `config_file` (string) — path to an `.oxide-sloc.toml`
+
+**get_metrics_latest** — Fetch metrics from the most recent completed scan on a running server.
+- Optional: `server_url` (string, default: `SLOC_SERVER_URL`)
+
+**get_metrics_history** — Fetch time-series scan history (timestamps, git refs, SLOC counts).
+- Optional: `server_url`, `limit` (integer, default: 100)
+
+**get_run_metrics** — Fetch metrics for a specific run by UUID.
+- Required: `run_id` (string UUID)
+- Optional: `server_url`
+
+**compare_runs** — Diff two JSON result files; returns net SLOC delta, per-language changes,
+test count changes.
+- Required: `baseline_path`, `current_path` (paths to AnalysisRun JSON files)
+
+**health_check** — Verify the server is reachable; returns status and version.
+- Optional: `server_url`
+
+**ingest_result** — Push a headless scan result into a running server's registry (for CI use).
+- Optional: `server_url`, `json_path`, `json_inline`
+
+Full schemas: `docs/mcp/tool-definitions.json` (MCP format), `docs/mcp/function-definitions.json`
+(OpenAI/Anthropic function-calling format).
+
+---
+
+## CLI reference
+
+```bash
+# Subcommands
+oxide-sloc analyze <path> [flags]   # Analyze a directory or file
+oxide-sloc report <result.json>     # Re-render a saved JSON result
+oxide-sloc diff <base> <cur>        # Compare two JSON results
+oxide-sloc serve                    # Start the web UI (default when no subcommand)
+oxide-sloc init                     # Write a default .oxide-sloc.toml
+oxide-sloc send                     # Send a result via SMTP or webhook
+
+# Common analyze flags
+--plain              # Plain text output (no HTML)
+--per-file           # Include per-file breakdown
+--json-out <path>    # Write AnalysisRun JSON
+--html-out <path>    # Write HTML report
+--pdf-out <path>     # Write PDF (requires Chromium)
+--exclude <glob>     # Exclude files matching glob
+--include <glob>     # Include only files matching glob
+--submodule-breakdown # Analyze git submodules separately
+
+# Web server
+oxide-sloc serve [--bind 0.0.0.0:4317]
+# Environment overrides
+SLOC_BIND=127.0.0.1:8080 oxide-sloc serve
+SLOC_API_KEY=secret oxide-sloc serve    # Enable bearer-token auth
+SLOC_BROWSER=/path/to/chrome oxide-sloc # Override Chromium path for PDF
+RUST_LOG=debug oxide-sloc serve         # Debug logging
+```
+
+---
+
+## REST API
+
+Base URL when running locally: `http://127.0.0.1:4317`
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/metrics/latest` | Latest scan metrics |
+| GET | `/api/metrics/{run_id}` | Metrics for a specific run |
+| GET | `/api/metrics/history` | Time-series scan history |
+| POST | `/api/ingest` | Push an AnalysisRun JSON result |
+| GET | `/api/version` | Server version |
+| GET | `/api/health` | Health check |
+| GET | `/api/openapi.yaml` | Full OpenAPI 3.1 spec |
+| GET | `/badge/{metric}` | SVG badge (sloc, files, languages, tests) |
+| GET | `/embed/summary` | Embeddable summary widget (HTML) |
+| GET | `/healthz` | Lightweight health ping |
+
+Authentication: optional bearer token via `Authorization: Bearer <SLOC_API_KEY>` header.
+
+Full spec: `docs/openapi.yaml` (OpenAPI 3.1, ~1.5 MB).
+
+---
+
+## IEEE 1045-1992 line counting
+
+oxide-sloc implements configurable IEEE 1045-1992 physical SLOC counting:
+
+| Policy | Config key | Values |
+|---|---|---|
+| Mixed lines (code + comment on same line) | `mixed_line_policy` | `code_only`, `comment_only`, `count_both` |
+| Blank lines inside block comments | `blank_in_block_comment_policy` | `as_comment`, `as_blank` |
+| Continuation lines | `continuation_line_policy` | `count_each`, `count_once` |
+| Compiler directives (`#include`, `#define`) | `count_compiler_directives` | `true`, `false` |
+
+Python triple-quote strings are classified as docstrings (comment) or code based on context.
+
+---
+
+## Supported languages (41)
+
+Assembly, C, C++, C#, Clojure, CSS, Dart, Dockerfile, Elixir, Erlang, F#, Go, Groovy, Haskell,
+HTML, Java, JavaScript, Julia, Kotlin, Lua, Makefile, Nim, Objective-C, OCaml, Perl, PHP,
+PowerShell, Python, R, Ruby, Rust, Scala, SCSS/Sass, Shell (bash/sh/zsh/ksh), SQL, Svelte,
+Swift, TypeScript, Vue, XML/SVG, Zig.
+
+Note: TOML, Markdown, and YAML are intentionally excluded — no meaningful SLOC metric applies.
+Language detection uses file extension, shebang line, and optional per-path overrides.
+
+---
+
+## oxide-sloc vs alternatives
+
+| Feature | oxide-sloc | cloc | tokei | scc |
+|---|---|---|---|---|
+| Languages | 41 | 250+ | 240+ | 240+ |
+| Web UI | yes | no | no | no |
+| HTML/PDF reports | yes | no | no | no |
+| MCP server | yes | no | no | no |
+| AI agent integration | yes | no | no | no |
+| Test function detection | yes | no | no | no |
+| Trend / history tracking | yes | no | no | no |
+| Coverage file import | yes | no | no | no |
+| IEEE 1045-1992 compliance | yes | partial | no | no |
+| REST API | yes | no | no | no |
+| SVG badge endpoint | yes | no | no | no |
+| Git webhook integration | yes | no | no | no |
+| CI/CD marketplace action | yes | no | no | no |
+| Offline / air-gapped build | yes | no | no | no |
+
+Trade-off: cloc, tokei, and scc support more languages and are faster for pure counting tasks.
+oxide-sloc is the right choice when you need analysis depth, reporting, history, or AI integration.
+
+---
+
+## Configuration file (.oxide-sloc.toml)
+
+```toml
+[discovery]
+include_globs = []         # e.g. ["src/**"]
+exclude_globs = []         # e.g. ["**/vendor/**"]
+follow_symlinks = false
+
+[analysis]
+mixed_line_policy = "code_only"
+blank_in_block_comment_policy = "as_comment"
+continuation_line_policy = "count_each"
+count_compiler_directives = true
+python_docstrings_as_comments = true
+generated_file_detection = true
+vendor_directory_detection = true
+
+[reporting]
+report_title = ""
+include_per_file = false
+
+[web]
+bind_address = "127.0.0.1:4317"
+```
+
+Generate a default config: `oxide-sloc init`
+
+---
+
+## Build from source (offline-first)
+
+```bash
+git clone https://github.com/oxide-sloc/oxide-sloc
+cd oxide-sloc
+bash scripts/run.sh    # handles toolchain bootstrap + vendor extraction + build
+```
+
+Or manually:
+```bash
+cargo build --release --workspace
+```
+
+The repo commits a `vendor.tar.xz` of all ~328 crate dependencies and split Rust toolchain
+archives so the entire build works with no internet access on Windows (Git Bash) and Linux x86_64/arm64.
+
+---
+
+## Links
+
+- Repository: https://github.com/oxide-sloc/oxide-sloc
+- Crates.io: https://crates.io/crates/oxide-sloc
+- OpenAPI spec: https://github.com/oxide-sloc/oxide-sloc/blob/main/docs/openapi.yaml
+- MCP tool definitions: https://github.com/oxide-sloc/oxide-sloc/blob/main/docs/mcp/tool-definitions.json
+- Function call definitions: https://github.com/oxide-sloc/oxide-sloc/blob/main/docs/mcp/function-definitions.json
+- Concise summary: /llms.txt
