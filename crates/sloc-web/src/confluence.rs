@@ -909,3 +909,294 @@ mod tests {
         assert!(result.contains("%2F01"));
     }
 }
+
+// ── HTTP-mocked tests for ConfluenceClient ────────────────────────────────────
+//
+// Uses a minimal Axum router on a random port (tokio TcpListener) as the mock
+// Confluence server. No extra deps — axum and tokio are already in [dependencies].
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use axum::{routing, Json, Router};
+    use std::net::SocketAddr;
+
+    fn setup_tls() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    fn cloud_cfg(base_url: &str) -> ConfluenceConfig {
+        ConfluenceConfig {
+            tier: ConfluenceTier::Cloud,
+            base_url: base_url.to_owned(),
+            username: "user@example.com".to_owned(),
+            credential: "api-token-123".to_owned(),
+            space_key: "MYSPACE".to_owned(),
+            parent_page_id: None,
+            schedule_auto_post: Default::default(),
+        }
+    }
+
+    fn server_cfg(base_url: &str) -> ConfluenceConfig {
+        ConfluenceConfig {
+            tier: ConfluenceTier::Server,
+            base_url: base_url.to_owned(),
+            username: "admin".to_owned(),
+            credential: "password".to_owned(),
+            space_key: "MYSPACE".to_owned(),
+            parent_page_id: None,
+            schedule_auto_post: Default::default(),
+        }
+    }
+
+    /// Spin up a throw-away Axum app on an ephemeral port, return the bound address.
+    async fn start_mock(app: Router) -> SocketAddr {
+        // Install a TLS crypto provider so reqwest::Client::new() doesn't panic.
+        setup_tls();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_connection_cloud_ok() {
+        let app = Router::new().route(
+            "/wiki/api/v2/spaces",
+            routing::get(|| async { Json(serde_json::json!({"results": []})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        assert!(
+            client.test_connection().await.is_ok(),
+            "test_connection should succeed with 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_cloud_unauthorized() {
+        use axum::http::StatusCode;
+        let app = Router::new().route(
+            "/wiki/api/v2/spaces",
+            routing::get(|| async { StatusCode::UNAUTHORIZED }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        assert!(
+            client.test_connection().await.is_err(),
+            "test_connection should fail with 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_server_ok() {
+        let app = Router::new().route(
+            "/rest/api/space",
+            routing::get(|| async { Json(serde_json::json!({"results": []})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        assert!(
+            client.test_connection().await.is_ok(),
+            "server test_connection should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_server_unauthorized() {
+        use axum::http::StatusCode;
+        let app = Router::new().route(
+            "/rest/api/space",
+            routing::get(|| async { StatusCode::UNAUTHORIZED }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        assert!(
+            client.test_connection().await.is_err(),
+            "server test_connection should fail with 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_space_id_cloud_returns_id() {
+        let app = Router::new().route(
+            "/wiki/api/v2/spaces",
+            routing::get(|| async {
+                Json(serde_json::json!({"results": [{"id": "12345", "key": "MYSPACE"}]}))
+            }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        let space_id = client
+            .find_space_id()
+            .await
+            .expect("should return space id");
+        assert_eq!(space_id, "12345");
+    }
+
+    #[tokio::test]
+    async fn find_space_id_cloud_not_found_returns_error() {
+        let app = Router::new().route(
+            "/wiki/api/v2/spaces",
+            routing::get(|| async { Json(serde_json::json!({"results": []})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        assert!(
+            client.find_space_id().await.is_err(),
+            "should error when space not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_page_cloud_not_found_returns_none() {
+        let app = Router::new().route(
+            "/wiki/api/v2/pages",
+            routing::get(|| async { Json(serde_json::json!({"results": []})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        let result = client
+            .find_page_cloud("99", "My Report")
+            .await
+            .expect("should not error");
+        assert!(result.is_none(), "should return None when page not found");
+    }
+
+    #[tokio::test]
+    async fn find_page_cloud_found_returns_summary() {
+        let app = Router::new().route(
+            "/wiki/api/v2/pages",
+            routing::get(|| async {
+                Json(serde_json::json!({"results": [{"id": "777", "version": {"number": 3}}]}))
+            }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        let result = client
+            .find_page_cloud("99", "My Report")
+            .await
+            .expect("should not error");
+        let ps = result.expect("should find the page");
+        assert_eq!(ps.id, "777");
+        assert_eq!(ps.version_number, 3);
+    }
+
+    #[tokio::test]
+    async fn find_page_server_not_found_returns_none() {
+        let app = Router::new().route(
+            "/rest/api/content",
+            routing::get(|| async { Json(serde_json::json!({"results": []})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        let result = client
+            .find_page_server("My Report")
+            .await
+            .expect("should not error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_page_server_found_returns_summary() {
+        let app = Router::new().route(
+            "/rest/api/content",
+            routing::get(|| async {
+                Json(serde_json::json!({"results": [{"id": "888", "version": {"number": 2}}]}))
+            }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        let result = client
+            .find_page_server("My Report")
+            .await
+            .expect("should not error");
+        let ps = result.expect("should find the page");
+        assert_eq!(ps.id, "888");
+        assert_eq!(ps.version_number, 2);
+    }
+
+    #[tokio::test]
+    async fn create_cloud_page_success() {
+        let app = Router::new().route(
+            "/wiki/api/v2/pages",
+            routing::post(|| async { Json(serde_json::json!({"id": "555"})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        let id = client
+            .create_cloud("99", "My Report", "<p>content</p>")
+            .await
+            .expect("create should succeed");
+        assert_eq!(id, "555");
+    }
+
+    #[tokio::test]
+    async fn create_cloud_page_failure_returns_error() {
+        use axum::http::StatusCode;
+        let app = Router::new().route(
+            "/wiki/api/v2/pages",
+            routing::post(|| async { StatusCode::FORBIDDEN }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        assert!(
+            client
+                .create_cloud("99", "My Report", "<p>content</p>")
+                .await
+                .is_err(),
+            "create should fail with 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_server_page_success() {
+        let app = Router::new().route(
+            "/rest/api/content",
+            routing::post(|| async { Json(serde_json::json!({"id": "444"})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        let id = client
+            .create_server("My Report", "<p>content</p>")
+            .await
+            .expect("server create should succeed");
+        assert_eq!(id, "444");
+    }
+
+    #[tokio::test]
+    async fn update_cloud_page_success() {
+        let app = Router::new().route(
+            "/wiki/api/v2/pages/{id}",
+            routing::put(|| async { Json(serde_json::json!({"id": "777"})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        assert!(
+            client
+                .update_cloud("777", 3, "My Report", "<p>updated</p>")
+                .await
+                .is_ok(),
+            "update_cloud should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_server_page_success() {
+        let app = Router::new().route(
+            "/rest/api/content/{id}",
+            routing::put(|| async { Json(serde_json::json!({"id": "888"})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        assert!(
+            client
+                .update_server("888", 2, "My Report", "<p>updated</p>")
+                .await
+                .is_ok(),
+            "update_server should succeed"
+        );
+    }
+}

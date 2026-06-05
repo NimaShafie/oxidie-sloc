@@ -2332,6 +2332,7 @@ dependencies = [
  "sloc-config",
  "sloc-core",
  "sloc-git",
+ "sloc-languages",
  "sloc-report",
  "subtle",
  "tar",
