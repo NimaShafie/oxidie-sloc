@@ -362,21 +362,21 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 |-----------|---------|-------------|
 | `REPO_URL` | `https://github.com/oxide-sloc/oxide-sloc.git` | Git repository URL. Use `file:///path/to/repo` for air-gapped repos. |
 | `SCAN_PATH` | `tests/fixtures/basic` | Directory or space-separated paths to scan (relative to workspace or absolute). |
-| `REPORT_TITLE` | `oxide-sloc CI Report` | Title embedded in HTML and PDF reports. |
+| `REPORT_TITLE` | `oxide-sloc CI Report` | Title embedded in generated HTML and PDF reports. |
 | `OUTPUT_SUBDIR` | `ci-out` | Sub-directory for all generated artifacts (relative to workspace). Created automatically. Contains `report.html`, `result.json`, `report.pdf`, and trend CSVs. |
-| `CI_PRESET` | `default` | Preset config file: `none` / `default` / `strict` / `full-scope`. |
+| `CI_PRESET` | `default` | CI configuration preset loaded from `ci/`: `default` (balanced, mirrors web UI) / `none` (no preset) / `strict` (fail on binary files) / `full-scope` (count everything including vendor). |
 | `MIXED_LINE_POLICY` | `code-only` | How lines with inline comments are classified. |
 | `DOCSTRINGS_AS_CODE` | false | Count Python triple-quoted docstrings as code instead of comments. |
-| `SUBMODULE_BREAKDOWN` | false | Emit per-submodule stats when `.gitmodules` is present. |
+| `SUBMODULE_BREAKDOWN` | true | Detect `.gitmodules` and emit per-submodule stats in the report. |
 | `FOLLOW_SYMLINKS` | false | Follow symbolic links during file discovery. |
 | `NO_IGNORE_FILES` | false | Ignore `.gitignore` / `.slocignore` rules. |
 | `ENABLED_LANGUAGES` | _(all)_ | Comma-separated language filter, e.g. `rust,python`. |
 | `INCLUDE_GLOBS` | _(all)_ | Comma-separated include glob patterns, e.g. `src/**/*.py`. |
 | `EXCLUDE_GLOBS` | _(none)_ | Comma-separated exclude glob patterns, e.g. `vendor/**`. |
 | `GENERATE_HTML` | true | Write HTML report and publish as "OxideSLOC — Jenkins CI Report" sidebar link. Requires HTML Publisher plugin. |
-| `GENERATE_PDF` | true | Write PDF report. Pure-Rust generation — no browser or external tool required on the agent. |
+| `GENERATE_PDF` | true | Write PDF report alongside the HTML report. Pure-Rust generation — no browser or external tool required on the agent. When enabled, the "View PDF" button in the HTML report opens the archived PDF directly. |
 | `SKIP_QUALITY_GATES` | false | Skip fmt / clippy / unit-test stage for scan-only runs. |
-| `SKIP_WEB_CHECK` | true | Skip web UI health-check on agents without loopback / port 4317. |
+| `SKIP_WEB_CHECK` | true | Skip the web UI health-check stage. Use on agents without loopback access or where port 4317 is unavailable. |
 | `WEBHOOK_URL` | _(skip)_ | POST JSON result here after scan. Add `SLOC_WEBHOOK_TOKEN` Secret Text credential for Bearer auth. |
 | `EMAIL_RECIPIENTS` | _(skip)_ | Comma-separated recipients. Requires `SLOC_SMTP_HOST`, `SLOC_SMTP_USER`, `SLOC_SMTP_PASS` credentials. |
 | `ARTIFACT_REPO_TYPE` | `none` | Artifact repository backend: `none` / `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http`. |
@@ -450,7 +450,15 @@ The build description on each run is also set automatically, e.g.: `code=4821  f
 
 #### Setting the artifact-viewer CSP
 
-The HTML report requires the Jenkins artifact viewer to allow inline styles. The recommended approach is to drop `ci/jenkins/init.groovy.d/relax-csp.groovy` into `$JENKINS_HOME/init.groovy.d/` before starting Jenkins:
+From Jenkins 2.387.x LTS onward (including the current 2.555.x series), the artifact viewer
+serves a `Content-Security-Policy-Report-Only` header — non-blocking — so the oxide-sloc HTML
+report renders correctly on a current install without any CSP changes.
+
+On **pre-2.387.x Jenkins**, the default CSP was enforcing and blocked inline scripts, making
+this step required.  Deploying the init script is still recommended for all setups as a
+preventive measure against future policy changes.
+
+The recommended approach is to drop `ci/jenkins/init.groovy.d/relax-csp.groovy` into `$JENKINS_HOME/init.groovy.d/` before starting Jenkins:
 
 ```bash
 cp ci/jenkins/init.groovy.d/relax-csp.groovy $JENKINS_HOME/init.groovy.d/
@@ -1059,7 +1067,11 @@ Sends each artifact via `curl -X PUT` to `<ARTIFACT_REPO_URL>/<ARTIFACT_REPO_PAT
 
 ### Registering artifact repo credentials
 
-Register the following Secret Text credentials in Jenkins before triggering a push build. The pipeline wraps the credential binding in a try/catch, so builds where these credentials are absent will log a warning and attempt an unauthenticated push rather than aborting.
+Register the following Secret Text credentials in Jenkins before triggering a push build.
+The pipeline wraps each credential binding in a `try/catch` — **not** `optional: true`,
+which is unsupported in credentials-binding 719.x and generates "Unknown parameter" log noise.
+Builds with absent credentials log a warning and fall back to an unauthenticated push rather
+than aborting.
 
 ```bash
 set -a; source ci/jenkins/.env; set +a

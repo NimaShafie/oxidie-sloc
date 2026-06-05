@@ -18274,7 +18274,7 @@ struct ScanSetupTemplate {
         </div>
         <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
         <table id="subm-tbl" style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:1050px;">
-          <colgroup><col style="width:15%"><col style="width:31%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"></colgroup>
+          <colgroup><col style="width:25%"><col style="width:21%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"></colgroup>
           <thead>
             <tr>
               <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>

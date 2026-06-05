@@ -260,7 +260,12 @@ Jenkinsfile itself.  Add only the credentials that match the features you intend
 
 ### 5c. Artifact repository (required for artifact push stage)
 
-Add **two** credentials, one for the username and one for the password/token:
+Add **two** credentials, one for the username and one for the password/token.
+
+> **Credential fallback behavior:** the pipeline wraps this binding in a `try/catch` — not
+> `optional: true`, which is unsupported in credentials-binding 719.x and would generate
+> "Unknown parameter" log noise.  If either credential is absent the build logs a warning
+> and falls back to an unauthenticated push rather than failing.
 
 **Credential 1:**
 | Field | Value |
@@ -331,18 +336,36 @@ the job through the web UI, go to **Configure → Pipeline → Advanced** and un
 | Secret | Your Jenkins admin API token — see `ci/jenkins/README.md § Minting a long-lived API token` |
 | ID | `jenkins-api-token` |
 
-Without this credential **and** with the Groovy sandbox enabled, the pipeline still
-works but the HTML report may render with broken interactive features.  The permanent
-fix is [Step 6](#6-configure-the-csp-header-html-report-viewer) — the only approach
-that is guaranteed to work regardless of sandbox state.
+Without this credential and with the Groovy sandbox enabled, the pipeline falls back
+silently — the in-pipeline CSP relaxation is skipped.  On current Jenkins LTS
+(2.387.x+) this has no visible effect because the default header is already
+`Content-Security-Policy-Report-Only` (non-blocking) and reports render correctly
+regardless.  On older Jenkins (pre-2.387.x), missing CSP relaxation causes broken
+interactive features — deploy the init script in [Step 6](#6-configure-the-csp-header-html-report-viewer)
+as the permanent fix.
+
+> **Credential fallback behavior:** the `jenkins-api-token` binding is wrapped in a
+> `try/catch` — not `optional: true`, which is unsupported in credentials-binding 719.x
+> and generates "Unknown parameter" log noise.  A missing credential is handled
+> gracefully with a logged message; the build does not fail.
 
 ---
 
 ## 6. Configure the CSP header (HTML report viewer)
 
-By default, Jenkins's Content Security Policy blocks the inline styles and scripts
-in the oxide-sloc HTML report.  **The only reliable fix is deploying a Groovy init
-script** — do this before running any real build.
+From **Jenkins 2.387.x LTS onward** (including the current 2.555.x LTS series), the
+default Content Security Policy is served as `Content-Security-Policy-Report-Only` —
+a **non-blocking** header that logs violations to the browser console but does not
+prevent inline styles or scripts from executing.  On a current LTS install the
+oxide-sloc HTML report renders correctly without any changes to this header.
+
+**Deploying the init script below is still recommended** as a permanent preventive
+measure.  It upgrades the header to an explicit allow-list so the report continues to
+render correctly if Jenkins is downgraded, the default CSP changes in a future LTS,
+or the container is rebuilt from a base image with a stricter policy.
+
+On **pre-2.387.x Jenkins** this step is required — the default CSP was an enforcing
+(blocking) header that prevented inline scripts and broke interactive features.
 
 > **Why not the in-pipeline `System.setProperty` approach?** The Jenkinsfile Setup
 > stage contains a `System.setProperty` call as a convenience, but it is blocked by
@@ -394,11 +417,12 @@ script** — do this before running any real build.
 5. Verify the CSP is set by running `bash ci/jenkins/preflight.sh` — the `[warn] CSP at default`
    message should be gone.
 
-> **Without this step**, the "OxideSLOC — Jenkins CI Report" and "OxideSLOC — Jenkins HTML Report"
-> pages will render with broken interactive features (CSS still loads, but JS is blocked — see
-> Step 11 for full symptoms).  The `preflight.sh` script also supports
-> `bash ci/jenkins/preflight.sh --install-csp` (requires Docker on the Jenkins host) to deploy
-> and restart automatically.
+> **On Jenkins 2.387.x+ LTS** this step is optional — the default `Content-Security-Policy-Report-Only`
+> header is non-blocking and reports render correctly without it.
+> **On pre-2.387.x Jenkins** omitting this step breaks interactive features in the published
+> report (CSS loads, but JS is blocked).
+> The `preflight.sh` script also supports `bash ci/jenkins/preflight.sh --install-csp`
+> (requires Docker on the Jenkins host) to deploy the init script and restart automatically.
 
 ---
 
@@ -477,7 +501,7 @@ once.  The first build must run **without parameters** to register them.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 
-From this point on, all 44 configuration parameters are visible in the build form.
+From this point on, all 45 configuration parameters are visible in the build form.
 
 ---
 
@@ -485,7 +509,7 @@ From this point on, all 44 configuration parameters are visible in the build for
 
 1. Click **"Build with Parameters"** in the left sidebar.
 
-2. The build form opens with all 44 parameters grouped by function.
+2. The build form opens with all 45 parameters grouped by function.
    Adjust at minimum:
 
    | Parameter | Default | What to set |
@@ -520,6 +544,14 @@ From this point on, all 44 configuration parameters are visible in the build for
    | `ARTIFACT_REPO_URL` | Base URL of the repository |
    | `ARTIFACT_PUSH_JSON` / `ARTIFACT_PUSH_HTML` / etc. | Check the artifact types to push |
 
+   **To trigger a downstream pipeline on success (pipeline-of-pipelines)**:
+
+   | Parameter | Value |
+   |-----------|-------|
+   | `DOWNSTREAM_JOB` | Name of the Jenkins job to trigger automatically after this build succeeds (empty = disabled) |
+   | `UPSTREAM_JOB` | Set automatically by an upstream pipeline that invoked this build; identifies the caller job |
+   | `UPSTREAM_BUILD` | Set automatically by the upstream pipeline; the caller's build number, passed to the downstream job |
+
 3. Click **Build**.
 
 4. Watch the build progress in the **Stage View** on the job page.
@@ -537,8 +569,10 @@ After a successful build, confirm each feature is wired correctly:
   `/job/<JOB>/<N>/OxideSLOC_20_e28094_20Jenkins_20CI_20Report/`
   (Jenkins encodes the em-dash as `_e28094_`).
 - Clicking it opens the report in the browser.
-- If interactive features (sorting, expand modals, charts) are broken, the
-  Jenkins CSP is at default — see [Step 6](#6-configure-the-csp-header-html-report-viewer).
+- On current Jenkins LTS (2.387.x+) the CSP is `Content-Security-Policy-Report-Only`
+  (non-blocking) — interactive features work without any CSP changes.
+  If features are broken on an older Jenkins instance (pre-2.387.x), the enforcing
+  default CSP is blocking inline scripts — see [Step 6](#6-configure-the-csp-header-html-report-viewer).
 
 ### OxideSLOC — Jenkins HTML Report (HTML Publisher — standalone)
 - A second sidebar link, **"OxideSLOC — Jenkins HTML Report"**, is published from
