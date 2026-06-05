@@ -18,3 +18,5 @@ ignore:
   - "tests/**"
   - "vendor/**"
   - "crates/sloc-cli/src/main.rs"
+  - "crates/sloc-mcp/src/main.rs"
+  - "fuzz/**"

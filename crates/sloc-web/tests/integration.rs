@@ -11,6 +11,14 @@ use http_body_util::BodyExt;
 use sloc_web::{make_test_router, make_test_router_with_key};
 use tower::ServiceExt;
 
+use chrono::Utc;
+use sloc_config::AppConfig;
+use sloc_core::{
+    AnalysisRun, EffectiveCounts, EnvironmentMetadata, FileCoverage, FileRecord, FileStatus,
+    LanguageSummary, SubmoduleSummary, SummaryTotals, ToolMetadata,
+};
+use sloc_languages::{Language, ParseMode, RawLineCounts};
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 async fn get(uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
@@ -110,10 +118,366 @@ async fn delete(uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     (status, headers, body)
 }
 
+async fn post_json_shared(
+    app: Router,
+    uri: &str,
+    json: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let req = Request::post(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(json.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
+}
+
+fn raw_multipart(boundary: &str, name: &str, filename: &str, data: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    v.extend(data);
+    v.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
+    v
+}
+
 fn has_csp(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("content-security-policy")
         .is_some_and(|v| v.to_str().unwrap_or("").contains("script-src"))
+}
+
+// ── AnalysisRun fixture builders ─────────────────────────────────────────────
+//
+// These construct rich AnalysisRun values that are POSTed to /api/ingest so that
+// the large dashboard handlers (trend_report_handler, test_metrics_handler, etc.)
+// exercise conditional branches that only activate with real data.
+
+fn fixture_base_run(id: &str) -> AnalysisRun {
+    AnalysisRun {
+        tool: ToolMetadata {
+            name: "oxide-sloc".into(),
+            version: "1.5.66".into(),
+            run_id: id.into(),
+            timestamp_utc: Utc::now(),
+        },
+        environment: EnvironmentMetadata {
+            operating_system: "linux".into(),
+            architecture: "x86_64".into(),
+            runtime_mode: "test".into(),
+            initiator_username: "tester".into(),
+            initiator_hostname: "ci".into(),
+            ci_name: None,
+        },
+        effective_configuration: AppConfig::default(),
+        input_roots: vec!["/test/myproject".into()],
+        summary_totals: SummaryTotals {
+            files_considered: 1,
+            files_analyzed: 1,
+            code_lines: 50,
+            ..SummaryTotals::default()
+        },
+        totals_by_language: vec![],
+        per_file_records: vec![],
+        skipped_file_records: vec![],
+        warnings: vec![],
+        submodule_summaries: vec![],
+        git_commit_short: None,
+        git_commit_long: None,
+        git_branch: None,
+        git_commit_author: None,
+        git_tags: None,
+        git_nearest_tag: None,
+        git_commit_date: None,
+        git_remote_url: None,
+        style_summary: None,
+    }
+}
+
+fn fixture_file_record(path: &str, lang: Language, code: u64) -> FileRecord {
+    FileRecord {
+        path: format!("/test/myproject/{path}"),
+        relative_path: path.into(),
+        language: Some(lang),
+        size_bytes: code * 25,
+        detected_encoding: Some("utf-8".into()),
+        raw_line_categories: RawLineCounts {
+            total_physical_lines: code + 2,
+            code_only_lines: code,
+            blank_only_lines: 1,
+            single_comment_only_lines: 1,
+            ..RawLineCounts::default()
+        },
+        effective_counts: EffectiveCounts {
+            code_lines: code,
+            comment_lines: 1,
+            blank_lines: 1,
+            mixed_lines_separate: 0,
+        },
+        status: FileStatus::AnalyzedExact,
+        warnings: vec![],
+        generated: false,
+        minified: false,
+        vendor: false,
+        parse_mode: Some(ParseMode::Lexical),
+        submodule: None,
+        coverage: None,
+        style_analysis: None,
+    }
+}
+
+fn fixture_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
+    LanguageSummary {
+        language: lang,
+        files,
+        total_physical_lines: code + 2,
+        code_lines: code,
+        comment_lines: 1,
+        blank_lines: 1,
+        mixed_lines_separate: 0,
+        functions: 2,
+        classes: 0,
+        variables: 0,
+        imports: 1,
+        test_count: 0,
+        test_assertion_count: 0,
+        test_suite_count: 0,
+        coverage_lines_found: 0,
+        coverage_lines_hit: 0,
+        coverage_functions_found: 0,
+        coverage_functions_hit: 0,
+        coverage_branches_found: 0,
+        coverage_branches_hit: 0,
+    }
+}
+
+/// Multi-language run: Rust + Python + JavaScript + TypeScript + CSS
+fn fixture_run_multi_language() -> String {
+    let mut run = fixture_base_run("ingest-multilang-001");
+    run.per_file_records = vec![
+        fixture_file_record("src/lib.rs", Language::Rust, 120),
+        fixture_file_record("main.py", Language::Python, 80),
+        fixture_file_record("app.js", Language::JavaScript, 60),
+        fixture_file_record("types.ts", Language::TypeScript, 40),
+        fixture_file_record("style.css", Language::Css, 30),
+    ];
+    run.totals_by_language = vec![
+        fixture_lang_summary(Language::Rust, 1, 120),
+        fixture_lang_summary(Language::Python, 1, 80),
+        fixture_lang_summary(Language::JavaScript, 1, 60),
+        fixture_lang_summary(Language::TypeScript, 1, 40),
+        fixture_lang_summary(Language::Css, 1, 30),
+    ];
+    run.summary_totals = SummaryTotals {
+        files_considered: 5,
+        files_analyzed: 5,
+        code_lines: 330,
+        total_physical_lines: 340,
+        ..SummaryTotals::default()
+    };
+    run.input_roots = vec!["/test/multi-lang-project".into()];
+    serde_json::to_string(&run).unwrap()
+}
+
+/// Run with per-file coverage data — exercises coverage rendering branches
+fn fixture_run_with_coverage() -> String {
+    let mut run = fixture_base_run("ingest-coverage-001");
+    let mut rec1 = fixture_file_record("src/lib.rs", Language::Rust, 100);
+    rec1.coverage = Some(FileCoverage {
+        lines_found: 100,
+        lines_hit: 85,
+        functions_found: 8,
+        functions_hit: 7,
+        branches_found: 20,
+        branches_hit: 16,
+    });
+    let mut rec2 = fixture_file_record("src/handlers.rs", Language::Rust, 80);
+    rec2.coverage = Some(FileCoverage {
+        lines_found: 80,
+        lines_hit: 40,
+        functions_found: 6,
+        functions_hit: 3,
+        branches_found: 15,
+        branches_hit: 7,
+    });
+    let mut lang_sum = fixture_lang_summary(Language::Rust, 2, 180);
+    lang_sum.coverage_lines_found = 180;
+    lang_sum.coverage_lines_hit = 125;
+    lang_sum.coverage_functions_found = 14;
+    lang_sum.coverage_functions_hit = 10;
+    run.per_file_records = vec![rec1, rec2];
+    run.totals_by_language = vec![lang_sum];
+    run.summary_totals = SummaryTotals {
+        files_considered: 2,
+        files_analyzed: 2,
+        code_lines: 180,
+        total_physical_lines: 184,
+        coverage_lines_found: 180,
+        coverage_lines_hit: 125,
+        coverage_functions_found: 14,
+        coverage_functions_hit: 10,
+        ..SummaryTotals::default()
+    };
+    run.input_roots = vec!["/test/covered-project".into()];
+    serde_json::to_string(&run).unwrap()
+}
+
+/// Run with test metrics — exercises test-count rendering branches
+fn fixture_run_with_test_metrics() -> String {
+    let mut run = fixture_base_run("ingest-testmetrics-001");
+    let mut rec = fixture_file_record("src/lib.rs", Language::Rust, 200);
+    rec.raw_line_categories.test_count = 15;
+    rec.raw_line_categories.test_assertion_count = 45;
+    rec.raw_line_categories.test_suite_count = 3;
+    let mut lang_sum = fixture_lang_summary(Language::Rust, 1, 200);
+    lang_sum.test_count = 15;
+    lang_sum.test_assertion_count = 45;
+    lang_sum.test_suite_count = 3;
+    run.per_file_records = vec![rec];
+    run.totals_by_language = vec![lang_sum];
+    run.summary_totals = SummaryTotals {
+        files_considered: 1,
+        files_analyzed: 1,
+        code_lines: 200,
+        total_physical_lines: 202,
+        test_count: 15,
+        test_assertion_count: 45,
+        test_suite_count: 3,
+        ..SummaryTotals::default()
+    };
+    run.input_roots = vec!["/test/tested-project".into()];
+    serde_json::to_string(&run).unwrap()
+}
+
+/// Run with git metadata — exercises git chip rendering branches
+fn fixture_run_with_git_meta() -> String {
+    let mut run = fixture_base_run("ingest-gitmeta-001");
+    run.per_file_records = vec![fixture_file_record("src/lib.rs", Language::Rust, 100)];
+    run.totals_by_language = vec![fixture_lang_summary(Language::Rust, 1, 100)];
+    run.summary_totals = SummaryTotals {
+        files_considered: 1,
+        files_analyzed: 1,
+        code_lines: 100,
+        total_physical_lines: 102,
+        ..SummaryTotals::default()
+    };
+    run.git_remote_url = Some("https://github.com/test-org/test-repo.git".into());
+    run.git_branch = Some("main".into());
+    run.git_commit_short = Some("a1b2c3d".into());
+    run.git_commit_long = Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".into());
+    run.git_commit_author = Some("Test Author".into());
+    run.git_commit_date = Some("2026-06-05T10:00:00Z".into());
+    run.git_nearest_tag = Some("v1.5.66".into());
+    run.input_roots = vec!["/test/git-project".into()];
+    serde_json::to_string(&run).unwrap()
+}
+
+/// Run with submodule data — exercises submodule table rendering
+fn fixture_run_with_submodules() -> String {
+    let mut run = fixture_base_run("ingest-submodules-001");
+    run.per_file_records = vec![fixture_file_record("src/lib.rs", Language::Rust, 150)];
+    run.totals_by_language = vec![fixture_lang_summary(Language::Rust, 1, 150)];
+    run.summary_totals = SummaryTotals {
+        files_considered: 3,
+        files_analyzed: 3,
+        code_lines: 300,
+        total_physical_lines: 306,
+        ..SummaryTotals::default()
+    };
+    run.submodule_summaries = vec![
+        SubmoduleSummary {
+            name: "vendor/lib-a".into(),
+            relative_path: "vendor/lib-a".into(),
+            files_analyzed: 1,
+            total_physical_lines: 102,
+            code_lines: 100,
+            comment_lines: 1,
+            blank_lines: 1,
+            language_summaries: vec![fixture_lang_summary(Language::Rust, 1, 100)],
+            git_commit_short: Some("deadbeef".into()),
+            git_commit_long: None,
+            git_branch: Some("main".into()),
+            git_commit_author: None,
+            git_commit_date: None,
+            git_remote_url: Some("https://github.com/test-org/lib-a.git".into()),
+        },
+        SubmoduleSummary {
+            name: "vendor/lib-b".into(),
+            relative_path: "vendor/lib-b".into(),
+            files_analyzed: 1,
+            total_physical_lines: 52,
+            code_lines: 50,
+            comment_lines: 1,
+            blank_lines: 1,
+            language_summaries: vec![fixture_lang_summary(Language::Python, 1, 50)],
+            git_commit_short: Some("cafebabe".into()),
+            git_commit_long: None,
+            git_branch: Some("dev".into()),
+            git_commit_author: None,
+            git_commit_date: None,
+            git_remote_url: None,
+        },
+    ];
+    run.git_remote_url = Some("https://github.com/test-org/parent-repo.git".into());
+    run.input_roots = vec!["/test/parent-project".into()];
+    serde_json::to_string(&run).unwrap()
+}
+
+/// Run with both coverage and test metrics combined
+fn fixture_run_coverage_and_tests() -> String {
+    let mut run = fixture_base_run("ingest-cov-and-tests-001");
+    let mut rec = fixture_file_record("src/lib.rs", Language::Rust, 200);
+    rec.coverage = Some(FileCoverage {
+        lines_found: 200,
+        lines_hit: 160,
+        functions_found: 12,
+        functions_hit: 10,
+        branches_found: 30,
+        branches_hit: 24,
+    });
+    rec.raw_line_categories.test_count = 20;
+    rec.raw_line_categories.test_assertion_count = 60;
+    rec.raw_line_categories.test_suite_count = 4;
+    let mut lang_sum = fixture_lang_summary(Language::Rust, 1, 200);
+    lang_sum.coverage_lines_found = 200;
+    lang_sum.coverage_lines_hit = 160;
+    lang_sum.test_count = 20;
+    lang_sum.test_assertion_count = 60;
+    lang_sum.test_suite_count = 4;
+    run.per_file_records = vec![rec];
+    run.totals_by_language = vec![lang_sum];
+    run.summary_totals = SummaryTotals {
+        files_considered: 1,
+        files_analyzed: 1,
+        code_lines: 200,
+        total_physical_lines: 202,
+        coverage_lines_found: 200,
+        coverage_lines_hit: 160,
+        coverage_functions_found: 12,
+        coverage_functions_hit: 10,
+        test_count: 20,
+        test_assertion_count: 60,
+        test_suite_count: 4,
+        ..SummaryTotals::default()
+    };
+    run.git_remote_url = Some("https://github.com/test-org/full-project.git".into());
+    run.git_branch = Some("main".into());
+    run.git_commit_short = Some("123abcd".into());
+    run.input_roots = vec!["/test/full-project".into()];
+    serde_json::to_string(&run).unwrap()
+}
+
+/// Empty repo — zero files analysed (exercises "no data" empty-state paths)
+fn fixture_run_empty_repo() -> String {
+    let run = fixture_base_run("ingest-empty-001");
+    serde_json::to_string(&run).unwrap()
 }
 
 // ── public routes (no auth required) ─────────────────────────────────────────
@@ -2301,4 +2665,602 @@ async fn schedule_create_then_delete_lifecycle() {
         .await
         .unwrap();
     assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+}
+
+// ── Phase 2: ingest-based branch coverage for large dashboard handlers ────────
+//
+// Each test injects a rich AnalysisRun via POST /api/ingest, then exercises a
+// dashboard handler that has deep conditional branches keyed on the run data.
+
+#[tokio::test]
+async fn trend_reports_with_multi_language_data_renders_language_sections() {
+    let app = make_test_router();
+    let (ingest_status, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_multi_language()).await;
+    assert!(
+        ingest_status.as_u16() < 500,
+        "ingest must succeed, got {ingest_status}"
+    );
+    let (status, headers, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(has_csp(&headers), "missing CSP on /trend-reports");
+    assert!(body.contains("<html"), "expected HTML");
+}
+
+#[tokio::test]
+async fn trend_reports_with_coverage_data_renders_coverage_section() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML from /trend-reports");
+}
+
+#[tokio::test]
+async fn trend_reports_with_git_metadata_renders_git_section() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_git_meta()).await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML");
+}
+
+#[tokio::test]
+async fn trend_reports_with_submodule_data_renders_submodule_section() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_submodules()).await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML");
+}
+
+#[tokio::test]
+async fn trend_reports_with_multiple_ingested_runs_exercises_pagination() {
+    let app = make_test_router();
+    // Inject 12 runs to push past the default page size and exercise pagination branches
+    for i in 0..12 {
+        let mut run: AnalysisRun = serde_json::from_str(&fixture_run_multi_language()).unwrap();
+        run.tool.run_id = format!("ingest-page-{i:03}");
+        run.input_roots = vec![format!("/test/project-{i}")];
+        let json = serde_json::to_string(&run).unwrap();
+        let (s, _, _) = post_json_shared(app.clone(), "/api/ingest", &json).await;
+        // Some may fail due to duplicate paths — only assert no 5xx
+        assert!(s.as_u16() < 500, "ingest {i} returned 5xx: {s}");
+    }
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML with paginated runs");
+}
+
+#[tokio::test]
+async fn test_metrics_with_test_count_data_renders_metrics_section() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_test_metrics()).await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/test-metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /test-metrics with test data"
+    );
+}
+
+#[tokio::test]
+async fn test_metrics_with_coverage_and_test_data_renders_combined_view() {
+    let app = make_test_router();
+    let (s, _, _) = post_json_shared(
+        app.clone(),
+        "/api/ingest",
+        &fixture_run_coverage_and_tests(),
+    )
+    .await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/test-metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML with coverage+test data"
+    );
+}
+
+#[tokio::test]
+async fn test_metrics_with_multi_language_run_exercises_language_breakdown() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_multi_language()).await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/test-metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML");
+}
+
+#[tokio::test]
+async fn test_metrics_with_git_metadata_renders_git_fields() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_git_meta()).await;
+    assert!(s.as_u16() < 500, "ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/test-metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML");
+}
+
+#[tokio::test]
+async fn compare_page_with_two_ingested_runs_returns_html() {
+    let app = make_test_router();
+    // Inject two different runs
+    let (s1, h1, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s1.as_u16() < 500, "first ingest failed with {s1}");
+    let (s2, h2, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_multi_language()).await;
+    assert!(s2.as_u16() < 500, "second ingest failed with {s2}");
+
+    // Extract run_ids from Location headers (if 201) or use known fixture IDs
+    let rid1 = h1
+        .get("x-run-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("ingest-coverage-001");
+    let rid2 = h2
+        .get("x-run-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("ingest-multilang-001");
+
+    let (status, _, body) = get_shared(app.clone(), &format!("/compare?a={rid1}&b={rid2}")).await;
+    assert!(status.as_u16() < 500, "/compare must not 5xx");
+    if status == StatusCode::OK {
+        assert!(
+            body.contains("<html") || body.contains("<!doctype"),
+            "expected HTML from /compare"
+        );
+    }
+}
+
+#[tokio::test]
+async fn embed_handler_with_rich_coverage_run_returns_widget() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, body) =
+        get_shared(app.clone(), "/embed/summary?run_id=ingest-coverage-001").await;
+    assert!(
+        status.as_u16() < 500,
+        "/embed/summary must not 5xx, got {status}"
+    );
+    assert!(!body.is_empty(), "expected non-empty embed widget");
+}
+
+#[tokio::test]
+async fn embed_handler_dark_mode_with_data() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_git_meta()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, _) = get_shared(
+        app.clone(),
+        "/embed/summary?run_id=ingest-gitmeta-001&theme=dark",
+    )
+    .await;
+    assert!(status.as_u16() < 500, "/embed/summary dark must not 5xx");
+}
+
+#[tokio::test]
+async fn history_handler_with_multiple_ingested_runs_shows_entries() {
+    let app = make_test_router();
+    let (s1, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s1.as_u16() < 500, "first ingest failed");
+    let (s2, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_test_metrics()).await;
+    assert!(s2.as_u16() < 500, "second ingest failed");
+    let (status, _, body) = get_shared(app.clone(), "/view-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<!doctype html>") || body.contains("<!DOCTYPE html>"),
+        "expected HTML from /view-reports"
+    );
+}
+
+#[tokio::test]
+async fn api_metrics_run_with_ingested_coverage_data_returns_fields() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, body) = get_shared(app.clone(), "/api/metrics/ingest-coverage-001").await;
+    assert!(status.as_u16() < 500, "/api/metrics/:id must not 5xx");
+    if status == StatusCode::OK {
+        // Verify it's valid JSON — shape varies by implementation
+        let _v: serde_json::Value =
+            serde_json::from_str(&body).expect("metrics endpoint must return valid JSON");
+    }
+}
+
+#[tokio::test]
+async fn api_metrics_latest_with_ingested_data_returns_json() {
+    let app = make_test_router();
+    let (s, _, _) = post_json_shared(
+        app.clone(),
+        "/api/ingest",
+        &fixture_run_coverage_and_tests(),
+    )
+    .await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, body) = get_shared(app.clone(), "/api/metrics/latest").await;
+    assert!(status.as_u16() < 500, "/api/metrics/latest must not 5xx");
+    if status == StatusCode::OK {
+        let _v: serde_json::Value =
+            serde_json::from_str(&body).expect("/api/metrics/latest must return valid JSON");
+    }
+}
+
+#[tokio::test]
+async fn api_ingest_with_submodule_run_registers_and_renders() {
+    let app = make_test_router();
+    let (status, _, body) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_submodules()).await;
+    assert!(
+        status.as_u16() < 500,
+        "ingest with submodules must not 5xx, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn trend_reports_with_empty_repo_shows_no_data_state() {
+    let app = make_test_router();
+    let (s, _, _) = post_json_shared(app.clone(), "/api/ingest", &fixture_run_empty_repo()).await;
+    assert!(s.as_u16() < 500, "empty repo ingest failed with {s}");
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"), "expected HTML from /trend-reports");
+}
+
+// ── Phase 3: secondary handler success-path tests ─────────────────────────────
+
+#[tokio::test]
+async fn scan_setup_with_real_path_returns_html() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, headers, body) = get(&format!("/scan-setup?path={path}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/scan-setup with real path must not 5xx, got {status}"
+    );
+    if status == StatusCode::OK {
+        assert!(has_csp(&headers), "expected CSP on /scan-setup");
+        assert!(body.contains("<html"), "expected HTML");
+    }
+}
+
+#[tokio::test]
+async fn scan_setup_recent_dirs_branch() {
+    let (status, _, _) = get("/scan-setup?recent=1").await;
+    assert!(status.as_u16() < 500, "/scan-setup?recent=1 must not 5xx");
+}
+
+#[tokio::test]
+async fn preview_handler_with_real_dir_returns_response() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hello.rs"), "fn main() {}\n").unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, _, _) = get(&format!("/preview?path={path}")).await;
+    assert!(status.as_u16() < 500, "/preview must not 5xx, got {status}");
+}
+
+#[tokio::test]
+async fn delete_run_after_ingest_returns_no_content_or_404() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+
+    let req = Request::delete("/api/runs/ingest-coverage-001")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert!(
+        status == StatusCode::NO_CONTENT
+            || status == StatusCode::NOT_FOUND
+            || status == StatusCode::OK,
+        "DELETE /api/runs/:id must return 204, 404, or 200, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_runs_post_returns_ok() {
+    let (status, _, _) = post_form("/api/runs/cleanup", "").await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/runs/cleanup must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_cleanup_policy_get_with_default_state_returns_json() {
+    let (status, headers, _) = get("/api/cleanup-policy").await;
+    assert!(
+        status.as_u16() < 500,
+        "GET /api/cleanup-policy must not 5xx"
+    );
+    if status == StatusCode::OK {
+        let ct = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("json"), "expected JSON content-type");
+    }
+}
+
+#[tokio::test]
+async fn api_cleanup_policy_run_now_returns_ok() {
+    let app = make_test_router();
+    let req = Request::post("/api/cleanup-policy/run-now")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /api/cleanup-policy/run-now must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn api_cleanup_policy_delete_returns_ok() {
+    let app = make_test_router();
+    let req = Request::delete("/api/cleanup-policy")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "DELETE /api/cleanup-policy must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn download_bundle_after_ingest_not_5xx() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_git_meta()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, _) = get_shared(app.clone(), "/api/runs/ingest-gitmeta-001/bundle").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/runs/:id/bundle must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn upload_directory_with_multipart_not_5xx() {
+    let app = make_test_router();
+    let boundary = "TEST_BOUNDARY_XYZ";
+    let body_bytes = raw_multipart(boundary, "files", "test.rs", b"fn main() {}\n");
+    let req = Request::post("/upload-directory")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /upload-directory must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn upload_file_with_multipart_not_5xx() {
+    let app = make_test_router();
+    let boundary = "UPLOAD_FILE_BOUNDARY";
+    let body_bytes = raw_multipart(
+        boundary,
+        "file",
+        "main.rs",
+        b"fn main() { println!(\"hi\"); }\n",
+    );
+    let req = Request::post("/upload-file")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /upload-file must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn upload_tarball_with_multipart_not_5xx() {
+    let app = make_test_router();
+    let boundary = "UPLOAD_TAR_BOUNDARY";
+    // Send a minimal gzip-like payload (content doesn't need to be a valid tarball for
+    // a not-5xx assertion; the handler should return 4xx for invalid content)
+    let body_bytes = raw_multipart(boundary, "tarball", "archive.tar.gz", b"\x1f\x8b\x00");
+    let req = Request::post("/upload-tarball")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /upload-tarball must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn watched_dirs_add_with_real_tempdir_redirects() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap_or(".").to_owned();
+    let (status, _, _) = post_form(
+        "/watched-dirs/add",
+        &format!(
+            "folder_path={}&redirect_to=/trend-reports",
+            pct_encode(&path)
+        ),
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /watched-dirs/add must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn watched_dirs_remove_with_path_redirects() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap_or(".").to_owned();
+    // First add it
+    let app = make_test_router();
+    post_form_shared(
+        app.clone(),
+        "/watched-dirs/add",
+        &format!(
+            "folder_path={}&redirect_to=/trend-reports",
+            pct_encode(&path)
+        ),
+    )
+    .await;
+    // Then remove it
+    let (status, _, _) = post_form_shared(
+        app.clone(),
+        "/watched-dirs/remove",
+        &format!(
+            "folder_path={}&redirect_to=/trend-reports",
+            pct_encode(&path)
+        ),
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /watched-dirs/remove must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn open_path_handler_with_headless_env_returns_redirect() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, _, _) = get(&format!("/open-path?path={path}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/open-path must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_ingest_with_coverage_run_then_project_history_returns_data() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, body) = get_shared(app.clone(), "/api/project-history").await;
+    assert!(status.as_u16() < 500, "/api/project-history must not 5xx");
+    if status == StatusCode::OK {
+        let _v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    }
+}
+
+#[tokio::test]
+async fn pdf_status_for_ingested_run_not_5xx() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_git_meta()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, _) = get_shared(app.clone(), "/api/runs/ingest-gitmeta-001/pdf-status").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/runs/:id/pdf-status must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_metrics_submodules_with_ingested_submodule_run_not_5xx() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_submodules()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, _) =
+        get_shared(app.clone(), "/api/metrics/ingest-submodules-001/submodules").await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/metrics/:id/submodules must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_run_for_unknown_id_returns_ok_or_not_found() {
+    let app = make_test_router();
+    let req = Request::post("/api/runs/no-such-run-xyz/cancel")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/runs/:id/cancel must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn async_run_result_for_unknown_id_not_5xx() {
+    let (status, _, _) = get("/runs/result/no-such-run-xyz").await;
+    assert!(
+        status.as_u16() < 500,
+        "/runs/result/:id must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn locate_report_with_valid_json_path_not_5xx() {
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("report.json");
+    // Write a minimal valid AnalysisRun JSON
+    std::fs::write(&json_path, fixture_run_with_coverage()).unwrap();
+    let payload = serde_json::json!({
+        "path": json_path.to_str().unwrap_or(""),
+    });
+    let app = make_test_router();
+    let req = Request::post("/locate-report")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /locate-report must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn locate_reports_dir_with_real_dir_not_5xx() {
+    let dir = tempfile::tempdir().unwrap();
+    let payload = serde_json::json!({
+        "path": dir.path().to_str().unwrap_or(""),
+    });
+    let app = make_test_router();
+    let req = Request::post("/locate-reports-dir")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /locate-reports-dir must not 5xx"
+    );
 }

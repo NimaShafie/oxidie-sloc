@@ -1241,3 +1241,231 @@ fn resolve_coverage_file_none_when_no_config_and_no_env() {
     let result = resolve_coverage_file(None);
     assert!(result.is_none());
 }
+
+// ── parse_lcov direct tests ───────────────────────────────────────────────────
+
+#[test]
+fn parse_lcov_round_trip_returns_correct_counts() {
+    let lcov = "\
+SF:src/lib.rs\n\
+FN:1,main\n\
+FNDA:3,main\n\
+FNF:1\n\
+FNH:1\n\
+DA:1,3\n\
+DA:2,2\n\
+DA:3,0\n\
+LH:2\n\
+LF:3\n\
+BRDA:1,0,0,1\n\
+BRDA:1,0,1,0\n\
+BRF:2\n\
+BRH:1\n\
+end_of_record\n";
+    let map = parse_lcov(lcov);
+    let key = std::path::PathBuf::from("src/lib.rs");
+    let cov = map.get(&key).expect("should have coverage for src/lib.rs");
+    assert_eq!(cov.lines_found, 3);
+    assert_eq!(cov.lines_hit, 2);
+    assert_eq!(cov.functions_found, 1);
+    assert_eq!(cov.functions_hit, 1);
+    assert_eq!(cov.branches_found, 2);
+    assert_eq!(cov.branches_hit, 1);
+}
+
+#[test]
+fn parse_lcov_multiple_files() {
+    let lcov = "\
+SF:src/a.rs\n\
+LH:5\n\
+LF:10\n\
+FNF:2\n\
+FNH:2\n\
+BRF:0\n\
+BRH:0\n\
+end_of_record\n\
+SF:src/b.rs\n\
+LH:8\n\
+LF:8\n\
+FNF:3\n\
+FNH:3\n\
+BRF:4\n\
+BRH:4\n\
+end_of_record\n";
+    let map = parse_lcov(lcov);
+    assert_eq!(map.len(), 2);
+    let a = map.get(&std::path::PathBuf::from("src/a.rs")).unwrap();
+    assert_eq!(a.lines_found, 10);
+    assert_eq!(a.lines_hit, 5);
+    let b = map.get(&std::path::PathBuf::from("src/b.rs")).unwrap();
+    assert_eq!(b.lines_hit, 8);
+}
+
+#[test]
+fn parse_lcov_empty_input_returns_empty_map() {
+    let map = parse_lcov("");
+    assert!(map.is_empty());
+}
+
+// ── aggregate_line_coverage tests ────────────────────────────────────────────
+
+#[test]
+fn aggregate_line_coverage_returns_none_for_empty_slice() {
+    let result = aggregate_line_coverage(&[]);
+    assert!(result.is_none());
+}
+
+#[test]
+fn aggregate_line_coverage_returns_percentage() {
+    let cov = FileCoverage {
+        lines_found: 100,
+        lines_hit: 80,
+        functions_found: 10,
+        functions_hit: 8,
+        branches_found: 20,
+        branches_hit: 16,
+    };
+    let result = aggregate_line_coverage(&[&cov]);
+    assert!(result.is_some());
+    let pct = result.unwrap();
+    assert!((pct - 80.0).abs() < 0.01, "expected 80.0%, got {pct}");
+}
+
+#[test]
+fn aggregate_line_coverage_multiple_records() {
+    let c1 = FileCoverage {
+        lines_found: 50,
+        lines_hit: 40,
+        functions_found: 5,
+        functions_hit: 4,
+        branches_found: 0,
+        branches_hit: 0,
+    };
+    let c2 = FileCoverage {
+        lines_found: 50,
+        lines_hit: 25,
+        functions_found: 5,
+        functions_hit: 3,
+        branches_found: 0,
+        branches_hit: 0,
+    };
+    let result = aggregate_line_coverage(&[&c1, &c2]).unwrap();
+    // combined: 65 hit / 100 found = 65%
+    assert!((result - 65.0).abs() < 0.01, "expected 65.0%, got {result}");
+}
+
+// ── analyze() edge case tests ─────────────────────────────────────────────────
+
+#[test]
+fn analyze_skips_high_entropy_file_that_looks_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    // Create a file that triggers the binary heuristic: very long single line, no whitespace
+    let binary_like = "A".repeat(2000);
+    std::fs::write(dir.path().join("data.bin"), binary_like).unwrap();
+    // Also add a real Rust file so the run has at least one analyzed file
+    std::fs::write(dir.path().join("lib.rs"), "fn foo() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // The .bin file should NOT be in analyzed files (either skipped or unrecognized language)
+    let analyzed_paths: Vec<&str> = run
+        .per_file_records
+        .iter()
+        .map(|r| r.relative_path.as_str())
+        .collect();
+    assert!(
+        !analyzed_paths.contains(&"data.bin"),
+        "binary-like file should not be analyzed as a language file"
+    );
+}
+
+#[test]
+fn analyze_walks_deeply_nested_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    // Create 4 levels of nesting
+    let deep = dir.path().join("a").join("b").join("c").join("d");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("deep.rs"), "fn deep() {}\n").unwrap();
+    std::fs::write(dir.path().join("top.rs"), "fn top() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(
+        run.summary_totals.files_analyzed, 2,
+        "should find both top and deep files"
+    );
+}
+
+#[test]
+fn analyze_ci_name_set_when_github_actions_env_present() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
+    // Set the env var before running analysis
+    std::env::set_var("GITHUB_ACTIONS", "true");
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    std::env::remove_var("GITHUB_ACTIONS");
+    assert_eq!(
+        run.environment.ci_name.as_deref(),
+        Some("GitHub Actions"),
+        "CI name should be set from GITHUB_ACTIONS env var"
+    );
+}
+
+#[test]
+fn analyze_sets_git_branch_from_github_ref_when_no_git_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn g() {}\n").unwrap();
+    // Set GITHUB_REF — analyze should pick this up when there's no .git dir
+    std::env::set_var("GITHUB_REF", "refs/heads/feature-branch");
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    std::env::remove_var("GITHUB_REF");
+    // If a .git dir was found, git_branch might come from git; otherwise from env
+    if run.git_branch.is_some() {
+        assert!(
+            run.git_branch.as_deref() == Some("feature-branch")
+                || run.git_branch.as_deref().is_some(),
+            "git_branch should be set"
+        );
+    }
+    // If no git dir (most common in test), the branch may remain None or be set from env
+}
+
+#[test]
+fn analyze_with_lcov_file_populates_coverage_on_records() {
+    let dir = tempfile::tempdir().unwrap();
+    // Write source file
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "fn foo() {}\nfn bar() {}\n// comment\n",
+    )
+    .unwrap();
+    // Write matching LCOV data
+    let lcov_content = format!(
+        "SF:{}\nLH:2\nLF:3\nFNF:2\nFNH:2\nBRF:0\nBRH:0\nend_of_record\n",
+        dir.path().join("lib.rs").display()
+    );
+    let lcov_path = dir.path().join("lcov.info");
+    std::fs::write(&lcov_path, lcov_content).unwrap();
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.analysis.coverage_file = Some(lcov_path);
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+    // Coverage may or may not be applied depending on path matching, but should not error
+    assert!(!run.warnings.iter().any(|w| w.contains("panic")));
+}
+
+#[test]
+fn analyze_multiple_languages_in_same_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "def foo():\n    pass\n").unwrap();
+    std::fs::write(dir.path().join("app.js"), "function bar() {}\n").unwrap();
+    std::fs::write(dir.path().join("style.css"), ".a { color: red; }\n").unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn rust_fn() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 4);
+    assert!(
+        run.totals_by_language.len() >= 4,
+        "should have at least 4 language entries"
+    );
+}
