@@ -157,13 +157,10 @@ fn classify_ptr_token(bytes: &[u8], i: usize) -> PtrToken {
     let len = bytes.len();
     let nx = (i + 1 < len).then(|| bytes[i + 1]);
     let pv = i.checked_sub(1).map(|p| bytes[p]);
-    if matches!(
-        nx,
-        Some(b'*') | Some(b'&') | Some(b'=') | Some(b'/') | Some(b'>')
-    ) {
+    if matches!(nx, Some(b'*' | b'&' | b'=' | b'/' | b'>')) {
         return PtrToken::Skip2;
     }
-    if matches!(pv, Some(b'=') | Some(b'/') | Some(b'-')) {
+    if matches!(pv, Some(b'=' | b'/' | b'-')) {
         return PtrToken::Skip1;
     }
     let pre_word = pv.is_some_and(|p| p.is_ascii_alphanumeric() || p == b'_');

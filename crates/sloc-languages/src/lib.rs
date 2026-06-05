@@ -2775,6 +2775,7 @@ pub mod ts {
             raw,
             parse_mode: ParseMode::TreeSitter,
             warnings: Vec::new(),
+            style_analysis: None,
         })
     }
 

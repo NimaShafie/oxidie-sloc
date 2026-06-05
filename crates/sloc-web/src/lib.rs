@@ -2776,14 +2776,16 @@ async fn locate_report_handler(
     }
 
     // No JSON found — if expected_run_id matches an existing registry entry, just update html_path.
-    if !expected_run_id.is_empty() {
-        if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == expected_run_id) {
-            entry.html_path = Some(html_path.clone());
-            let _ = reg.save(&state.registry_path);
-            drop(reg);
-            state.artifacts.lock().await.remove(&expected_run_id);
-            return redirect_or_json_ok(want_json, &safe_redirect);
-        }
+    if let Some(entry) = reg
+        .entries
+        .iter_mut()
+        .find(|e| !expected_run_id.is_empty() && e.run_id == expected_run_id)
+    {
+        entry.html_path = Some(html_path.clone());
+        let _ = reg.save(&state.registry_path);
+        drop(reg);
+        state.artifacts.lock().await.remove(&expected_run_id);
+        return redirect_or_json_ok(want_json, &safe_redirect);
     }
 
     drop(reg);
