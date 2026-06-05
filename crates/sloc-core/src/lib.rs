@@ -83,6 +83,33 @@ pub enum FileStatus {
     ErrorInternal,
 }
 
+/// COCOMO I (Basic) project mode — determines the a/b/c/d exponent coefficients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CocomoMode {
+    /// Small team, familiar domain. Effort = 2.4 × KSLOC^1.05.
+    #[default]
+    Organic,
+    /// Mixed constraints. Effort = 3.0 × KSLOC^1.12.
+    SemiDetached,
+    /// Tight hardware/OS constraints. Effort = 3.6 × KSLOC^1.20.
+    Embedded,
+}
+
+/// COCOMO I (Basic) cost-estimation result derived from total code SLOC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CocomoEstimate {
+    pub mode: CocomoMode,
+    /// Input: code lines in thousands (KSLOC).
+    pub ksloc: f64,
+    /// Estimated development effort in person-months.
+    pub effort_person_months: f64,
+    /// Estimated schedule duration in months.
+    pub duration_months: f64,
+    /// Average team size (effort ÷ duration).
+    pub avg_staff: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EffectiveCounts {
     pub code_lines: u64,
@@ -151,6 +178,12 @@ pub struct SummaryTotals {
     pub coverage_branches_found: u64,
     #[serde(default)]
     pub coverage_branches_hit: u64,
+    /// Sum of per-file cyclomatic complexity scores across all analyzed files.
+    #[serde(default)]
+    pub cyclomatic_complexity: u64,
+    /// Total logical SLOC across files that support it; `None` if no files produced LSLOC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsloc: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +221,10 @@ pub struct LanguageSummary {
     pub coverage_branches_found: u64,
     #[serde(default)]
     pub coverage_branches_hit: u64,
+    #[serde(default)]
+    pub cyclomatic_complexity: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsloc: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +250,16 @@ pub struct FileRecord {
     /// Lexical style-guide adherence analysis; `None` for unsupported languages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_analysis: Option<StyleAnalysis>,
+    /// Cyclomatic complexity approximation for this file (sum of branch decision keywords).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cyclomatic_complexity: Option<u32>,
+    /// Logical SLOC estimate; `None` when the language does not support lexical LSLOC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsloc: Option<u32>,
+    /// SHA-256 (first 8 bytes as u64) of raw file bytes — used for duplicate detection.
+    /// Not serialized; consumed in-process during `assemble_run`.
+    #[serde(skip)]
+    pub content_hash: u64,
 }
 
 /// Per-language-family style aggregation within a `StyleSummary`.
@@ -329,6 +376,21 @@ pub struct AnalysisRun {
     /// Multi-language style-guide adherence; `None` when no supported files were analysed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_summary: Option<StyleSummary>,
+    /// COCOMO I (Basic) effort/schedule estimate derived from total code SLOC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cocomo: Option<CocomoEstimate>,
+    /// Unique Lines of Code: count of distinct non-blank code lines across all analyzed files.
+    #[serde(default)]
+    pub uloc: u64,
+    /// DRYness percentage: `uloc / total_code_lines × 100`. `None` when code lines = 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dryness_pct: Option<f32>,
+    /// Groups of files with identical content (relative paths). Only non-singleton groups included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_groups: Vec<Vec<String>>,
+    /// Number of duplicate files excluded from SLOC totals (when `exclude_duplicates` is set).
+    #[serde(default)]
+    pub duplicates_excluded: usize,
 }
 
 #[derive(Default)]
@@ -888,6 +950,76 @@ fn process_submodules(config: &AppConfig, analyzed: &mut [FileRecord]) -> Vec<Su
     build_submodule_summaries(analyzed, &submodules, &root)
 }
 
+/// Compute Basic COCOMO I cost estimate from total code SLOC.
+fn compute_cocomo(code_lines: u64, mode: CocomoMode) -> CocomoEstimate {
+    let ksloc = code_lines as f64 / 1_000.0;
+    let (a, b, c, d): (f64, f64, f64, f64) = match mode {
+        CocomoMode::Organic => (2.4, 1.05, 2.5, 0.38),
+        CocomoMode::SemiDetached => (3.0, 1.12, 2.5, 0.35),
+        CocomoMode::Embedded => (3.6, 1.20, 2.5, 0.32),
+    };
+    let effort = a * ksloc.powf(b);
+    let duration = c * effort.powf(d);
+    let avg_staff = if duration > 0.0 {
+        effort / duration
+    } else {
+        0.0
+    };
+    // Round to 2 decimal places for readability.
+    CocomoEstimate {
+        mode,
+        ksloc: (ksloc * 100.0).round() / 100.0,
+        effort_person_months: (effort * 100.0).round() / 100.0,
+        duration_months: (duration * 100.0).round() / 100.0,
+        avg_staff: (avg_staff * 100.0).round() / 100.0,
+    }
+}
+
+/// Collect ULOC hashes across all analyzed files, compute ULOC and DRYness.
+fn compute_uloc(analyzed: &[FileRecord]) -> (u64, Option<f32>) {
+    use std::collections::HashSet as StdHashSet;
+    let mut unique: StdHashSet<u64> = StdHashSet::new();
+    let mut total_code: u64 = 0;
+    for record in analyzed {
+        total_code += record.effective_counts.code_lines;
+        for &hash in &record.raw_line_categories.code_line_hashes {
+            unique.insert(hash);
+        }
+    }
+    let uloc = unique.len() as u64;
+    let dryness = if total_code > 0 {
+        Some((uloc as f32 / total_code as f32) * 100.0)
+    } else {
+        None
+    };
+    (uloc, dryness)
+}
+
+/// Group files by content hash and return groups of duplicates (relative paths).
+/// Only groups with ≥ 2 files are returned.
+fn find_duplicate_groups(analyzed: &[FileRecord]) -> Vec<Vec<String>> {
+    let mut by_hash: std::collections::HashMap<u64, Vec<&str>> = std::collections::HashMap::new();
+    for record in analyzed {
+        if record.content_hash != 0 {
+            by_hash
+                .entry(record.content_hash)
+                .or_default()
+                .push(&record.relative_path);
+        }
+    }
+    let mut groups: Vec<Vec<String>> = by_hash
+        .into_values()
+        .filter(|v| v.len() >= 2)
+        .map(|v| {
+            let mut paths: Vec<String> = v.into_iter().map(str::to_owned).collect();
+            paths.sort();
+            paths
+        })
+        .collect();
+    groups.sort_by(|a, b| a[0].cmp(&b[0]));
+    groups
+}
+
 /// Assemble the final `AnalysisRun` from collected records and metadata.
 fn assemble_run(
     config: &AppConfig,
@@ -901,6 +1033,15 @@ fn assemble_run(
     let language_summaries = build_language_summaries(&analyzed);
     let col_threshold = config.analysis.style_col_threshold;
     let style_summary = build_style_summary(&analyzed, col_threshold);
+
+    // Compute ULOC, DRYness, duplicates, and COCOMO from the aggregated records.
+    let (uloc, dryness_pct) = compute_uloc(&analyzed);
+    let duplicate_groups = find_duplicate_groups(&analyzed);
+    let cocomo = if summary.code_lines > 0 {
+        Some(compute_cocomo(summary.code_lines, CocomoMode::Organic))
+    } else {
+        None
+    };
 
     let first_root = config
         .discovery
@@ -959,6 +1100,11 @@ fn assemble_run(
         git_commit_date: git.commit_date,
         git_remote_url: git.remote_url,
         style_summary,
+        cocomo,
+        uloc,
+        dryness_pct,
+        duplicate_groups,
+        duplicates_excluded: 0,
     }
 }
 
@@ -1431,6 +1577,22 @@ fn analyze_candidate_file(
     let mut warnings = decode_warnings;
     warnings.extend(analysis.warnings.clone());
 
+    // Compute a fast 64-bit content fingerprint for duplicate-file detection.
+    let content_hash = {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+
+    // Extract fields from analysis.raw before it is moved into FileRecord.
+    let cyclomatic_complexity = if analysis.raw.cyclomatic_complexity > 0 {
+        Some(analysis.raw.cyclomatic_complexity)
+    } else {
+        None
+    };
+    let lsloc = analysis.raw.lsloc;
+
     Ok(Some(FileRecord {
         path: path_to_string(path),
         relative_path,
@@ -1451,6 +1613,9 @@ fn analyze_candidate_file(
         submodule: None,
         coverage: None,
         style_analysis: analysis.style_analysis,
+        cyclomatic_complexity,
+        lsloc,
+        content_hash,
     }))
 }
 
@@ -1516,6 +1681,11 @@ fn build_summary(analyzed: &[FileRecord], skipped: &[FileRecord]) -> SummaryTota
         summary.test_count += record.raw_line_categories.test_count;
         summary.test_assertion_count += record.raw_line_categories.test_assertion_count;
         summary.test_suite_count += record.raw_line_categories.test_suite_count;
+        summary.cyclomatic_complexity +=
+            u64::from(record.raw_line_categories.cyclomatic_complexity);
+        if let Some(lsloc) = record.raw_line_categories.lsloc {
+            *summary.lsloc.get_or_insert(0) += u64::from(lsloc);
+        }
         if let Some(cov) = &record.coverage {
             summary.coverage_lines_found += u64::from(cov.lines_found);
             summary.coverage_lines_hit += u64::from(cov.lines_hit);
@@ -1552,6 +1722,8 @@ const fn zeroed_summary(language: Language) -> LanguageSummary {
         coverage_functions_hit: 0,
         coverage_branches_found: 0,
         coverage_branches_hit: 0,
+        cyclomatic_complexity: 0,
+        lsloc: None,
     }
 }
 
@@ -1571,6 +1743,10 @@ fn accumulate_record_into_summary(entry: &mut LanguageSummary, record: &FileReco
     entry.test_count += r.test_count;
     entry.test_assertion_count += r.test_assertion_count;
     entry.test_suite_count += r.test_suite_count;
+    entry.cyclomatic_complexity += u64::from(r.cyclomatic_complexity);
+    if let Some(lsloc) = r.lsloc {
+        *entry.lsloc.get_or_insert(0) += u64::from(lsloc);
+    }
     if let Some(cov) = &record.coverage {
         entry.coverage_lines_found += u64::from(cov.lines_found);
         entry.coverage_lines_hit += u64::from(cov.lines_hit);
@@ -1619,6 +1795,9 @@ fn skipped_record(
         submodule: None,
         coverage: None,
         style_analysis: None,
+        cyclomatic_complexity: None,
+        lsloc: None,
+        content_hash: 0,
     }
 }
 

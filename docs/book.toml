@@ -3,7 +3,7 @@ title = "oxide-sloc"
 authors = ["Nima Shafie"]
 description = "IEEE 1045-1992 SLOC analysis, test detection, and code metrics workbench"
 language = "en"
-src = "docs"
+src = "."
 
 [output.html]
 site-url = "/oxide-sloc/"
