@@ -51,6 +51,9 @@ fn make_file_record(path: &str, lang: Language, code: u64) -> FileRecord {
         submodule: None,
         coverage: None,
         style_analysis: None,
+        cyclomatic_complexity: None,
+        lsloc: None,
+        content_hash: 0,
     }
 }
 
@@ -76,6 +79,8 @@ const fn make_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSum
         coverage_functions_hit: 0,
         coverage_branches_found: 0,
         coverage_branches_hit: 0,
+        cyclomatic_complexity: 0,
+        lsloc: None,
     }
 }
 
@@ -132,6 +137,11 @@ fn make_run() -> AnalysisRun {
         git_commit_date: None,
         git_remote_url: None,
         style_summary: None,
+        cocomo: None,
+        uloc: 0,
+        dryness_pct: None,
+        duplicate_groups: vec![],
+        duplicates_excluded: 0,
     }
 }
 
@@ -157,6 +167,11 @@ fn make_empty_run() -> AnalysisRun {
         git_commit_date: None,
         git_remote_url: None,
         style_summary: None,
+        cocomo: None,
+        uloc: 0,
+        dryness_pct: None,
+        duplicate_groups: vec![],
+        duplicates_excluded: 0,
     }
 }
 
@@ -200,6 +215,11 @@ fn make_multi_lang_run() -> AnalysisRun {
         git_commit_date: None,
         git_remote_url: None,
         style_summary: None,
+        cocomo: None,
+        uloc: 0,
+        dryness_pct: None,
+        duplicate_groups: vec![],
+        duplicates_excluded: 0,
     }
 }
 

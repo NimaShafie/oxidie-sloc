@@ -240,6 +240,18 @@ pub struct RawLineCounts {
     /// (`TEST_GROUP`, `BOOST_AUTO_TEST_SUITE`, [`TestClass`], [`TestFixture`], etc.).
     #[serde(default)]
     pub test_suite_count: u64,
+    /// Cyclomatic complexity approximation: total count of branch decision keywords found on
+    /// code lines (e.g. `if`, `for`, `while`, `||`, `&&`). Starts at 0; +1 per keyword hit.
+    #[serde(default)]
+    pub cyclomatic_complexity: u32,
+    /// Logical SLOC estimate: executable statement count using a language-specific strategy.
+    /// `None` when the language does not support lexical LSLOC estimation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsloc: Option<u32>,
+    /// Per-code-line content hashes (trimmed) for ULOC aggregation. Never serialized — only
+    /// populated during an in-process scan and consumed by `sloc-core` during aggregation.
+    #[serde(skip)]
+    pub code_line_hashes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -285,6 +297,19 @@ pub struct AnalysisOptions {
 pub enum StyleLangScope {
     All,
     CFamilyOnly,
+}
+
+/// Strategy for computing Logical SLOC (LSLOC) from a physical-line scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LslocStrategy {
+    /// Count semicolons on code lines (C, C++, Java, C#, Go, Rust, JS/TS, Kotlin, SQL, …).
+    Semicolons,
+    /// Count non-blank code lines whose trimmed content does not end with a continuation
+    /// character (`\`, `,`, `(`, `[`, `{`). Suitable for Python, Ruby, Shell, Elixir, Nim.
+    NonContinuationNewlines,
+    /// Language does not have a well-defined statement boundary detectable by simple
+    /// lexical heuristics; `lsloc` will be `None` for files of this type.
+    Unsupported,
 }
 
 impl Default for AnalysisOptions {
@@ -616,6 +641,7 @@ fn language_scan_config(language: Language) -> (ScanConfig, bool) {
         .iter()
         .find_map(|&(l, c)| (l == language).then_some(c))
         .unwrap_or_else(|| panic!("language_scan_config: no entry for {language:?}"));
+    let (branch_keywords, lsloc_strategy) = language_complexity_config(language);
     (
         ScanConfig {
             line_comments: cfg.line_comments,
@@ -626,9 +652,105 @@ fn language_scan_config(language: Language) -> (ScanConfig, bool) {
             allow_csharp_verbatim_strings: cfg.allow_csharp_verbatim_strings,
             skip_lines: HashSet::new(),
             symbol_patterns: cfg.symbol_patterns,
+            branch_keywords,
+            lsloc_strategy,
         },
         cfg.has_preprocessor,
     )
+}
+
+// ── Cyclomatic complexity branch-keyword lists ────────────────────────────────
+// Alphabetic tokens are matched word-bounded; operator tokens (||, &&, ?) are
+// matched as raw substrings.  Each list covers one language family.
+
+const BRANCH_C_FAMILY: &[&str] = &[
+    "if", "else", "for", "while", "switch", "case", "catch", "||", "&&",
+];
+const BRANCH_C_TERNARY: &[&str] = &[
+    "if", "else", "for", "while", "switch", "case", "catch", "||", "&&", "?",
+];
+const BRANCH_GO: &[&str] = &["if", "else", "for", "switch", "case", "select", "||", "&&"];
+const BRANCH_RUST: &[&str] = &["if", "else", "for", "while", "match", "||", "&&"];
+const BRANCH_ZIG: &[&str] = &["if", "else", "for", "while", "switch", "catch", "||", "&&"];
+const BRANCH_FSHARP: &[&str] = &["if", "then", "else", "elif", "match", "when", "||", "&&"];
+const BRANCH_LUA: &[&str] = &[
+    "if", "elseif", "else", "for", "while", "repeat", "and", "or",
+];
+const BRANCH_HASKELL: &[&str] = &["if", "then", "else", "case", "otherwise"];
+const BRANCH_SQL: &[&str] = &["CASE", "WHEN", "IF", "ELSE", "case", "when", "if", "else"];
+const BRANCH_OCAML: &[&str] = &["if", "then", "else", "match", "when", "||", "&&"];
+const BRANCH_CLOJURE: &[&str] = &["if", "when", "cond", "case", "and", "or"];
+const BRANCH_PHP: &[&str] = &[
+    "if", "elseif", "else", "for", "while", "switch", "case", "catch", "match", "||", "&&", "?",
+];
+const BRANCH_JULIA: &[&str] = &["if", "elseif", "else", "for", "while", "catch", "||", "&&"];
+const BRANCH_PYTHON: &[&str] = &["if", "elif", "else", "for", "while", "except", "or", "and"];
+const BRANCH_RUBY: &[&str] = &[
+    "if", "elsif", "else", "unless", "until", "while", "case", "when", "rescue", "||", "&&",
+];
+const BRANCH_SHELL: &[&str] = &["if", "elif", "else", "while", "until", "case", "||", "&&"];
+const BRANCH_ELIXIR: &[&str] = &[
+    "if", "else", "cond", "case", "when", "rescue", "||", "&&", "and", "or",
+];
+const BRANCH_POWERSHELL: &[&str] = &[
+    "if", "elseif", "else", "for", "while", "switch", "foreach", "||", "&&",
+];
+const BRANCH_NIM: &[&str] = &[
+    "if", "elif", "else", "for", "while", "case", "of", "except", "and", "or",
+];
+const BRANCH_PERL: &[&str] = &[
+    "if", "elsif", "else", "unless", "until", "for", "while", "foreach", "||", "&&",
+];
+const BRANCH_R: &[&str] = &["if", "else", "for", "while", "repeat", "||", "&&"];
+
+/// Returns (branch_keywords, lsloc_strategy) for the given language.
+/// Kept separate from `LANG_SCAN_TABLE` to avoid touching that large table.
+const fn language_complexity_config(
+    language: Language,
+) -> (&'static [&'static str], LslocStrategy) {
+    match language {
+        // ── C preprocessor family ─────────────────────────────────────────────
+        Language::C | Language::Cpp | Language::ObjectiveC => {
+            (BRANCH_C_TERNARY, LslocStrategy::Semicolons)
+        }
+        // ── C-slash family ────────────────────────────────────────────────────
+        Language::CSharp => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
+        Language::Go => (BRANCH_GO, LslocStrategy::Semicolons),
+        Language::Java => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
+        Language::JavaScript | Language::TypeScript | Language::Svelte | Language::Vue => {
+            (BRANCH_C_TERNARY, LslocStrategy::Semicolons)
+        }
+        Language::Dart | Language::Groovy => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
+        Language::Kotlin => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
+        Language::Scala => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
+        Language::Scss => (&[], LslocStrategy::Unsupported),
+        Language::Rust => (BRANCH_RUST, LslocStrategy::Semicolons),
+        Language::Swift => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
+        Language::Zig => (BRANCH_ZIG, LslocStrategy::Semicolons),
+        Language::FSharp => (BRANCH_FSHARP, LslocStrategy::Unsupported),
+        // ── Hash-comment family ───────────────────────────────────────────────
+        Language::Shell => (BRANCH_SHELL, LslocStrategy::NonContinuationNewlines),
+        Language::Elixir => (BRANCH_ELIXIR, LslocStrategy::NonContinuationNewlines),
+        Language::Perl => (BRANCH_PERL, LslocStrategy::Semicolons),
+        Language::R => (BRANCH_R, LslocStrategy::NonContinuationNewlines),
+        Language::Ruby => (BRANCH_RUBY, LslocStrategy::NonContinuationNewlines),
+        Language::Python => (BRANCH_PYTHON, LslocStrategy::NonContinuationNewlines),
+        Language::PowerShell => (BRANCH_POWERSHELL, LslocStrategy::Unsupported),
+        Language::Nim => (BRANCH_NIM, LslocStrategy::NonContinuationNewlines),
+        Language::Makefile | Language::Dockerfile => (&[], LslocStrategy::Unsupported),
+        // ── Unique comment styles ─────────────────────────────────────────────
+        Language::Css => (&[], LslocStrategy::Unsupported),
+        Language::Html | Language::Xml => (&[], LslocStrategy::Unsupported),
+        Language::Lua => (BRANCH_LUA, LslocStrategy::Unsupported),
+        Language::Haskell => (BRANCH_HASKELL, LslocStrategy::Unsupported),
+        Language::Sql => (BRANCH_SQL, LslocStrategy::Semicolons),
+        Language::Ocaml => (BRANCH_OCAML, LslocStrategy::Semicolons),
+        Language::Assembly => (&[], LslocStrategy::Unsupported),
+        Language::Clojure => (BRANCH_CLOJURE, LslocStrategy::Unsupported),
+        Language::Erlang => (&[], LslocStrategy::Unsupported),
+        Language::Php => (BRANCH_PHP, LslocStrategy::Semicolons),
+        Language::Julia => (BRANCH_JULIA, LslocStrategy::NonContinuationNewlines),
+    }
 }
 
 /// Per-language keyword prefixes used for best-effort structural symbol detection.
@@ -1629,6 +1751,10 @@ struct ScanConfig {
     allow_csharp_verbatim_strings: bool,
     skip_lines: HashSet<usize>,
     symbol_patterns: SymbolPatterns,
+    /// Branch keywords used to approximate cyclomatic complexity.
+    branch_keywords: &'static [&'static str],
+    /// Strategy for computing Logical SLOC.
+    lsloc_strategy: LslocStrategy,
 }
 
 // ── Per-family base configurations ───────────────────────────────────────────
@@ -2348,6 +2474,35 @@ fn process_physical_line(
         raw.test_count += t;
         raw.test_assertion_count += a;
         raw.test_suite_count += s;
+
+        // Cyclomatic complexity: count branch decision keywords on code lines.
+        raw.cyclomatic_complexity +=
+            count_branch_in_line(trimmed.as_bytes(), config.branch_keywords);
+
+        // Logical SLOC (language-specific strategy).
+        match config.lsloc_strategy {
+            LslocStrategy::Semicolons => {
+                let semi = trimmed.bytes().filter(|&b| b == b';').count() as u32;
+                *raw.lsloc.get_or_insert(0) += semi;
+            }
+            LslocStrategy::NonContinuationNewlines => {
+                let cont = trimmed.ends_with('\\')
+                    || trimmed.ends_with(',')
+                    || trimmed.ends_with('(')
+                    || trimmed.ends_with('[')
+                    || trimmed.ends_with('{');
+                if !cont {
+                    *raw.lsloc.get_or_insert(0) += 1;
+                }
+            }
+            LslocStrategy::Unsupported => {}
+        }
+
+        // ULOC: hash each trimmed code line for cross-file unique-line counting.
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        trimmed.hash(&mut h);
+        raw.code_line_hashes.push(h.finish());
     }
 }
 
@@ -2468,6 +2623,43 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
         hit(patterns.assertions),
         hit(patterns.test_suites),
     )
+}
+
+/// Count branch keyword occurrences in `line` (ASCII bytes of a trimmed code line).
+///
+/// Alphabetic keywords are matched word-bounded (not as substrings of longer identifiers).
+/// Operator tokens (`||`, `&&`, `?`) are matched as raw substrings.
+fn count_branch_in_line(line: &[u8], keywords: &[&str]) -> u32 {
+    if keywords.is_empty() || line.is_empty() {
+        return 0;
+    }
+    let mut total = 0u32;
+    for &kw in keywords {
+        let kw_bytes = kw.as_bytes();
+        let word_kw = kw.bytes().all(|b| b.is_ascii_alphabetic() || b == b'_');
+        let mut i = 0usize;
+        while i + kw_bytes.len() <= line.len() {
+            if &line[i..i + kw_bytes.len()] == kw_bytes {
+                let ok = if word_kw {
+                    let before_ok =
+                        i == 0 || (!line[i - 1].is_ascii_alphanumeric() && line[i - 1] != b'_');
+                    let end = i + kw_bytes.len();
+                    let after_ok = end >= line.len()
+                        || (!line[end].is_ascii_alphanumeric() && line[end] != b'_');
+                    before_ok && after_ok
+                } else {
+                    true
+                };
+                if ok {
+                    total += 1;
+                    i += kw_bytes.len();
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    total
 }
 
 fn starts_with(chars: &[char], index: usize, needle: &str) -> bool {

@@ -574,6 +574,28 @@ fn render_html_inner(
             .as_deref()
             .zip(run.git_branch.as_deref())
             .and_then(|(remote, branch)| derive_branch_url(remote, branch)),
+        has_cocomo: run.cocomo.is_some(),
+        cocomo_effort_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.effort_person_months)),
+        cocomo_duration_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.duration_months)),
+        cocomo_staff_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.avg_staff)),
+        cocomo_ksloc_str: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| format!("{:.2}", c.ksloc)),
+        uloc: run.uloc,
+        dryness_pct_str: run
+            .dryness_pct
+            .map_or(String::new(), |d| format!("{:.1}", d)),
+        duplicate_group_count: run.duplicate_groups.len(),
     };
 
     template.render().context("failed to render HTML report")
@@ -3675,8 +3697,41 @@ struct WarningOpportunityRow {
         <div class="metric" data-metric-value="{{ run.summary_totals.test_count }}"><div class="metric-tooltip">Best-effort count of test cases detected by framework pattern (GTest, PyTest, JUnit, etc.).</div><div class="metric-label">Tests</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-density><div class="metric-tooltip">Percentage of physical lines that contain executable source code — higher means a leaner, code-dense codebase.</div><div class="metric-label">Code density</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         <div class="metric" data-metric-value="{{ run.summary_totals.files_analyzed }}"><div class="metric-tooltip">Total number of source files included in this analysis.</div><div class="metric-label">Files analyzed</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
+        {% if run.summary_totals.cyclomatic_complexity > 0 %}<div class="metric" data-metric-value="{{ run.summary_totals.cyclomatic_complexity }}"><div class="metric-tooltip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines. Approximates total McCabe cyclomatic complexity.</div><div class="metric-label">Complexity score</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
+        {% if let Some(lsloc) = run.summary_totals.lsloc %}<div class="metric" data-metric-value="{{ lsloc }}"><div class="metric-tooltip">Logical SLOC: count of executable statements (semicolons for C-family; non-continuation lines for Python/Ruby/Shell). Normalises across coding styles.</div><div class="metric-label">Logical SLOC</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
+        {% if uloc > 0 %}<div class="metric" data-metric-value="{{ uloc }}"><div class="metric-tooltip">Unique Lines of Code: distinct non-blank code lines across all files. DRYness = ULOC &divide; Code Lines {% if dryness_pct_str != "" %}({{ dryness_pct_str }}%){% endif %}.</div><div class="metric-label">Unique SLOC (ULOC)</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
+        {% if duplicate_group_count > 0 %}<div class="metric" data-metric-value="{{ duplicate_group_count }}"><div class="metric-tooltip">Groups of files with identical content detected. These may inflate SLOC totals. Re-run with --no-duplicates to exclude them.</div><div class="metric-label">Duplicate groups</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
       </div>
     </section>
+
+    {% if has_cocomo %}
+    <section class="report-card" id="cocomo-section">
+      <div class="toolbar"><div class="toolbar-left"><h2>COCOMO I Estimate</h2></div></div>
+      <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+          <div class="stat-chip-label">Person-months</div>
+          <div class="stat-chip-tip">Estimated development effort (COCOMO I, Organic mode)</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+          <div class="stat-chip-label">Schedule (months)</div>
+          <div class="stat-chip-tip">Estimated project duration in calendar months</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+          <div class="stat-chip-label">Avg. Team Size</div>
+          <div class="stat-chip-tip">Average engineers required (effort &divide; duration)</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+          <div class="stat-chip-label">Input KSLOC</div>
+          <div class="stat-chip-tip">{{ run.summary_totals.code_lines }} code lines used as COCOMO input</div>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--muted);padding:4px 4px 0;">Estimate only &mdash; COCOMO I (Basic, Organic mode). Actual effort varies widely by team experience and domain.</p>
+    </section>
+    {% endif %}
 
     <!-- ── PDF-only pre-rendered chart variants (hidden on screen) ─────── -->
     <div id="pdf-variants" class="pdf-variants-root"></div>
@@ -6834,7 +6889,8 @@ struct WarningOpportunityRow {
     ext = "html"
 )]
 // Template structs need many bool fields to pass Askama rendering flags.
-#[allow(clippy::struct_excessive_bools)]
+// Fields are consumed by the Askama proc-macro; clippy cannot trace that usage.
+#[allow(clippy::struct_excessive_bools, dead_code)]
 struct ReportTemplate<'a> {
     nonce: String,
     title: String,
@@ -6922,6 +6978,22 @@ struct ReportTemplate<'a> {
     prev_scan_count: usize,
     prev_scan_label: String,
     prev_run_id: String,
+    /// Whether a COCOMO estimate is available.
+    has_cocomo: bool,
+    /// Pre-formatted COCOMO effort string (e.g. "14.32 person-months").
+    cocomo_effort_str: String,
+    /// Pre-formatted COCOMO schedule string (e.g. "6.18 months").
+    cocomo_duration_str: String,
+    /// Pre-formatted COCOMO average team-size string (e.g. "2.32").
+    cocomo_staff_str: String,
+    /// Pre-formatted KSLOC input for COCOMO (e.g. "12.53").
+    cocomo_ksloc_str: String,
+    /// Unique Lines of Code across all analyzed files.
+    uloc: u64,
+    /// Pre-formatted DRYness percentage string (e.g. "82.3") or empty string.
+    dryness_pct_str: String,
+    /// Number of duplicate file groups detected.
+    duplicate_group_count: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

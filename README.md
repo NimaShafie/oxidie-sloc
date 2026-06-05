@@ -38,6 +38,26 @@ bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 - **CI/CD** — GitHub Actions, Jenkins, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable widget, SMTP/webhook delivery
 - **Offline-first** — vendored deps, Chart.js compiled in, no CDN calls; Docker on GHCR; LAN server mode with API key auth and optional TLS
 
+## Why oxide-sloc vs cloc / tokei / scc?
+
+| Capability | oxide-sloc | cloc | tokei | scc |
+|---|---|---|---|---|
+| Languages | 41 | 250+ | 240+ | 240+ |
+| Web UI + HTML/PDF reports | ✓ | — | — | — |
+| MCP server (AI agent tools) | ✓ | — | — | — |
+| Test function detection | ✓ | — | — | — |
+| Trend / history tracking | ✓ | — | — | — |
+| Coverage file import | ✓ | — | — | — |
+| IEEE 1045-1992 compliance | ✓ | partial | — | — |
+| REST API + SVG badge | ✓ | — | — | — |
+| Git webhook integration | ✓ | — | — | — |
+| CI/CD marketplace action | ✓ | — | — | — |
+| Offline / air-gapped build | ✓ | — | — | — |
+
+cloc, tokei, and scc win on raw language count and throughput for pure line-counting pipelines.
+oxide-sloc is the right choice when you need analysis depth, visual reports, history, or
+AI-native integration — particularly as an MCP tool callable by Claude, Copilot, and other agents.
+
 ---
 
 ## Screenshots

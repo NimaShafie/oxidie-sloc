@@ -58,6 +58,7 @@ perf.data.old
 # Compiled binaries — never committed; users build from toolchain/ + vendor sources
 *.exe
 *.dll
+/oxide-sloc
 
 # dist/ — ignored for local builds to prevent accidental commits.
 # update-dist.yml uses `git add -f` to intentionally commit the signed
