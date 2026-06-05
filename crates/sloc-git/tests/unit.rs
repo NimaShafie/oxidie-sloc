@@ -203,11 +203,11 @@ fn parse_bitbucket_push_malformed_json_errors() {
 
 #[test]
 fn verify_github_sig_valid() {
+    use ring::hmac;
     // Pre-computed: HMAC-SHA256("secret", "hello") in hex
     let body = b"hello";
     let secret = "secret";
     // Compute expected sig using ring directly to get a reference value
-    use ring::hmac;
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
     let tag = hmac::sign(&key, body);
     let hex: String = tag.as_ref().iter().fold(String::new(), |mut s, b| {

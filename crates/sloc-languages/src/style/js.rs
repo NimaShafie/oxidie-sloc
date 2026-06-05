@@ -76,18 +76,23 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
     let over100 = count_over(&lines, 100);
     let over120 = count_over(&lines, 120);
     let over140 = count_over(&lines, 140);
-    let max_len = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0);
+    let max_len = lines
+        .iter()
+        .map(|l| u32::try_from(l.len()).unwrap_or(u32::MAX))
+        .max()
+        .unwrap_or(0);
 
     for line in &lines {
         scan_js_line(line, &mut c);
     }
 
     let indent = classify_indent(c.tabs, c.sp2, c.sp4);
-    let uses_semis = c.semicolons as f32 / (c.semicolons + c.no_semicolons).max(1) as f32 >= 0.60;
-    let uses_single = c.single_q as f32 / (c.single_q + c.double_q).max(1) as f32 >= 0.60;
-    let uses_double = c.double_q as f32 / (c.single_q + c.double_q).max(1) as f32 >= 0.60;
+    let uses_semis =
+        f64::from(c.semicolons) / f64::from((c.semicolons + c.no_semicolons).max(1)) >= 0.60;
+    let uses_single = f64::from(c.single_q) / f64::from((c.single_q + c.double_q).max(1)) >= 0.60;
+    let uses_double = f64::from(c.double_q) / f64::from((c.single_q + c.double_q).max(1)) >= 0.60;
     let modern_vars = c.var_count == 0
-        || (c.let_const as f32 / (c.var_count + c.let_const).max(1) as f32 >= 0.80);
+        || (f64::from(c.let_const) / f64::from((c.var_count + c.let_const).max(1)) >= 0.80);
 
     let quote_str = if uses_single {
         "Single quotes"
@@ -174,6 +179,7 @@ pub fn analyze(language: Language, text: &str) -> StyleAnalysis {
 // ─── Scoring ──────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)] // scoring flags: semis/single/double/modern_vars
 fn score_js(
     ind: super::common::IndentStyle,
     over80: u32,
@@ -188,7 +194,7 @@ fn score_js(
     let l80 = score_line80(over80, total);
     let l100 = score_line100(over100, total);
     let sf = if semis { 1.0_f32 } else { 0.0 };
-    let nsf = if !semis { 1.0_f32 } else { 0.0 };
+    let nsf = if semis { 0.0 } else { 1.0_f32 };
     let sq = if single { 1.0_f32 } else { 0.0 };
     let dq = if double { 1.0_f32 } else { 0.0 };
     let mv = if modern_vars { 1.0_f32 } else { 0.30 };

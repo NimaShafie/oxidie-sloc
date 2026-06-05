@@ -4,7 +4,10 @@
 //! Style-guide analysis for Go.
 //! Guides: Effective Go / gofmt, Uber Go, Google Go.
 
-use super::common::*;
+use super::common::{
+    classify_indent, scan_base_metrics, score_indent_tabs, score_line100, score_line120,
+    score_line80, weighted_score, IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+};
 
 pub fn analyze(text: &str) -> StyleAnalysis {
     let lines: Vec<&str> = text.lines().collect();

@@ -1343,6 +1343,7 @@ async fn git_compare_refs_missing_params_not_5xx() {
 // code paths that only activate once a completed scan is stored.
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn full_analyze_cycle_html_json_csv_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn main() {}\n// comment\n").unwrap();
@@ -1495,6 +1496,7 @@ async fn full_analyze_cycle_html_json_csv_artifacts() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn full_analyze_cycle_compare_two_runs() {
     let dir1 = tempfile::tempdir().unwrap();
     std::fs::write(dir1.path().join("lib.rs"), "fn foo() {}\n").unwrap();
@@ -1780,7 +1782,7 @@ async fn api_confluence_config_post_with_valid_payload_not_5xx() {
 
 #[tokio::test]
 async fn api_confluence_config_post_empty_payload_not_5xx() {
-    let (status, _, _) = post_json("/api/confluence/config", r#"{}"#).await;
+    let (status, _, _) = post_json("/api/confluence/config", r"{}").await;
     assert!(
         status.as_u16() < 500,
         "POST /api/confluence/config empty payload must not 5xx, got {status}"
