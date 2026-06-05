@@ -862,6 +862,128 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
     build_router(state)
 }
 
+/// Test router with `server_mode = true`. Exercises server-mode-gated code paths such as
+/// the locked watched-bar in trend-reports, path validation in analyze, and upload-only
+/// preview restrictions.
+pub fn make_test_router_server_mode() -> Router {
+    std::env::set_var("SLOC_HEADLESS", "1");
+    let tmp = std::env::temp_dir().join("sloc_test_server");
+    let state = AppState {
+        base_config: AppConfig::default(),
+        artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
+        registry: Arc::new(Mutex::new(ScanRegistry::default())),
+        registry_path: tmp.join("registry.json"),
+        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
+        server_mode: true,
+        tls_enabled: false,
+        api_keys: Arc::new(vec![]),
+        rate_limiter: Arc::new(IpRateLimiter::new(
+            Duration::from_mins(1),
+            600,
+            10,
+            Duration::from_hours(1),
+        )),
+        trust_proxy: false,
+        trusted_proxy_ips: vec![],
+        git_clones_dir: tmp.join("git-clones"),
+        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
+        schedules_path: tmp.join("schedules.json"),
+        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
+        scan_profiles_path: tmp.join("scan_profiles.json"),
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
+        confluence_path: tmp.join("confluence_config.json"),
+        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
+        watched_dirs_path: tmp.join("watched_dirs.json"),
+        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
+        cleanup_policy_path: tmp.join("cleanup_policy.json"),
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
+    };
+    build_router(state)
+}
+
+/// Test router where the analysis semaphore is pre-exhausted (0 permits).
+/// Immediately returns 503 on POST /analyze, exercising the busy-server branch.
+pub fn make_test_router_exhausted_semaphore() -> Router {
+    std::env::set_var("SLOC_HEADLESS", "1");
+    let tmp = std::env::temp_dir().join("sloc_test_exhaust");
+    let sem = Arc::new(tokio::sync::Semaphore::new(0));
+    let state = AppState {
+        base_config: AppConfig::default(),
+        artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
+        registry: Arc::new(Mutex::new(ScanRegistry::default())),
+        registry_path: tmp.join("registry.json"),
+        analyze_semaphore: sem,
+        server_mode: false,
+        tls_enabled: false,
+        api_keys: Arc::new(vec![]),
+        rate_limiter: Arc::new(IpRateLimiter::new(
+            Duration::from_mins(1),
+            600,
+            10,
+            Duration::from_hours(1),
+        )),
+        trust_proxy: false,
+        trusted_proxy_ips: vec![],
+        git_clones_dir: tmp.join("git-clones"),
+        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
+        schedules_path: tmp.join("schedules.json"),
+        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
+        scan_profiles_path: tmp.join("scan_profiles.json"),
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
+        confluence_path: tmp.join("confluence_config.json"),
+        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
+        watched_dirs_path: tmp.join("watched_dirs.json"),
+        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
+        cleanup_policy_path: tmp.join("cleanup_policy.json"),
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
+    };
+    build_router(state)
+}
+
+/// Test router with a very tight rate limit (3 req/min). The third request from
+/// the same IP (0.0.0.0 when ConnectInfo is absent) returns 429.
+pub fn make_test_router_tight_rate_limit() -> Router {
+    std::env::set_var("SLOC_HEADLESS", "1");
+    let tmp = std::env::temp_dir().join("sloc_test_rate");
+    let state = AppState {
+        base_config: AppConfig::default(),
+        artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
+        registry: Arc::new(Mutex::new(ScanRegistry::default())),
+        registry_path: tmp.join("registry.json"),
+        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
+        server_mode: false,
+        tls_enabled: false,
+        api_keys: Arc::new(vec![]),
+        rate_limiter: Arc::new(IpRateLimiter::new(
+            Duration::from_secs(60),
+            2,
+            5,
+            Duration::from_secs(5),
+        )),
+        trust_proxy: false,
+        trusted_proxy_ips: vec![],
+        git_clones_dir: tmp.join("git-clones"),
+        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
+        schedules_path: tmp.join("schedules.json"),
+        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
+        scan_profiles_path: tmp.join("scan_profiles.json"),
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
+        confluence_path: tmp.join("confluence_config.json"),
+        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
+        watched_dirs_path: tmp.join("watched_dirs.json"),
+        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
+        cleanup_policy_path: tmp.join("cleanup_policy.json"),
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
+    };
+    build_router(state)
+}
+
 struct RuntimeSecurityConfig {
     api_keys: Vec<secrecy::SecretBox<String>>,
     tls_cert: Option<String>,
