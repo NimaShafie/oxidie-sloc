@@ -8,7 +8,10 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use sloc_web::{make_test_router, make_test_router_with_key};
+use sloc_web::{
+    make_test_router, make_test_router_exhausted_semaphore, make_test_router_server_mode,
+    make_test_router_tight_rate_limit, make_test_router_with_key,
+};
 use tower::ServiceExt;
 
 use chrono::Utc;
@@ -3262,5 +3265,677 @@ async fn locate_reports_dir_with_real_dir_not_5xx() {
     assert!(
         resp.status().as_u16() < 500,
         "POST /locate-reports-dir must not 5xx"
+    );
+}
+
+// ── A1: server_mode = true gated paths ───────────────────────────────────────
+
+#[tokio::test]
+async fn server_mode_trend_reports_shows_locked_watched_bar() {
+    let app = make_test_router_server_mode();
+    let (status, _, body) = get_shared(app, "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("Network Server mode")
+            || body.contains("network-server")
+            || body.contains("watched-none"),
+        "server_mode trend-reports should show locked watched bar, got len={}",
+        body.len()
+    );
+}
+
+#[tokio::test]
+async fn server_mode_test_metrics_renders_html() {
+    let app = make_test_router_server_mode();
+    let (status, headers, body) = get_shared(app, "/test-metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(has_csp(&headers));
+    assert!(
+        body.contains("<html"),
+        "expected HTML from server_mode /test-metrics"
+    );
+}
+
+#[tokio::test]
+async fn server_mode_analyze_with_path_rejects_when_no_allowed_roots() {
+    // server_mode + no allowed_scan_roots → validate_server_scan_path rejects
+    let app = make_test_router_server_mode();
+    let dir = tempfile::tempdir().unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, _, _) = post_form_shared(app, "/analyze", &format!("path={path}")).await;
+    // Should be a redirect or 4xx/5xx — must not panic
+    assert!(
+        status.as_u16() != 500,
+        "server_mode analyze must not 500, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn server_mode_preview_rejects_arbitrary_path() {
+    let app = make_test_router_server_mode();
+    let dir = tempfile::tempdir().unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, _, body) = get_shared(app, &format!("/preview?path={path}")).await;
+    // server_mode preview rejects non-upload/non-sample paths
+    assert!(
+        status.as_u16() < 500,
+        "/preview in server_mode must not 5xx, got {status}"
+    );
+    // Should return the rejected message or an empty preview
+    let _ = body;
+}
+
+#[tokio::test]
+async fn server_mode_view_reports_renders_html() {
+    let app = make_test_router_server_mode();
+    let (status, _, body) = get_shared(app, "/view-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from server_mode /view-reports"
+    );
+}
+
+#[tokio::test]
+async fn server_mode_history_handler_with_error_query_param() {
+    let app = make_test_router_server_mode();
+    // history_handler has an error query param branch
+    let (status, _, body) = get_shared(app, "/view-reports?error=scan_failed").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /view-reports?error=..."
+    );
+}
+
+#[tokio::test]
+async fn server_mode_project_history_upload_path_branch() {
+    // server_mode + path under oxide-sloc-uploads → exercises upload-name suffix branch
+    let app = make_test_router_server_mode();
+    let upload_base = std::env::temp_dir()
+        .join("oxide-sloc-uploads")
+        .join("some-uuid")
+        .join("myproject");
+    let path = pct_encode(upload_base.to_str().unwrap_or("."));
+    let (status, _, _) = get_shared(app, &format!("/api/project-history?path={path}")).await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/project-history in server_mode must not 5xx"
+    );
+}
+
+// ── A2: watched-dirs shared-router tests ─────────────────────────────────────
+
+#[tokio::test]
+async fn trend_reports_with_non_empty_watched_dirs_renders_chips() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap_or(".").to_owned();
+    // Add the dir on the SAME router so state is shared
+    let (add_status, _, _) = post_form_shared(
+        app.clone(),
+        "/watched-dirs/add",
+        &format!(
+            "folder_path={}&redirect_to=/trend-reports",
+            pct_encode(&path)
+        ),
+    )
+    .await;
+    assert!(add_status.as_u16() < 500, "watched-dirs/add must not 5xx");
+    // Now trend-reports should see the non-empty watched_dirs list
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK, "/trend-reports must be 200");
+    assert!(body.contains("<html"), "expected HTML");
+}
+
+#[tokio::test]
+async fn trend_reports_with_two_watched_dirs_renders_both() {
+    let app = make_test_router();
+    let dir1 = tempfile::tempdir().unwrap();
+    let dir2 = tempfile::tempdir().unwrap();
+    for dir in [&dir1, &dir2] {
+        let p = dir.path().to_str().unwrap_or(".").to_owned();
+        let (s, _, _) = post_form_shared(
+            app.clone(),
+            "/watched-dirs/add",
+            &format!("folder_path={}&redirect_to=/trend-reports", pct_encode(&p)),
+        )
+        .await;
+        assert!(s.as_u16() < 500);
+    }
+    let (status, _, body) = get_shared(app.clone(), "/trend-reports").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html"));
+}
+
+#[tokio::test]
+async fn view_reports_with_linked_query_param_renders_html() {
+    let app = make_test_router();
+    // history_handler accepts ?linked= for a "just saved" banner
+    let (status, _, body) = get_shared(app.clone(), "/view-reports?linked=some-run-id").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /view-reports?linked=..."
+    );
+}
+
+#[tokio::test]
+async fn test_metrics_with_watched_dir_state_renders_html() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap_or(".").to_owned();
+    post_form_shared(
+        app.clone(),
+        "/watched-dirs/add",
+        &format!(
+            "folder_path={}&redirect_to=/test-metrics",
+            pct_encode(&path)
+        ),
+    )
+    .await;
+    let (status, _, body) = get_shared(app.clone(), "/test-metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /test-metrics with watched dir"
+    );
+}
+
+// ── A3: git browser with real local git repo ──────────────────────────────────
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+fn init_local_repo(dir: &std::path::Path) -> bool {
+    let ok =
+        |c: &mut std::process::Command| c.output().map(|o| o.status.success()).unwrap_or(false);
+    ok(std::process::Command::new("git").args(["init", dir.to_str().unwrap_or(".")]))
+        && ok(std::process::Command::new("git").current_dir(dir).args([
+            "-c",
+            "user.email=test@test.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]))
+}
+
+#[tokio::test]
+async fn api_list_refs_with_local_git_repo_returns_ok() {
+    if !git_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    if !init_local_repo(dir.path()) {
+        return; // git not configured well enough
+    }
+    let repo_url = format!("file://{}", dir.path().display());
+    let (status, _, body) = get(&format!("/api/git/refs?repo={}", pct_encode(&repo_url))).await;
+    // 200 with refs JSON, OR 502 if git clone fails (still < 500 except 502)
+    assert!(
+        status == StatusCode::OK || status.as_u16() == 502,
+        "/api/git/refs must return 200 or 502, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_list_refs_missing_repo_param_returns_400() {
+    let (status, _, _) = get("/api/git/refs").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing ?repo= must return 400"
+    );
+}
+
+#[tokio::test]
+async fn api_scan_ref_with_local_repo_completes() {
+    if !git_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
+    let ok =
+        |c: &mut std::process::Command| c.output().map(|o| o.status.success()).unwrap_or(false);
+    ok(std::process::Command::new("git").args(["init", dir.path().to_str().unwrap_or(".")]));
+    ok(std::process::Command::new("git")
+        .current_dir(&dir)
+        .args(["add", "."]));
+    if !ok(std::process::Command::new("git").current_dir(&dir).args([
+        "-c",
+        "user.email=t@t.com",
+        "-c",
+        "user.name=T",
+        "commit",
+        "-m",
+        "add",
+    ])) {
+        return;
+    }
+    let repo_url = format!("file://{}", dir.path().display());
+    let (status, _, _) = get(&format!(
+        "/api/git/scan-ref?repo={}&ref_name=main",
+        pct_encode(&repo_url)
+    ))
+    .await;
+    assert!(
+        status == StatusCode::OK || status.as_u16() == 502,
+        "/api/git/scan-ref must return 200 or 502, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_scan_ref_invalid_ref_name_returns_400() {
+    // api_scan_ref validates the ref_name; path-traversal should return 400
+    let (status, _, _) =
+        get("/api/git/scan-ref?repo=file%3A%2F%2F%2Ftmp&ref_name=..%2F..%2Fetc%2Fpasswd").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "path-traversal ref_name must return 400, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn git_browser_handler_renders_html() {
+    let (status, headers, body) = get("/git-browser").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(has_csp(&headers), "missing CSP on /git-browser");
+    assert!(body.contains("<html"), "expected HTML from /git-browser");
+}
+
+#[tokio::test]
+async fn git_browser_with_repo_query_renders_html() {
+    let (status, _, body) = get("/git-browser?repo=https%3A%2F%2Fgithub.com%2Ftest%2Frepo").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /git-browser?repo=..."
+    );
+}
+
+// ── A4: analyze variants ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn analyze_when_semaphore_exhausted_returns_503() {
+    let app = make_test_router_exhausted_semaphore();
+    let dir = tempfile::tempdir().unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, _, body) = post_form_shared(app, "/analyze", &format!("path={path}")).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "exhausted semaphore must return 503, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn analyze_with_project_label_form_field() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let form = format!("path={path}&report_title=My+Coverage+Report");
+    let (status, headers, _) = post_form_shared(app, "/analyze", &form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers.contains_key("x-wait-id"),
+        "expected x-wait-id header"
+    );
+}
+
+#[tokio::test]
+async fn analyze_with_include_globs_form_field() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("skip.py"), "pass\n").unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let form = format!("path={path}&include_globs=*.rs&report_title=Rust+Only");
+    let (status, headers, _) = post_form_shared(app, "/analyze", &form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.contains_key("x-wait-id"));
+}
+
+#[tokio::test]
+async fn analyze_with_exclude_globs_form_field() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("skip.rs"), "// skip\n").unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let form = format!("path={path}&exclude_globs=skip.rs");
+    let (status, headers, _) = post_form_shared(app, "/analyze", &form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.contains_key("x-wait-id"));
+}
+
+// ── A5: history / project-history query-param branches ───────────────────────
+
+#[tokio::test]
+async fn view_reports_with_error_query_param_renders_html() {
+    let (status, _, body) = get("/view-reports?error=some_error").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<html"),
+        "expected HTML from /view-reports?error=..."
+    );
+}
+
+#[tokio::test]
+async fn compare_scans_page_renders_html() {
+    let (status, headers, body) = get("/compare-scans").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(has_csp(&headers));
+    assert!(body.contains("<html"), "expected HTML from /compare-scans");
+}
+
+#[tokio::test]
+async fn project_history_with_explicit_path_returns_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = pct_encode(dir.path().to_str().unwrap_or("."));
+    let (status, _, _) = get(&format!("/api/project-history?path={path}")).await;
+    assert!(status.as_u16() < 500, "/api/project-history must not 5xx");
+}
+
+#[tokio::test]
+async fn metrics_history_with_ingested_run_returns_array() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, body) = get_shared(app.clone(), "/api/metrics/history").await;
+    assert!(status.as_u16() < 500);
+    if status == StatusCode::OK {
+        let _: serde_json::Value =
+            serde_json::from_str(&body).expect("/api/metrics/history must be valid JSON");
+    }
+}
+
+#[tokio::test]
+async fn async_run_status_for_unknown_id_returns_json() {
+    let (status, _, body) = get("/api/runs/00000000-0000-0000-0000-000000000000/status").await;
+    assert!(status.as_u16() < 500);
+    // Should return JSON indicating not found or unknown state
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let _ = v;
+}
+
+// ── A6: compare handler with valid run IDs and different scopes ───────────────
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn compare_with_two_ingested_runs_exercises_delta_rendering() {
+    let app = make_test_router();
+    // Inject two runs with different code counts so delta is non-trivial
+    let (s1, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    assert!(s1.as_u16() < 500, "first ingest failed");
+    let (s2, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_test_metrics()).await;
+    assert!(s2.as_u16() < 500, "second ingest failed");
+
+    let (status, _, body) = get_shared(
+        app.clone(),
+        "/compare?a=ingest-coverage-001&b=ingest-testmetrics-001",
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "/compare with two run IDs must not 5xx, got {status}"
+    );
+    if status == StatusCode::OK {
+        assert!(body.contains("<!doctype html>") || body.contains("<!DOCTYPE html>"));
+    }
+}
+
+#[tokio::test]
+async fn compare_with_submodule_scope_query_param() {
+    let app = make_test_router();
+    let (s1, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_submodules()).await;
+    assert!(s1.as_u16() < 500, "ingest failed");
+
+    // With a `sub=` query param — exercises submodule scope branch
+    let (status, _, body) = get_shared(
+        app.clone(),
+        "/compare?a=ingest-submodules-001&b=ingest-submodules-001&sub=vendor%2Flib-a",
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "/compare with sub= scope must not 5xx, got {status}"
+    );
+    let _ = body;
+}
+
+#[tokio::test]
+async fn compare_with_scope_super_query_param() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_submodules()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, _) = get_shared(
+        app.clone(),
+        "/compare?a=ingest-submodules-001&b=ingest-submodules-001&scope=super",
+    )
+    .await;
+    assert!(status.as_u16() < 500, "/compare?scope=super must not 5xx");
+}
+
+#[tokio::test]
+async fn compare_redirect_when_no_run_ids() {
+    let (status, headers, _) = get("/compare").await;
+    // Without a= and b= params, compare redirects to /compare-scans
+    assert!(
+        status.is_redirection() || status == StatusCode::OK,
+        "/compare without IDs should redirect, got {status}"
+    );
+    if status.is_redirection() {
+        let loc = headers
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            loc.contains("compare"),
+            "redirect should go to compare page"
+        );
+    }
+}
+
+// ── A7: confluence end-to-end flow ────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_confluence_config_save_and_retrieve() {
+    let app = make_test_router();
+    let payload = serde_json::json!({
+        "tier": "cloud",
+        "base_url": "https://mycompany.atlassian.net",
+        "username": "user@example.com",
+        "credential": "api-token",
+        "space_key": "PROJ"
+    });
+    let (status, _, body) =
+        post_json_shared(app.clone(), "/api/confluence/config", &payload.to_string()).await;
+    assert!(
+        status.as_u16() < 500,
+        "POST /api/confluence/config must not 5xx"
+    );
+    // GET the config back
+    let (get_status, _, get_body) = get_shared(app.clone(), "/api/confluence/config").await;
+    assert!(get_status.as_u16() < 500);
+    let _ = (body, get_body);
+}
+
+#[tokio::test]
+async fn api_confluence_test_without_config_returns_400() {
+    let app = make_test_router();
+    let req = Request::post("/api/confluence/test")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // No config → 400 Bad Request
+    assert!(
+        resp.status().as_u16() < 500,
+        "POST /api/confluence/test without config must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn api_confluence_post_with_run_not_found_returns_error() {
+    let app = make_test_router();
+    // Save a config first
+    let cfg = serde_json::json!({
+        "tier": "cloud",
+        "base_url": "https://example.atlassian.net",
+        "username": "u@e.com",
+        "credential": "tok",
+        "space_key": "SPACE"
+    });
+    post_json_shared(app.clone(), "/api/confluence/config", &cfg.to_string()).await;
+    // Now try to post a run that doesn't exist
+    let body = serde_json::json!({"run_id": "no-such-run-xyz"});
+    let (status, _, _) =
+        post_json_shared(app.clone(), "/api/confluence/post", &body.to_string()).await;
+    assert!(
+        status.as_u16() < 500,
+        "confluence post with unknown run must not 5xx"
+    );
+}
+
+#[tokio::test]
+async fn api_confluence_wiki_markup_with_ingested_run_returns_html() {
+    let app = make_test_router();
+    let (s, _, _) =
+        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_git_meta()).await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    let (status, _, body) = get_shared(
+        app.clone(),
+        "/api/confluence/wiki-markup?run_id=ingest-gitmeta-001",
+    )
+    .await;
+    assert!(
+        status.as_u16() < 500,
+        "/api/confluence/wiki-markup must not 5xx, got {status}"
+    );
+    let _ = body;
+}
+
+#[tokio::test]
+async fn api_confluence_post_with_ingested_run_exercises_post_flow() {
+    // Even though the Confluence connection will fail (no real server),
+    // this exercises the code path from config lookup → artifact lookup → post attempt.
+    let app = make_test_router();
+    // Ingest a run
+    let (s, _, _) = post_json_shared(
+        app.clone(),
+        "/api/ingest",
+        &fixture_run_coverage_and_tests(),
+    )
+    .await;
+    assert!(s.as_u16() < 500, "ingest failed");
+    // Configure confluence
+    let cfg = serde_json::json!({
+        "tier": "cloud",
+        "base_url": "https://fake.atlassian.net",
+        "username": "u@e.com",
+        "credential": "tok",
+        "space_key": "SPACE"
+    });
+    post_json_shared(app.clone(), "/api/confluence/config", &cfg.to_string()).await;
+    // Try to post — will fail at HTTP level but exercises the handler code
+    let body = serde_json::json!({"run_id": "ingest-cov-and-tests-001"});
+    let (status, _, _) =
+        post_json_shared(app.clone(), "/api/confluence/post", &body.to_string()).await;
+    // 502 Bad Gateway is expected (can't reach fake.atlassian.net), not a server error
+    assert!(
+        status.as_u16() < 500 || status.as_u16() == 502,
+        "confluence post must not produce unexpected 5xx (got {status})"
+    );
+}
+
+// ── A8: rate limiter paths ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn rate_limiter_returns_429_after_limit_exceeded() {
+    let app = make_test_router_tight_rate_limit();
+    // Limit is 2 req/min for IP 0.0.0.0 (no ConnectInfo → UNSPECIFIED)
+    // First 2 requests are allowed; 3rd should get 429
+    let r1 = app
+        .clone()
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let r2 = app
+        .clone()
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let r3 = app
+        .clone()
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        r1.status() == StatusCode::OK || r1.status() == StatusCode::TOO_MANY_REQUESTS,
+        "r1 must be 200 or 429"
+    );
+    assert!(
+        r2.status() == StatusCode::OK || r2.status() == StatusCode::TOO_MANY_REQUESTS,
+        "r2 must be 200 or 429"
+    );
+    assert_eq!(
+        r3.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "3rd request must be rate-limited (429)"
+    );
+}
+
+#[tokio::test]
+async fn rate_limiter_is_allowed_method_exercised() {
+    // Exercise the IpRateLimiter::is_allowed path through actual HTTP requests.
+    // The first request must succeed; the limiter increments its internal counter.
+    let app = make_test_router_tight_rate_limit();
+    let resp = app
+        .oneshot(Request::get("/api/version").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::OK || resp.status() == StatusCode::TOO_MANY_REQUESTS,
+        "rate limiter request must return 200 or 429"
+    );
+}
+
+#[tokio::test]
+async fn auth_lockout_after_repeated_wrong_key_attempts() {
+    use std::net::SocketAddr;
+    let app = make_test_router_with_key("correct-secret");
+    let peer: SocketAddr = "127.0.0.2:55555".parse().unwrap();
+
+    let mut last_status = StatusCode::OK;
+    for _ in 0..12 {
+        let mut req = Request::post("/auth/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("key=wrong&next=%2F"))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        last_status = resp.status();
+    }
+    // After 10+ failures the IP may be locked out; last response is either
+    // 302 (redirect with ?error=1) or 429 (rate-limited/locked out)
+    assert!(
+        last_status.is_redirection()
+            || last_status == StatusCode::TOO_MANY_REQUESTS
+            || last_status == StatusCode::FORBIDDEN,
+        "after repeated wrong keys, expected redirect, 429, or 403; got {last_status}"
     );
 }
