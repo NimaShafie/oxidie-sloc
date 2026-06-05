@@ -228,12 +228,12 @@ impl McpServer {
 fn string_arg(args: &Value, key: &str) -> anyhow::Result<String> {
     args[key]
         .as_str()
-        .map(|s| s.to_owned())
+        .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("missing required argument: {key}"))
 }
 
 fn opt_string(args: &Value, key: &str) -> Option<String> {
-    args[key].as_str().map(|s| s.to_owned())
+    args[key].as_str().map(str::to_owned)
 }
 
 #[cfg(test)]

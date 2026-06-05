@@ -54,7 +54,7 @@ fn make_file_record(path: &str, lang: Language, code: u64) -> FileRecord {
     }
 }
 
-fn make_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
+const fn make_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
     LanguageSummary {
         language: lang,
         files,
@@ -776,11 +776,11 @@ fn render_sub_report_html_empty_run() {
 #[test]
 fn render_html_many_files() {
     let mut run = make_run();
-    for i in 0..20 {
+    for i in 0_u64..20 {
         run.per_file_records.push(make_file_record(
             &format!("src/file_{i}.rs"),
             Language::Rust,
-            10 + i as u64,
+            10 + i,
         ));
     }
     run.summary_totals.files_analyzed = run.per_file_records.len() as u64;

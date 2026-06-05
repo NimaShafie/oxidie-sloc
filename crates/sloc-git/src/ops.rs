@@ -747,7 +747,7 @@ mod git_integration {
             .env("GIT_COMMITTER_EMAIL", "test@example.com")
             .status()
             .expect("git must be on PATH");
-        assert!(status.success(), "git {:?} failed", args);
+        assert!(status.success(), "git {args:?} failed");
     }
 
     /// Initialise a bare-minimum git repo with a single commit on branch `main`.

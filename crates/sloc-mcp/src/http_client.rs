@@ -104,7 +104,7 @@ mod tests {
 
     // ── in-process mock HTTP server ───────────────────────────────────────────
 
-    /// Spawn a minimal Axum server and return (base_url, abort_handle).
+    /// Spawn a minimal Axum server and return (`base_url`, `abort_handle`).
     async fn spawn_mock(
         get_json: &'static str,
         post_json: &'static str,

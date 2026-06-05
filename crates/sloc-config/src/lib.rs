@@ -171,7 +171,7 @@ pub struct AnalysisConfig {
     #[serde(default)]
     pub style_score_threshold: u8,
     /// Language scope for style analysis. "all" = every supported language family (default).
-    /// "c_family" = C / C++ / Objective-C only (fast, backwards-compatible).
+    /// `"c_family"` = C / C++ / Objective-C only (fast, backwards-compatible).
     #[serde(default = "default_style_lang_scope")]
     pub style_lang_scope: String,
 }

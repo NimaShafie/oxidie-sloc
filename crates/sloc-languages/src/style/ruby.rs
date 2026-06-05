@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
 //! Style-guide analysis for Ruby.
-//! Guides: RuboCop (community), Airbnb Ruby, Standard Ruby.
+//! Guides: `RuboCop` (community), Airbnb Ruby, Standard Ruby.
 
 use super::common::{
     classify_indent, count_first_quote, scan_base_metrics, score_indent_2, score_line100,
@@ -22,8 +22,8 @@ pub fn analyze(text: &str) -> StyleAnalysis {
     }
 
     let indent = classify_indent(m.tabs, m.sp2, m.sp4);
-    let uses_single = single_q as f32 / (single_q + double_q).max(1) as f32 >= 0.60;
-    let uses_double = double_q as f32 / (single_q + double_q).max(1) as f32 >= 0.60;
+    let uses_single = f64::from(single_q) / f64::from((single_q + double_q).max(1)) >= 0.60;
+    let uses_double = f64::from(double_q) / f64::from((single_q + double_q).max(1)) >= 0.60;
 
     let guides = score_ruby(
         indent,

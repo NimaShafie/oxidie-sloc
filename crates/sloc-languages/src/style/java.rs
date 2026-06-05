@@ -3,7 +3,7 @@
 
 //! Style-guide analysis for Java, Kotlin, Groovy, and Scala.
 //! Java guides: Google Java, Oracle/Sun, Spring Framework.
-//! Kotlin guides: JetBrains, Android, Google Kotlin.
+//! Kotlin guides: `JetBrains`, Android, Google Kotlin.
 
 use super::common::{
     classify_brace, classify_indent, scan_base_metrics, score_attach_brace, score_indent_2,

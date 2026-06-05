@@ -252,9 +252,9 @@ mod win_dialog_focus {
     }
 
     /// Opens `path` in Windows Explorer and forces it to the foreground.
-    /// ShellExecuteW alone cannot guarantee foreground placement when the
+    /// `ShellExecuteW` alone cannot guarantee foreground placement when the
     /// caller is not the foreground process (the browser is).  After launching,
-    /// we poll for a new CabinetWClass window and call SwitchToThisWindow —
+    /// we poll for a new `CabinetWClass` window and call `SwitchToThisWindow` —
     /// an undocumented API that bypasses Windows' foreground-lock restriction
     /// so the window surfaces regardless of which process currently has focus.
     pub fn open_folder_foreground(path: std::path::PathBuf) {
@@ -2615,7 +2615,7 @@ fn validate_locate_request(
     Ok((html_path, parent))
 }
 
-/// JSON-or-HTML error for locate_report_handler error paths.
+/// JSON-or-HTML error for `locate_report_handler` error paths.
 fn locate_handler_err(want_json: bool, msg: String, csp_nonce: &str) -> Response {
     if want_json {
         (
@@ -2637,13 +2637,13 @@ fn redirect_or_json_ok(want_json: bool, redirect: &str) -> Response {
     }
 }
 
-/// Scan `json_candidates` for a run whose run_id matches `expected` (or return the
+/// Scan `json_candidates` for a run whose `run_id` matches `expected` (or return the
 /// first parseable run when `expected` is empty).  Returns `(path, run_id)`.
 fn find_json_run_by_id(candidates: &[PathBuf], expected: &str) -> Option<(PathBuf, String)> {
     for jpath in candidates {
         if let Ok(run) = read_json(jpath) {
             if expected.is_empty() || run.tool.run_id == expected {
-                return Some((jpath.clone(), run.tool.run_id.clone()));
+                return Some((jpath.clone(), run.tool.run_id));
             }
         }
     }
@@ -2654,8 +2654,7 @@ fn resolve_scan_root(html_path: &Path, parent: &Path) -> PathBuf {
     html_path
         .parent()
         .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| parent.to_path_buf())
+        .map_or_else(|| parent.to_path_buf(), std::path::Path::to_path_buf)
 }
 
 fn gather_json_candidates(scan_root: &Path, parent: &Path) -> Vec<PathBuf> {
@@ -2667,6 +2666,7 @@ fn gather_json_candidates(scan_root: &Path, parent: &Path) -> Vec<PathBuf> {
     hits
 }
 
+#[allow(clippy::too_many_lines)]
 async fn locate_report_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -2715,7 +2715,7 @@ async fn locate_report_handler(
     if matched_json.is_none() && !json_candidates.is_empty() && !expected_run_id.is_empty() {
         let actual = json_candidates
             .iter()
-            .find_map(|p| read_json(p).ok().map(|r| r.tool.run_id.clone()))
+            .find_map(|p| read_json(p).ok().map(|r| r.tool.run_id))
             .unwrap_or_else(|| "unknown".to_string());
         return locate_handler_err(
             want_json,
@@ -2898,7 +2898,7 @@ struct RelocateScanForm {
     redirect_url: String,
 }
 
-/// JSON-or-HTML error for relocate_scan_handler folder-level errors.
+/// JSON-or-HTML error for `relocate_scan_handler` folder-level errors.
 /// HTML variant renders the relocate template; JSON returns `{"ok": false, "message": msg}`.
 fn relocate_folder_err(
     want_json: bool,
@@ -2920,6 +2920,7 @@ fn relocate_folder_err(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn relocate_scan_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -3400,10 +3401,11 @@ fn find_existing_ancestor(raw: &str) -> Result<PathBuf, (StatusCode, &'static st
 
 async fn resolve_open_target(raw: &str) -> Result<PathBuf, (StatusCode, &'static str)> {
     match tokio::fs::canonicalize(raw).await {
-        Ok(canonical) if canonical.is_file() => match canonical.parent() {
-            Some(p) => Ok(p.to_path_buf()),
-            None => Err((StatusCode::BAD_REQUEST, "path has no parent")),
-        },
+        Ok(canonical) if canonical.is_file() => canonical
+            .parent()
+            .map_or(Err((StatusCode::BAD_REQUEST, "path has no parent")), |p| {
+                Ok(p.to_path_buf())
+            }),
         Ok(canonical) if canonical.is_dir() => Ok(canonical),
         Ok(_) => Err((StatusCode::BAD_REQUEST, "path is not a file or directory")),
         Err(_) => find_existing_ancestor(raw),
@@ -4011,6 +4013,7 @@ fn build_submodule_row(
 // The semaphore permit is moved into the spawned task so concurrency limiting is maintained.
 #[allow(clippy::similar_names)]
 #[allow(clippy::significant_drop_tightening)] // task is moved into spawn; drop(task) would not compile
+#[allow(clippy::too_many_lines)]
 async fn analyze_handler(
     State(state): State<AppState>,
     axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
@@ -5379,7 +5382,7 @@ async fn run_auto_cleanup(state: &AppState) -> u32 {
         let _ = reg.save(&state.registry_path);
     }
 
-    let deleted = to_delete.len() as u32;
+    let deleted = u32::try_from(to_delete.len()).unwrap_or(u32::MAX);
     {
         let mut store = state.cleanup_policy.lock().await;
         store.last_run_at = Some(chrono::Utc::now());
@@ -6118,7 +6121,7 @@ async fn serve_submodule_pdf_arm(
 
 fn serve_submodule_arm(
     artifact: &str,
-    artifact_set: RunArtifacts,
+    artifact_set: &RunArtifacts,
     wants_download: bool,
     csp_nonce: &str,
     run_id: &str,
@@ -6261,7 +6264,7 @@ async fn artifact_handler(
         }
         _ if artifact.starts_with("sub_") => serve_submodule_arm(
             &artifact,
-            artifact_set,
+            &artifact_set,
             wants_download,
             &csp_nonce,
             &run_id,
@@ -6726,7 +6729,7 @@ fn compute_churn_stats(
 
 /// Build a pre-rendered HTML delta card for line coverage, or an empty string when neither
 /// scan has coverage data. Using a pre-built HTML string avoids adding multiple Askama template
-/// variables to the large CompareTemplate, which causes rustc stack overflows on Windows.
+/// variables to the large `CompareTemplate`, which causes rustc stack overflows on Windows.
 fn build_coverage_delta_card(s: &sloc_core::SummaryDelta) -> String {
     let has_data = s.baseline_coverage_line_pct.is_some() || s.current_coverage_line_pct.is_some();
     if !has_data {
@@ -6734,12 +6737,10 @@ fn build_coverage_delta_card(s: &sloc_core::SummaryDelta) -> String {
     }
     let base_str = s
         .baseline_coverage_line_pct
-        .map(|p| format!("{p:.1}%"))
-        .unwrap_or_else(|| "\u{2014}".into());
+        .map_or_else(|| "\u{2014}".into(), |p| format!("{p:.1}%"));
     let curr_str = s
         .current_coverage_line_pct
-        .map(|p| format!("{p:.1}%"))
-        .unwrap_or_else(|| "\u{2014}".into());
+        .map_or_else(|| "\u{2014}".into(), |p| format!("{p:.1}%"));
     let (delta_str, cls) = match s.coverage_line_pct_delta {
         Some(d) if d > 0.0 => (format!("+{d:.1} pp"), "pos"),
         Some(d) if d < 0.0 => (format!("{d:.1} pp"), "neg"),
@@ -11014,6 +11015,7 @@ fn render_embed_widget(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn persist_run_artifacts(
     run: &sloc_core::AnalysisRun,
     report_html: &str,
@@ -11147,6 +11149,7 @@ fn persist_run_artifacts(
 /// the root of the run output directory so business users can open it from disk.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::similar_names)]
 fn generate_offline_index(
     run: &sloc_core::AnalysisRun,
     run_dir: &Path,
@@ -11695,6 +11698,7 @@ fn split_patterns(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+#[must_use]
 pub fn build_sub_run(
     parent: &AnalysisRun,
     sub: &sloc_core::SubmoduleSummary,
@@ -11788,6 +11792,7 @@ pub fn build_sub_run(
     }
 }
 
+#[must_use]
 pub fn sanitize_project_label(raw: &str) -> String {
     let candidate = Path::new(raw)
         .file_name()
@@ -11841,11 +11846,11 @@ fn remote_to_commit_url(remote: &str, sha: &str) -> Option<String> {
     let base = base.trim_end_matches('/');
     // GitLab uses /-/commit/; everything else uses /commit/
     if base.contains("gitlab.com") || base.contains("gitlab.") {
-        Some(format!("{}/-/commit/{}", base, sha))
+        Some(format!("{base}/-/commit/{sha}"))
     } else if base.contains("bitbucket.org") {
-        Some(format!("{}/commits/{}", base, sha))
+        Some(format!("{base}/commits/{sha}"))
     } else {
-        Some(format!("{}/commit/{}", base, sha))
+        Some(format!("{base}/commit/{sha}"))
     }
 }
 
@@ -11865,9 +11870,9 @@ fn remote_to_branch_url(remote: &str, branch: &str) -> Option<String> {
     };
     let base = base.trim_end_matches('/');
     if base.contains("gitlab.com") || base.contains("gitlab.") {
-        Some(format!("{}/-/tree/{}", base, branch))
+        Some(format!("{base}/-/tree/{branch}"))
     } else {
-        Some(format!("{}/tree/{}", base, branch))
+        Some(format!("{base}/tree/{branch}"))
     }
 }
 
@@ -18276,7 +18281,7 @@ struct ScanSetupTemplate {
         </div>
         <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-top:12px;">
         <table id="subm-tbl" style="width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;min-width:1050px;">
-          <colgroup><col style="width:25%"><col style="width:21%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"></colgroup>
+          <colgroup><col style="width:24%"><col style="width:22%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:9%"></colgroup>
           <thead>
             <tr>
               <th style="padding:9px 14px;background:var(--surface-2);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);border-bottom:1px solid var(--line);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Submodule</th>
@@ -26001,19 +26006,13 @@ mod form_config_tests {
 
     #[test]
     fn report_title_unchanged_when_absent() {
-        let original = sloc_config::AppConfig::default()
-            .reporting
-            .report_title
-            .clone();
+        let original = sloc_config::AppConfig::default().reporting.report_title;
         assert_eq!(apply(&blank_form()).reporting.report_title, original);
     }
 
     #[test]
     fn report_title_unchanged_when_whitespace_only() {
-        let original = sloc_config::AppConfig::default()
-            .reporting
-            .report_title
-            .clone();
+        let original = sloc_config::AppConfig::default().reporting.report_title;
         let mut form = blank_form();
         form.report_title = Some("   ".to_string());
         assert_eq!(
@@ -26230,14 +26229,14 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_allows_first_request() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 5, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 100, 5, Duration::from_hours(1));
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         assert!(rl.is_allowed(ip));
     }
 
     #[test]
     fn rate_limiter_blocks_after_limit_reached() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 3, 5, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 3, 5, Duration::from_hours(1));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert!(rl.is_allowed(ip));
         assert!(rl.is_allowed(ip));
@@ -26247,7 +26246,7 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_allows_requests_up_to_limit() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 5, 5, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 5, 5, Duration::from_hours(1));
         let ip: IpAddr = "10.0.0.2".parse().unwrap();
         for _ in 0..5 {
             assert!(rl.is_allowed(ip));
@@ -26257,7 +26256,7 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_different_ips_are_independent() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 1, 5, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 1, 5, Duration::from_hours(1));
         let ip1: IpAddr = "192.168.1.1".parse().unwrap();
         let ip2: IpAddr = "192.168.1.2".parse().unwrap();
         assert!(rl.is_allowed(ip1));
@@ -26267,7 +26266,7 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_auth_failure_not_locked_below_threshold() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 3, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 100, 3, Duration::from_hours(1));
         let ip: IpAddr = "10.0.0.3".parse().unwrap();
         rl.record_auth_failure(ip);
         rl.record_auth_failure(ip);
@@ -26279,7 +26278,7 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_auth_failure_locked_at_threshold() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 3, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 100, 3, Duration::from_hours(1));
         let ip: IpAddr = "10.0.0.4".parse().unwrap();
         rl.record_auth_failure(ip);
         rl.record_auth_failure(ip);
@@ -26289,7 +26288,7 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_auth_failure_different_ips_independent() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 100, 2, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 100, 2, Duration::from_hours(1));
         let ip1: IpAddr = "10.0.1.1".parse().unwrap();
         let ip2: IpAddr = "10.0.1.2".parse().unwrap();
         rl.record_auth_failure(ip1);
@@ -26300,7 +26299,7 @@ mod utility_tests {
 
     #[test]
     fn rate_limiter_high_limit_never_blocks_normal_traffic() {
-        let rl = IpRateLimiter::new(Duration::from_secs(60), 1000, 10, Duration::from_secs(3600));
+        let rl = IpRateLimiter::new(Duration::from_mins(1), 1000, 10, Duration::from_hours(1));
         let ip: IpAddr = "127.0.0.2".parse().unwrap();
         for _ in 0..100 {
             assert!(rl.is_allowed(ip));
@@ -26705,7 +26704,12 @@ mod utility_tests {
     #[test]
     fn build_pdf_filename_slugifies_title() {
         let name = build_pdf_filename("My Project Report", "abc-def-1234");
-        assert!(name.starts_with("my_project_report_") && name.ends_with(".pdf"));
+        assert!(
+            name.starts_with("my_project_report_")
+                && std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        );
     }
 
     #[test]
@@ -26717,7 +26721,12 @@ mod utility_tests {
     #[test]
     fn build_pdf_filename_empty_title_uses_report_prefix() {
         let name = build_pdf_filename("", "abc-def-9999");
-        assert!(name.starts_with("report_") && name.ends_with(".pdf"));
+        assert!(
+            name.starts_with("report_")
+                && std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        );
     }
 
     // ── swap_inline_chart_js_for_static ───────────────────────────────────────
@@ -26985,7 +26994,7 @@ mod utility_tests {
 
     #[test]
     fn format_system_time_31_days_after_epoch() {
-        let t = UNIX_EPOCH + Duration::from_secs(31 * 86_400);
+        let t = UNIX_EPOCH + Duration::from_hours(744);
         assert_eq!(format_system_time(t), "1970-02-01 00:00");
     }
 

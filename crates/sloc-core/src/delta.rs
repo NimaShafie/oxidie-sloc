@@ -152,6 +152,7 @@ fn coverage_line_pct(hit: u64, found: u64) -> Option<f64> {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanComparison {
     let baseline_map: HashMap<&str, &EffectiveCounts> = baseline
         .per_file_records

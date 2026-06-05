@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
 //! Style-guide analysis for C, C++, and Objective-C.
-//! Guides: LLVM, Google, Mozilla, Microsoft, WebKit.
+//! Guides: LLVM, Google, Mozilla, Microsoft, `WebKit`.
 
 use super::common::{
     classify_brace, classify_indent, scan_base_metrics, score_allman_brace, score_attach_brace,
@@ -217,8 +217,8 @@ fn classify_ptr(with_type: u32, with_name: u32) -> PointerStyle {
     if t == 0 {
         return PointerStyle::Unknown;
     }
-    let tp = with_type as f32 / t as f32;
-    let np = with_name as f32 / t as f32;
+    let tp = f64::from(with_type) / f64::from(t);
+    let np = f64::from(with_name) / f64::from(t);
     if tp >= 0.65 {
         PointerStyle::WithType
     } else if np >= 0.65 {
@@ -228,7 +228,8 @@ fn classify_ptr(with_type: u32, with_name: u32) -> PointerStyle {
     }
 }
 
-fn ptr_display(s: PointerStyle) -> &'static str {
+#[must_use]
+const fn ptr_display(s: PointerStyle) -> &'static str {
     match s {
         PointerStyle::WithType => "Type* var",
         PointerStyle::WithName => "Type *var",
@@ -242,31 +243,34 @@ fn paren_display(with_sp: u32, no_sp: u32) -> &'static str {
     if t == 0 {
         return "\u{2014}";
     }
-    if with_sp as f32 / t as f32 >= 0.70 {
+    if f64::from(with_sp) / f64::from(t) >= 0.70 {
         "space before '('"
     } else {
         "no space before '('"
     }
 }
 
-fn score_ptr_type(p: PointerStyle) -> f32 {
+#[must_use]
+const fn score_ptr_type(p: PointerStyle) -> f32 {
     match p {
         PointerStyle::WithType => 1.0,
         PointerStyle::Mixed => 0.40,
         PointerStyle::Unknown => 0.50,
-        _ => 0.05,
+        PointerStyle::WithName => 0.05,
     }
 }
 
-fn score_ptr_name(p: PointerStyle) -> f32 {
+#[must_use]
+const fn score_ptr_name(p: PointerStyle) -> f32 {
     match p {
         PointerStyle::WithName => 1.0,
         PointerStyle::Mixed => 0.40,
         PointerStyle::Unknown => 0.50,
-        _ => 0.05,
+        PointerStyle::WithType => 0.05,
     }
 }
 
+#[allow(clippy::cast_precision_loss)] // counts bounded well within f32 precision
 fn score_sp(with: u32, no: u32) -> f32 {
     let t = with + no;
     if t == 0 {
