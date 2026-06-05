@@ -73,9 +73,6 @@ skip = [
   # linux-raw-sys 0.4 (via rustix 0.38 → procfs → prometheus) and 0.12 (via rustix 1.x) coexist
   { name = "linux-raw-sys", version = "0.4" },
   { name = "linux-raw-sys", version = "0.12" },
-  # redox_syscall 0.5 (via parking_lot) and 0.7 (via libredox → filetime → tar) coexist
-  { name = "redox_syscall", version = "0.5" },
-  { name = "redox_syscall", version = "0.7" },
 ]
 
 [advisories]
