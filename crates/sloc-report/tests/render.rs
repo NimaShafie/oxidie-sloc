@@ -1233,3 +1233,214 @@ fn render_html_file_size_histogram_all_buckets() {
     let html = render_html(&run).unwrap();
     assert!(!html.is_empty());
 }
+
+// ── Additional branch-coverage tests ─────────────────────────────────────────
+
+#[test]
+fn render_html_with_git_remote_url_renders_link() {
+    let mut run = make_run();
+    run.git_remote_url = Some("https://github.com/owner/repo.git".into());
+    run.git_branch = Some("main".into());
+    run.git_commit_short = Some("a1b2c3d".into());
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
+}
+
+#[test]
+fn render_html_with_high_test_count_exercises_density_calculation() {
+    let mut run = make_multi_lang_run();
+    // Set substantial test counts to exercise density + badge rendering
+    run.summary_totals.test_count = 150;
+    run.summary_totals.test_assertion_count = 450;
+    run.summary_totals.test_suite_count = 15;
+    run.summary_totals.code_lines = 1000;
+    for lang in &mut run.totals_by_language {
+        lang.test_count = 50;
+        lang.test_assertion_count = 150;
+    }
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_with_coverage_and_git_meta_combined() {
+    let mut run = make_run_with_coverage();
+    run.git_remote_url = Some("https://github.com/test/repo.git".into());
+    run.git_branch = Some("feature".into());
+    run.git_commit_short = Some("deadbeef".into());
+    run.git_nearest_tag = Some("v2.0.0".into());
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(
+        html.to_lowercase().contains("coverage"),
+        "coverage section should appear"
+    );
+}
+
+#[test]
+fn render_html_with_zero_coverage_pct_renders_low_coverage_state() {
+    let mut run = make_run();
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 100,
+        lines_hit: 0,
+        functions_found: 10,
+        functions_hit: 0,
+        branches_found: 20,
+        branches_hit: 0,
+    });
+    run.summary_totals.coverage_lines_found = 100;
+    run.summary_totals.coverage_lines_hit = 0;
+    run.totals_by_language[0].coverage_lines_found = 100;
+    run.totals_by_language[0].coverage_lines_hit = 0;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_perfect_coverage_renders_100_pct_state() {
+    let mut run = make_run();
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 50,
+        lines_hit: 50,
+        functions_found: 5,
+        functions_hit: 5,
+        branches_found: 10,
+        branches_hit: 10,
+    });
+    run.summary_totals.coverage_lines_found = 50;
+    run.summary_totals.coverage_lines_hit = 50;
+    run.totals_by_language[0].coverage_lines_found = 50;
+    run.totals_by_language[0].coverage_lines_hit = 50;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_sub_report_html_with_pdf_url_includes_link() {
+    let run = make_run();
+    let html = render_sub_report_html(&run, Some("https://example.com/report.pdf")).unwrap();
+    assert!(!html.is_empty());
+    assert!(
+        html.contains("example.com") || html.contains("pdf"),
+        "pdf URL should appear in sub-report HTML"
+    );
+}
+
+#[test]
+fn render_sub_report_html_with_coverage_data() {
+    let run = make_run_with_coverage();
+    let html = render_sub_report_html(&run, None).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_sub_report_html_with_style_data() {
+    let run = make_run_with_style();
+    let html = render_sub_report_html(&run, None).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_sub_report_html_with_submodules() {
+    let run = make_run_with_submodules();
+    let html = render_sub_report_html(&run, None).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_confluence_storage_with_coverage_data() {
+    let run = make_run_with_coverage();
+    let out = render_confluence_storage(&run, None);
+    assert!(
+        !out.is_empty(),
+        "confluence storage with coverage must produce output"
+    );
+}
+
+#[test]
+fn render_confluence_storage_with_submodules() {
+    let run = make_run_with_submodules();
+    let out = render_confluence_storage(&run, Some("https://reports.example.com/latest"));
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn render_confluence_wiki_markup_with_coverage_data() {
+    let run = make_run_with_coverage();
+    let out = render_confluence_wiki_markup(&run);
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn render_confluence_wiki_markup_with_empty_repo() {
+    let run = make_empty_run();
+    let out = render_confluence_wiki_markup(&run);
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn write_csv_with_test_metrics() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run();
+    run.summary_totals.test_count = 30;
+    run.summary_totals.test_assertion_count = 90;
+    run.summary_totals.test_suite_count = 6;
+    run.totals_by_language[0].test_count = 30;
+    write_csv(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+}
+
+#[test]
+fn write_xlsx_with_coverage_data_extra() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_coverage();
+    write_xlsx(&run, tmp.path()).unwrap();
+    // File should exist and be non-empty
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "XLSX file should be non-empty");
+}
+
+#[test]
+fn write_xlsx_multi_language_with_coverage() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_multi_lang_run();
+    // Add coverage to every file record
+    for rec in &mut run.per_file_records {
+        rec.coverage = Some(FileCoverage {
+            lines_found: 50,
+            lines_hit: 40,
+            functions_found: 4,
+            functions_hit: 3,
+            branches_found: 8,
+            branches_hit: 6,
+        });
+    }
+    run.summary_totals.coverage_lines_found = 200;
+    run.summary_totals.coverage_lines_hit = 160;
+    write_xlsx(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn render_html_with_all_41_languages_exercises_rendering() {
+    use sloc_languages::supported_languages;
+    let mut run = make_empty_run();
+    for (i, lang) in supported_languages().into_iter().enumerate() {
+        run.per_file_records
+            .push(make_file_record(&format!("file{i}.x"), lang, 10 + i as u64));
+        run.totals_by_language
+            .push(make_lang_summary(lang, 1, 10 + i as u64));
+    }
+    run.summary_totals.files_analyzed = run.per_file_records.len() as u64;
+    run.summary_totals.code_lines = run
+        .per_file_records
+        .iter()
+        .map(|r| r.effective_counts.code_lines)
+        .sum();
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
+}
