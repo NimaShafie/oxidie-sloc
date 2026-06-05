@@ -978,7 +978,7 @@ fn pdf_render_page1_header(
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
     ctx.layer.use_text(
-        pdf_trunc(title, 55),
+        pdf_trunc(&pdf_safe_str(title), 55),
         9.5,
         Mm(ctx.margin),
         Mm(title_text_y),
@@ -1941,15 +1941,21 @@ fn pdf_fill_rect(
 }
 
 fn pdf_safe_str(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii() && !c.is_ascii_control() {
-                c
-            } else {
-                '?'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // Common Unicode punctuation → readable ASCII equivalents
+            '\u{2014}' | '\u{2013}' => out.push_str(" - "), // em dash / en dash
+            '\u{2026}' => out.push_str("..."),              // ellipsis
+            '\u{2018}' | '\u{2019}' => out.push('\''),      // curly single quotes
+            '\u{201C}' | '\u{201D}' => out.push('"'),       // curly double quotes
+            '\u{00B7}' | '\u{2022}' => out.push('-'),       // middle dot / bullet
+            '\u{00A0}' => out.push(' '),                    // non-breaking space
+            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
+            _ => {} // drop truly unprintable non-ASCII rather than emitting '?'
+        }
+    }
+    out
 }
 
 fn pdf_trunc(s: &str, max: usize) -> String {
@@ -2772,6 +2778,8 @@ struct WarningOpportunityRow {
     .run-id-chip.muted-chip .run-id-chip-label { color:var(--muted-2); }
     .run-id-chip-value { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
+    .submodule-state-badge { display:inline-block; font-size:10px; font-style:italic; font-weight:600; color:var(--accent-2); background:rgba(100,130,220,0.10); border:1px solid rgba(100,130,220,0.22); border-radius:4px; padding:1px 6px; letter-spacing:0.03em; }
+    body.dark-theme .submodule-state-badge { color:var(--accent); background:rgba(111,155,255,0.13); border-color:rgba(111,155,255,0.28); }
     .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity 0.18s ease; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
     .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .run-id-chip:hover .chip-tooltip { opacity:1; }
@@ -3524,8 +3532,8 @@ struct WarningOpportunityRow {
             {% else %}
             {% if is_sub_report %}
             <span class="run-id-chip">
-              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Branch</span>
-              <span class="run-id-chip-value">Submodule</span>
+              <span class="run-id-chip-label"><svg class="chip-label-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Submodule</span>
+              <span class="run-id-chip-value"><span class="submodule-state-badge">detached HEAD</span></span>
               <span class="chip-tooltip">Submodules are pinned to a specific commit — no branch ref</span>
             </span>
             {% else %}
