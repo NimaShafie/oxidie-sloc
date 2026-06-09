@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -266,5 +266,207 @@ pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanCompa
         files_removed,
         files_modified,
         files_unchanged,
+    }
+}
+
+// ── Multi-point comparison ─────────────────────────────────────────────────────
+
+/// Summary metrics snapshot for one scan in a multi-point timeline.
+#[derive(Debug, Serialize)]
+pub struct MultiScanPoint {
+    pub run_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub git_commit: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_tags: Option<String>,
+    pub git_nearest_tag: Option<String>,
+    pub code_lines: i64,
+    pub comment_lines: i64,
+    pub blank_lines: i64,
+    pub files_analyzed: i64,
+    pub test_count: i64,
+    pub coverage_line_pct: Option<f64>,
+}
+
+/// Per-file code counts across N scan points.
+#[derive(Debug, Serialize)]
+pub struct MultiFileDelta {
+    pub relative_path: String,
+    pub language: Option<String>,
+    /// Code lines at each scan (`None` = file absent at that point).
+    pub code_per_scan: Vec<Option<i64>>,
+    /// Delta from previous scan; index 0 is always `None`.
+    pub code_delta_per_scan: Vec<Option<i64>>,
+    /// `"added"` | `"removed"` | `"modified"` | `"unchanged"`
+    pub overall_status: String,
+    /// Code delta from first presence to last presence.
+    pub total_code_delta: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MultiScanComparison {
+    pub points: Vec<MultiScanPoint>,
+    /// One `ScanComparison` per consecutive pair (length = N − 1).
+    pub sequential_deltas: Vec<ScanComparison>,
+    /// Overall delta from the first scan to the last scan.
+    pub total_delta: SummaryDelta,
+    /// All files × all scan points, sorted modified → added → removed → unchanged.
+    pub file_matrix: Vec<MultiFileDelta>,
+}
+
+/// Compute a multi-point timeline comparison.
+///
+/// `runs` must be sorted chronologically (oldest first) and contain at least 2 elements.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_multi_delta(runs: &[&AnalysisRun]) -> MultiScanComparison {
+    assert!(
+        runs.len() >= 2,
+        "compute_multi_delta requires at least 2 runs"
+    );
+
+    // Union of all file paths across every run.
+    let all_paths: BTreeSet<String> = runs
+        .iter()
+        .flat_map(|r| r.per_file_records.iter().map(|f| f.relative_path.clone()))
+        .collect();
+
+    // Per-run lookup: path → FileRecord.
+    let run_maps: Vec<HashMap<&str, &FileRecord>> = runs
+        .iter()
+        .map(|r| {
+            r.per_file_records
+                .iter()
+                .map(|f| (f.relative_path.as_str(), f))
+                .collect()
+        })
+        .collect();
+
+    // Build the file matrix.
+    let mut file_matrix: Vec<MultiFileDelta> = all_paths
+        .into_iter()
+        .map(|path| {
+            let code_per_scan: Vec<Option<i64>> = run_maps
+                .iter()
+                .map(|m| {
+                    m.get(path.as_str())
+                        .map(|r| r.effective_counts.code_lines.cast_signed())
+                })
+                .collect();
+
+            // Delta at index i = code[i] - code[i-1], None when both sides are absent.
+            let mut code_delta_per_scan: Vec<Option<i64>> = vec![None];
+            for i in 1..code_per_scan.len() {
+                if code_per_scan[i - 1].is_some() || code_per_scan[i].is_some() {
+                    let prev = code_per_scan[i - 1].unwrap_or(0);
+                    let curr = code_per_scan[i].unwrap_or(0);
+                    code_delta_per_scan.push(Some(curr - prev));
+                } else {
+                    code_delta_per_scan.push(None);
+                }
+            }
+
+            let n = code_per_scan.len();
+            let first_idx = code_per_scan.iter().position(|v| v.is_some());
+            let last_idx = code_per_scan.iter().rposition(|v| v.is_some());
+
+            let overall_status = match (first_idx, last_idx) {
+                (Some(f), Some(l)) if f > 0 && l == n - 1 => "added".to_string(),
+                (Some(f), Some(l)) if f == 0 && l < n - 1 => "removed".to_string(),
+                (Some(f), Some(l)) => {
+                    let first_val = code_per_scan[f].unwrap_or(0);
+                    if code_per_scan[f..=l]
+                        .iter()
+                        .all(|v| v.is_none_or(|x| x == first_val))
+                    {
+                        "unchanged".to_string()
+                    } else {
+                        "modified".to_string()
+                    }
+                }
+                _ => "unchanged".to_string(),
+            };
+
+            let total_code_delta = match (first_idx, last_idx) {
+                (Some(f), Some(l)) => code_per_scan[l].unwrap_or(0) - code_per_scan[f].unwrap_or(0),
+                _ => 0,
+            };
+
+            let language = run_maps.iter().find_map(|m| {
+                m.get(path.as_str())
+                    .and_then(|r| r.language)
+                    .map(|l| l.display_name().to_string())
+            });
+
+            MultiFileDelta {
+                relative_path: path,
+                language,
+                code_per_scan,
+                code_delta_per_scan,
+                overall_status,
+                total_code_delta,
+            }
+        })
+        .collect();
+
+    // Sort: modified → added → removed → unchanged, then path.
+    file_matrix.sort_by(|a, b| {
+        const fn status_order(s: &str) -> u8 {
+            match s.as_bytes() {
+                b"modified" => 0,
+                b"added" => 1,
+                b"removed" => 2,
+                _ => 3,
+            }
+        }
+        status_order(&a.overall_status)
+            .cmp(&status_order(&b.overall_status))
+            .then(a.relative_path.cmp(&b.relative_path))
+    });
+
+    // Sequential deltas (N - 1 pairs).
+    let sequential_deltas: Vec<ScanComparison> = (0..runs.len() - 1)
+        .map(|i| compute_delta(runs[i], runs[i + 1]))
+        .collect();
+
+    // Overall first-to-last delta.
+    let total_delta = compute_delta(runs[0], runs[runs.len() - 1]).summary;
+
+    // Build scan-point summaries.
+    let points: Vec<MultiScanPoint> = runs
+        .iter()
+        .map(|r| {
+            let s = &r.summary_totals;
+            let coverage_line_pct = if s.coverage_lines_found > 0 {
+                Some(
+                    ((s.coverage_lines_hit as f64 / s.coverage_lines_found as f64 * 1000.0)
+                        .round())
+                        / 10.0,
+                )
+            } else {
+                None
+            };
+            MultiScanPoint {
+                run_id: r.tool.run_id.clone(),
+                timestamp: r.tool.timestamp_utc,
+                git_commit: r.git_commit_short.clone(),
+                git_branch: r.git_branch.clone(),
+                git_tags: r.git_tags.clone(),
+                git_nearest_tag: r.git_nearest_tag.clone(),
+                code_lines: s.code_lines.cast_signed(),
+                comment_lines: s.comment_lines.cast_signed(),
+                blank_lines: s.blank_lines.cast_signed(),
+                files_analyzed: s.files_analyzed.cast_signed(),
+                test_count: s.test_count.cast_signed(),
+                coverage_line_pct,
+            }
+        })
+        .collect();
+
+    MultiScanComparison {
+        points,
+        sequential_deltas,
+        total_delta,
+        file_matrix,
     }
 }

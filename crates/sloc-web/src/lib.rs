@@ -68,9 +68,9 @@ static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
 static REPORT_CHART_JS: &[u8] = include_bytes!("../static/chart.min.js");
 
 use sloc_core::{
-    analyze, compute_delta, read_json, AnalysisRun, CleanupPolicy, CleanupPolicyStore,
-    FileChangeStatus, RegistryEntry, ScanRegistry, ScanSummarySnapshot, SummaryTotals,
-    WatchedDirsStore,
+    analyze, compute_delta, compute_multi_delta, read_json, AnalysisRun, CleanupPolicy,
+    CleanupPolicyStore, FileChangeStatus, MultiScanComparison, RegistryEntry, ScanRegistry,
+    ScanSummarySnapshot, SummaryTotals, WatchedDirsStore,
 };
 use sloc_report::{
     render_html, render_html_with_delta, render_sub_report_html, write_pdf_from_html,
@@ -664,6 +664,7 @@ fn build_router(state: AppState) -> Router {
         .route("/view-reports", get(history_handler))
         .route("/compare-scans", get(compare_select_handler))
         .route("/compare", get(compare_handler))
+        .route("/multi-compare", get(multi_compare_handler))
         .route("/images/{folder}/{file}", get(image_handler))
         .route("/runs/{artifact}/{run_id}", get(artifact_handler))
         .route("/api/metrics/latest", get(api_metrics_latest_handler))
@@ -687,6 +688,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/git/refs", get(git_browser::api_list_refs))
         .route("/api/git/scan-ref", get(git_browser::api_scan_ref))
         .route("/api/git/compare-refs", get(git_browser::api_compare_refs))
+        // ── Report export (HTML→PDF via headless Chrome) ──────────────────────
+        .route("/export/pdf", post(export_pdf_handler))
         // ── Config export / import ─────────────────────────────────────────────
         .route("/export-config", get(export_config_handler))
         .route("/import-config", post(import_config_handler))
@@ -5466,14 +5469,19 @@ async fn delete_run_handler(
         let _ = reg.save(&state.registry_path);
     }
 
-    // Delete on-disk artifacts.
+    // Delete on-disk artifacts. Treat NotFound as success — concurrent tests or
+    // a prior delete may have already removed the directory.
     if output_dir.exists() {
-        if let Err(e) = tokio::fs::remove_dir_all(&output_dir).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to delete files: {e}")})),
-            )
-                .into_response();
+        match tokio::fs::remove_dir_all(&output_dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Failed to delete files: {e}")})),
+                )
+                    .into_response();
+            }
         }
     }
 
@@ -6792,6 +6800,8 @@ struct CompareFileDeltaRow {
     status: String,
     baseline_code: i64,
     current_code: i64,
+    baseline_code_display: String,
+    current_code_display: String,
     code_delta_str: String,
     code_delta_class: String,
     comment_delta_str: String,
@@ -6996,7 +7006,7 @@ fn build_coverage_delta_card(s: &sloc_core::SummaryDelta) -> String {
     };
     format!(
         r#"<div class="delta-card">
-          <div class="dc-tip">Line coverage % from LCOV/Cobertura/JaCoCo. Positive delta = more lines instrumented and hit. Only shown when at least one scan has coverage data.</div>
+          <div class="dc-tip">Line coverage % from LCOV/Cobertura/JaCoCo.<br>Positive delta = more lines instrumented and hit.<br>Only shown when at least one scan has coverage data.</div>
           <div class="delta-card-label">Line coverage</div>
           <div class="delta-card-from">Before: {base_str}</div>
           <div class="delta-card-to">{curr_str}</div>
@@ -7162,6 +7172,16 @@ async fn compare_handler(
             },
             baseline_code: d.baseline_code,
             current_code: d.current_code,
+            baseline_code_display: if d.status == FileChangeStatus::Added {
+                "—".into()
+            } else {
+                d.baseline_code.to_string()
+            },
+            current_code_display: if d.status == FileChangeStatus::Removed {
+                "—".into()
+            } else {
+                d.current_code.to_string()
+            },
             code_delta_str: fmt_delta(d.code_delta),
             code_delta_class: delta_class(d.code_delta).into(),
             comment_delta_str: fmt_delta(d.comment_delta),
@@ -7225,6 +7245,12 @@ async fn compare_handler(
         current_comments: s.current_comments,
         comment_lines_delta_str: fmt_delta(s.comment_lines_delta),
         comment_lines_delta_class: delta_class(s.comment_lines_delta).into(),
+        baseline_code_fmt: fmt_comma(s.baseline_code as i64),
+        current_code_fmt: fmt_comma(s.current_code as i64),
+        baseline_files_fmt: fmt_comma(s.baseline_files as i64),
+        current_files_fmt: fmt_comma(s.current_files as i64),
+        baseline_comments_fmt: fmt_comma(s.baseline_comments as i64),
+        current_comments_fmt: fmt_comma(s.current_comments as i64),
         code_lines_pct_str: fmt_pct(s.code_lines_delta, s.baseline_code),
         files_analyzed_pct_str: fmt_pct(s.files_analyzed_delta, s.baseline_files),
         comment_lines_pct_str: fmt_pct(s.comment_lines_delta, s.baseline_comments),
@@ -7264,6 +7290,10 @@ async fn compare_handler(
         super_scope_active,
         csp_nonce,
         coverage_delta_card: build_coverage_delta_card(s),
+        baseline_test_count: effective_baseline.summary_totals.test_count,
+        current_test_count: effective_current.summary_totals.test_count,
+        baseline_coverage_pct: s.baseline_coverage_line_pct,
+        current_coverage_pct: s.current_coverage_line_pct,
     };
 
     Html(
@@ -8021,6 +8051,1893 @@ async fn api_ingest_handler(
     }
 }
 
+// ── Multi-compare page ────────────────────────────────────────────────────────
+// GET /multi-compare?runs=id1,id2,id3,...
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn fmt_num(n: i64) -> String {
+    let a = n.unsigned_abs();
+    if a >= 1_000_000 {
+        let v = n as f64 / 1_000_000.0;
+        let s = format!("{v:.1}");
+        format!("{}M", s.trim_end_matches(".0"))
+    } else if a >= 10_000 {
+        let v = n as f64 / 1_000.0;
+        let s = format!("{v:.1}");
+        format!("{}K", s.trim_end_matches(".0"))
+    } else {
+        let sign = if n < 0 { "-" } else { "" };
+        if a < 1_000 {
+            return format!("{sign}{a}");
+        }
+        format!("{sign}{},{:03}", a / 1_000, a % 1_000)
+    }
+}
+
+fn fmt_comma(n: i64) -> String {
+    let sign = if n < 0 { "-" } else { "" };
+    let a = n.unsigned_abs();
+    if a < 1_000 {
+        return format!("{sign}{a}");
+    }
+    let s = a.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    format!("{sign}{out}")
+}
+
+#[derive(Deserialize, Default)]
+struct MultiCompareQuery {
+    runs: Option<String>,
+    /// "super" to show only super-repo files (exclude all submodule files)
+    scope: Option<String>,
+    /// Submodule name to narrow the comparison to one submodule
+    sub: Option<String>,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn multi_compare_handler(
+    State(state): State<AppState>,
+    Query(params): Query<MultiCompareQuery>,
+    axum::extract::Extension(CspNonce(csp_nonce)): axum::extract::Extension<CspNonce>,
+) -> impl IntoResponse {
+    let run_ids: Vec<String> = params
+        .runs
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if run_ids.len() < 2 {
+        return Html(
+            "<p style='font-family:sans-serif;padding:2rem'>At least 2 run IDs are required. \
+             <a href=\"/compare-scans\">Go back</a></p>",
+        )
+        .into_response();
+    }
+    if run_ids.len() > 20 {
+        return Html(
+            "<p style='font-family:sans-serif;padding:2rem'>At most 20 scans can be compared \
+             at once. <a href=\"/compare-scans\">Go back</a></p>",
+        )
+        .into_response();
+    }
+
+    // Look up each run_id in the registry.
+    let entries: Vec<Option<RegistryEntry>> = {
+        let reg = state.registry.lock().await;
+        run_ids
+            .iter()
+            .map(|id| reg.entries.iter().find(|e| &e.run_id == id).cloned())
+            .collect()
+    };
+
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.is_none() {
+            let html = format!(
+                "<p style='font-family:sans-serif;padding:2rem'>Scan ID <code>{}</code> not \
+                 found. <a href=\"/compare-scans\">Go back</a></p>",
+                run_ids[i]
+            );
+            return Html(html).into_response();
+        }
+    }
+
+    let mut entries: Vec<RegistryEntry> = entries.into_iter().flatten().collect();
+
+    for entry in &entries {
+        if entry.json_path.is_none() {
+            let html = format!(
+                "<p style='font-family:sans-serif;padding:2rem'>Scan <code>{}</code> has no \
+                 JSON data — re-run the analysis to enable comparison. \
+                 <a href=\"/compare-scans\">Go back</a></p>",
+                &entry.run_id
+            );
+            return Html(html).into_response();
+        }
+    }
+
+    // Sort chronologically.
+    entries.sort_by_key(|e| e.timestamp_utc);
+
+    // Load JSON for each entry.
+    let mut runs: Vec<AnalysisRun> = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let path = entry.json_path.as_ref().unwrap();
+        match read_json(path) {
+            Ok(r) => runs.push(r),
+            Err(e) => {
+                let html = format!(
+                    "<p style='font-family:sans-serif;padding:2rem'>Could not load scan \
+                     <code>{}</code>: {e}. <a href=\"/compare-scans\">Go back</a></p>",
+                    &entry.run_id
+                );
+                return Html(html).into_response();
+            }
+        }
+    }
+
+    // Collect submodule names from all runs.
+    let all_sub_names: Vec<String> = {
+        let mut set = std::collections::BTreeSet::new();
+        for r in &runs {
+            for s in &r.submodule_summaries {
+                set.insert(s.name.clone());
+            }
+        }
+        set.into_iter().collect()
+    };
+    let has_submodule_data = !all_sub_names.is_empty();
+    let active_submodule = params.sub.clone();
+    let super_scope_active = params.scope.as_deref() == Some("super");
+
+    // Narrow per_file_records when a scope is active, then recompute totals.
+    if let Some(ref sub_name) = active_submodule {
+        for run in &mut runs {
+            run.per_file_records
+                .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+            recompute_summary_from_records(run);
+        }
+    } else if super_scope_active {
+        for run in &mut runs {
+            run.per_file_records.retain(|f| f.submodule.is_none());
+            recompute_summary_from_records(run);
+        }
+    }
+
+    let runs_csv = params.runs.as_deref().unwrap_or("").to_string();
+    let project_label = entries
+        .first()
+        .map(|e| e.project_label.as_str())
+        .unwrap_or("")
+        .to_string();
+    let run_refs: Vec<&AnalysisRun> = runs.iter().collect();
+    let multi = compute_multi_delta(&run_refs);
+    let html = multi_compare_page(
+        &multi,
+        &project_label,
+        env!("CARGO_PKG_VERSION"),
+        &csp_nonce,
+        has_submodule_data,
+        &all_sub_names,
+        &runs_csv,
+        super_scope_active,
+        active_submodule.as_deref(),
+        &entries,
+    );
+    Html(html).into_response()
+}
+
+fn multi_delta_class(n: i64) -> &'static str {
+    if n > 0 {
+        "pos"
+    } else if n < 0 {
+        "neg"
+    } else {
+        "zero"
+    }
+}
+
+fn multi_fmt_delta(n: i64) -> String {
+    if n > 0 {
+        format!("+{n}")
+    } else {
+        format!("{n}")
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+fn multi_compare_page(
+    multi: &MultiScanComparison,
+    project_label: &str,
+    version: &str,
+    csp_nonce: &str,
+    has_submodule_data: bool,
+    sub_names: &[String],
+    runs_csv: &str,
+    super_scope_active: bool,
+    active_sub: Option<&str>,
+    entries: &[RegistryEntry],
+) -> String {
+    use std::fmt::Write as _;
+
+    let n = multi.points.len();
+    let is_many = n > 4;
+    let mc_strip_class = if is_many {
+        "mc-strip mc-strip-grid"
+    } else {
+        "mc-strip"
+    };
+
+    // ── Scan strip cards ──────────────────────────────────────────────────────
+    let mut scan_strip = String::new();
+    for (i, pt) in multi.points.iter().enumerate() {
+        let ts_ms = pt.timestamp.timestamp_millis();
+        let ts = pt.timestamp.format("%Y-%m-%d %H:%M UTC").to_string();
+        let commit = pt.git_commit.as_deref().unwrap_or("—");
+        let branch = pt.git_branch.as_deref().unwrap_or("");
+        let report_link = format!("/runs/html/{}", pt.run_id);
+        // Branch chip (empty branch → em dash)
+        let branch_html = if branch.is_empty() {
+            "<span class=\"mc-row-val\">&mdash;</span>".to_string()
+        } else {
+            format!(
+                "<span class=\"mc-card-branch\">{}</span>",
+                html_escape(branch)
+            )
+        };
+        // Commit date and author from registry entry (matched by index, same sort order)
+        let (commit_date_html, author_html) = if let Some(entry) =
+            entries.get(i).filter(|e| e.run_id == pt.run_id)
+        {
+            let cd = entry
+                .git_commit_date
+                .as_deref()
+                .and_then(fmt_git_date)
+                .unwrap_or_else(|| "&mdash;".to_string());
+            let au = entry
+                    .git_author
+                    .as_deref()
+                    .map(|a| format!(
+                        "<span class=\"mc-row-val\"><span class=\"cmp-author-val\">{}</span><span class=\"cmp-author-handle\"></span></span>",
+                        html_escape(a)
+                    ))
+                    .unwrap_or_else(|| "<span class=\"mc-row-val\">&mdash;</span>".to_string());
+            (cd, au)
+        } else {
+            (
+                "&mdash;".to_string(),
+                "<span class=\"mc-row-val\">&mdash;</span>".to_string(),
+            )
+        };
+        // Tags row
+        let tags_html = pt
+            .git_tags
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let chips = t
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|tag| format!("<span class='mc-tag'>{}</span>", html_escape(tag)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "<div class=\"mc-card-row\"><span class=\"mc-row-label\">Tags:</span><span class=\"mc-row-val\">{chips}</span></div>"
+                )
+            })
+            .unwrap_or_default();
+        let nearest = pt
+            .git_nearest_tag
+            .as_deref()
+            .map(|t| format!("near {}", html_escape(t)))
+            .unwrap_or_default();
+        let arrow = if i < n - 1 && !is_many {
+            "<div class='mc-arrow'>&#8594;</div>"
+        } else {
+            ""
+        };
+        let scope_badge = if let Some(s) = active_sub {
+            format!(
+                "<span class=\"mc-scope-tag mc-scope-sub\">{}</span>",
+                html_escape(s)
+            )
+        } else if super_scope_active {
+            "<span class=\"mc-scope-tag mc-scope-super\">Super-repo only</span>".to_string()
+        } else {
+            "<span class=\"mc-scope-tag mc-scope-full\"><svg width=\"9\" height=\"9\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\"><circle cx=\"12\" cy=\"12\" r=\"10\"></circle><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\"></line><path d=\"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"></path></svg> Full scan</span>".to_string()
+        };
+        let nearest_html = if nearest.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<span class=\"mc-card-nearest-wrap\"><span class=\"mc-card-nearest\">{nearest}</span><span class=\"mc-card-nearest-tip\">Nearest ancestor git release tag at scan time</span></span>"
+            )
+        };
+        write!(
+            scan_strip,
+            r#"<div class="mc-card">
+              <div class="mc-card-header">
+                <div class="mc-card-num">Scan {num}</div>
+                <div class="mc-card-project-col">
+                  <div class="mc-card-project">{project_label}</div>
+                  {scope_badge}
+                </div>
+              </div>
+              <a class="mc-card-commit" href="{report_link}" target="_blank" title="View report">{commit}</a>
+              <div class="mc-card-rows">
+                <div class="mc-card-row"><span class="mc-row-label">Branch:</span>{branch_html}</div>
+                <div class="mc-card-row"><span class="mc-row-label">Last commit on:</span><span class="mc-row-val">{commit_date}</span></div>
+                <div class="mc-card-row"><span class="mc-row-label">Last commit by:</span>{author_html}</div>
+                <div class="mc-card-row"><span class="mc-row-label">Scanned on:</span><span class="mc-row-val mc-ts-local" data-utc-ms="{ts_ms}">{ts}</span></div>
+                {tags_html}
+              </div>
+              <div class="mc-card-code"><strong>{code} loc</strong>{nearest_html}</div>
+            </div>{arrow}"#,
+            num = i + 1,
+            commit = html_escape(commit),
+            commit_date = commit_date_html,
+            ts_ms = ts_ms,
+            code = fmt_num(pt.code_lines),
+            scope_badge = scope_badge,
+            nearest_html = nearest_html,
+        )
+        .unwrap();
+    }
+
+    // ── Summary metrics table ─────────────────────────────────────────────────
+    // Header row: Metric | Scan 1 | Δ | Scan 2 | Δ | ... | Net Δ
+    let mut metrics_thead = String::from("<tr><th class='mc-met-label'>Metric</th>");
+    for i in 0..n {
+        write!(metrics_thead, "<th class='mc-val-col'>Scan {}</th>", i + 1).unwrap();
+        if i < n - 1 {
+            metrics_thead.push_str("<th class='mc-delta-col'>&#8594;&#916;</th>");
+        }
+    }
+    metrics_thead.push_str("<th class='mc-net-col'>Net &#916;</th></tr>");
+
+    struct MetricRow<'a> {
+        label: &'a str,
+        values: Vec<i64>,
+        seq_deltas: Vec<i64>,
+        net_delta: i64,
+    }
+
+    let rows: Vec<MetricRow<'_>> = vec![
+        MetricRow {
+            label: "Code Lines",
+            values: multi.points.iter().map(|p| p.code_lines).collect(),
+            seq_deltas: multi
+                .sequential_deltas
+                .iter()
+                .map(|d| d.summary.code_lines_delta)
+                .collect(),
+            net_delta: multi.total_delta.code_lines_delta,
+        },
+        MetricRow {
+            label: "Files Analyzed",
+            values: multi.points.iter().map(|p| p.files_analyzed).collect(),
+            seq_deltas: multi
+                .sequential_deltas
+                .iter()
+                .map(|d| d.summary.files_analyzed_delta)
+                .collect(),
+            net_delta: multi.total_delta.files_analyzed_delta,
+        },
+        MetricRow {
+            label: "Comment Lines",
+            values: multi.points.iter().map(|p| p.comment_lines).collect(),
+            seq_deltas: multi
+                .sequential_deltas
+                .iter()
+                .map(|d| d.summary.comment_lines_delta)
+                .collect(),
+            net_delta: multi.total_delta.comment_lines_delta,
+        },
+        MetricRow {
+            label: "Blank Lines",
+            values: multi.points.iter().map(|p| p.blank_lines).collect(),
+            seq_deltas: multi
+                .sequential_deltas
+                .iter()
+                .map(|d| d.summary.blank_lines_delta)
+                .collect(),
+            net_delta: multi.total_delta.blank_lines_delta,
+        },
+        MetricRow {
+            label: "Tests",
+            values: multi.points.iter().map(|p| p.test_count).collect(),
+            seq_deltas: multi
+                .points
+                .windows(2)
+                .map(|pts| pts[1].test_count - pts[0].test_count)
+                .collect(),
+            net_delta: multi.points.last().map_or(0, |l| l.test_count)
+                - multi.points.first().map_or(0, |f| f.test_count),
+        },
+    ];
+
+    let mut metrics_tbody = String::new();
+    for row in &rows {
+        metrics_tbody.push_str("<tr>");
+        write!(metrics_tbody, "<td class='mc-met-label'>{}</td>", row.label).unwrap();
+        for i in 0..n {
+            write!(
+                metrics_tbody,
+                "<td class='mc-val-col'>{}</td>",
+                fmt_comma(row.values[i])
+            )
+            .unwrap();
+            if i < n - 1 {
+                let d = row.seq_deltas[i];
+                write!(
+                    metrics_tbody,
+                    "<td class='mc-delta-col {cls}'>{val}</td>",
+                    cls = multi_delta_class(d),
+                    val = multi_fmt_delta(d)
+                )
+                .unwrap();
+            }
+        }
+        let nd = row.net_delta;
+        write!(
+            metrics_tbody,
+            "<td class='mc-net-col {cls}'>{val}</td>",
+            cls = multi_delta_class(nd),
+            val = multi_fmt_delta(nd)
+        )
+        .unwrap();
+        metrics_tbody.push_str("</tr>");
+    }
+
+    // ── Chart points JSON ─────────────────────────────────────────────────────
+    let mut points_json_parts: Vec<String> = Vec::with_capacity(n);
+    for pt in &multi.points {
+        let commit = pt.git_commit.as_deref().unwrap_or("");
+        let branch = pt.git_branch.as_deref().unwrap_or("");
+        let tags = pt.git_tags.as_deref().unwrap_or("");
+        let cov = pt
+            .coverage_line_pct
+            .map(|v| format!("{v:.1}"))
+            .unwrap_or_else(|| "null".to_string());
+        points_json_parts.push(format!(
+            r#"{{"run_id":"{run_id}","commit":"{commit}","branch":"{branch}","tags":"{tags}","code":{code},"comments":{comments},"blank":{blank},"files":{files},"tests":{tests},"cov":{cov}}}"#,
+            run_id = pt.run_id,
+            code = pt.code_lines,
+            comments = pt.comment_lines,
+            blank = pt.blank_lines,
+            files = pt.files_analyzed,
+            tests = pt.test_count,
+        ));
+    }
+    let points_json = format!("[{}]", points_json_parts.join(","));
+
+    // ── File matrix JSON ──────────────────────────────────────────────────────
+    let mut file_json_parts: Vec<String> = Vec::with_capacity(multi.file_matrix.len());
+    for row in &multi.file_matrix {
+        let lang = row.language.as_deref().unwrap_or("");
+        let codes: Vec<String> = row
+            .code_per_scan
+            .iter()
+            .map(|v| v.map_or("null".to_string(), |x| x.to_string()))
+            .collect();
+        let deltas: Vec<String> = row
+            .code_delta_per_scan
+            .iter()
+            .map(|v| v.map_or("null".to_string(), |x| x.to_string()))
+            .collect();
+        file_json_parts.push(format!(
+            r#"{{"p":"{path}","l":"{lang}","s":"{status}","c":[{codes}],"d":[{deltas}],"t":{total}}}"#,
+            path = row.relative_path.replace('\\', "/").replace('"', "\\\""),
+            status = row.overall_status,
+            codes = codes.join(","),
+            deltas = deltas.join(","),
+            total = row.total_code_delta,
+        ));
+    }
+    let file_matrix_json = format!("[{}]", file_json_parts.join(","));
+
+    // Counts for filter tabs
+    let files_modified = multi
+        .file_matrix
+        .iter()
+        .filter(|f| f.overall_status == "modified")
+        .count();
+    let files_added = multi
+        .file_matrix
+        .iter()
+        .filter(|f| f.overall_status == "added")
+        .count();
+    let files_removed = multi
+        .file_matrix
+        .iter()
+        .filter(|f| f.overall_status == "removed")
+        .count();
+    let files_unchanged = multi
+        .file_matrix
+        .iter()
+        .filter(|f| f.overall_status == "unchanged")
+        .count();
+    let total_files = multi.file_matrix.len();
+
+    // Column headers for file matrix (Scan 1 Code | Δ→2 | Scan 2 Code | ...)
+    let mut file_col_headers = String::new();
+    for i in 0..n {
+        write!(
+            file_col_headers,
+            "<th class='file-scan-col'>Scan {} Code</th>",
+            i + 1
+        )
+        .unwrap();
+        if i < n - 1 {
+            write!(
+                file_col_headers,
+                "<th class='file-delta-col'>&#916;&#8594;{}</th>",
+                i + 2
+            )
+            .unwrap();
+        }
+    }
+
+    let nav_compare_active = "";
+
+    // Build scope bar HTML (only when submodule data exists).
+    let scope_bar_html: String = if has_submodule_data {
+        let base_url = format!("/multi-compare?runs={}", html_escape(runs_csv));
+        let full_active = active_sub.is_none() && !super_scope_active;
+        let mut bar = format!(
+            r#"<div class="submod-scope-bar">
+  <span class="submod-scope-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
+    Scope:
+  </span>
+  <div class="submod-scope-divider"></div>
+  <a class="submod-scope-btn{full_cls}" href="{base_url}" title="All files — super-repo and all submodules combined">Full scan</a>
+  <a class="submod-scope-btn{super_cls}" href="{base_url}&amp;scope=super" title="Only files not belonging to any submodule">Super-repo only</a>"#,
+            full_cls = if full_active { " active" } else { "" },
+            super_cls = if super_scope_active { " active" } else { "" },
+        );
+        for s in sub_names {
+            let is_active = active_sub == Some(s.as_str());
+            write!(
+                bar,
+                "\n  <a class=\"submod-scope-btn{cls}\" href=\"{base_url}&amp;sub={name_enc}\" title=\"Only files in submodule {name_esc}\">{name_esc}</a>",
+                cls = if is_active { " active" } else { "" },
+                name_enc = html_escape(s),
+                name_esc = html_escape(s),
+            )
+            .unwrap();
+        }
+        bar.push_str("\n</div>");
+        bar
+    } else {
+        String::new()
+    };
+
+    // Build scope label for the subtitle line.
+    let scope_label: String = if let Some(s) = active_sub {
+        format!("Submodule: {} &mdash; ", html_escape(s))
+    } else if super_scope_active {
+        "Super-repo only &mdash; ".to_string()
+    } else {
+        String::new()
+    };
+
+    format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OxideSLOC | Multi-Scan Timeline — {project_label}</title>
+  <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
+  <style nonce="{csp_nonce}">
+    :root{{--radius:18px;--bg:#f5efe8;--surface:#fbf7f2;--surface-2:#f4ede4;--line:#e6d0bf;--line-strong:#d8bfad;--text:#43342d;--muted:#7b675b;--muted-2:#a08777;--nav:#283790;--nav-2:#013e6b;--accent:#6f9bff;--oxide:#d37a4c;--oxide-2:#b35428;--shadow:0 18px 42px rgba(77,44,20,0.12);--pos:#1a8f47;--pos-bg:#e8f5ed;--neg:#b33b3b;--neg-bg:#fcd6d6;}}
+    *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
+    body{{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;}}
+    body.dark-theme{{--bg:#1a120b;--surface:#241a12;--surface-2:#2d2117;--line:#3d2e22;--line-strong:#54402f;--text:#f0e6dc;--muted:#b09080;--muted-2:#8a6e5f;--pos-bg:#163a23;--neg-bg:#3d1c1c;}}
+    .background-watermarks{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}
+    .background-watermarks img{{position:absolute;opacity:0.15;filter:blur(0.3px);user-select:none;max-width:none;}}
+    .code-particles{{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}}
+    .code-particle{{position:absolute;font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--oxide);opacity:0;white-space:nowrap;user-select:none;animation:floatCode linear infinite;}}
+    @keyframes floatCode{{0%{{opacity:0;transform:translateY(0) rotate(var(--rot));}}10%{{opacity:var(--op);}}85%{{opacity:var(--op);}}100%{{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}}}
+    .top-nav{{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,var(--nav),var(--nav-2));border-bottom:1px solid rgba(255,255,255,0.12);box-shadow:0 4px 14px rgba(0,0,0,0.18);}}
+    .top-nav-inner{{max-width:1720px;margin:0 auto;padding:4px 24px;min-height:56px;display:flex;align-items:center;gap:14px;flex-wrap:nowrap;}}
+    @media(max-width:1920px){{.top-nav-inner{{max-width:1500px;}}.page{{max-width:1500px;}}}}
+    @media(max-width:1400px){{.nav-right{{gap:6px;}}.nav-pill,.nav-dropdown-btn,.theme-toggle{{padding:0 10px;}}}}
+    @media(max-width:1150px){{.nav-right{{gap:4px;}}.nav-pill,.nav-dropdown-btn,.theme-toggle{{padding:0 8px;font-size:11px;min-height:34px;}}.brand-subtitle{{display:none;}}}}
+    .brand{{display:flex;align-items:center;gap:14px;text-decoration:none;flex-shrink:0;}}
+    .brand-logo{{width:42px;height:46px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.22));}}
+    .brand-copy{{display:flex;flex-direction:column;justify-content:center;flex-shrink:0;}}
+    .brand-title{{margin:0;color:#fff;font-size:17px;font-weight:800;line-height:1.1;}}
+    .brand-subtitle{{color:rgba(255,255,255,0.85);font-size:12px;margin-top:2px;line-height:1.2;white-space:nowrap;}}
+    .nav-right{{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;}}
+    .nav-pill,.theme-toggle{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;transition:background .15s ease,transform .15s ease;}}
+    .nav-pill:hover{{background:rgba(255,255,255,0.18);transform:translateY(-1px);}}
+    .theme-toggle{{width:38px;justify-content:center;padding:0;cursor:pointer;transition:transform 0.15s ease;}}
+    .theme-toggle:hover{{transform:translateY(-1px);background:rgba(255,255,255,0.16);}}
+    .theme-toggle svg{{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}}
+    .nav-dropdown{{position:relative;display:inline-flex;}}
+    .nav-dropdown-btn{{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);color:#fff;background:rgba(255,255,255,0.08);font-size:12px;font-weight:700;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background .15s ease,transform .15s ease;}}
+    .nav-dropdown-btn:hover,.nav-dropdown:focus-within .nav-dropdown-btn{{background:rgba(255,255,255,0.18);transform:translateY(-1px);}}
+    .nav-dropdown-menu{{opacity:0;visibility:hidden;position:absolute;top:calc(100% + 8px);right:0;background:linear-gradient(180deg,var(--nav),var(--nav-2));border:1px solid rgba(255,255,255,0.15);border-radius:12px;min-width:165px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,0.28);z-index:100;transition:opacity .13s,visibility 0s .13s;}}
+    .nav-dropdown:hover .nav-dropdown-menu,.nav-dropdown:focus-within .nav-dropdown-menu{{opacity:1;visibility:visible;transition:opacity .13s,visibility 0s;}}
+    .nav-dropdown-menu a{{display:flex;align-items:center;gap:9px;padding:11px 16px;color:rgba(255,255,255,0.92);text-decoration:none;font-size:12px;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.10);}}
+    .nav-dropdown-menu a:last-child{{border-bottom:none;}}
+    .nav-dropdown-menu a:hover{{background:rgba(255,255,255,0.14);color:#fff;}}
+    .nav-dropdown-menu a svg{{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex:0 0 auto;}}
+    body:not(.dark-theme) .icon-sun{{display:none;}}
+    body.dark-theme .icon-moon{{display:none;}}
+    .settings-modal{{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,0.22);min-width:260px;max-width:320px;opacity:0;pointer-events:none;transform:translateY(-8px) scale(0.97);transition:opacity 0.18s ease,transform 0.18s ease;overflow:hidden;}}
+    .settings-modal.open{{opacity:1;pointer-events:auto;transform:translateY(0) scale(1);}}
+    .settings-modal-header{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:800;color:var(--text);}}
+    .settings-close{{background:none;border:none;cursor:pointer;width:24px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--muted);border-radius:6px;padding:0;}}
+    .settings-close:hover{{color:var(--text);background:var(--surface-2);}}
+    .settings-close svg{{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;}}
+    .settings-modal-body{{padding:14px 16px 16px;}}
+    .settings-modal-label{{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-2);margin-bottom:10px;}}
+    .scheme-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}}
+    .scheme-swatch{{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;padding:7px 4px 6px;transition:border-color 0.15s ease,transform 0.12s ease;}}
+    .scheme-swatch:hover{{border-color:var(--line-strong);transform:translateY(-1px);}}
+    .scheme-swatch.active{{border-color:#6f9bff;box-shadow:0 0 0 2px rgba(111,155,255,0.25);}}
+    .scheme-preview{{width:28px;height:28px;border-radius:7px;flex-shrink:0;}}
+    .scheme-label{{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}}
+    .tz-select{{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}}
+    .page{{width:100%;max-width:1720px;margin:0 auto;padding:18px 24px 36px;position:relative;z-index:1;}}
+    .btn-back{{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s;white-space:nowrap;margin-bottom:16px;}}
+    .btn-back:hover{{background:var(--line);}}
+    .mc-title{{font-size:28px;font-weight:900;letter-spacing:-.03em;margin:0 0 6px;background:linear-gradient(90deg,#b85d33 0%,#d37a4c 40%,#6f9bff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}}
+    body.dark-theme .mc-title{{background:linear-gradient(90deg,#f0a070 0%,#d37a4c 40%,#9bb8ff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}}
+    .mc-desc{{font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.5;}}
+    .mc-subtitle{{font-size:14px;color:var(--muted);margin:0 0 6px;}}
+    .mc-strip{{display:flex;align-items:stretch;flex-wrap:wrap;gap:12px;overflow-x:auto;padding-bottom:6px;margin-bottom:20px;width:100%;}}
+    .mc-strip.mc-strip-grid{{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;overflow-x:visible;padding-bottom:0;}}
+    .mc-hero{{background:linear-gradient(180deg,rgba(255,255,255,0.18),transparent),var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 24px 24px;margin-bottom:18px;}}
+    .mc-hero-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px;flex-wrap:wrap;}}
+    .mc-card{{background:var(--surface);border:1.5px solid var(--oxide);border-radius:14px;padding:22px 24px;flex:1;min-width:180px;min-height:200px;display:flex;flex-direction:column;justify-content:flex-start;transition:box-shadow .15s ease;overflow:hidden;}}
+    .mc-card:hover{{box-shadow:0 8px 24px rgba(77,44,20,0.14);}}
+    body.dark-theme .mc-card{{background:var(--surface-2);}}
+    .mc-card-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px;}}
+    .mc-card-num{{font-size:13px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted-2);}}
+    .mc-card-project{{font-size:12px;font-weight:600;color:var(--muted);font-style:italic;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}}
+    .mc-card-commit{{display:block;font-family:ui-monospace,monospace;font-size:24px;font-weight:800;letter-spacing:-0.02em;line-height:1.1;color:var(--accent);text-decoration:none;margin-bottom:14px;word-break:break-all;}}
+    .mc-card-commit:hover{{color:var(--oxide);}}
+    .mc-card-rows{{display:flex;flex-direction:column;gap:6px;}}
+    .mc-card-row{{display:flex;align-items:baseline;gap:8px;font-size:13px;}}
+    .mc-row-label{{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);white-space:nowrap;flex-shrink:0;}}
+    .mc-row-val{{color:var(--text);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;}}
+    .mc-card-branch{{font-family:ui-monospace,monospace;font-size:11px;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent);font-weight:700;display:inline-block;}}
+    .mc-tag{{font-size:10px;background:rgba(211,122,76,0.12);border:1px solid rgba(211,122,76,0.28);border-radius:4px;padding:1px 6px;color:var(--oxide);font-weight:700;margin-right:3px;display:inline-block;}}
+    .mc-card-project-col{{display:flex;flex-direction:column;align-items:flex-end;gap:5px;max-width:72%;}}
+    .mc-scope-tag{{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:800;padding:2px 8px;border-radius:5px;white-space:nowrap;letter-spacing:.03em;text-transform:uppercase;}}
+    .mc-scope-full{{background:rgba(160,136,120,0.10);border:1px solid rgba(160,136,120,0.28);color:var(--muted-2);}}
+    .mc-scope-sub{{background:rgba(111,155,255,0.10);border:1px solid rgba(111,155,255,0.28);color:var(--accent);}}
+    .mc-scope-super{{background:rgba(211,122,76,0.10);border:1px solid rgba(211,122,76,0.28);color:var(--oxide);}}
+    .mc-card-nearest-wrap{{position:relative;display:inline-flex;align-items:center;gap:4px;cursor:default;}}
+    .mc-card-nearest{{font-size:10px;color:var(--muted-2);font-style:italic;}}
+    .mc-card-nearest-tip{{display:none;position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:8px;padding:6px 10px;font-size:11px;font-weight:500;line-height:1.5;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.28);pointer-events:none;z-index:200;border:1px solid rgba(255,255,255,0.10);}}
+    .mc-card-nearest-tip::after{{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:rgba(20,12,8,0.97);}}
+    .mc-card-nearest-wrap:hover .mc-card-nearest-tip{{display:block;}}
+    .mc-card-code{{font-size:15px;font-weight:800;color:var(--text);margin-top:12px;padding-top:10px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:nowrap;}}
+    .cmp-author-handle{{font-size:11px;font-weight:600;color:var(--muted-2);margin-left:1.5em;font-family:ui-monospace,monospace;}}
+    .submod-scope-bar{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 16px;background:var(--surface-2);border:1.5px solid var(--line-strong);border-radius:12px;margin:0 0 16px;}}
+    .submod-scope-divider{{width:1px;height:18px;background:var(--line-strong);margin:0 4px;flex-shrink:0;}}
+    .submod-scope-label{{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);flex-shrink:0;white-space:nowrap;}}
+    .submod-scope-label svg{{stroke:currentColor;fill:none;stroke-width:2;}}
+    .submod-scope-btn{{padding:5px 13px;border-radius:7px;border:1.5px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:background .12s,border-color .12s,color .12s;}}
+    .submod-scope-btn:hover{{background:var(--line);}}
+    .submod-scope-btn.active{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}}
+    .mc-arrow{{font-size:26px;color:var(--muted);align-self:center;padding:0 12px;flex-shrink:0;}}
+    .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 24px;margin-bottom:18px;position:relative;}}
+    .panel-title{{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);margin-bottom:14px;}}
+    .metrics-table{{width:100%;border-collapse:collapse;font-size:13px;}}
+    .metrics-table th,.metrics-table td{{padding:9px 12px;border-bottom:1px solid var(--line);text-align:right;}}
+    .metrics-table th{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);background:var(--surface-2);}}
+    .metrics-table td.mc-met-label,.metrics-table th.mc-met-label{{text-align:left;font-weight:700;color:var(--text);}}
+    .metrics-table .mc-val-col{{font-weight:700;font-variant-numeric:tabular-nums;}}
+    .metrics-table .mc-delta-col{{font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;}}
+    .metrics-table .mc-net-col{{font-weight:800;font-size:13px;font-variant-numeric:tabular-nums;background:rgba(111,155,255,0.06);}}
+    .metrics-table .pos{{color:var(--pos);}}
+    .metrics-table .neg{{color:var(--neg);}}
+    .metrics-table .zero{{color:var(--muted);}}
+    .metrics-table tr:hover td{{background:rgba(211,122,76,0.04);}}
+    .chart-toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}}
+    .chart-metric-btn{{padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s;}}
+    .chart-metric-btn.active{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}}
+    .chart-metric-btn:hover:not(.active){{background:var(--line);}}
+    .chart-wrap{{width:100%;overflow-x:auto;}}
+    #mc-chart{{display:block;width:100%;}}
+    h2,.mc-charts-h2{{font-size:14px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 14px;}}
+    .export-group{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;}}
+    .ic-grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px;}}
+    @media(max-width:800px){{.ic-grid{{grid-template-columns:1fr;}}}}
+    .ic-card{{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:16px 20px;}}
+    body.dark-theme .ic-card{{border-color:var(--line-strong);}}
+    .ic-card-h2{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 10px;}}
+    .ic-card-h2-row{{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}}
+    .ic-card-h2-row .ic-card-h2{{margin:0;}}
+    .ic-leg{{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;flex-wrap:wrap;}}
+    .ic-dot{{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}}
+    .ic-cb{{cursor:pointer;transition:filter .15s;}}
+    .ic-cb:hover{{filter:brightness(1.12);}}
+    .ic-leg-item{{cursor:pointer;transition:opacity .15s;border-radius:4px;padding:2px 6px;}}
+    .ic-leg-item:hover{{background:rgba(211,122,76,0.08);}}
+    #mc-ic-tt{{display:none;position:fixed;background:rgba(15,10,6,.95);color:rgba(255,255,255,0.92);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.28);max-width:240px;white-space:nowrap;}}
+    .filter-tabs-row{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}}
+    .delta-note{{font-size:11px;color:var(--muted);font-style:italic;text-align:right;}}
+    .tab-btn{{padding:6px 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;transition:background .12s;}}
+    .tab-btn.active{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}}
+    .tab-btn:hover:not(.active){{background:var(--line);}}
+    .tab-btn.tab-modified{{background:#fff2d8;color:#926000;border-color:#e6c96c;}}
+    .tab-btn.tab-modified.active{{background:#926000;border-color:#926000;color:#fff;}}
+    .tab-btn.tab-added{{background:#e8f5ed;color:#1a8f47;border-color:#a3d9b1;}}
+    .tab-btn.tab-added.active{{background:#1a8f47;border-color:#1a8f47;color:#fff;}}
+    .tab-btn.tab-removed{{background:#fdeaea;color:#b33b3b;border-color:#f5a3a3;}}
+    .tab-btn.tab-removed.active{{background:#b33b3b;border-color:#b33b3b;color:#fff;}}
+    body.dark-theme .tab-btn.tab-modified{{background:#3d2f0a;color:#f0c060;border-color:#6b5020;}}
+    body.dark-theme .tab-btn.tab-added{{background:#163927;color:#8fe2a8;border-color:#2a6b4a;}}
+    body.dark-theme .tab-btn.tab-removed{{background:#3d1c1c;color:#f5a3a3;border-color:#7a3a3a;}}
+    .table-wrap{{width:100%;overflow-x:auto;}}
+    #file-table{{width:100%;border-collapse:collapse;font-size:12px;table-layout:auto;}}
+    #file-table th,#file-table td{{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;}}
+    #file-table th{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-2);background:var(--surface-2);text-align:right;}}
+    #file-table th.left,#file-table td.left{{text-align:left;}}
+    .file-scan-col,.file-delta-col,.file-net-col{{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;}}
+    .file-delta-col{{color:var(--muted);font-size:11px;}}
+    .file-net-col{{font-weight:800;}}
+    .pos{{color:var(--pos);}} .neg{{color:var(--neg);}} .zero{{color:var(--muted);}}
+    #file-table th.sortable{{cursor:pointer;user-select:none;}} #file-table th.sortable:hover{{color:var(--oxide);}}
+    #file-table .sort-icon{{margin-left:3px;font-size:9px;opacity:.4;vertical-align:middle;}}
+    #file-table th.sort-asc .sort-icon,#file-table th.sort-desc .sort-icon{{opacity:1;color:var(--oxide);}}
+    .status-badge{{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;}}
+    .status-badge.modified{{background:#fff2d8;color:#926000;}}
+    .status-badge.added{{background:#e8f5ed;color:#1a8f47;}}
+    .status-badge.removed{{background:#fdeaea;color:#b33b3b;}}
+    .status-badge.unchanged{{background:var(--surface-2);color:var(--muted);}}
+    body.dark-theme .status-badge.modified{{background:#3d2f0a;color:#f0c060;}}
+    body.dark-theme .status-badge.added{{background:#163927;color:#8fe2a8;}}
+    body.dark-theme .status-badge.removed{{background:#3d1c1c;color:#f5a3a3;}}
+    tr.row-added td{{background:rgba(26,143,71,0.04);}}
+    tr.row-removed td{{background:rgba(179,59,59,0.06);}}
+    tr.row-modified td{{background:rgba(146,96,0,0.04);}}
+    tr.row-unchanged td{{color:var(--muted);}}
+    tr.row-unchanged .status-badge{{opacity:.65;}}
+    .file-path{{font-family:ui-monospace,monospace;font-size:11px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle;}}
+    .absent{{color:var(--muted);font-style:italic;}}
+    .pagination{{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:14px;flex-wrap:wrap;}}
+    .pagination-info{{font-size:12px;color:var(--muted);}}
+    .pagination-btns{{display:flex;gap:5px;}}
+    .pg-btn{{min-width:32px;min-height:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:7px;border:1px solid var(--line);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s;}}
+    .pg-btn:hover:not(:disabled){{background:var(--line);}}
+    .pg-btn.active{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}}
+    .pg-btn:disabled{{opacity:.35;cursor:default;}}
+    select.per-page{{border:1px solid var(--line-strong);border-radius:7px;background:var(--surface-2);color:var(--text);padding:4px 9px;font-size:12px;cursor:pointer;}}
+    .export-btn{{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);text-decoration:none;white-space:nowrap;transition:background .12s;}}
+    .export-btn:hover{{background:var(--line);}}
+    .server-status-wrap{{position:relative;display:inline-flex;}}.server-online-pill{{cursor:default;}}.server-status-tip{{display:none;position:absolute;top:calc(100% + 10px);right:0;z-index:100;background:rgba(20,12,8,0.97);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:500;line-height:1.55;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);}}.server-status-tip::before{{content:'';position:absolute;bottom:100%;right:18px;border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.97);}}.server-status-wrap:hover .server-status-tip{{display:block;}}.status-dot{{display:inline-block;width:8px;height:8px;border-radius:50%;background:#26d768;box-shadow:0 0 0 3px rgba(38,215,104,0.18);flex-shrink:0;}}
+    .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
+    .site-footer a{{color:var(--muted);}}
+    body.pdf-mode .top-nav,body.pdf-mode .background-watermarks,body.pdf-mode #code-particles,body.pdf-mode .export-group,body.pdf-mode .btn-back,body.pdf-mode .chart-toolbar,body.pdf-mode .filter-tabs-row,body.pdf-mode .filter-tabs,body.pdf-mode .pagination,body.pdf-mode select.per-page,body.pdf-mode .submod-scope-bar,body.pdf-mode .settings-modal,body.pdf-mode .site-footer{{display:none!important;}}
+    body.pdf-mode{{background:#fff!important;}}
+    .mc-modal-overlay{{position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,0.52);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .18s ease;}}
+    .mc-modal-overlay.open{{opacity:1;pointer-events:auto;}}
+    .mc-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;box-shadow:0 24px 64px rgba(0,0,0,0.28);max-width:600px;width:92%;max-height:84vh;overflow-y:auto;position:relative;}}
+    .mc-modal-head{{background:var(--nav);color:#fff;padding:16px 20px;border-radius:14px 14px 0 0;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}}
+    .mc-modal-title{{font-size:18px;font-weight:800;}}
+    .mc-modal-sub{{font-size:12px;opacity:.72;margin-top:3px;word-break:break-all;}}
+    .mc-modal-close{{background:rgba(255,255,255,0.18);border:none;color:#fff;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}}
+    .mc-modal-close:hover{{background:rgba(255,255,255,0.32);}}
+    .mc-modal-body{{padding:16px 20px;}}
+    .mc-modal-sec{{margin-bottom:16px;}}
+    .mc-modal-sec-title{{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin-bottom:8px;}}
+    .mc-modal-stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;}}
+    .mc-modal-stat{{background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;}}
+    .mc-modal-stat-val{{font-size:16px;font-weight:900;color:var(--oxide);}}
+    .mc-modal-stat-lbl{{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:.05em;margin-top:2px;}}
+    .mc-modal-row{{display:flex;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line);align-items:baseline;}}
+    .mc-modal-row:last-child{{border-bottom:none;}}
+    .mc-modal-key{{color:var(--muted);font-weight:700;font-size:11px;text-transform:uppercase;flex-shrink:0;min-width:110px;}}
+    .mc-modal-val{{color:var(--text);word-break:break-all;}}
+    .mc-modal-val a{{color:var(--oxide);text-decoration:none;}}
+    .mc-modal-val a:hover{{text-decoration:underline;}}
+    body.dark-theme .mc-modal-stat{{background:rgba(255,255,255,0.07);}}
+    .mc-card{{cursor:pointer;transition:transform .12s,box-shadow .12s;}}
+    .mc-card:hover{{transform:translateY(-3px);box-shadow:0 8px 24px rgba(196,92,16,0.22);}}
+  </style>
+</head>
+<body>
+  <div class="background-watermarks" aria-hidden="true">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+    <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
+  </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
+  <div class="top-nav">
+    <div class="top-nav-inner">
+      <a class="brand" href="/">
+        <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Multi-Scan Timeline</div></div>
+      </a>
+      <div class="nav-right">
+        <a class="nav-pill" href="/">Home</a>
+        <div class="nav-dropdown">
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
+          </div>
+        </div>
+        <a class="nav-pill" href="/compare-scans" {nav_compare_active}>Compare Scans</a>
+        <a class="nav-pill" href="/test-metrics">Test Metrics</a>
+        <div class="nav-dropdown">
+          <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <div class="nav-dropdown-menu">
+            <a href="/integrations"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>Integrations</a>
+          </div>
+        </div>
+        <div class="server-status-wrap" id="server-status-wrap">
+          <div class="nav-pill server-online-pill" id="server-status-pill">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="server-status-label">Server</span>
+            <span id="server-ping-ms" style="margin-left:5px;opacity:0.75;font-size:10px;"></span>
+          </div>
+          <div class="server-status-tip">
+            OxideSLOC is running &mdash; accessible on your network.
+            <span id="server-tip-ping" style="display:block;margin-top:4px;font-size:11px;opacity:0.75;"></span>
+          </div>
+        </div>
+        <button type="button" class="theme-toggle" id="settings-btn" aria-label="Color scheme" title="Color scheme settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 1 1 12.5 4 6.7 6.7 0 0 0 20 15.5Z"></path></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.9 5.1l-1.6 1.6M6.7 17.3l-1.6 1.6M18.9 18.9l-1.6-1.6M6.7 6.7 5.1 5.1"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <!-- Hero header -->
+    <div class="mc-hero">
+      <div class="mc-hero-header">
+        <div>
+          <div class="mc-title">Multi-Scan Timeline</div>
+          <p class="mc-desc">Side-by-side metric comparison across multiple scans &mdash; code line progression, file changes, and language breakdown.</p>
+          <div class="mc-subtitle">{scope_label}{n} scans &middot; project: <strong>{project_label}</strong></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0;">
+          <a class="btn-back" href="/compare-scans"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg> Compare Scans</a>
+          <div class="export-group" id="mc-top-export-group">
+            <button type="button" class="export-btn" id="mc-top-export-html-btn" title="Export this page as a standalone HTML report"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export HTML</button>
+            <button type="button" class="export-btn" id="mc-top-export-pdf-btn" title="Export this page as a PDF report"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Export PDF</button>
+          </div>
+        </div>
+      </div>
+      {scope_bar_html}
+      <!-- Scan strip -->
+      <div class="{mc_strip_class}">{scan_strip}</div>
+    </div>
+
+    <!-- Summary metrics table -->
+    <div class="panel">
+      <div class="panel-title">Metric Progression</div>
+      <div class="table-wrap">
+        <table class="metrics-table">
+          <thead>{metrics_thead}</thead>
+          <tbody>{metrics_tbody}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Scan Charts -->
+    <div class="panel" id="mc-charts-panel">
+      <div class="panel-title" style="margin-bottom:14px;">Scan Delta Charts</div>
+      <div class="ic-grid">
+        <!-- Timeline line chart — spans full width -->
+        <div class="ic-card" style="grid-column:span 2">
+          <div class="ic-card-h2-row">
+            <span class="ic-card-h2">Timeline</span>
+            <div class="chart-toolbar" style="margin:0">
+              <button class="chart-metric-btn active" data-metric="code">Code Lines</button>
+              <button class="chart-metric-btn" data-metric="files">Files</button>
+              <button class="chart-metric-btn" data-metric="comments">Comments</button>
+              <button class="chart-metric-btn" data-metric="tests">Tests</button>
+              <button class="chart-metric-btn" data-metric="cov">Coverage %</button>
+            </div>
+          </div>
+          <div class="chart-wrap"><svg id="mc-chart" height="280"></svg></div>
+        </div>
+        <!-- Code Metrics: Scan 1 vs Latest -->
+        <div class="ic-card">
+          <div class="ic-card-h2">Code Metrics &mdash; Scan 1 vs Latest</div>
+          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files"><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;scan&nbsp;1)</span></div>
+          <div id="mc-ic-c1"></div>
+        </div>
+        <!-- Language Code Delta -->
+        <div class="ic-card" id="mc-ic-lang-card">
+          <div class="ic-card-h2">Language Code Delta</div>
+          <div id="mc-ic-c3"></div>
+        </div>
+        <!-- Delta by Metric -->
+        <div class="ic-card">
+          <div class="ic-card-h2">Delta by Metric</div>
+          <div id="mc-ic-c2"></div>
+        </div>
+        <!-- File Change Distribution -->
+        <div class="ic-card">
+          <div class="ic-card-h2">File Change Distribution</div>
+          <div id="mc-ic-c4"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- File matrix table -->
+    <div class="panel">
+      <div class="panel-title">File Matrix <span style="font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;text-transform:none;letter-spacing:0;">{total_files} files</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+        <div class="filter-tabs-row" style="margin-bottom:0;gap:6px;">
+          <button class="tab-btn tab-all active" data-status="">All ({total_files})</button>
+          <button class="tab-btn tab-modified" data-status="modified">Modified ({files_modified})</button>
+          <button class="tab-btn tab-added" data-status="added">Added ({files_added})</button>
+          <button class="tab-btn tab-removed" data-status="removed">Removed ({files_removed})</button>
+          <button class="tab-btn tab-unchanged" data-status="unchanged">Unchanged ({files_unchanged})</button>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0;">
+          <span class="delta-note">* &#916; = delta (change from scan 1 &rarr; latest)</span>
+          <div class="export-group">
+          <button type="button" class="export-btn" id="mc-file-reset-btn">&#8635; Reset</button>
+          <button type="button" class="export-btn" id="export-csv-btn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            CSV
+          </button>
+          <button type="button" class="export-btn" id="mc-file-xls-btn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Excel
+          </button>
+          <button type="button" class="export-btn" id="mc-file-html-btn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export HTML
+          </button>
+          <button type="button" class="export-btn" id="mc-file-pdf-btn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            Export PDF
+          </button>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="file-table">
+          <thead>
+            <tr>
+              <th class="left sortable" data-sort-col="p" data-sort-type="str">File <span class="sort-icon">&#8597;</span></th>
+              <th class="left sortable" data-sort-col="l" data-sort-type="str">Language <span class="sort-icon">&#8597;</span></th>
+              <th class="left sortable" data-sort-col="s" data-sort-type="str">Status <span class="sort-icon">&#8597;</span></th>
+              {file_col_headers}
+              <th class="file-net-col sortable" data-sort-col="t" data-sort-type="num">Net &#916; <span class="sort-icon">&#8597;</span></th>
+            </tr>
+          </thead>
+          <tbody id="file-tbody"></tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <span class="pagination-info" id="pg-info"></span>
+        <div class="pagination-btns" id="pg-btns"></div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:12px;color:var(--muted)">Show</span>
+          <select class="per-page" id="per-page-sel">
+            <option value="25" selected>25 per page</option>
+            <option value="50">50 per page</option>
+            <option value="100">100 per page</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mc-ic-tt"></div>
+
+  <footer class="site-footer">
+    oxide-sloc v{version} &mdash; local code metrics workbench &nbsp;&middot;&nbsp;
+    Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
+    &nbsp;&middot;&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
+    &nbsp;&middot;&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
+    &nbsp;&middot;&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
+  </footer>
+
+  <script nonce="{csp_nonce}">
+  (function(){{
+    // ── Dark theme ───────────────────────────────────────────────────────────
+    try{{if(localStorage.getItem('sloc-dark')==='1')document.body.classList.add('dark-theme');}}catch(e){{}}
+    var tt=document.getElementById('theme-toggle');
+    if(tt)tt.addEventListener('click',function(){{
+      var on=document.body.classList.toggle('dark-theme');
+      try{{localStorage.setItem('sloc-dark',on?'1':'0');}}catch(e){{}}
+      renderChart(activeMetric);
+    }});
+
+    // ── Code particles ───────────────────────────────────────────────────────
+    var container=document.getElementById('code-particles');
+    if(container){{
+      var snips=['multi-scan','timeline','code_lines','fn delta()','+230 loc','-15 files','v1.0','git main','scan 3','commits','trend','coverage','tests: 145','sloc_core','analyze()'];
+      for(var i=0;i<28;i++){{
+        (function(idx){{
+          var el=document.createElement('span');el.className='code-particle';
+          el.textContent=snips[idx%snips.length];
+          el.style.left=(Math.random()*94+2).toFixed(1)+'%';
+          el.style.top=(Math.random()*88+6).toFixed(1)+'%';
+          el.style.setProperty('--rot',(Math.random()*26-13).toFixed(1)+'deg');
+          el.style.setProperty('--op',(Math.random()*0.08+0.05).toFixed(3));
+          el.style.animationDuration=(Math.random()*10+9).toFixed(1)+'s';
+          el.style.animationDelay='-'+(Math.random()*18).toFixed(1)+'s';
+          container.appendChild(el);
+        }})(i);
+      }}
+    }}
+
+    // ── Watermarks ───────────────────────────────────────────────────────────
+    var wms=Array.prototype.slice.call(document.querySelectorAll('.background-watermarks img'));
+    if(wms.length){{
+      var placed=[];
+      function tooClose(t,l){{for(var i=0;i<placed.length;i++){{if(Math.abs(placed[i][0]-t)<16&&Math.abs(placed[i][1]-l)<12)return true;}}return false;}}
+      function pick(lb){{for(var a=0;a<50;a++){{var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;if(!tooClose(t,l)){{placed.push([t,l]);return[t,l];}}}}var t=Math.random()*88+2,l=lb?Math.random()*24+1:Math.random()*24+74;placed.push([t,l]);return[t,l];}}
+      var half=Math.floor(wms.length/2);
+      wms.forEach(function(img,i){{var pos=pick(i<half),sz=Math.floor(Math.random()*80+110),rot=(Math.random()*360).toFixed(1),op=(Math.random()*0.07+0.10).toFixed(2);img.style.width=sz+'px';img.style.top=pos[0].toFixed(1)+'%';img.style.left=pos[1].toFixed(1)+'%';img.style.transform='rotate('+rot+'deg)';img.style.opacity=op;}});
+    }}
+
+    // ── Settings / colour scheme modal ───────────────────────────────────────
+    (function(){{
+      var S=[{{n:'Classic',a:'#b85d33',b:'#7a371b'}},{{n:'Navy',a:'#283790',b:'#1e1e24'}},{{n:'Ember',a:'#ce5d3d',b:'#1e1e24'}},{{n:'Ocean',a:'#1f439b',b:'#1e1e24'}},{{n:'Royal',a:'#003184',b:'#1e1e24'}}];
+      function ap(s){{document.documentElement.style.setProperty('--nav',s.a);document.documentElement.style.setProperty('--nav-2',s.b);try{{localStorage.setItem('sloc-ns',JSON.stringify(s));}}catch(e){{}}document.querySelectorAll('.scheme-swatch').forEach(function(x){{x.classList.toggle('active',x.dataset.n===s.n);}});}}
+      try{{var sv=JSON.parse(localStorage.getItem('sloc-ns'));if(sv&&sv.a)ap(sv);else ap(S[0]);}}catch(e){{ap(S[0]);}}
+      function init(){{
+        var btn=document.getElementById('settings-btn');if(!btn)return;
+        var m=document.createElement('div');m.id='settings-modal';m.className='settings-modal';
+        m.innerHTML='<div class="settings-modal-header"><span>Appearance</span><button type="button" class="settings-close" id="settings-close-btn" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="settings-modal-body"><div class="settings-modal-label">Navigation color scheme</div><div class="scheme-grid" id="scheme-grid"></div><div style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"><div class="settings-modal-label" style="margin-bottom:8px;">Timestamp timezone</div><select class="tz-select" id="tz-select"><option value="America/Los_Angeles">Pacific (PT)</option><option value="America/Denver">Mountain (MT)</option><option value="America/Chicago">Central (CT)</option><option value="America/New_York">Eastern (ET)</option><option value="America/Anchorage">Alaska (AT)</option><option value="Pacific/Honolulu">Hawaii (HT)</option></select></div></div>';
+        document.body.appendChild(m);
+        var g=document.getElementById('scheme-grid');
+        if(g)S.forEach(function(s){{var el=document.createElement('button');el.type='button';el.className='scheme-swatch';el.dataset.n=s.n;el.title=s.n;var p=document.createElement('div');p.className='scheme-preview';p.style.background='linear-gradient(135deg,'+s.a+','+s.b+')';var l=document.createElement('span');l.className='scheme-label';l.textContent=s.n;el.appendChild(p);el.appendChild(l);try{{var c=JSON.parse(localStorage.getItem('sloc-ns'));if(c&&c.n===s.n)el.classList.add('active');}}catch(e){{}}el.addEventListener('click',function(){{ap(s);}});g.appendChild(el);}});
+        var cl=document.getElementById('settings-close-btn');
+        btn.addEventListener('click',function(e){{e.stopPropagation();var r=btn.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';m.style.right=(window.innerWidth-r.right)+'px';m.classList.toggle('open');}});
+        if(cl)cl.addEventListener('click',function(){{m.classList.remove('open');}});
+        document.addEventListener('click',function(e){{if(!m.contains(e.target)&&e.target!==btn)m.classList.remove('open');}});
+      }}
+      if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+    }})();
+
+    // ── Timezone support for scan timestamps ─────────────────────────────────
+    (function(){{
+      window.tzAbbr=function(z){{return{{'America/Los_Angeles':'PT','America/Denver':'MT','America/Chicago':'CT','America/New_York':'ET','America/Anchorage':'AT','Pacific/Honolulu':'HT'}}[z]||'PT';}};
+      window.fmtTz=function(ms,tz){{var d=new Date(ms);if(isNaN(d.getTime()))return'';try{{var pts=new Intl.DateTimeFormat('en-US',{{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}}).formatToParts(d);var v={{}};pts.forEach(function(p){{v[p.type]=p.value;}});return v.year+'-'+v.month+'-'+v.day+' '+v.hour+':'+v.minute+' '+window.tzAbbr(tz);}}catch(e){{return'';}}}};
+      window.applyTz=function(tz){{try{{localStorage.setItem('sloc-tz',tz);}}catch(e){{}}document.querySelectorAll('.mc-ts-local[data-utc-ms]').forEach(function(el){{var ms=parseInt(el.getAttribute('data-utc-ms'),10);if(!isNaN(ms))el.textContent=window.fmtTz(ms,tz);}});}};
+      var storedTz;try{{storedTz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}}catch(e){{storedTz='America/Los_Angeles';}}
+      window.applyTz(storedTz);
+      function wireTzSelect(){{var tzSel=document.getElementById('tz-select');if(!tzSel)return;tzSel.value=storedTz;tzSel.addEventListener('change',function(){{window.applyTz(this.value);}});}}
+      if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',wireTzSelect);else setTimeout(wireTzSelect,50);
+    }})();
+
+    // ── Data ────────────────────────────────────────────────────────────────
+    var POINTS={points_json};
+    var FILES={file_matrix_json};
+    var N={n};
+
+    // ── fmt helper ───────────────────────────────────────────────────────────
+    function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
+    function fmtFull(n){{return Number(n).toLocaleString();}}
+    function fmtDelta(n){{return n>0?'+'+fmt(n):fmt(n);}}
+
+    // ── Timeline chart ───────────────────────────────────────────────────────
+    var activeMetric='code';
+    var metricKey={{code:'code',files:'files',comments:'comments',tests:'tests',cov:'cov'}};
+    var metricLabel={{code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage %'}};
+
+    function renderChart(metric){{
+      var svg=document.getElementById('mc-chart');if(!svg)return;
+      var W=svg.getBoundingClientRect().width||800,H=280;
+      svg.setAttribute('height',H);
+      var pad={{l:62,r:20,t:32,b:72}};
+      var dark=document.body.classList.contains('dark-theme');
+      var pts=POINTS.map(function(p){{return p[metric]!=null?Number(p[metric]):null;}});
+      var valid=pts.filter(function(v){{return v!=null;}});
+      if(!valid.length){{var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12"+'  font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}}
+      var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
+      if(minV===maxV){{minV=Math.max(0,minV-1);maxV=maxV+1;}}
+      var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
+      function xOf(i){{return pad.l+(N===1?plotW/2:i/(N-1)*plotW);}}
+      function yOf(v){{return pad.t+plotH-(v-minV)/(maxV-minV)*plotH;}}
+      var gridColor=dark?'rgba(255,255,255,0.08)':'rgba(0,0,0,0.07)';
+      var textColor=dark?'rgba(255,255,255,0.6)':'rgba(67,52,45,0.7)';
+      var lineColor='#d37a4c';var dotColor='#d37a4c';var areaColor=dark?'rgba(211,122,76,0.12)':'rgba(211,122,76,0.10)';
+      var parts=[];
+      parts.push('<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+(dark?'#241a12':'#fbf7f2')+'" rx="8"/>');
+      for(var gi=0;gi<5;gi++){{var gy=pad.t+plotH/4*gi;parts.push('<line x1="'+pad.l+'" y1="'+gy.toFixed(1)+'" x2="'+(W-pad.r)+'" y2="'+gy.toFixed(1)+'" stroke="'+gridColor+'" stroke-width="1"/>');var gv=maxV-(maxV-minV)/4*gi;parts.push('<text x="'+(pad.l-6)+'" y="'+(gy+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="'+textColor+'">'+fmt(gv)+'</text>');}}
+      var areaD='M '+xOf(0)+' '+(pad.t+plotH);
+      var lineD='';var firstPt=true;
+      for(var i=0;i<N;i++){{if(pts[i]==null)continue;var cx=xOf(i),cy=yOf(pts[i]);areaD+=' L '+cx.toFixed(1)+' '+cy.toFixed(1);if(firstPt){{lineD='M '+cx.toFixed(1)+' '+cy.toFixed(1);firstPt=false;}}else{{lineD+=' L '+cx.toFixed(1)+' '+cy.toFixed(1);}}}}
+      areaD+=' L '+xOf(N-1)+' '+(pad.t+plotH)+' Z';
+      parts.push('<path d="'+areaD+'" fill="'+areaColor+'"/>');
+      parts.push('<path d="'+lineD+'" fill="none" stroke="'+lineColor+'" stroke-width="2.2" stroke-linejoin="round"/>');
+      for(var i=0;i<N;i++){{
+        if(pts[i]==null)continue;
+        var cx=xOf(i),cy=yOf(pts[i]);
+        var p=POINTS[i];var lbl=(p.commit||'').substring(0,7)||(i+1)+'';
+        var hasTag=p.tags&&p.tags.length>0;
+        // Permanent Y-value label above the dot
+        parts.push('<text x="'+cx.toFixed(1)+'" y="'+(cy-11).toFixed(1)+'" text-anchor="middle" font-size="11" font-weight="600" fill="'+textColor+'">'+fmt(pts[i])+'</text>');
+        parts.push('<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+(hasTag?5.5:4)+'" fill="'+(hasTag?'#6f9bff':dotColor)+'" stroke="'+(dark?'#241a12':'#fbf7f2')+'" stroke-width="1.5" style="cursor:pointer" onclick="window.location=\'/runs/report.html/'+p.run_id+'\'"/>');
+        var xanchor=i===0?'start':i===N-1?'end':'middle';
+        // X-axis label at 2× the original size (18 px)
+        parts.push('<text x="'+cx.toFixed(1)+'" y="'+(H-pad.b+22)+'" text-anchor="'+xanchor+'" font-size="18" fill="'+textColor+'" font-family="ui-monospace,monospace">'+escHtml(lbl)+'</text>');
+      }}
+      parts.push('<text x="'+(pad.l+plotW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-size="10" fill="'+textColor+'">'+escHtml(metricLabel[metric]||metric)+'</text>');
+      svg.setAttribute('viewBox','0 0 '+W+' '+H);
+      svg.innerHTML=parts.join('');
+      // ── Interactive hover: vertical crosshair + tooltip ───────────────────
+      svg.onmousemove=function(e){{
+        var rect=svg.getBoundingClientRect();
+        var scaleX=W/rect.width;
+        var mouseX=(e.clientX-rect.left)*scaleX;
+        var nearest=-1,minDist=Infinity;
+        for(var k=0;k<N;k++){{if(pts[k]==null)continue;var dx=Math.abs(xOf(k)-mouseX);if(dx<minDist){{minDist=dx;nearest=k;}}}}
+        if(nearest<0)return;
+        var nc=xOf(nearest),ny=yOf(pts[nearest]);
+        var xhair=svg.querySelector('.mc-xhair');
+        if(!xhair){{xhair=document.createElementNS('http://www.w3.org/2000/svg','g');xhair.setAttribute('class','mc-xhair');svg.appendChild(xhair);}}
+        xhair.innerHTML='<line x1="'+nc.toFixed(1)+'" y1="'+pad.t+'" x2="'+nc.toFixed(1)+'" y2="'+(pad.t+plotH)+'" stroke="rgba(211,122,76,0.55)" stroke-width="1.5" stroke-dasharray="4,3" pointer-events="none"/>';
+        var tt=document.getElementById('mc-ic-tt');if(!tt)return;
+        var pp=POINTS[nearest];var clbl=(pp.commit||'').substring(0,7)||(nearest+1)+'';
+        tt.innerHTML='<strong>Scan '+(nearest+1)+'</strong> <span style="font-family:monospace;font-size:11px;opacity:.75">'+escHtml(clbl)+'</span><br>'+escHtml(metricLabel[metric]||metric)+': <strong>'+fmtFull(pts[nearest])+'</strong>';
+        var bx=rect.left+(nc/W*rect.width)+18;
+        if(bx+220>window.innerWidth-8)bx=rect.left+(nc/W*rect.width)-228;
+        tt.style.left=bx+'px';tt.style.top=(e.clientY-38)+'px';tt.style.display='block';
+      }};
+      svg.onmouseleave=function(){{
+        var xhair=svg.querySelector('.mc-xhair');if(xhair)xhair.innerHTML='';
+        var tt=document.getElementById('mc-ic-tt');if(tt)tt.style.display='none';
+      }};
+    }}
+
+    function escHtml(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+
+    document.querySelectorAll('.chart-metric-btn').forEach(function(btn){{
+      btn.addEventListener('click',function(){{
+        activeMetric=this.dataset.metric;
+        document.querySelectorAll('.chart-metric-btn').forEach(function(b){{b.classList.remove('active');}});
+        this.classList.add('active');
+        renderChart(activeMetric);
+      }});
+    }});
+    if(typeof ResizeObserver!=='undefined'){{
+      new ResizeObserver(function(){{renderChart(activeMetric);}}).observe(document.getElementById('mc-chart'));
+    }}
+    renderChart(activeMetric);
+
+    // ── File matrix table ────────────────────────────────────────────────────
+    var activeStatus='';
+    var currentPage=1;
+    var perPage=25;
+    var mcSortCol=null,mcSortAsc=true;
+
+    function getFiltered(){{
+      var data=!activeStatus?FILES:FILES.filter(function(f){{return f.s===activeStatus;}});
+      if(!mcSortCol)return data;
+      var asc=mcSortAsc;
+      return data.slice().sort(function(a,b){{
+        var va,vb;
+        if(mcSortCol==='p'){{va=a.p||'';vb=b.p||'';}}
+        else if(mcSortCol==='l'){{va=a.l||'';vb=b.l||'';}}
+        else if(mcSortCol==='s'){{va=a.s||'';vb=b.s||'';}}
+        else if(mcSortCol==='t'){{va=a.t||0;vb=b.t||0;return asc?va-vb:vb-va;}}
+        else{{return 0;}}
+        if(asc)return va<vb?-1:va>vb?1:0;
+        return va<vb?1:va>vb?-1:0;
+      }});
+    }}
+
+    function renderFilePage(){{
+      var filtered=getFiltered();
+      var total=filtered.length;
+      var totalPages=Math.max(1,Math.ceil(total/perPage));
+      if(currentPage>totalPages)currentPage=totalPages;
+      var start=(currentPage-1)*perPage,end=Math.min(start+perPage,total);
+      var tbody=document.getElementById('file-tbody');if(!tbody)return;
+      var rows=[];
+      for(var i=start;i<end;i++){{
+        var f=filtered[i];
+        var cells='<td class="left"><span class="file-path" title="'+escHtml(f.p)+'">'+escHtml(f.p)+'</span></td>';
+        cells+='<td class="left">'+(f.l?escHtml(f.l):'<span class="absent">—</span>')+'</td>';
+        cells+='<td class="left"><span class="status-badge '+f.s+'">'+f.s+'</span></td>';
+        for(var j=0;j<N;j++){{
+          var cv=f.c[j];
+          cells+='<td class="file-scan-col">'+(cv!=null?fmt(cv):'<span class="absent">—</span>')+'</td>';
+          if(j<N-1){{
+            var dv=f.d[j+1];
+            cells+='<td class="file-delta-col '+(dv!=null?dv>0?'pos':dv<0?'neg':'zero':'absent-delta')+'">'+
+              (dv!=null?fmtDelta(dv):'<span class="absent">—</span>')+'</td>';
+          }}
+        }}
+        var tc=f.t;
+        cells+='<td class="file-net-col '+(tc>0?'pos':tc<0?'neg':'zero')+'">'+fmtDelta(tc)+'</td>';
+        rows.push('<tr class="row-'+f.s+'">'+cells+'</tr>');
+      }}
+      tbody.innerHTML=rows.join('');
+
+      var info=document.getElementById('pg-info');
+      if(info)info.textContent='Showing '+(total?start+1:0)+'–'+end+' of '+total+' files';
+      renderPgBtns(totalPages);
+    }}
+
+    function renderPgBtns(totalPages){{
+      var wrap=document.getElementById('pg-btns');if(!wrap)return;
+      var btns=[];
+      function mkBtn(label,page,active,disabled){{
+        var cls='pg-btn'+(active?' active':'')+(disabled?' disabled':'');
+        return '<button class="'+cls+'" data-pg="'+page+'" '+(disabled?'disabled':'')+'>'+label+'</button>';
+      }}
+      btns.push(mkBtn('&#8249;',currentPage-1,false,currentPage<=1));
+      var s=Math.max(1,currentPage-2),e=Math.min(totalPages,currentPage+2);
+      if(s>1)btns.push(mkBtn('1',1,false,false));
+      if(s>2)btns.push('<span class="pg-btn" style="pointer-events:none">&hellip;</span>');
+      for(var p=s;p<=e;p++)btns.push(mkBtn(p,p,p===currentPage,false));
+      if(e<totalPages-1)btns.push('<span class="pg-btn" style="pointer-events:none">&hellip;</span>');
+      if(e<totalPages)btns.push(mkBtn(totalPages,totalPages,false,false));
+      btns.push(mkBtn('&#8250;',currentPage+1,false,currentPage>=totalPages));
+      wrap.innerHTML=btns.join('');
+      wrap.querySelectorAll('.pg-btn[data-pg]').forEach(function(b){{
+        b.addEventListener('click',function(){{
+          var pg=parseInt(this.dataset.pg,10);
+          if(pg>=1&&pg<=totalPages){{currentPage=pg;renderFilePage();}}
+        }});
+      }});
+    }}
+
+    // Tab filter
+    document.querySelectorAll('.tab-btn').forEach(function(btn){{
+      btn.addEventListener('click',function(){{
+        activeStatus=this.dataset.status||'';
+        currentPage=1;
+        document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.remove('active');}});
+        this.classList.add('active');
+        renderFilePage();
+      }});
+    }});
+
+    // Per-page selector
+    var ppSel=document.getElementById('per-page-sel');
+    if(ppSel)ppSel.addEventListener('change',function(){{perPage=parseInt(this.value,10)||25;currentPage=1;renderFilePage();}});
+
+    // ── Column header sort ───────────────────────────────────────────────────
+    Array.prototype.slice.call(document.querySelectorAll('#file-table th.sortable')).forEach(function(th){{
+      th.addEventListener('click',function(){{
+        var col=th.dataset.sortCol;
+        if(mcSortCol===col){{mcSortAsc=!mcSortAsc;}}else{{mcSortCol=col;mcSortAsc=true;}}
+        Array.prototype.slice.call(document.querySelectorAll('#file-table th.sortable')).forEach(function(t){{
+          var si=t.querySelector('.sort-icon');if(si)si.innerHTML='&#8597;';t.classList.remove('sort-asc','sort-desc');
+        }});
+        th.classList.add(mcSortAsc?'sort-asc':'sort-desc');
+        var si=th.querySelector('.sort-icon');if(si)si.innerHTML=mcSortAsc?'&#8593;':'&#8595;';
+        currentPage=1;renderFilePage();
+      }});
+    }});
+
+    // Reset button also clears sort
+    var mcResetBtn=document.getElementById('mc-file-reset-btn');
+    if(mcResetBtn)mcResetBtn.addEventListener('click',function(){{
+      mcSortCol=null;mcSortAsc=true;
+      Array.prototype.slice.call(document.querySelectorAll('#file-table th.sortable')).forEach(function(t){{
+        var si=t.querySelector('.sort-icon');if(si)si.innerHTML='&#8597;';t.classList.remove('sort-asc','sort-desc');
+      }});
+      activeStatus='';currentPage=1;
+      document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.remove('active');}});
+      var allBtn=document.querySelector('.tab-btn');if(allBtn)allBtn.classList.add('active');
+      renderFilePage();
+    }});
+
+    renderFilePage();
+
+    // ── CSV export ───────────────────────────────────────────────────────────
+    var exportBtn=document.getElementById('export-csv-btn');
+    if(exportBtn)exportBtn.addEventListener('click',function(){{
+      var header=['File','Language','Status'];
+      for(var i=0;i<N;i++){{header.push('Scan '+(i+1)+' Code');if(i<N-1)header.push('Δ→'+(i+2));}}
+      header.push('Net Δ');
+      var rows=[header.map(function(h){{return '"'+h.replace(/"/g,'""')+'"';}}).join(',')];
+      var filtered=getFiltered();
+      filtered.forEach(function(f){{
+        var cols=['"'+f.p.replace(/"/g,'""')+'"','"'+(f.l||'')+'"','"'+f.s+'"'];
+        for(var j=0;j<N;j++){{
+          cols.push(f.c[j]!=null?f.c[j]:'');
+          if(j<N-1)cols.push(f.d[j+1]!=null?f.d[j+1]:'');
+        }}
+        cols.push(f.t);
+        rows.push(cols.join(','));
+      }});
+      var blob=new Blob([rows.join('\r\n')],{{type:'text/csv'}});
+      var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download='multi-compare.csv';a.click();
+    }});
+
+    // ── File matrix extra export buttons ─────────────────────────────────────
+    (function(){{
+      var resetBtn=document.getElementById('mc-file-reset-btn');
+      if(resetBtn)resetBtn.addEventListener('click',function(){{
+        activeStatus='';currentPage=1;
+        document.querySelectorAll('.tab-btn').forEach(function(b){{b.classList.remove('active');}});
+        var allBtn=document.querySelector('.tab-btn.tab-all');if(allBtn)allBtn.classList.add('active');
+        renderFilePage();
+      }});
+
+      function mcFileGetData(){{
+        var header=['File','Language','Status'];
+        for(var i=0;i<N;i++){{header.push('Scan '+(i+1)+' Code');if(i<N-1)header.push('Δ→'+(i+2));}}
+        header.push('Net Δ');
+        var filtered=getFiltered();
+        var rowData=filtered.map(function(f){{
+          var cols=[f.p,f.l||'',f.s];
+          for(var j=0;j<N;j++){{cols.push(f.c[j]!=null?f.c[j]:'');if(j<N-1)cols.push(f.d[j+1]!=null?f.d[j+1]:'');}}
+          cols.push(f.t);return cols;
+        }});
+        return{{header:header,rows:rowData}};
+      }}
+
+      var xlsBtn=document.getElementById('mc-file-xls-btn');
+      if(xlsBtn)xlsBtn.addEventListener('click',function(){{
+        var d=mcFileGetData();
+        var enc=new TextEncoder();
+        var CT=[],_n,_c,_k;for(_n=0;_n<256;_n++){{_c=_n;for(_k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}}
+        function crc32(d2){{var v=0xFFFFFFFF;for(var i=0;i<d2.length;i++)v=CT[(v^d2[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}}
+        function u2(n){{return[n&0xFF,(n>>8)&0xFF];}}function u4(n){{return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}}
+        var ss=[],si={{}};function S(v){{v=String(v==null?'':v);if(!(v in si)){{si[v]=ss.length;ss.push(v);}}return si[v];}}
+        function xe(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+        var R=0,buf=[];
+        function cl(c){{return String.fromCharCode(65+c);}}
+        function sc(c,v){{return'<c r="'+cl(c)+(R+1)+'" t="s"><v>'+S(v)+'</v></c>';}}
+        function nc(c,v){{return(v===''||v==null)?'':'<c r="'+cl(c)+(R+1)+'"><v>'+(+v)+'</v></c>';}}
+        function row(cells){{buf.push('<row r="'+(R+1)+'">'+cells+'</row>');R++;}}
+        row(d.header.map(function(h,i){{return sc(i,h);}}).join(''));
+        d.rows.forEach(function(r){{row(r.map(function(v,i){{var n=Number(v);return(typeof v==='number'||(v!==''&&!isNaN(n)&&v!==null))?nc(i,n):sc(i,String(v));}}).join(''));}});
+        var sheetXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'+buf.join('')+'</sheetData></worksheet>';
+        var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){{return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}}).join('')+'</sst>';
+        var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
+        var F={{'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
+          '_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+          'xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
+          'xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets><sheet name="File Matrix" sheetId="1" r:id="rId1"/></sheets></workbook>',
+          'xl/styles.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>',
+          'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sheetXml}};
+        var zparts=[],zcds=[],zoff=0,znf=0;
+        ['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'].forEach(function(name){{
+          var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);
+          var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);
+          var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);
+          var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));
+          var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);
+          zoff+=lha.length+nb.length+sz;znf++;
+        }});
+        var cdOff=zoff,cdSz=zcds.reduce(function(s,b){{return s+b.length;}},0);
+        var eocd=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(cdOff)).concat([0,0]);
+        var totalLen=zoff+cdSz+eocd.length,out=new Uint8Array(totalLen),pos=0;
+        zparts.forEach(function(b){{out.set(b,pos);pos+=b.length;}});
+        zcds.forEach(function(b){{out.set(b,pos);pos+=b.length;}});
+        out.set(new Uint8Array(eocd),pos);
+        var blob=new Blob([out],{{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}});
+        var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='multi-compare.xlsx';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
+      }});
+
+      // File matrix HTML export — interactive: sort by column, filter by status
+      function mcFileBuildHtml(){{
+        function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+        var hdrs=['File','Language','Status'];
+        for(var _i=0;_i<N;_i++){{hdrs.push('Scan '+(_i+1)+' Code');if(_i<N-1)hdrs.push('Δ→'+(_i+2));}}
+        hdrs.push('Net Δ');
+        var SI=2;
+        var allRows=FILES.map(function(f){{var r=[f.p,f.l||'',f.s||''];for(var _i=0;_i<N;_i++){{r.push(f.c[_i]!=null?f.c[_i]:null);if(_i<N-1)r.push(f.d[_i+1]!=null?f.d[_i+1]:null);}}r.push(f.t);return r;}});
+        var dJson=JSON.stringify(allRows),hJson=JSON.stringify(hdrs);
+        var cnt={{all:allRows.length}};
+        allRows.forEach(function(r){{var s=r[SI];cnt[s]=(cnt[s]||0)+1;}});
+        var now=new Date().toISOString().replace('T',' ').slice(0,16)+' UTC';
+        var css='body{{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#f5f2ee;color:#111;}}'+
+          '.hd{{background:#1a2035;color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:flex-start;}}'+
+          '.brand{{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}}'+
+          '.ttl{{font-size:18px;font-weight:700;margin:2px 0 3px;}}'+
+          '.sub{{font-size:12px;color:#99aabb;}}'+
+          '.pg-meta{{font-size:11px;color:#8899aa;text-align:right;line-height:1.8;}}'+
+          '.wr{{padding:16px 20px;}}'+
+          '.fbar{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}}'+
+          '.fb{{padding:4px 12px;border-radius:20px;border:1px solid #ccc;background:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:all .12s;}}'+
+          '.fb.on{{background:#c45c10;color:#fff;border-color:#c45c10;}}'+
+          '.ibar{{font-size:12px;color:#888;margin-bottom:8px;}}'+
+          '.tw{{overflow-x:auto;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.09);}}'+
+          'table{{width:100%;border-collapse:collapse;background:#fff;font-size:12px;}}'+
+          'thead tr{{background:#1a2035;}}'+
+          'th{{padding:6px 10px;color:#fff;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;text-align:left;white-space:nowrap;cursor:pointer;user-select:none;}}'+
+          'th:hover{{background:#2a3050;}}'+
+          'th span{{margin-left:4px;opacity:.55;font-size:10px;}}'+
+          'td{{padding:5px 10px;border-bottom:1px solid #f0ece8;}}'+
+          'tr:nth-child(even) td{{background:#faf7f4;}}'+
+          'tr:hover td{{background:#f5f0ea;}}'+
+          '.ap{{color:#2a6846;font-weight:700;}}.an{{color:#b23030;font-weight:700;}}'+
+          '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:7px 20px;display:flex;justify-content:space-between;margin-top:16px;}}';
+        var thH=hdrs.map(function(h,i){{return'<th data-ci="'+i+'">'+esc(h)+'<span>⇅</span></th>';}}).join('');
+        var fH='<button class="fb on" data-f="">All ('+allRows.length+')</button>'+
+          (cnt.modified?'<button class="fb" data-f="modified">Modified ('+cnt.modified+')</button>':'')+
+          (cnt.added?'<button class="fb" data-f="added">Added ('+cnt.added+')</button>':'')+
+          (cnt.removed?'<button class="fb" data-f="removed">Removed ('+cnt.removed+')</button>':'')+
+          (cnt.unchanged?'<button class="fb" data-f="unchanged">Unchanged ('+cnt.unchanged+')</button>':'');
+        var inlineJs='var ALL='+dJson+',HDRS='+hJson+',SI='+SI+',sc=-1,sd=1,sf="";'+
+          'function fc(v,ci){{if(v==null)return"&mdash;";var s=String(v);'+
+          'if(ci===SI){{return s==="added"?"<span class=\\"ap\\">added<\\/span>":s==="removed"?"<span class=\\"an\\">removed<\\/span>":s||"&mdash;";}}'+
+          'var n=Number(v);if(ci>SI&&!isNaN(n)&&n!==0){{return n>0?"<span class=\\"ap\\">+"+n.toLocaleString()+"<\\/span>":"<span class=\\"an\\">"+n.toLocaleString()+"<\\/span>";}}'+
+          'if(ci>=3&&typeof v==="number")return Number(v).toLocaleString();'+
+          'return s.length>80?"<abbr title=\\""+s.replace(/"/g,"&quot;")+"\\" style=\\"cursor:help\\">"+s.slice(0,78)+"…<\\/abbr>":esc(s);}}'+
+          'function esc(s){{return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}}'+
+          'function render(){{var data=sf?ALL.filter(function(r){{return r[SI]===sf;}}):ALL.slice();'+
+          'if(sc>=0)data.sort(function(a,b){{var av=a[sc],bv=b[sc];var an=Number(av),bn=Number(bv);'+
+          'return(!isNaN(an)&&!isNaN(bn)?an-bn:String(av||"").localeCompare(String(bv||"")))*sd;}});'+
+          'document.getElementById("tb").innerHTML=data.map(function(r){{return"<tr>"+HDRS.map(function(h,ci){{return"<td>"+fc(r[ci],ci)+"<\\/td>";}}).join("")+"<\\/tr>";}}).join("")'+
+          '||"<tr><td colspan=\\""+HDRS.length+"\\" style=\\"text-align:center;color:#aaa;padding:14px\\">No files match.<\\/td><\\/tr>";'+
+          'document.getElementById("ic").textContent=data.length+" of "+ALL.length+" files";}}'+
+          'document.querySelectorAll(".fb").forEach(function(b){{b.onclick=function(){{sf=this.dataset.f||"";'+
+          'document.querySelectorAll(".fb").forEach(function(x){{x.classList.remove("on");}});this.classList.add("on");render();}};}} );'+
+          'document.querySelectorAll("th[data-ci]").forEach(function(th){{th.onclick=function(){{var ci=+this.dataset.ci;'+
+          'sd=(sc===ci)?-sd:1;sc=ci;'+
+          'document.querySelectorAll("th[data-ci]").forEach(function(t){{t.querySelector("span").textContent="⇅";}});'+
+          'this.querySelector("span").textContent=sd>0?"▲":"▼";render();}};}} );'+
+          'render();';
+        return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Multi-Scan File Matrix<\/title><style>'+css+'<\/style><\/head><body>'+
+          '<div class="hd"><div><div class="brand">oxide-sloc<\/div><div class="ttl">Multi-Scan File Matrix<\/div>'+
+          '<div class="sub">{project_label} &middot; {n} scans<\/div><\/div>'+
+          '<div class="pg-meta">'+allRows.length+' files<br>Generated: '+now+'<\/div><\/div>'+
+          '<div class="wr"><div class="fbar">'+fH+'<\/div><div class="ibar" id="ic"><\/div>'+
+          '<div class="tw"><table><thead><tr>'+thH+'<\/tr><\/thead><tbody id="tb"><\/tbody><\/table><\/div><\/div>'+
+          '<div class="ftr"><span>oxide-sloc v{version}<\/span><span>Multi-Scan File Matrix<\/span><span>{project_label}<\/span><\/div>'+
+          '<script>'+inlineJs+'<\/script><\/body><\/html>';
+      }}
+
+      var htmlBtn=document.getElementById('mc-file-html-btn');
+      if(htmlBtn)htmlBtn.addEventListener('click',function(){{
+        var h=mcFileBuildHtml();
+        var blob=new Blob([h],{{type:'text/html;charset=utf-8;'}});
+        var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+        a.download='multi-compare-files.html';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
+      }});
+
+      var pdfBtn=document.getElementById('mc-file-pdf-btn');
+      if(pdfBtn)pdfBtn.addEventListener('click',function(){{
+        var btn=pdfBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF…';
+        var h=mcBuildPdfHtml();
+        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:h,filename:'multi-compare.pdf'}})}})
+          .then(function(r){{if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();}})
+          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='multi-compare.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
+          .catch(function(e){{alert('PDF export failed: '+e.message);}})
+          .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
+      }});
+    }})();
+
+    // ── Inline scan charts (matching Scan Delta layout) ──────────────────────
+    (function(){{
+      var OX='#C45C10',GN='#2A6846',RD='#B23030',LGY='#DDDDDD';
+      function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+      function fmt2(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
+      function px(n){{return Math.round(n);}}
+      var _tt=document.getElementById('mc-ic-tt');
+      function btt(l,v){{return ' class="ic-cb" data-ttl="'+esc(l)+'" data-ttv="'+esc(v)+'"';}}
+      function addTT(el){{
+        if(!el)return;
+        el.addEventListener('mouseover',function(e){{
+          var t=e.target.closest('[data-ttl]');
+          if(t&&_tt){{
+            var ttl=t.getAttribute('data-ttl');
+            _tt.innerHTML='<strong>'+ttl+'</strong><br>'+t.getAttribute('data-ttv');
+            _tt.style.display='block';mvTT(e);
+            el.querySelectorAll('[data-ttl]').forEach(function(x){{x.style.filter='';x.style.opacity='';}});
+            el.querySelectorAll('[data-ttl]').forEach(function(x){{if(x.getAttribute('data-ttl')===ttl)x.style.filter='brightness(1.2)';}});
+          }} else {{
+            if(_tt)_tt.style.display='none';
+            el.querySelectorAll('[data-ttl]').forEach(function(x){{x.style.filter='';x.style.opacity='';}});
+          }}
+        }});
+        el.addEventListener('mouseleave',function(){{
+          if(_tt)_tt.style.display='none';
+          el.querySelectorAll('[data-ttl]').forEach(function(x){{x.style.filter='';x.style.opacity='';}});
+        }});
+        el.addEventListener('mousemove',function(e){{mvTT(e);}});
+      }}
+      function mvTT(e){{if(!_tt)return;var x=e.clientX+16,y=e.clientY-10,r=_tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;_tt.style.left=x+'px';_tt.style.top=y+'px';}}
+      if(N<2)return;
+      var p0=POINTS[0],pLast=POINTS[N-1];
+      // Chart 1: Code Metrics — Scan 1 vs Latest (grouped bars, same structure as Scan Delta)
+      var c1mets=[
+        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:'#93C5FD',cc:'#2563EB'}},
+        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:'#C4B5FD',cc:'#7C3AED'}},
+        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:'#6EE7B7',cc:'#0D9488'}}
+      ];
+      var maxV1=Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))*1.15||1;
+      var C1W=620,C1H=196,c1mt=38,c1mb=30,c1ml=56,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=54,c1gap=10;
+      var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+      for(var gi=1;gi<=4;gi++){{
+        var gy=c1mt+c1ph*(1-gi/4),gv=maxV1*gi/4;
+        c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';
+        c1+='<text x="'+(c1ml-5)+'" y="'+(px(gy)+4)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">'+fmt2(gv)+'</text>';
+      }}
+      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
+      c1+='<text x="'+(c1ml-5)+'" y="'+(c1mt+c1ph+4)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">0</text>';
+      c1mets.forEach(function(m,i){{
+        var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
+        var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
+        c1+='<text x="'+cx+'" y="17" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="13" font-weight="700" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3" style="cursor:pointer;"/>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="600" fill="'+m.bc+'">'+fmt2(m.b)+'</text>';
+        c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3" style="cursor:pointer;"/>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="600" fill="'+m.cc+'">'+fmt2(m.c)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="500" fill="#888">Scan 1</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.cc+'">Latest</text>';
+      }});
+      c1+='</svg>';
+      // Chart 2: Delta by Metric (net delta first scan to last)
+      var mets=[
+        {{l:'Code Lines',v:Number(pLast.code)-Number(p0.code),mc:'#2563EB'}},
+        {{l:'Files Analyzed',v:Number(pLast.files)-Number(p0.files),mc:'#7C3AED'}},
+        {{l:'Comment Lines',v:Number(pLast.comments)-Number(p0.comments),mc:'#0D9488'}}
+      ];
+      var maxD=Math.max.apply(null,mets.map(function(m){{return Math.abs(m.v);}}));maxD=maxD||1;
+      var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
+      var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+      c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
+      mets.forEach(function(m,i){{
+        var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt2(m.v);
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+22)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="13" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        c2+='<rect'+btt(m.l,'Net delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3" style="cursor:pointer;"/>';
+        if(bw>=52){{c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
+        else{{var vx2=m.v>=0?px(bx+bw)+6:px(bx)-6,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
+      }});
+      c2+='</svg>';
+      // Chart 3: Language Code Delta (from FILES net total_code_delta per language)
+      var lm={{}};
+      FILES.forEach(function(f){{var l=f.l||'Unknown';if(!lm[l])lm[l]={{f:0,d:0}};lm[l].f++;lm[l].d+=f.t;}});
+      var langs=Object.keys(lm).sort(function(a,b){{return Math.abs(lm[b].d)-Math.abs(lm[a].d);}}).slice(0,12);
+      var c3='';
+      if(langs.length){{
+        var maxLD=Math.max.apply(null,langs.map(function(l){{return Math.abs(lm[l].d);}}));maxLD=maxLD||1;
+        var C3W=550,c3LW=124,c3FW=52,cx3=c3LW+Math.floor((C3W-c3LW-c3FW-14)/2),maxLBW=Math.floor((C3W-c3LW-c3FW-14)/2)-4,L3rH=30,C3H=langs.length*L3rH+20;
+        c3='<svg viewBox="0 0 '+C3W+' '+C3H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+        c3+='<line x1="'+cx3+'" y1="0" x2="'+cx3+'" y2="'+C3H+'" stroke="'+LGY+'" stroke-width="1.5"/>';
+        langs.forEach(function(l,i){{
+          var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
+          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
+          c3+='<rect'+btt(l,'Net delta: '+vStr+' • '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
+          if(bw>=48){{c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
+          else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
+          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
+        }});
+        c3+='</svg>';
+      }}
+      // Chart 4: File Change Distribution (centered donut, legend below)
+      var fm=0,fa=0,fr=0,fu=0;
+      FILES.forEach(function(f){{if(f.s==='modified')fm++;else if(f.s==='added')fa++;else if(f.s==='removed')fr++;else fu++;}});
+      var segs=[{{l:'Modified',v:fm,c:OX}},{{l:'Added',v:fa,c:GN}},{{l:'Removed',v:fr,c:RD}},{{l:'Unchanged',v:fu,c:'#CCCCCC'}}].filter(function(s){{return s.v>0;}});
+      var tot4=segs.reduce(function(a,s){{return a+s.v;}},0)||1;
+      var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
+      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang4=-Math.PI/2;
+      if(segs.length===1){{
+        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
+        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface-2)"/>';
+      }} else {{
+        segs.forEach(function(s){{
+          var sw=Math.min(s.v/tot4*2*Math.PI,2*Math.PI-0.001),a2=ang4+sw;
+          var x1=cx4+Ro*Math.cos(ang4),y1=cy4+Ro*Math.sin(ang4),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
+          var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang4),yi2=cy4+Ri*Math.sin(ang4);
+          c4+='<path'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          ang4+=sw;
+        }});
+      }}
+      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#444">'+fmt2(tot4)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
+      segs.forEach(function(s,i){{
+        var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
+        c4+='<rect'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
+        c4+='<text'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt2(s.v)+'</text>';
+      }});
+      c4+='</svg>';
+      // Inject charts
+      var e1=document.getElementById('mc-ic-c1');if(e1){{e1.innerHTML=c1;addTT(e1);}}
+      var e2=document.getElementById('mc-ic-c2');if(e2){{e2.innerHTML=c2;addTT(e2);}}
+      var e3=document.getElementById('mc-ic-c3');if(e3){{e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';addTT(e3);}}
+      var e4=document.getElementById('mc-ic-c4');if(e4){{e4.innerHTML=c4;addTT(e4);}}
+      var lc=document.getElementById('mc-ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
+
+      // HTML legend hover → highlight matching SVG bars within the SAME card only
+      document.querySelectorAll('.ic-leg-item[data-highlight]').forEach(function(leg){{
+        var metric=leg.getAttribute('data-highlight');
+        var parentCard=leg.closest('.ic-card');
+        var chartEl=parentCard?parentCard.querySelector('[id]'):null;
+        if(!chartEl)return;
+        leg.addEventListener('mouseenter',function(){{
+          chartEl.querySelectorAll('[data-ttl]').forEach(function(x){{
+            if(x.getAttribute('data-ttl').indexOf(metric)===0){{
+              x.style.filter='brightness(1.35) drop-shadow(0 2px 8px rgba(0,0,0,0.28))';
+              x.style.opacity='1';
+            }} else {{
+              x.style.opacity='0.28';
+            }}
+          }});
+        }});
+        leg.addEventListener('mouseleave',function(){{
+          chartEl.querySelectorAll('[data-ttl]').forEach(function(x){{x.style.filter='';x.style.opacity='';}});
+        }});
+      }});
+      // Author handles
+      document.querySelectorAll('.cmp-author-val').forEach(function(el){{var h=el.nextElementSibling;if(h)h.textContent='/'+el.textContent.replace(/\s+/g,'');}});
+
+      // ── Export helpers ────────────────────────────────────────────────────────
+      // Fetch one image from the server and return a data-URI Promise
+      function mcFetchUri(path){{
+        return fetch(path).then(function(r){{return r.blob();}}).then(function(b){{
+          return new Promise(function(res){{
+            var rd=new FileReader();rd.onload=function(){{res(rd.result);}};rd.onerror=function(){{res('');}};rd.readAsDataURL(b);
+          }});
+        }}).catch(function(){{return '';}});
+      }}
+      // Replace /images/… src attrs in html with base64 data-URIs (async, callback)
+      function mcInlineImgs(html,cb){{
+        var paths=[],seen={{}};
+        html.replace(/src="(\/images\/[^"]+)"/g,function(_,p){{if(!seen[p]){{seen[p]=1;paths.push(p);}}return _;}});
+        if(!paths.length){{cb(html);return;}}
+        Promise.all(paths.map(function(p){{return mcFetchUri(p).then(function(u){{return{{p:p,u:u}};}}); }}))
+          .then(function(rs){{rs.forEach(function(r){{if(r.u)html=html.split('src="'+r.p+'"').join('src="'+r.u+'"');}});cb(html);}})
+          .catch(function(){{cb(html);}});
+      }}
+      // Capture full-page HTML with all table rows visible
+      function mcRawHtml(pdfMode){{
+        if(pdfMode)document.body.classList.add('pdf-mode');
+        var s=perPage,p=currentPage;perPage=FILES.length||999999;currentPage=1;renderFilePage();
+        var html=document.documentElement.outerHTML;
+        perPage=s;currentPage=p;renderFilePage();
+        if(pdfMode)document.body.classList.remove('pdf-mode');
+        return html;
+      }}
+
+      // HTML export (full page with inlined images)
+      function mcDoHtml(btn,fname){{
+        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting…';
+        mcInlineImgs(mcRawHtml(false),function(html){{
+          var blob=new Blob([html],{{type:'text/html;charset=utf-8;'}});
+          var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+          a.download=fname;a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
+          btn.disabled=false;btn.innerHTML=orig;
+        }});
+      }}
+      // PDF export — comprehensive document-style report: full numbers, all sections
+      function mcBuildPdfHtml(){{
+        function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+        function full(n){{if(n==null||n===''||isNaN(Number(n)))return'—';return Number(n).toLocaleString();}}
+        function dStr(v){{return Number(v)>0?'+'+Number(v).toLocaleString():Number(v).toLocaleString();}}
+        function dHtml(v){{var s=dStr(v);return Number(v)>0?'<span style="color:#2a6846;font-weight:700">'+s+'</span>':Number(v)<0?'<span style="color:#b23030;font-weight:700">'+s+'</span>':'<span>'+s+'</span>';}}
+        var now=new Date().toISOString().replace('T',' ').slice(0,16)+' UTC';
+        var p0=N>0?POINTS[0]:null,pLast=N>0?POINTS[N-1]:null;
+        var codeDelta=(p0&&pLast)?Number(pLast.code)-Number(p0.code):null;
+        var css='body{{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}}'+
+          '.hdr{{background:#1a2035;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:flex-start;}}'+
+          '.brand{{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}}'+
+          '.title{{font-size:20px;font-weight:700;margin:3px 0 2px;}}'+
+          '.proj{{font-size:12px;color:#99aabb;margin-top:3px;}}'+
+          '.hr{{font-size:11px;color:#8899aa;text-align:right;line-height:1.9;}}'+
+          '.body{{padding:18px 24px;}}'+
+          '.sg{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px;}}'+
+          '.sc{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;}}'+
+          '.sv{{font-size:18px;font-weight:900;color:#c45c10;}}'+
+          '.sl{{font-size:10px;font-weight:700;text-transform:uppercase;color:#888;margin-top:3px;letter-spacing:.06em;}}'+
+          '.sec{{margin-bottom:20px;}}'+
+          '.sh{{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}}'+
+          'table{{width:100%;border-collapse:collapse;font-size:11px;}}'+
+          'th{{background:#1a2035;color:#fff;padding:5px 8px;font-size:10px;font-weight:700;text-align:left;letter-spacing:.04em;white-space:nowrap;}}'+
+          'td{{border-bottom:1px solid #eee;padding:4px 8px;vertical-align:middle;}}'+
+          'tr:nth-child(even) td{{background:#faf8f6;}}'+
+          '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:7px 24px;display:flex;justify-content:space-between;margin-top:20px;}}';
+        // ── Metric Progression ────────────────────────────────────────────────
+        var hasTests=POINTS.some(function(pt){{return pt.tests!=null&&Number(pt.tests)>0;}});
+        var hasCov=POINTS.some(function(pt){{return pt.cov!=null;}});
+        var progHdr='<th>#</th><th>Scan Ref</th><th style="text-align:right">Code Lines</th><th style="text-align:right">Comments</th><th style="text-align:right">Blank Lines</th><th style="text-align:right">Files</th>';
+        if(hasTests)progHdr+='<th style="text-align:right">Tests</th>';
+        if(hasCov)progHdr+='<th style="text-align:right">Coverage</th>';
+        var progRows=POINTS.map(function(pt,i){{
+          var lbl=pt.tags||(pt.branch?(pt.commit?pt.branch+' @ '+pt.commit.slice(0,8):pt.branch):(pt.commit?pt.commit.slice(0,12):'Scan '+(i+1)));
+          var r='<tr><td style="text-align:center;font-weight:700">'+(i+1)+'</td><td>'+esc(lbl)+'</td>'+
+            '<td style="text-align:right">'+full(pt.code)+'</td>'+
+            '<td style="text-align:right">'+full(pt.comments)+'</td>'+
+            '<td style="text-align:right">'+full(pt.blank)+'</td>'+
+            '<td style="text-align:right">'+full(pt.files)+'</td>';
+          if(hasTests)r+='<td style="text-align:right">'+(pt.tests!=null&&Number(pt.tests)>0?full(pt.tests):'&mdash;')+'</td>';
+          if(hasCov)r+='<td style="text-align:right">'+(pt.cov!=null?Number(pt.cov).toFixed(1)+'%':'&mdash;')+'</td>';
+          return r+'</tr>';
+        }}).join('');
+        // ── Scan-to-scan changes ──────────────────────────────────────────────
+        var deltaRows=N>1?POINTS.slice(1).map(function(pt,i){{
+          var prev=POINTS[i];
+          var cd=Number(pt.code)-Number(prev.code),cm=Number(pt.comments)-Number(prev.comments);
+          var bl=Number(pt.blank)-Number(prev.blank),fd=Number(pt.files)-Number(prev.files);
+          return '<tr><td style="text-align:center;font-weight:700">'+(i+1)+' → '+(i+2)+'</td>'+
+            '<td style="text-align:right">'+dHtml(cd)+'</td>'+
+            '<td style="text-align:right">'+dHtml(cm)+'</td>'+
+            '<td style="text-align:right">'+dHtml(bl)+'</td>'+
+            '<td style="text-align:right">'+dHtml(fd)+'</td></tr>';
+        }}).join(''):'';
+        // ── File matrix (top 50 by |total delta|) ────────────────────────────
+        var fmSection='';
+        if(FILES&&FILES.length){{
+          var topFiles=FILES.slice().sort(function(a,b){{return Math.abs(Number(b.t))-Math.abs(Number(a.t));}}).slice(0,50);
+          var fmHdr='<th>File</th><th>Language</th><th>Status</th>';
+          for(var fi=0;fi<N;fi++)fmHdr+='<th style="text-align:right">Scan '+(fi+1)+'</th>';
+          fmHdr+='<th style="text-align:right">Total Δ</th>';
+          var fmRows=topFiles.map(function(f){{
+            var ss=f.s==='added'?'style="color:#2a6846;font-weight:700"':f.s==='removed'?'style="color:#b23030;font-weight:700"':'';
+            var cols='';for(var fi=0;fi<N;fi++)cols+='<td style="text-align:right">'+(f.c[fi]!=null?Number(f.c[fi]).toLocaleString():'&mdash;')+'</td>';
+            cols+='<td style="text-align:right">'+dHtml(Number(f.t))+'</td>';
+            var sp=f.p.length>55?'…'+f.p.slice(-53):f.p;
+            return '<tr><td style="font-family:monospace;font-size:10px;word-break:break-all">'+esc(sp)+'</td><td>'+esc(f.l||'')+'</td><td '+ss+'>'+esc(f.s||'')+'</td>'+cols+'</tr>';
+          }}).join('');
+          var moreMsg=FILES.length>50?'<tr><td colspan="'+(N+4)+'" style="color:#888;font-style:italic;text-align:center">… '+(FILES.length-50)+' more files</td></tr>':'';
+          fmSection='<div class="sec"><p class="sh">File Matrix — Top '+Math.min(FILES.length,50)+' by Change</p>'+
+            '<table><thead><tr>'+fmHdr+'</tr></thead><tbody>'+fmRows+moreMsg+'</tbody></table></div>';
+        }}
+        return '<!DOCTYPE html><html><head><meta charset="utf-8">'+
+          '<title>OxideSLOC — Multi-Scan Timeline</title><style>'+css+'</style></head><body>'+
+          '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Multi-Scan Timeline</div><div class="proj">{project_label}</div></div>'+
+          '<div class="hr">{n} scans<br>Generated: '+esc(now)+'</div></div>'+
+          '<div class="body">'+
+          '<div class="sg">'+
+          (pLast?'<div class="sc"><div class="sv">'+full(pLast.code)+'</div><div class="sl">Latest Code Lines</div></div>':
+            '<div class="sc"><div class="sv">&mdash;</div><div class="sl">Latest Code Lines</div></div>')+
+          (pLast?'<div class="sc"><div class="sv">'+full(pLast.files)+'</div><div class="sl">Latest Files</div></div>':
+            '<div class="sc"><div class="sv">&mdash;</div><div class="sl">Latest Files</div></div>')+
+          (codeDelta!==null?'<div class="sc"><div class="sv" style="'+(codeDelta>0?'color:#2a6846':codeDelta<0?'color:#b23030':'color:#555')+';font-weight:900">'+dStr(codeDelta)+'</div><div class="sl">Net Code Change</div></div>':
+            '<div class="sc"><div class="sv">&mdash;</div><div class="sl">Net Code Change</div></div>')+
+          '<div class="sc"><div class="sv" style="color:#111">{n}</div><div class="sl">Scans Compared</div></div>'+
+          '</div>'+
+          '<div class="sec"><p class="sh">Metric Progression</p>'+
+          '<table><thead><tr>'+progHdr+'</tr></thead><tbody>'+progRows+'</tbody></table></div>'+
+          (N>1?'<div class="sec"><p class="sh">Scan-to-Scan Changes</p>'+
+          '<table><thead><tr><th style="text-align:center">Scans</th>'+
+          '<th style="text-align:right">Code Δ</th><th style="text-align:right">Comments Δ</th>'+
+          '<th style="text-align:right">Blank Δ</th><th style="text-align:right">Files Δ</th>'+
+          '</tr></thead><tbody>'+deltaRows+'</tbody></table></div>':'')+
+          fmSection+
+          '</div>'+
+          '<div class="ftr"><span>oxide-sloc v{version}</span><span>Multi-Scan Timeline Report</span><span>{project_label} &middot; {n} scans</span></div>'+
+          '</body></html>';
+      }}
+      function mcDoPdf(btn){{
+        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF…';
+        var html=mcBuildPdfHtml();
+        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:html,filename:'multi-scan-timeline.pdf'}})}})
+          .then(function(r){{if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();}})
+          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='multi-scan-timeline.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
+          .catch(function(e){{alert('PDF export failed: '+e.message);}})
+          .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
+      }}
+
+      var mcHtmlBtn=document.getElementById('mc-export-html-btn');
+      if(mcHtmlBtn)mcHtmlBtn.addEventListener('click',function(){{mcDoHtml(mcHtmlBtn,'multi-scan-timeline.html');}});
+      var mcTopHtmlBtn=document.getElementById('mc-top-export-html-btn');
+      if(mcTopHtmlBtn)mcTopHtmlBtn.addEventListener('click',function(){{mcDoHtml(mcTopHtmlBtn,'multi-scan-timeline.html');}});
+      var mcPdfBtn=document.getElementById('mc-export-pdf-btn');
+      if(mcPdfBtn)mcPdfBtn.addEventListener('click',function(){{mcDoPdf(mcPdfBtn);}});
+      var mcTopPdfBtn=document.getElementById('mc-top-export-pdf-btn');
+      if(mcTopPdfBtn)mcTopPdfBtn.addEventListener('click',function(){{mcDoPdf(mcTopPdfBtn);}});
+      if(location.protocol==='file:'){{
+        [mcHtmlBtn,mcTopHtmlBtn,document.getElementById('mc-file-html-btn')].forEach(function(b){{if(b){{b.disabled=true;b.style.opacity='0.45';b.style.cursor='not-allowed';b.title='Already viewing an exported HTML file';}}}} );
+        [mcPdfBtn,mcTopPdfBtn,document.getElementById('mc-file-pdf-btn')].forEach(function(b){{if(b){{b.disabled=true;b.style.opacity='0.45';b.style.cursor='not-allowed';b.title='PDF export requires a running server';}}}} );
+      }}
+    }})();
+    // ── Scan card modal (inside outer IIFE — POINTS/N/FILES in scope) ────────
+    (function(){{
+      var ov=document.getElementById('mc-modal-overlay'),closeBtn=document.getElementById('mc-modal-close');
+      var titleEl=document.getElementById('mc-modal-title'),subEl=document.getElementById('mc-modal-sub'),bodyEl=document.getElementById('mc-modal-body');
+      if(!ov||!POINTS||!N)return;
+      function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+      function full(n){{if(n==null||isNaN(Number(n)))return'—';return Number(n).toLocaleString();}}
+      function dS(v){{return Number(v)>0?'+'+Number(v).toLocaleString():Number(v).toLocaleString();}}
+      function dSt(v){{return Number(v)>0?'color:#2a6846;font-weight:700':Number(v)<0?'color:#b23030;font-weight:700':'';}}
+      function openModal(idx){{
+        if(idx<0||idx>=N)return;
+        var pt=POINTS[idx];
+        titleEl.textContent='Scan '+(idx+1);
+        var lbl=pt.tags||(pt.branch?(pt.commit?pt.branch+' @ '+pt.commit:pt.branch):(pt.commit||'—'));
+        subEl.textContent=lbl;
+        var sHtml='<div class="mc-modal-sec"><div class="mc-modal-sec-title">Metrics</div><div class="mc-modal-stats">'+
+          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.code)+'</div><div class="mc-modal-stat-lbl">Code Lines</div></div>'+
+          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.comments)+'</div><div class="mc-modal-stat-lbl">Comments</div></div>'+
+          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.blank)+'</div><div class="mc-modal-stat-lbl">Blank Lines</div></div>'+
+          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.files)+'</div><div class="mc-modal-stat-lbl">Files</div></div>'+
+          (pt.tests!=null&&Number(pt.tests)>0?'<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.tests)+'</div><div class="mc-modal-stat-lbl">Tests</div></div>':'')+
+          (pt.cov!=null?'<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+Number(pt.cov).toFixed(1)+'%</div><div class="mc-modal-stat-lbl">Coverage</div></div>':'')+
+          '</div></div>';
+        var iHtml='<div class="mc-modal-sec"><div class="mc-modal-sec-title">Scan Info</div>'+
+          (pt.commit?'<div class="mc-modal-row"><span class="mc-modal-key">Commit</span><span class="mc-modal-val"><a href="/runs/html/'+esc(pt.run_id)+'" target="_blank" rel="noopener">'+esc(pt.commit)+'</a></span></div>':'')+
+          (pt.branch?'<div class="mc-modal-row"><span class="mc-modal-key">Branch</span><span class="mc-modal-val">'+esc(pt.branch)+'</span></div>':'')+
+          (pt.tags?'<div class="mc-modal-row"><span class="mc-modal-key">Tags</span><span class="mc-modal-val">'+esc(pt.tags)+'</span></div>':'')+
+          '<div class="mc-modal-row"><span class="mc-modal-key">Run ID</span><span class="mc-modal-val"><a href="/runs/html/'+esc(pt.run_id)+'" target="_blank" rel="noopener">'+esc(pt.run_id)+'</a></span></div>'+
+          '</div>';
+        var dHtml='';
+        if(idx>0){{
+          var prev=POINTS[idx-1];
+          var cd=Number(pt.code)-Number(prev.code),fd=Number(pt.files)-Number(prev.files),cm=Number(pt.comments)-Number(prev.comments);
+          dHtml='<div class="mc-modal-sec"><div class="mc-modal-sec-title">Change vs Scan '+idx+'</div><div class="mc-modal-stats">'+
+            '<div class="mc-modal-stat"><div class="mc-modal-stat-val" style="'+dSt(cd)+'">'+dS(cd)+'</div><div class="mc-modal-stat-lbl">Code Δ</div></div>'+
+            '<div class="mc-modal-stat"><div class="mc-modal-stat-val" style="'+dSt(fd)+'">'+dS(fd)+'</div><div class="mc-modal-stat-lbl">Files Δ</div></div>'+
+            '<div class="mc-modal-stat"><div class="mc-modal-stat-val" style="'+dSt(cm)+'">'+dS(cm)+'</div><div class="mc-modal-stat-lbl">Comments Δ</div></div>'+
+            '</div></div>';
+        }}
+        bodyEl.innerHTML=sHtml+iHtml+dHtml;
+        ov.classList.add('open');document.body.style.overflow='hidden';
+      }}
+      function closeModal(){{ov.classList.remove('open');document.body.style.overflow='';}}
+      if(closeBtn)closeBtn.addEventListener('click',closeModal);
+      ov.addEventListener('click',function(e){{if(e.target===ov)closeModal();}});
+      document.addEventListener('keydown',function(e){{if(e.key==='Escape')closeModal();}});
+      document.querySelectorAll('.mc-card').forEach(function(card,i){{
+        card.setAttribute('title','Click to view full scan details');
+        card.addEventListener('click',function(e){{if(e.target.tagName==='A')return;openModal(i);}});
+      }});
+    }})();
+  }})();
+  </script>
+  <script nonce="{csp_nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){{if(lbl)lbl.textContent='Offline';if(dot){{dot.style.background='#888';dot.style.boxShadow='none';}}if(pingEl)pingEl.textContent='';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  <!-- Scan card detail modal -->
+  <div class="mc-modal-overlay" id="mc-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="mc-modal-title">
+    <div class="mc-modal" id="mc-modal">
+      <div class="mc-modal-head">
+        <div><div class="mc-modal-title" id="mc-modal-title">Scan</div><div class="mc-modal-sub" id="mc-modal-sub"></div></div>
+        <button class="mc-modal-close" id="mc-modal-close" aria-label="Close">&#10005;</button>
+      </div>
+      <div class="mc-modal-body" id="mc-modal-body"></div>
+    </div>
+  </div>
+</body>
+</html>"##,
+        project_label = html_escape(project_label),
+        n = n,
+        scan_strip = scan_strip,
+        mc_strip_class = mc_strip_class,
+        metrics_thead = metrics_thead,
+        metrics_tbody = metrics_tbody,
+        file_col_headers = file_col_headers,
+        total_files = total_files,
+        files_modified = files_modified,
+        files_added = files_added,
+        files_removed = files_removed,
+        files_unchanged = files_unchanged,
+        points_json = points_json,
+        file_matrix_json = file_matrix_json,
+        nav_compare_active = nav_compare_active,
+        version = version,
+        csp_nonce = csp_nonce,
+        scope_bar_html = scope_bar_html,
+        scope_label = scope_label,
+    )
+}
+
 // ── Trend report page ─────────────────────────────────────────────────────────
 // Protected. Interactive time-series chart page that loads scan history via
 // /api/metrics/history and renders a vanilla-SVG line chart.
@@ -8149,7 +10066,7 @@ async fn trend_report_handler(
     .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
-    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
     .stat-chip:hover .stat-chip-tip{{opacity:1;}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
@@ -9999,7 +11916,7 @@ async fn test_metrics_handler(
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
-    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
     .stat-chip:hover .stat-chip-tip{{opacity:1;}}
     .section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
@@ -10168,9 +12085,12 @@ async fn test_metrics_handler(
       <div class="chart-box" style="margin-bottom:18px;">
         <div class="chart-box-header">
           <div class="chart-box-title" style="margin-bottom:0;">Test Count Trend</div>
-          <button class="chart-expand-btn" id="trend-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button class="chart-expand-btn" id="multi-compare-trend-btn" title="Open all scans in Multi-Scan Timeline" style="display:none;">&#8652; Multi-Timeline</button>
+            <button class="chart-expand-btn" id="trend-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
+          </div>
         </div>
-        <p style="font-size:13px;color:var(--muted);margin:0 0 14px;">Test definition count across all saved scans for the selected scope.</p>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 14px;">Test definition count across all saved scans for the selected scope. Use <strong>Multi-Timeline</strong> to compare all scans side-by-side.</p>
         <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
         <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
       </div>
@@ -11073,6 +12993,25 @@ async fn test_metrics_handler(
       if (currentRoot !== '__all__') url += '&root=' + encodeURIComponent(currentRoot);
       fetch(url).then(function(r){{ return r.json(); }}).then(function(data){{
         buildTrend(data);
+        // Show Multi-Timeline button when >= 2 scans exist for the selected project.
+        var btn = document.getElementById('multi-compare-trend-btn');
+        if (btn) {{
+          var ids = data.filter(function(d){{ return d.run_id; }}).map(function(d){{ return d.run_id; }});
+          if (ids.length >= 2) {{
+            btn.style.display = '';
+            btn.onclick = function() {{
+              // Reverse so oldest first (API returns newest first).
+              var sorted = ids.slice().reverse();
+              if (sorted.length === 2) {{
+                window.location.href = '/compare?a=' + encodeURIComponent(sorted[0]) + '&b=' + encodeURIComponent(sorted[1]);
+              }} else {{
+                window.location.href = '/multi-compare?runs=' + sorted.map(encodeURIComponent).join(',');
+              }}
+            }};
+          }} else {{
+            btn.style.display = 'none';
+          }}
+        }}
       }}).catch(function(){{
         var trendEmpty = document.getElementById('trend-empty');
         if (trendEmpty) {{ trendEmpty.style.display = ''; trendEmpty.textContent = 'Failed to load trend data.'; }}
@@ -11743,6 +13682,82 @@ fn find_scan_config_in_dir_flat(dir: &Path) -> Option<PathBuf> {
 }
 
 // ── Config export / import ────────────────────────────────────────────────────
+
+/// POST /export/pdf — JSON body `{ "html": "...", "filename": "report.pdf" }`
+/// Renders the HTML to PDF via headless Chrome and returns the PDF bytes.
+#[derive(Deserialize)]
+struct ExportPdfRequest {
+    html: String,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+async fn export_pdf_handler(Json(body): Json<ExportPdfRequest>) -> impl IntoResponse {
+    let html_content = body.html;
+    let filename = body.filename.unwrap_or_else(|| "report.pdf".to_string());
+    if html_content.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing html field").into_response();
+    }
+    // Write HTML to a temp file, run headless Chrome PDF export, read result.
+    let tmp_dir = std::env::temp_dir();
+    let html_path = tmp_dir.join(format!(
+        "sloc-export-{}.html",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let pdf_path = tmp_dir.join(format!("sloc-export-{}.pdf", uuid::Uuid::new_v4().simple()));
+    if let Err(e) = std::fs::write(&html_path, &html_content) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write temp HTML: {e}"),
+        )
+            .into_response();
+    }
+    let pdf_result = write_pdf_from_html(&html_path, &pdf_path);
+    let _ = std::fs::remove_file(&html_path);
+    match pdf_result {
+        Err(e) => {
+            let _ = std::fs::remove_file(&pdf_path);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("PDF generation failed: {e}"),
+            )
+                .into_response()
+        }
+        Ok(()) => {
+            let pdf_bytes = match std::fs::read(&pdf_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&pdf_path);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to read PDF: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            let _ = std::fs::remove_file(&pdf_path);
+            let safe_name: String = filename
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let disposition = format!("attachment; filename=\"{}\"", safe_name);
+            (
+                [
+                    (header::CONTENT_TYPE, "application/pdf".to_string()),
+                    (header::CONTENT_DISPOSITION, disposition),
+                ],
+                pdf_bytes,
+            )
+                .into_response()
+        }
+    }
+}
 
 async fn export_config_handler(State(state): State<AppState>) -> impl IntoResponse {
     let toml_str = match toml::to_string_pretty(&state.base_config) {
@@ -17877,7 +19892,9 @@ struct SplashTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){if(lbl)lbl.textContent='Offline';if(dot){dot.style.background='#888';dot.style.boxShadow='none';}if(pingEl)pingEl.textContent='';if(fm)fm.textContent='oxide-sloc v{{ version }} — Saved Report';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -18117,7 +20134,7 @@ struct ScanSetupTemplate {
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; line-height:1.6; white-space:normal; max-width:280px; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
     /* Submodule panel */
@@ -18457,7 +20474,7 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Complexity score</div>
           <div class="stat-chip-val">{{ cyclomatic_complexity }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a lexical approximation of McCabe cyclomatic complexity.{% if complexity_alert > 0 %} Alert threshold: {{ complexity_alert }}.{% endif %}</div>
+          <div class="stat-chip-tip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a lexical approximation of McCabe cyclomatic complexity.{% if complexity_alert > 0 %}<br>Alert threshold: {{ complexity_alert }}.{% endif %}</div>
         </div>
         {% endif %}
         {% if let Some(ls) = lsloc %}
@@ -18465,7 +20482,7 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Logical SLOC</div>
           <div class="stat-chip-val">{{ ls }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Logical SLOC: count of executable statements (semicolons for C/Java/Go/Rust; non-continuation lines for Python/Ruby/Shell). Normalises across formatting styles.</div>
+          <div class="stat-chip-tip">Logical SLOC: count of executable statements (semicolons for C/Java/Go/Rust; non-continuation lines for Python/Ruby/Shell).<br>Normalises across formatting styles.</div>
         </div>
         {% endif %}
         {% if uloc > 0 %}
@@ -18473,7 +20490,7 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Unique SLOC (ULOC)</div>
           <div class="stat-chip-val">{{ uloc }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Unique Lines of Code: distinct non-blank code lines across all files.{% if dryness_pct_str != "" %} DRYness: {{ dryness_pct_str }}% (higher = less copy-paste).{% endif %}</div>
+          <div class="stat-chip-tip">Unique Lines of Code: distinct non-blank code lines across all files.{% if dryness_pct_str != "" %}<br>DRYness: {{ dryness_pct_str }}% (higher = less copy-paste).{% endif %}</div>
         </div>
         {% endif %}
         {% if duplicate_group_count > 0 %}
@@ -18481,7 +20498,7 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Duplicate groups</div>
           <div class="stat-chip-val">{{ duplicate_group_count }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Groups of files with identical content detected. These may inflate SLOC counts. Enable "Exclude duplicates" in the scan settings to remove them from totals.</div>
+          <div class="stat-chip-tip">Groups of files with identical content detected.<br>These may inflate SLOC counts.<br>Enable "Exclude duplicates" in the scan settings to remove them from totals.</div>
         </div>
         {% endif %}
       </div>
@@ -20477,7 +22494,9 @@ struct ResultTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){if(lbl)lbl.textContent='Offline';if(dot){dot.style.background='#888';dot.style.boxShadow='none';}if(pingEl)pingEl.textContent='';if(fm)fm.textContent='oxide-sloc v{{ version }} — Saved Report';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -20867,7 +22886,9 @@ struct ScanWaitTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){if(lbl)lbl.textContent='Offline';if(dot){dot.style.background='#888';dot.style.boxShadow='none';}if(pingEl)pingEl.textContent='';if(fm)fm.textContent='oxide-sloc v{{ version }} — Saved Report';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -21521,7 +23542,9 @@ struct LocateFileTemplate {
     }
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){if(lbl)lbl.textContent='Offline';if(dot){dot.style.background='#888';dot.style.boxShadow='none';}if(pingEl)pingEl.textContent='';if(fm)fm.textContent='oxide-sloc v{{ version }} — Saved Report';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -21615,7 +23638,7 @@ struct RelocateScanTemplate {
     tr:last-child td{border-bottom:none;}
     tr:hover td{background:var(--surface-2);}
     .run-id-chip{font-family:ui-monospace,monospace;font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--muted);}
-    .git-chip{font-family:ui-monospace,monospace;font-size:11px;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent-2);}
+    .git-chip{font-family:ui-monospace,monospace;font-size:11px;font-weight:700;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent);}
     body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
     .metric-num{font-weight:700;color:var(--text);}
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
@@ -22337,10 +24360,18 @@ struct HistoryTemplate {
     tr:last-child td{border-bottom:none;}
     tr.selected td{background:var(--sel-bg);}
     tr.selected td:first-child{box-shadow:inset 4px 0 0 var(--sel-border);}
-    tr:hover:not(.selected) td{background:var(--surface-2);}
+    tr:hover:not(.selected):not(.row-locked) td{background:var(--surface-2);}
     tr{cursor:pointer;}
+    tr.row-locked{opacity:.35;cursor:not-allowed;}
+    tr.row-locked td{pointer-events:none;}
+    .compare-all-bar{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;margin:10px 0 14px;align-items:center;}
+    .compare-all-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);flex-shrink:0;}
+    .compare-all-btn{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:7px;border:1px solid var(--accent-2);background:rgba(111,155,255,0.08);color:var(--accent-2);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s;}
+    .compare-all-btn:hover{background:rgba(111,155,255,0.18);}
+    body.dark-theme .compare-all-btn{background:rgba(111,155,255,0.12);color:var(--accent);border-color:var(--accent);}
+    body.dark-theme .compare-all-btn:hover{background:rgba(111,155,255,0.22);}
     .run-id-chip{font-family:ui-monospace,monospace;font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--muted);}
-    .git-chip{font-family:ui-monospace,monospace;font-size:11px;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent-2);}
+    .git-chip{font-family:ui-monospace,monospace;font-size:11px;font-weight:700;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent);}
     body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
     .metric-num{font-weight:700;color:var(--text);}
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
@@ -22524,13 +24555,13 @@ struct HistoryTemplate {
       <div class="panel-header">
         <div>
           <h1>Compare Scans</h1>
-          <p class="panel-meta">{{ total_scans }} scan record(s) available. Select exactly two to compare their metrics side-by-side.</p>
+          <p class="panel-meta">{{ total_scans }} scan record(s) available. Select two or more scans from the same project, then press Compare.</p>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
             <button class="btn primary" id="compare-btn" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
-              Compare <span class="sel-count" id="sel-count">0/2</span>
+              Compare <span class="sel-count" id="sel-count">0</span> Selected
             </button>
           </div>
         </div>
@@ -22558,10 +24589,16 @@ struct HistoryTemplate {
       <div class="hint-right-wrap" style="display:flex;justify-content:flex-end;margin:6px 0 8px;">
         <div class="instruction-bar" style="margin:0;max-width:fit-content;flex-shrink:0;">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-          Click any two rows to select them, then press <strong>Compare</strong> to view the scan delta.
+          Select rows from the <strong>same project</strong>, then press <strong>Compare</strong> — or use <strong>Compare All</strong> for a full project history.
         </div>
       </div>
       {% endif %}
+      <div id="compare-all-bar" class="compare-all-bar" style="display:none">
+        <span class="compare-all-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline></svg>
+          Quick Compare All
+        </span>
+      </div>
       <div class="table-wrap">
         <table id="compare-table">
           <colgroup><col><col><col><col><col><col><col><col><col><col><col></colgroup>
@@ -22583,7 +24620,7 @@ struct HistoryTemplate {
           <tbody id="compare-tbody">
             {% for entry in entries %}
             <tr class="compare-row" data-run="{{ entry.run_id }}" data-vid="{{ entry.run_id }}"
-                data-timestamp="{{ entry.timestamp }}"
+                data-timestamp="{{ entry.timestamp }}" data-sort-ts="{{ entry.timestamp_utc_ms }}"
                 data-project="{{ entry.project_label }}"
                 data-files="{{ entry.files_analyzed }}"
                 data-code="{{ entry.code_lines }}"
@@ -22652,6 +24689,7 @@ struct HistoryTemplate {
       var perPage = 25, currentPage = 1, sortCol = 'timestamp', sortOrder = 'desc';
       var allRows = Array.prototype.slice.call(document.querySelectorAll('.compare-row'));
       allRows.forEach(function(r, i) { r.dataset.origIdx = i; });
+      window._allCompareRows = allRows;
 
       // ── Stat chips ────────────────────────────────────────────────────────
       (function() {
@@ -22801,18 +24839,38 @@ struct HistoryTemplate {
       };
 
       renderPage();
+      buildCompareAllBar();
 
       // ── Row selection state ───────────────────────────────────────────────
       var selected = [];
+      var lockedProject = null; // project label of first selected scan
+
       function updateCompareBtn() {
         var btn = document.getElementById('compare-btn');
         var cnt = document.getElementById('sel-count');
         if (!btn) return;
-        btn.disabled = selected.length !== 2;
-        if (cnt) cnt.textContent = selected.length + '/2';
+        btn.disabled = selected.length < 2;
+        if (cnt) cnt.textContent = selected.length;
+      }
+
+      function applyProjectLock() {
+        var allRows = Array.prototype.slice.call(document.querySelectorAll('#compare-tbody .compare-row'));
+        allRows.forEach(function(r) {
+          if (lockedProject === null) {
+            r.classList.remove('row-locked');
+          } else {
+            var proj = r.dataset.project || '';
+            if (proj !== lockedProject) {
+              r.classList.add('row-locked');
+            } else {
+              r.classList.remove('row-locked');
+            }
+          }
+        });
       }
 
       function toggleRow(row) {
+        if (row.classList.contains('row-locked')) return;
         var vid = row.dataset.vid || row.dataset.run;
         var idx = selected.indexOf(vid);
         if (idx >= 0) {
@@ -22820,8 +24878,11 @@ struct HistoryTemplate {
           row.classList.remove('selected');
           var b = document.getElementById('badge-' + vid);
           if (b) b.textContent = '';
+          // Release project lock if nothing selected
+          if (selected.length === 0) lockedProject = null;
         } else {
-          if (selected.length >= 2) return;
+          // Set project lock on first selection
+          if (selected.length === 0) lockedProject = row.dataset.project || null;
           selected.push(vid);
           row.classList.add('selected');
         }
@@ -22829,8 +24890,59 @@ struct HistoryTemplate {
           var b = document.getElementById('badge-' + v);
           if (b) b.textContent = i + 1;
         });
+        applyProjectLock();
         updateCompareBtn();
         buildScopePanel();
+      }
+
+      // ── Compare-All bar ───────────────────────────────────────────────────
+      function buildCompareAllBar() {
+        var bar = document.getElementById('compare-all-bar');
+        if (!bar) return;
+        // Group all rows by project label.
+        var groups = {};
+        var allRows = Array.prototype.slice.call(document.querySelectorAll('#compare-tbody .compare-row'));
+        // Use all rows from the source data (not just visible).
+        var allRowsAll = Array.prototype.slice.call(document.querySelectorAll('#compare-tbody .compare-row'));
+        // We need ALL rows across all pages, not just the rendered ones.
+        // Use the underlying allRows array that the pagination JS also uses.
+        var sourceRows = window._allCompareRows || allRowsAll;
+        sourceRows.forEach(function(r) {
+          var proj = r.dataset.project || '';
+          var vid = r.dataset.vid || r.dataset.run || '';
+          if (!proj || !vid) return;
+          if (!groups[proj]) groups[proj] = { ids: [], ts: [] };
+          groups[proj].ids.push(vid);
+          groups[proj].ts.push(parseInt(r.dataset.sortTs || '0', 10) || 0);
+        });
+        // Build buttons for each project with >= 2 scans.
+        var keys = Object.keys(groups).filter(function(k) { return groups[k].ids.length >= 2; });
+        if (!keys.length) { bar.style.display = 'none'; return; }
+        bar.style.display = 'flex';
+        // Remove old buttons (keep label).
+        var oldBtns = bar.querySelectorAll('.compare-all-btn');
+        oldBtns.forEach(function(b) { b.remove(); });
+        keys.sort();
+        keys.forEach(function(proj) {
+          var g = groups[proj];
+          var btn = document.createElement('button');
+          btn.className = 'compare-all-btn';
+          btn.type = 'button';
+          btn.textContent = proj + ' (' + g.ids.length + ' scans)';
+          btn.title = 'Compare all ' + g.ids.length + ' scans of ' + proj;
+          btn.addEventListener('click', function() {
+            // Sort ids by timestamp (ascending).
+            var pairs = g.ids.map(function(id, i) { return { id: id, ts: g.ts[i] }; });
+            pairs.sort(function(a, b) { return a.ts - b.ts; });
+            var sorted = pairs.map(function(p) { return p.id; });
+            if (sorted.length === 2) {
+              window.location.href = '/compare?a=' + encodeURIComponent(sorted[0]) + '&b=' + encodeURIComponent(sorted[1]);
+            } else {
+              window.location.href = '/multi-compare?runs=' + sorted.map(encodeURIComponent).join(',');
+            }
+          });
+          bar.appendChild(btn);
+        });
       }
 
       // ── Scope panel ───────────────────────────────────────────────────────
@@ -22840,9 +24952,9 @@ struct HistoryTemplate {
         var panel = document.getElementById('scope-panel');
         var opts = document.getElementById('scope-options');
         if (!panel || !opts) return;
-        if (selected.length !== 2) { panel.classList.add('hidden'); selectedScope = 'all'; return; }
+        if (selected.length < 2) { panel.classList.add('hidden'); selectedScope = 'all'; return; }
 
-        // Collect union of submodules from both selected rows.
+        // Collect union of submodules from all selected rows.
         var allSubs = {};
         selected.forEach(function(vid) {
           var row = document.querySelector('#compare-tbody .compare-row[data-vid="' + vid + '"]');
@@ -22886,11 +24998,20 @@ struct HistoryTemplate {
       }
 
       function doCompare() {
-        if (selected.length !== 2) return;
-        var url = '/compare?a=' + encodeURIComponent(selected[0]) + '&b=' + encodeURIComponent(selected[1]);
-        if (selectedScope === 'super') url += '&scope=super';
-        else if (selectedScope.indexOf('sub:') === 0) url += '&sub=' + encodeURIComponent(selectedScope.slice(4));
-        window.location.href = url;
+        if (selected.length < 2) return;
+        if (selected.length === 2) {
+          // Two-scan delta (existing flow with scope support).
+          var url = '/compare?a=' + encodeURIComponent(selected[0]) + '&b=' + encodeURIComponent(selected[1]);
+          if (selectedScope === 'super') url += '&scope=super';
+          else if (selectedScope.indexOf('sub:') === 0) url += '&sub=' + encodeURIComponent(selectedScope.slice(4));
+          window.location.href = url;
+        } else {
+          // Multi-scan timeline (N >= 3) — pass scope params too.
+          var url = '/multi-compare?runs=' + selected.map(encodeURIComponent).join(',');
+          if (selectedScope === 'super') url += '&scope=super';
+          else if (selectedScope.indexOf('sub:') === 0) url += '&sub=' + encodeURIComponent(selectedScope.slice(4));
+          window.location.href = url;
+        }
       }
 
       // ── Event wiring (CSP-safe: no inline handlers) ───────────────────────
@@ -23003,7 +25124,9 @@ struct HistoryTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){if(lbl)lbl.textContent='Offline';if(dot){dot.style.background='#888';dot.style.boxShadow='none';}if(pingEl)pingEl.textContent='';if(fm)fm.textContent='oxide-sloc v{{ version }} — Saved Report';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -23118,12 +25241,13 @@ struct CompareSelectTemplate {
     .meta-label{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted-2);white-space:nowrap;flex-shrink:0;}
     .meta-value{color:var(--text);font-size:13px;}
     .cmp-author-handle{font-size:11px;font-weight:600;color:var(--muted-2);margin-left:1.5em;font-family:ui-monospace,monospace;}
-    .dc-tip{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:200;background:rgba(20,12,8,0.96);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:11.5px;font-weight:500;line-height:1.55;width:230px;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);text-transform:none;letter-spacing:0;}
+    .dc-tip{display:none;position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:200;background:rgba(20,12,8,0.96);color:rgba(255,255,255,0.92);border-radius:10px;padding:10px 14px;font-size:11.5px;font-weight:500;line-height:1.6;width:290px;box-shadow:0 8px 24px rgba(0,0,0,0.32);pointer-events:none;border:1px solid rgba(255,255,255,0.10);text-transform:none;letter-spacing:0;}
     .dc-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-bottom-color:rgba(20,12,8,0.96);}
     .delta-card:hover .dc-tip{display:block;}
     .export-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);text-decoration:none;white-space:nowrap;transition:background .12s ease;}
     .export-btn:hover{background:var(--line);}
     .export-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+    .panel-title{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);margin-bottom:14px;}
     .delta-card-change{font-size:15px;font-weight:700;border-radius:6px;padding:2px 8px;display:inline-block;margin-top:4px;}
     .delta-card-change.pos{color:var(--pos);background:var(--pos-bg);}
     .delta-card-change.neg{color:var(--neg);background:var(--neg-bg);}
@@ -23175,20 +25299,25 @@ struct CompareSelectTemplate {
     .btn-reset{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s ease;white-space:nowrap;}
     .btn-reset:hover{background:var(--line);}
     .table-wrap{width:100%;overflow-x:auto;}
-    table{width:100%;border-collapse:collapse;font-size:13px;table-layout:auto;}
-    th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:8px 10px;border-bottom:2px solid var(--line);white-space:nowrap;position:relative;user-select:none;}
+    table{width:100%;border-collapse:collapse;font-size:12px;table-layout:auto;}
+    th{text-align:left;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted-2);padding:8px 10px;border-bottom:2px solid var(--line);white-space:nowrap;position:relative;user-select:none;background:var(--surface-2);}
     th.sortable{cursor:pointer;} th.sortable:hover{color:var(--oxide);}
     .sort-icon{margin-left:4px;font-size:10px;opacity:0.45;display:inline-block;vertical-align:middle;}
     th.sort-asc .sort-icon,th.sort-desc .sort-icon{opacity:1;color:var(--oxide);}
     .col-resize-handle{position:absolute;top:0;right:0;bottom:0;width:6px;cursor:col-resize;z-index:2;}
     .col-resize-handle:hover,.col-resize-handle.dragging{background:rgba(211,122,76,0.3);}
-    td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap;}
     tr:last-child td{border-bottom:none;}
-    tr.row-added td{background:rgba(26,143,71,0.06);}
-    tr.row-removed td{background:rgba(179,59,59,0.06);opacity:.85;}
-    tr.row-modified td{background:rgba(146,96,0,0.05);}
-    tr.row-unchanged td{opacity:.6;}
-    .file-path{font-family:ui-monospace,monospace;font-size:12px;white-space:nowrap;overflow:visible;text-overflow:unset;}
+    tr:hover td{background:var(--surface-2);}
+    .col-num{text-align:right;font-variant-numeric:tabular-nums;}
+    #delta-table th:nth-child(n+4),#delta-table td:nth-child(n+4){text-align:right;font-variant-numeric:tabular-nums;}
+    #delta-table th:last-child,#delta-table td:last-child{padding-right:14px;}
+    tr.row-added td{background:rgba(26,143,71,0.04);}
+    tr.row-removed td{background:rgba(179,59,59,0.06);}
+    tr.row-modified td{background:rgba(146,96,0,0.04);}
+    tr.row-unchanged td{color:var(--muted);}
+    tr.row-unchanged .status-badge{opacity:.65;}
+    .file-path{font-family:ui-monospace,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px;display:inline-block;vertical-align:middle;}
     .status-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase;}
     .status-badge.added{background:#e8f5ed;color:#1a8f47;}
     .status-badge.removed{background:#fdeaea;color:#b33b3b;}
@@ -23205,6 +25334,8 @@ struct CompareSelectTemplate {
     .from-to strong{color:var(--text);}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
+    body.pdf-mode .top-nav,body.pdf-mode .background-watermarks,body.pdf-mode #code-particles,body.pdf-mode .export-group,body.pdf-mode .btn-reset,body.pdf-mode .filter-tabs,body.pdf-mode .filter-tabs-row,body.pdf-mode .pagination,body.pdf-mode select.per-page,body.pdf-mode .settings-modal,body.pdf-mode .site-footer,body.pdf-mode .scope-bar,body.pdf-mode .submod-scope-bar{display:none!important;}
+    body.pdf-mode{background:#fff!important;}
     @media(max-width:900px){.meta-strip{grid-template-columns:1fr;}.delta-strip{grid-template-columns:repeat(2,1fr);}}
     @media(max-width:600px){.meta-strip{grid-template-columns:1fr;}.delta-strip{grid-template-columns:1fr;} th.hide-sm,td.hide-sm{display:none;}}
     .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
@@ -23253,9 +25384,20 @@ struct CompareSelectTemplate {
     .ic-card{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:16px 20px;}
     body.dark-theme .ic-card{background:var(--surface-2);}
     .ic-card-h2{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 10px;}
-    .ic-leg{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;}
+    .ic-leg{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;flex-wrap:wrap;}
+    .ic-leg-item{cursor:pointer;transition:opacity .15s;border-radius:4px;padding:2px 6px;}
+    .ic-leg-item:hover{background:rgba(211,122,76,0.08);}
     .ic-dot{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}
-    .ic-cb{cursor:pointer;transition:opacity .15s,filter .15s;}.ic-cb:hover{opacity:.72;filter:brightness(1.1);}
+    .ic-cb{cursor:pointer;transition:filter .15s;}.ic-cb:hover{filter:brightness(1.12);}
+    .ic-card-h2-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
+    .ic-card-h2-row .ic-card-h2{margin:0;}
+    .chart-metric-btn{padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s;}
+    .chart-metric-btn.active{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
+    .chart-metric-btn:hover:not(.active){background:var(--line);}
+    .chart-wrap{width:100%;overflow-x:auto;}
+    #cmp-tl-svg{display:block;width:100%;}
+    .git-chip{font-family:ui-monospace,monospace;font-size:11px;font-weight:700;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent);}
+    body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
     #ic-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:rgba(255,255,255,0.92);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.28);max-width:240px;white-space:nowrap;}
   </style>
 </head>
@@ -23319,7 +25461,7 @@ struct CompareSelectTemplate {
         <div>
           <h1 class="delta-title">Scan Delta</h1>
           <p class="delta-desc">Side-by-side metric comparison between two scans — code line deltas, file changes, and language breakdown.</p>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;">
             {% if let Some(sub) = active_submodule %}
             <span class="muted" style="font-size:16px;">Submodule <strong>{{ sub }}</strong> — two scans of</span>
             {% else if super_scope_active %}
@@ -23330,10 +25472,16 @@ struct CompareSelectTemplate {
             <a class="path-link" id="project-path-link" data-folder="{{ project_path }}" href="#" style="font-size:16px;font-weight:700;">{{ project_path }}</a>
           </div>
         </div>
-        <a class="btn-back" href="/compare-scans">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>
-          Compare Scans
-        </a>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;">
+          <a class="btn-back" href="/compare-scans">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            Compare Scans
+          </a>
+          <div class="export-group" style="margin-top:12px;">
+            <button type="button" class="export-btn" id="page-export-html-btn" title="Export page as HTML report"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export HTML</button>
+            <button type="button" class="export-btn" id="page-export-pdf-btn" title="Export page as PDF report"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Export PDF</button>
+          </div>
+        </div>
       </div>
       {% if has_any_submodule_data %}
       <div class="submod-scope-bar">
@@ -23422,30 +25570,30 @@ struct CompareSelectTemplate {
       </div>
       <div class="delta-strip">
         <div class="delta-card">
-          <div class="dc-tip">Executable source lines. Excludes comments and blanks. Positive delta = more code written.</div>
+          <div class="dc-tip">Executable source lines.<br>Excludes comments and blanks.<br>Positive delta = more code written.</div>
           <div class="delta-card-label">Code lines</div>
-          <div class="delta-card-from">Before: {{ baseline_code }}</div>
-          <div class="delta-card-to">{{ current_code }}</div>
+          <div class="delta-card-from">Before: {{ baseline_code_fmt }}</div>
+          <div class="delta-card-to">{{ current_code_fmt }}</div>
           {% if code_lines_delta_class == "pos" %}<span class="delta-card-change pos">{{ code_lines_delta_str }}</span><div class="delta-card-pct pos">{{ code_lines_pct_str }}</div>
           {% else if code_lines_delta_class == "neg" %}<span class="delta-card-change neg">{{ code_lines_delta_str }}</span><div class="delta-card-pct neg">{{ code_lines_pct_str }}</div>
           {% else %}<div class="delta-card-pct zero">±0%</div>
           {% endif %}
         </div>
         <div class="delta-card">
-          <div class="dc-tip">Source files where language detection succeeded. Changes reflect files added, removed, or reclassified between scans.</div>
+          <div class="dc-tip">Source files where language detection succeeded.<br>Changes reflect files added, removed, or reclassified between scans.</div>
           <div class="delta-card-label">Files analyzed</div>
-          <div class="delta-card-from">Before: {{ baseline_files }}</div>
-          <div class="delta-card-to">{{ current_files }}</div>
+          <div class="delta-card-from">Before: {{ baseline_files_fmt }}</div>
+          <div class="delta-card-to">{{ current_files_fmt }}</div>
           {% if files_analyzed_delta_class == "pos" %}<span class="delta-card-change pos">{{ files_analyzed_delta_str }}</span><div class="delta-card-pct pos">{{ files_analyzed_pct_str }}</div>
           {% else if files_analyzed_delta_class == "neg" %}<span class="delta-card-change neg">{{ files_analyzed_delta_str }}</span><div class="delta-card-pct neg">{{ files_analyzed_pct_str }}</div>
           {% else %}<div class="delta-card-pct zero">±0%</div>
           {% endif %}
         </div>
         <div class="delta-card">
-          <div class="dc-tip">Comment-only lines per the active parser policy. A rise indicates more docs; a drop may reflect comment cleanup.</div>
+          <div class="dc-tip">Comment-only lines per the active parser policy.<br>A rise indicates more docs; a drop may reflect comment cleanup.</div>
           <div class="delta-card-label">Comment lines</div>
-          <div class="delta-card-from">Before: {{ baseline_comments }}</div>
-          <div class="delta-card-to">{{ current_comments }}</div>
+          <div class="delta-card-from">Before: {{ baseline_comments_fmt }}</div>
+          <div class="delta-card-to">{{ current_comments_fmt }}</div>
           {% if comment_lines_delta_class == "pos" %}<span class="delta-card-change pos">{{ comment_lines_delta_str }}</span><div class="delta-card-pct pos">{{ comment_lines_pct_str }}</div>
           {% else if comment_lines_delta_class == "neg" %}<span class="delta-card-change neg">{{ comment_lines_delta_str }}</span><div class="delta-card-pct neg">{{ comment_lines_pct_str }}</div>
           {% else %}<div class="delta-card-pct zero">±0%</div>
@@ -23453,7 +25601,7 @@ struct CompareSelectTemplate {
         </div>
         {{ coverage_delta_card|safe }}
         <div class="delta-card delta-card-wide">
-          <div class="dc-tip">Per-file breakdown. Modified = at least one count changed. Unchanged = identical counts in both scans. Added/Removed = only in one scan.</div>
+          <div class="dc-tip">Per-file breakdown.<br>Modified = at least one count changed.<br>Unchanged = identical counts in both scans.<br>Added/Removed = only in one scan.</div>
           <div class="delta-card-label">File changes</div>
           <div class="file-changes-grid">
             <div class="fc-row fc-modified"><span class="fc-count">{{ files_modified }}</span><span class="fc-label">Modified</span></div>
@@ -23465,26 +25613,26 @@ struct CompareSelectTemplate {
       </div>
       <div class="insights-panel">
         <div class="insight-card">
-          <div class="dc-tip up">Sum of code lines added or grown across all files between the two scans. Only counts files where the current scan has more code than the baseline — shrunk files do not contribute here.</div>
+          <div class="dc-tip up">Sum of code lines added or grown across all files between the two scans.<br>Only counts files where the current scan has more code than the baseline — shrunk files do not contribute here.</div>
           <div class="insight-label">Lines Added</div>
           <div class="insight-val pos">+{{ code_lines_added }}</div>
           <div class="insight-sub">New or grown source lines</div>
         </div>
         <div class="insight-card">
-          <div class="dc-tip up">Sum of code lines removed or shrunk across all files between the two scans. Only counts files where the current scan has fewer code lines than the baseline — grown files do not contribute here.</div>
+          <div class="dc-tip up">Sum of code lines removed or shrunk across all files between the two scans.<br>Only counts files where the current scan has fewer code lines than the baseline — grown files do not contribute here.</div>
           <div class="insight-label">Lines Removed</div>
           <div class="insight-val neg">&minus;{{ code_lines_removed }}</div>
           <div class="insight-sub">Deleted or shrunk source lines</div>
         </div>
         <div class="insight-card">
-          <div class="dc-tip up">Measures total editing activity relative to codebase size. Formula: (lines added + lines removed) ÷ baseline code lines × 100%. Above 20% = high activity, 5–20% = normal velocity, below 5% = stable.</div>
+          <div class="dc-tip up">Measures total editing activity relative to codebase size.<br>Formula: (lines added + lines removed) &divide; baseline code lines &times; 100%.<br>Above 20% = high activity<br>5&ndash;20% = normal velocity<br>Below 5% = stable baseline.</div>
           <div class="insight-label">Churn Rate</div>
           <div class="insight-val {{ churn_rate_class }}">{{ churn_rate_str }}</div>
           <div class="insight-sub">{% if new_scope %}No prior baseline for this scope{% else if churn_rate_class == "high" %}High activity — verify scope{% else if churn_rate_class == "med" %}Normal development velocity{% else %}Stable baseline{% endif %} · (added + removed) ÷ baseline</div>
         </div>
         {% if scope_flag %}
         <div class="insight-card insight-flag">
-          <div class="dc-tip up">{% if new_scope %}This scope had no files in the baseline scan — all content is new. Switch to Full scan to compare against the parent repository.{% else %}Triggered when net code growth exceeds 20% of the baseline. This often signals a large feature branch, a bulk import, or a generated-file inclusion. Review the file-level delta below to confirm scope.{% endif %}</div>
+          <div class="dc-tip up">{% if new_scope %}This scope had no files in the baseline scan — all content is new.<br>Switch to Full scan to compare against the parent repository.{% else %}Triggered when net code growth exceeds 20% of the baseline.<br>This often signals a large feature branch, a bulk import, or a generated-file inclusion.<br>Review the file-level delta below to confirm scope.{% endif %}</div>
           <div class="insight-label flag">Scope Signal</div>
           <div class="insight-val high">{% if new_scope %}New{% else %}{{ code_lines_pct_str }}{% endif %}</div>
           <div class="insight-sub">{% if new_scope %}New scope — no prior baseline for this selection{% else %}Added &gt; 20% of baseline — large feature addition detected{% endif %}</div>
@@ -23495,11 +25643,24 @@ struct CompareSelectTemplate {
     </section>
 
     <section class="panel" id="inline-charts-section">
-      <h2>Scan Delta Charts</h2>
+      <div class="panel-title">Scan Delta Charts</div>
       <div class="ic-grid">
+        <div class="ic-card" style="grid-column:span 2">
+          <div class="ic-card-h2-row">
+            <span class="ic-card-h2">Timeline</span>
+            <div class="cmp-tl-btns" style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="chart-metric-btn active" data-cmp-metric="code">Code Lines</button>
+              <button class="chart-metric-btn" data-cmp-metric="files">Files</button>
+              <button class="chart-metric-btn" data-cmp-metric="comments">Comments</button>
+              <button class="chart-metric-btn" data-cmp-metric="tests">Tests</button>
+              <button class="chart-metric-btn" data-cmp-metric="cov">Coverage %</button>
+            </div>
+          </div>
+          <div class="chart-wrap"><svg id="cmp-tl-svg" width="100%" height="280"></svg></div>
+        </div>
         <div class="ic-card">
           <div class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</div>
-          <div class="ic-leg"><span><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
+          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
           <div id="ic-c1"></div>
         </div>
         <div class="ic-card" id="ic-lang-card">
@@ -23518,16 +25679,16 @@ struct CompareSelectTemplate {
     </section>
 
     <section class="panel">
-      <h2>File-level delta</h2>
-      <div class="filter-tabs-row">
-        <div class="filter-tabs">
-          <button class="tab-btn tab-all active" data-filter="all">All</button>
+      <div class="panel-title">File Matrix <span style="font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;text-transform:none;letter-spacing:0;">{{ files_modified + files_added + files_removed + files_unchanged }} files</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+        <div class="filter-tabs" style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="tab-btn tab-all active" data-filter="all">All ({{ files_modified + files_added + files_removed + files_unchanged }})</button>
           <button class="tab-btn tab-modified" data-filter="modified">Modified ({{ files_modified }})</button>
           <button class="tab-btn tab-added" data-filter="added">Added ({{ files_added }})</button>
           <button class="tab-btn tab-removed" data-filter="removed">Removed ({{ files_removed }})</button>
           <button class="tab-btn tab-unchanged" data-filter="unchanged">Unchanged ({{ files_unchanged }})</button>
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
           <span class="delta-note">* &Delta; = delta (change from baseline &rarr; current)</span>
           <div class="export-group">
             <button type="button" class="export-btn" id="delta-reset-btn">&#8635; Reset</button>
@@ -23540,8 +25701,12 @@ struct CompareSelectTemplate {
               Excel
             </button>
             <button type="button" class="export-btn" id="delta-charts-btn">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="2" y1="20" x2="22" y2="20"/><rect x="3" y="13" width="4" height="7" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="17" y="2" width="4" height="18" rx="1"/></svg>
-              Charts
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export HTML
+            </button>
+            <button type="button" class="export-btn" id="delta-pdf-btn">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              Export PDF
             </button>
           </div>
         </div>
@@ -23580,10 +25745,10 @@ struct CompareSelectTemplate {
               data-comment-delta="{{ row.comment_delta_str }}"
               data-total-delta="{{ row.total_delta_str }}"
               data-orig-idx="">
-            <td class="file-path" title="{{ row.relative_path }}">{{ row.relative_path }}</td>
+            <td title="{{ row.relative_path }}"><span class="file-path">{{ row.relative_path }}</span></td>
             <td class="hide-sm">{{ row.language }}</td>
             <td><span class="status-badge {{ row.status }}">{{ row.status }}</span></td>
-            <td><span class="from-to"><strong>{{ row.baseline_code }}</strong><span>→</span><strong>{{ row.current_code }}</strong></span></td>
+            <td><span class="from-to"><strong>{{ row.baseline_code_display }}</strong><span>→</span><strong>{{ row.current_code_display }}</strong></span></td>
             <td><span class="delta-val {{ row.code_delta_class }}">{{ row.code_delta_str }}</span></td>
             <td class="hide-sm"><span class="delta-val {{ row.comment_delta_class }}">{{ row.comment_delta_str }}</span></td>
             <td><span class="delta-val {{ row.total_delta_class }}">{{ row.total_delta_str }}</span></td>
@@ -23593,7 +25758,7 @@ struct CompareSelectTemplate {
       </table>
       </div>
       <div class="pagination">
-        <span class="pagination-info" id="pg-info"></span>
+        <span class="pagination-info" id="pg-range-label"></span>
         <div class="pagination-btns" id="pg-btns"></div>
         <div class="flex-row">
           <span class="per-page-label">Show</span>
@@ -23603,7 +25768,6 @@ struct CompareSelectTemplate {
             <option value="50">50 per page</option>
             <option value="100">100 per page</option>
           </select>
-          <span class="per-page-label" id="pg-range-label"></span>
         </div>
       </div>
     </section>
@@ -23695,9 +25859,7 @@ struct CompareSelectTemplate {
         r.style.display = shownSet[r.dataset.origIdx] !== undefined ? '' : 'none';
       });
       var rl = document.getElementById('pg-range-label');
-      if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '–' + end + ' of ' + total : 'No results';
-      var info = document.getElementById('pg-info');
-      if (info) info.textContent = totalPages > 1 ? 'Page ' + deltaCurrPage + ' of ' + totalPages : '';
+      if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '–' + end + ' of ' + total + ' files' : 'No results';
       var btns = document.getElementById('pg-btns');
       if (!btns) return;
       btns.innerHTML = '';
@@ -23831,8 +25993,136 @@ struct CompareSelectTemplate {
       if (csvBtn) csvBtn.addEventListener('click', function() { window.exportDeltaCsv(); });
       var xlsBtn = document.getElementById('delta-xls-btn');
       if (xlsBtn) xlsBtn.addEventListener('click', function() { window.exportDeltaXls(); });
+      // ── Export helpers (image-inlining + pdf-mode) ────────────────────────────
+      function sdFetchUri(path) {
+        return fetch(path).then(function(r){return r.blob();}).then(function(b){
+          return new Promise(function(res){var rd=new FileReader();rd.onload=function(){res(rd.result);};rd.onerror=function(){res('');};rd.readAsDataURL(b);});
+        }).catch(function(){return '';});
+      }
+      function sdInlineImgs(html, cb) {
+        var paths=[], seen={};
+        html.replace(/src="(\/images\/[^"]+)"/g,function(_,p){if(!seen[p]){seen[p]=1;paths.push(p);}return _;});
+        if(!paths.length){cb(html);return;}
+        Promise.all(paths.map(function(p){return sdFetchUri(p).then(function(u){return{p:p,u:u};});}))
+          .then(function(rs){rs.forEach(function(r){if(r.u)html=html.split('src="'+r.p+'"').join('src="'+r.u+'"');});cb(html);})
+          .catch(function(){cb(html);});
+      }
+      function buildFullPageHtml(pdfMode) {
+        if(pdfMode) document.body.classList.add('pdf-mode');
+        var saved = deltaPerPage; deltaPerPage = 999999; deltaCurrPage = 1;
+        renderDeltaPage();
+        var html = document.documentElement.outerHTML;
+        deltaPerPage = saved; deltaCurrPage = 1; renderDeltaPage();
+        if(pdfMode) document.body.classList.remove('pdf-mode');
+        return html;
+      }
       var chartsBtn = document.getElementById('delta-charts-btn');
-      if (chartsBtn) chartsBtn.addEventListener('click', function() { window.exportDeltaCharts(); });
+      if (chartsBtn) chartsBtn.addEventListener('click', function() {
+        var btn=chartsBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting…';
+        sdInlineImgs(buildFullPageHtml(false), function(html) {
+          var blob=new Blob([html],{type:'text/html;charset=utf-8;'});
+          var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+          a.download=getExportFilename('html');a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},200);
+          btn.disabled=false;btn.innerHTML=orig;
+        });
+      });
+      var pageHtmlBtn = document.getElementById('page-export-html-btn');
+      if (pageHtmlBtn) pageHtmlBtn.addEventListener('click', function() {
+        var btn=pageHtmlBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting…';
+        sdInlineImgs(buildFullPageHtml(false), function(html) {
+          var blob=new Blob([html],{type:'text/html;charset=utf-8;'});
+          var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+          a.download=getExportFilename('html');a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},200);
+          btn.disabled=false;btn.innerHTML=orig;
+        });
+      });
+      // PDF export — clean document-style report, not a web page screenshot
+      function buildDeltaPdfHtml() {
+        var sd=_sd, dr=getDeltaExportRows();
+        var projEl=document.querySelector('[data-folder]'), proj=projEl?projEl.getAttribute('data-folder'):'';
+        var now=new Date().toISOString().replace('T',' ').slice(0,16)+' UTC';
+        function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        function fmtN(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
+        function delt(v){var s=String(v==null?'—':v);if(!s||s==='0'||s==='—')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
+        var lm={};
+        dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
+        var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
+        var tfTotal=sd.fm+sd.fa+sd.fr+sd.fu;
+        var css='body{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}'+
+          '.hdr{background:#1a2035;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:flex-start;}'+
+          '.brand{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}'+
+          '.title{font-size:20px;font-weight:700;margin:3px 0 2px;line-height:1.2;}'+
+          '.proj{font-size:12px;color:#99aabb;margin-top:3px;}'+
+          '.hr{font-size:11px;color:#8899aa;text-align:right;line-height:1.9;}'+
+          '.body{padding:18px 24px;}'+
+          '.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}'+
+          '.sc{border:1px solid #ddd;border-radius:8px;padding:10px 12px;}'+
+          '.sv{font-size:18px;font-weight:900;color:#c45c10;}'+
+          '.sl{font-size:10px;font-weight:700;text-transform:uppercase;color:#888;margin-top:3px;letter-spacing:.06em;}'+
+          '.meta{background:#f5f2ee;border:1px solid #e5e0d8;border-radius:6px;padding:8px 12px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:18px;}'+
+          '.ml{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.06em;}.mv{font-weight:700;margin-top:1px;}'+
+          '.sec{margin-bottom:18px;}'+
+          '.sh{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}'+
+          'table{width:100%;border-collapse:collapse;font-size:12px;}'+
+          'th{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-align:left;letter-spacing:.03em;}'+
+          'td{border-bottom:1px solid #eee;padding:5px 10px;vertical-align:middle;}'+
+          'tr:nth-child(even) td{background:#faf8f6;}'+
+          '.ftr{background:#1a2035;color:#7a8b9c;font-size:10px;padding:7px 24px;display:flex;justify-content:space-between;margin-top:16px;}';
+        var fileRows=dr.slice(0,200).map(function(r){
+          var st=r[2]||'',ss=st==='added'?'color:#2a6846;font-weight:700':st==='removed'?'color:#b23030;font-weight:700':'';
+          return '<tr><td style="word-break:break-all">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td>'+
+            '<td style="'+ss+'">'+esc(st)+'</td>'+
+            '<td style="text-align:right">'+fmtN(r[3])+'</td>'+
+            '<td style="text-align:right">'+fmtN(r[4])+'</td>'+
+            '<td style="text-align:right">'+delt(r[5])+'</td></tr>';
+        }).join('');
+        var more=dr.length>200?'<tr><td colspan="6" style="color:#888;font-style:italic;text-align:center">… '+fmtN(dr.length-200)+' more files — export to XLS for full list</td></tr>':'';
+        var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
+        return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC — Scan Delta</title><style>'+css+'</style></head><body>'+
+          '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Scan Delta</div><div class="proj">'+esc(proj)+'</div></div>'+
+          '<div class="hr">'+esc(_blabel)+'<br>'+esc(_clabel)+'<br>Generated: '+esc(now)+'</div></div>'+
+          '<div class="body">'+
+          '<div class="sg">'+
+          '<div class="sc"><div class="sv">'+delt(sd.cd)+'</div><div class="sl">Code Lines Δ</div></div>'+
+          '<div class="sc"><div class="sv">'+delt(sd.fd)+'</div><div class="sl">Files Δ</div></div>'+
+          '<div class="sc"><div class="sv">'+delt(sd.cmd)+'</div><div class="sl">Comment Lines Δ</div></div>'+
+          '<div class="sc"><div class="sv" style="color:#111">'+fmtN(tfTotal)+'</div><div class="sl">Total Files</div></div>'+
+          '</div>'+
+          '<div class="meta">'+
+          '<div><div class="ml">Baseline Code</div><div class="mv">'+fmtN(sd.bc)+'</div></div>'+
+          '<div><div class="ml">Current Code</div><div class="mv">'+fmtN(sd.cc)+'</div></div>'+
+          '<div><div class="ml">Modified</div><div class="mv">'+fmtN(sd.fm)+'</div></div>'+
+          '<div><div class="ml">Added</div><div class="mv" style="color:#2a6846">+'+fmtN(sd.fa)+'</div></div>'+
+          '<div><div class="ml">Removed</div><div class="mv" style="color:#b23030">-'+fmtN(sd.fr)+'</div></div>'+
+          '<div><div class="ml">Unchanged</div><div class="mv">'+fmtN(sd.fu)+'</div></div>'+
+          '</div>'+
+          (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code Δ</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
+          '<div class="sec"><p class="sh">File Delta ('+fmtN(dr.length)+' files)</p>'+
+          '<table><thead><tr><th>File</th><th>Language</th><th>Status</th>'+
+          '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code Δ</th>'+
+          '</tr></thead><tbody>'+fileRows+more+'</tbody></table></div>'+
+          '</div>'+
+          '<div class="ftr"><span>oxide-sloc v{{ version }}</span><span>Scan Delta Report</span>'+
+          '<span>'+esc(sd.bid)+' → '+esc(sd.cid)+'</span></div>'+
+          '</body></html>';
+      }
+      function doDeltaPdf(btn) {
+        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF…';
+        var html=buildDeltaPdfHtml();
+        fetch('/export/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({html:html,filename:getExportFilename('pdf')})})
+          .then(function(r){if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();})
+          .then(function(blob){var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=getExportFilename('pdf');a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},200);})
+          .catch(function(e){alert('PDF export failed: '+e.message);})
+          .finally(function(){btn.disabled=false;btn.innerHTML=orig;});
+      }
+      var pdfBtn = document.getElementById('delta-pdf-btn');
+      if (pdfBtn) pdfBtn.addEventListener('click', function() { doDeltaPdf(pdfBtn); });
+      var pagePdfBtn = document.getElementById('page-export-pdf-btn');
+      if (pagePdfBtn) pagePdfBtn.addEventListener('click', function() { doDeltaPdf(pagePdfBtn); });
+      if (location.protocol === 'file:') {
+        [pageHtmlBtn, chartsBtn].forEach(function(b) { if (b) { b.disabled=true; b.style.opacity='0.45'; b.style.cursor='not-allowed'; b.title='Already viewing an exported HTML file'; } });
+        [pdfBtn, pagePdfBtn].forEach(function(b) { if (b) { b.disabled=true; b.style.opacity='0.45'; b.style.cursor='not-allowed'; b.title='PDF export requires a running server'; } });
+      }
       var ppSel = document.getElementById('per-page-sel');
       if (ppSel) ppSel.addEventListener('change', function() { window.setDeltaPerPage(this.value); });
       var pathLink = document.getElementById('project-path-link');
@@ -23957,7 +26247,7 @@ struct CompareSelectTemplate {
     var _exportBase='{{ project_label }}_{{ baseline_run_id_short }}_vs_{{ current_run_id_short }}';
     function getExportFilename(ext){return _exportBase+'.'+ext;}
 
-    var _sd = {bc:{{ baseline_code }},cc:{{ current_code }},cd:'{{ code_lines_delta_str }}',bf:{{ baseline_files }},cf:{{ current_files }},fd:'{{ files_analyzed_delta_str }}',bcm:{{ baseline_comments }},ccm:{{ current_comments }},cmd:'{{ comment_lines_delta_str }}',fm:{{ files_modified }},fa:{{ files_added }},fr:{{ files_removed }},fu:{{ files_unchanged }},bts:'{{ baseline_timestamp }}',cts:'{{ current_timestamp }}',bid:'{{ baseline_run_id_short }}',cid:'{{ current_run_id_short }}',bbr:'{{ baseline_git_branch }}',cbr:'{{ current_git_branch }}',btag:'{% if let Some(t) = baseline_git_tags %}{{ t }}{% endif %}',ctag:'{% if let Some(t) = current_git_tags %}{{ t }}{% endif %}',bsha:'{{ baseline_git_commit }}',csha:'{{ current_git_commit }}'};
+    var _sd = {bc:{{ baseline_code }},cc:{{ current_code }},cd:'{{ code_lines_delta_str }}',bf:{{ baseline_files }},cf:{{ current_files }},fd:'{{ files_analyzed_delta_str }}',bcm:{{ baseline_comments }},ccm:{{ current_comments }},cmd:'{{ comment_lines_delta_str }}',fm:{{ files_modified }},fa:{{ files_added }},fr:{{ files_removed }},fu:{{ files_unchanged }},bts:'{{ baseline_timestamp }}',cts:'{{ current_timestamp }}',bid:'{{ baseline_run_id_short }}',cid:'{{ current_run_id_short }}',bbr:'{{ baseline_git_branch }}',cbr:'{{ current_git_branch }}',btag:'{% if let Some(t) = baseline_git_tags %}{{ t }}{% endif %}',ctag:'{% if let Some(t) = current_git_tags %}{{ t }}{% endif %}',bsha:'{{ baseline_git_commit }}',csha:'{{ current_git_commit }}',btests:{{ baseline_test_count }},ctests:{{ current_test_count }},bcov:{% if let Some(p) = baseline_coverage_pct %}{{ p }}{% else %}null{% endif %},ccov:{% if let Some(p) = current_coverage_pct %}{{ p }}{% else %}null{% endif %}};
     function _mkScanLabel(pfx,tag,br,sha){var ref=tag||(br||'');if(ref&&sha)return pfx+' ('+ref+' @ '+sha+')';if(ref)return pfx+' ('+ref+')';if(sha)return pfx+' ('+sha+')';return pfx;}
     var _blabel=_mkScanLabel('Baseline',_sd.btag,_sd.bbr,_sd.bsha);
     var _clabel=_mkScanLabel('Current',_sd.ctag,_sd.cbr,_sd.csha);
@@ -23992,19 +26282,19 @@ struct CompareSelectTemplate {
       // ── Chart 1: Baseline vs Current grouped bars ────────────────────────
       var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#93C5FD',cc:'#2563EB'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#C4B5FD',cc:'#7C3AED'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#6EE7B7',cc:'#0D9488'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
-      var C1W=600,C1H=160,c1mt=20,c1mb=24,c1ml=14,c1mr=14;
-      var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=52,c1gap=10;
+      var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14;
+      var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
       c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="14" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
         c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
         c1+='<rect class="cb" x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"'+barTT(m.l,'Current: '+fmt(m.c))+'/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
         c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">After</text>';
       });
@@ -24013,21 +26303,21 @@ struct CompareSelectTemplate {
       // ── Chart 2: Delta by Metric ─────────────────────────────────────────
       var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#2563EB'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#7C3AED'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#0D9488'}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
-      var C2W=530,rH=48,C2H=mets.length*rH+28,c2LW=144,c2RP=18;
+      var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18;
       var cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){
-        var y=14+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2);
+        var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2);
         var col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw;
         var sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
-        c2+='<rect class="cb" x="'+px(bx)+'" y="'+(y+7)+'" width="'+px(bw)+'" height="26" fill="'+col+'" rx="3"'+barTT(m.l,'Delta: '+vStr)+'/>';
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        c2+='<rect class="cb" x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3"'+barTT(m.l,'Delta: '+vStr)+'/>';
         if(bw>=52){
-          c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+25)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';
+          c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';
         }else{
           var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';
-          c2+='<text x="'+vx2+'" y="'+(y+25)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';
+          c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';
         }
       });
       c2+='</svg>';
@@ -24058,11 +26348,11 @@ struct CompareSelectTemplate {
         c3+='</svg>';
       }
 
-      // ── Chart 4: File Change Donut — wider aspect ratio to avoid tall scaling
+      // ── Chart 4: File Change Donut — centered pie with legend below
       var segs=[{l:'Modified',v:sd.fm,c:OX},{l:'Added',v:sd.fa,c:GN},{l:'Removed',v:sd.fr,c:RD},{l:'Unchanged',v:sd.fu,c:'#CCCCCC'}].filter(function(s){return s.v>0;});
       var tot=segs.reduce(function(a,s){return a+s.v;},0)||1;
-      var cx4=110,cy4=100,Ro=84,Ri=46,C4W=480,C4H=210;
-      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+      var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
+      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">';
       var ang=-Math.PI/2;
       segs.forEach(function(s){
         var sw=Math.min(s.v/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
@@ -24075,7 +26365,11 @@ struct CompareSelectTemplate {
       });
       c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#333">'+fmt(tot)+'</text>';
       c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
-      segs.forEach(function(s,i){c4+='<rect x="234" y="'+(16+i*44)+'" width="14" height="14" fill="'+s.c+'" rx="2"/><text x="252" y="'+(27+i*44)+'" font-family="Inter,Calibri,Arial" font-size="12" fill="#333">'+esc(s.l)+': '+fmt(s.v)+'</text>';});
+      segs.forEach(function(s,i){
+        var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
+        c4+='<rect x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2"/>';
+        c4+='<text x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+      });
       c4+='</svg>';
 
       // ── Embedded tooltip JS for the downloaded HTML ───────────────────────
@@ -24123,6 +26417,35 @@ struct CompareSelectTemplate {
       slocDownload(html, fname, 'text/html;charset=utf-8;');
     }
     window.exportDeltaCharts = function(){slocChartReport(getExportFilename('html'),_sd,getDeltaExportRows());};
+    window.buildDeltaChartsHtml = function() {
+      function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+      var sd=_sd;
+      var projEl=document.querySelector('[data-folder]');
+      var proj=projEl?projEl.getAttribute('data-folder'):'';
+      var c1h=document.getElementById('ic-c1')?document.getElementById('ic-c1').innerHTML:'';
+      var c2h=document.getElementById('ic-c2')?document.getElementById('ic-c2').innerHTML:'';
+      var c3h=document.getElementById('ic-c3')?document.getElementById('ic-c3').innerHTML:'';
+      var c4h=document.getElementById('ic-c4')?document.getElementById('ic-c4').innerHTML:'';
+      var ttJs='var tt=document.getElementById("ox-tt");function oxTT(e,t,v){tt.innerHTML="<strong>"+t+"<\/strong><br>"+v;tt.style.display="block";oxMT(e);}function oxMT(e){var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+"px";tt.style.top=y+"px";}function oxHT(){tt.style.display="none";}';
+      var css='*{box-sizing:border-box;}body{font-family:Inter,Calibri,Arial,sans-serif;margin:0 auto;padding:20px 30px 24px;max-width:1460px;background:#F7F3EE;color:#333;}h1{color:#C45C10;font-size:21px;margin:0 0 3px;font-weight:800;}p.sub{color:#888;font-size:12px;margin:0 0 18px;}.card{background:#fff;border-radius:12px;padding:16px 20px;margin-bottom:0;box-shadow:0 1px 5px rgba(0,0,0,.08);}h2{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 10px;}.leg{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;}.dot{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}svg{display:block;}.two-col{display:flex;gap:18px;margin-bottom:16px;}.two-col>.card{flex:1;min-width:0;}#ox-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:#fff;border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;max-width:240px;white-space:nowrap;}.cb{cursor:pointer;transition:opacity .15s,filter .15s;}.cb:hover{opacity:.72;filter:brightness(1.1);}';
+      return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>OxideSLOC — Scan Delta Charts<\/title><style>'+css+'<\/style><\/head><body>'+
+        '<div id="ox-tt"><\/div>'+
+        '<h1>OxideSLOC — Scan Delta Charts<\/h1>'+
+        '<p class="sub">'+esc(proj)+'&nbsp;&middot;&nbsp;'+esc(sd.bts||'')+' → '+esc(sd.cts||'')+'<\/p>'+
+        '<div class="two-col">'+
+        '<div class="card"><h2>Code Metrics — Baseline vs Current<\/h2>'+
+        '<div class="leg"><span><span class="dot" style="background:#93C5FD"><\/span><span style="color:#2563EB;font-weight:600">Code Lines<\/span><\/span>'+
+        '<span><span class="dot" style="background:#C4B5FD"><\/span><span style="color:#7C3AED;font-weight:600">Files<\/span><\/span>'+
+        '<span><span class="dot" style="background:#6EE7B7"><\/span><span style="color:#0D9488;font-weight:600">Comments<\/span><\/span><\/div>'+c1h+'<\/div>'+
+        (c3h?'<div class="card"><h2>Language Code Delta<\/h2>'+c3h+'<\/div>':'<div><\/div>')+
+        '<\/div>'+
+        '<div class="two-col">'+
+        '<div class="card"><h2>Delta by Metric<\/h2>'+c2h+'<\/div>'+
+        '<div class="card"><h2>File Change Distribution<\/h2>'+c4h+'<\/div>'+
+        '<\/div>'+
+        '<script>'+ttJs+'<\/script>'+
+        '<\/body><\/html>';
+    };
     // ── Inline delta charts ────────────────────────────────────────────────────
     var _icTT=document.getElementById('ic-tt');
     window.icTT=function(e,t,v){if(!_icTT)return;_icTT.innerHTML='<strong>'+t+'</strong><br>'+v;_icTT.style.display='block';window.icMT(e);};
@@ -24137,25 +26460,25 @@ struct CompareSelectTemplate {
       function px(n){return Math.round(n);}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
       function btt(l,v){return ' class="ic-cb" data-ttl="'+esc(l)+'" data-ttv="'+esc(v)+'"';}
-      function addTT(el){if(!el)return;el.addEventListener('mouseover',function(e){var t=e.target.closest('[data-ttl]');if(t)icTT(e,t.getAttribute('data-ttl'),t.getAttribute('data-ttv'));});el.addEventListener('mouseout',function(e){if(!e.relatedTarget||!el.contains(e.relatedTarget))icHT();});el.addEventListener('mousemove',function(e){icMT(e);});}
+      function addTT(el){if(!el)return;el.addEventListener('mouseover',function(e){var t=e.target.closest('[data-ttl]');if(t){var ttl=t.getAttribute('data-ttl');icTT(e,ttl,t.getAttribute('data-ttv'));el.querySelectorAll('[data-ttl]').forEach(function(x){x.style.filter='';x.style.opacity='';});el.querySelectorAll('[data-ttl]').forEach(function(x){if(x.getAttribute('data-ttl')===ttl)x.style.filter='brightness(1.2)';});}else{icHT();el.querySelectorAll('[data-ttl]').forEach(function(x){x.style.filter='';x.style.opacity='';})}});el.addEventListener('mouseleave',function(){icHT();el.querySelectorAll('[data-ttl]').forEach(function(x){x.style.filter='';x.style.opacity='';});});el.addEventListener('mousemove',function(e){icMT(e);});}
       var dr=getDeltaExportRows(),sd=_sd,lm={};
       dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
       var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
       // Chart 1: Baseline vs Current grouped bars
       var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#93C5FD',cc:'#2563EB'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#C4B5FD',cc:'#7C3AED'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#6EE7B7',cc:'#0D9488'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
-      var C1W=600,C1H=160,c1mt=20,c1mb=24,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=52,c1gap=10;
+      var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
       c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="14" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
         c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
         c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-3)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
         c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">After</text>';
       });
@@ -24163,15 +26486,15 @@ struct CompareSelectTemplate {
       // Chart 2: Delta by Metric
       var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#2563EB'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#7C3AED'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#0D9488'}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
-      var C2W=530,rH=48,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
+      var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){
-        var y=14+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+21)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
-        c2+='<rect'+btt(m.l,'Delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+7)+'" width="'+px(bw)+'" height="26" fill="'+col+'" rx="3"/>';
-        if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+25)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
-        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+25)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+        var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        c2+='<rect'+btt(m.l,'Delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3"/>';
+        if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
+        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
       });
       c2+='</svg>';
       // Chart 3: Language Code Delta
@@ -24191,12 +26514,12 @@ struct CompareSelectTemplate {
         });
         c3+='</svg>';
       }
-      // Chart 4: File Change Donut
+      // Chart 4: File Change Donut — centered pie with legend below
       var segs=[{l:'Modified',v:sd.fm,c:OX},{l:'Added',v:sd.fa,c:GN},{l:'Removed',v:sd.fr,c:RD},{l:'Unchanged',v:sd.fu,c:'#CCCCCC'}].filter(function(s){return s.v>0;});
       var tot=segs.reduce(function(a,s){return a+s.v;},0)||1;
-      var cx4=110,cy4=100,Ro=84,Ri=46,C4W=480,C4H=210,c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
+      var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
+      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
       if(segs.length===1){
-        // Single segment — SVG arc degenerates at 360°; use concentric circles instead
         c4+='<circle'+btt(segs[0].l,fmt(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
         c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface)"/>';
       } else {
@@ -24210,14 +26533,127 @@ struct CompareSelectTemplate {
       }
       c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#444">'+fmt(tot)+'</text>';
       c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
-      segs.forEach(function(s,i){c4+='<rect x="234" y="'+(16+i*44)+'" width="14" height="14" fill="'+s.c+'" rx="2"/><text x="252" y="'+(27+i*44)+'" font-family="Inter,Calibri,Arial" font-size="12" fill="#444">'+esc(s.l)+': '+fmt(s.v)+'</text>';});
+      segs.forEach(function(s,i){
+        var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
+        c4+='<rect'+btt(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
+        c4+='<text'+btt(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+      });
       c4+='</svg>';
       var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=c1;addTT(e1);}
       var e2=document.getElementById('ic-c2');if(e2){e2.innerHTML=c2;addTT(e2);}
       var e3=document.getElementById('ic-c3');if(e3){e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';addTT(e3);}
       var e4=document.getElementById('ic-c4');if(e4){e4.innerHTML=c4;addTT(e4);}
       var lc=document.getElementById('ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
-      document.querySelectorAll('.cmp-author-val').forEach(function(el){var h=el.nextElementSibling;if(h)h.textContent='  /'+el.textContent.replace(/\s+/g,'');});
+
+      // Compare Timeline chart (Baseline vs Current, 2 points)
+      (function() {
+        var activeCmpMetric='code';
+        var cmpMetricLabel={code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage %'};
+        function renderCmpTL(metric) {
+          var svg=document.getElementById('cmp-tl-svg');if(!svg)return;
+          var W=svg.getBoundingClientRect().width||800,H=280;
+          svg.setAttribute('height',H);
+          var pad={l:62,r:20,t:32,b:72};
+          var dark=document.body.classList.contains('dark-theme');
+          var cmpPts=[
+            {v:{code:_sd.bc,files:_sd.bf,comments:_sd.bcm,tests:_sd.btests,cov:_sd.bcov},label:(_sd.bsha||'').substring(0,7)||'Base'},
+            {v:{code:_sd.cc,files:_sd.cf,comments:_sd.ccm,tests:_sd.ctests,cov:_sd.ccov},label:(_sd.csha||'').substring(0,7)||'Curr'}
+          ];
+          var pts=cmpPts.map(function(p){var v=p.v[metric];return(v==null)?null:Number(v);});
+          var valid=pts.filter(function(v){return v!=null;});
+          if(!valid.length){var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12"+'  font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}
+          var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
+          if(minV===maxV){minV=Math.max(0,minV-1);maxV=maxV+1;}
+          var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
+          var cx0=pad.l,cx1=pad.l+plotW;
+          var cy0=pts[0]!=null?pad.t+plotH-(pts[0]-minV)/(maxV-minV)*plotH:pad.t+plotH;
+          var cy1=pts[1]!=null?pad.t+plotH-(pts[1]-minV)/(maxV-minV)*plotH:pad.t+plotH;
+          var gridColor=dark?'rgba(255,255,255,0.08)':'rgba(0,0,0,0.07)';
+          var textColor=dark?'rgba(255,255,255,0.6)':'rgba(67,52,45,0.7)';
+          var areaColor=dark?'rgba(211,122,76,0.12)':'rgba(211,122,76,0.10)';
+          function fmtN(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
+          function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+          var parts=[];
+          parts.push('<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+(dark?'#241a12':'#fbf7f2')+'" rx="8"/>');
+          for(var gi=0;gi<5;gi++){
+            var gy=pad.t+plotH/4*gi,gv=maxV-(maxV-minV)/4*gi;
+            parts.push('<line x1="'+pad.l+'" y1="'+gy.toFixed(1)+'" x2="'+(W-pad.r)+'" y2="'+gy.toFixed(1)+'" stroke="'+gridColor+'" stroke-width="1"/>');
+            parts.push('<text x="'+(pad.l-6)+'" y="'+(gy+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="'+textColor+'">'+fmtN(gv)+'</text>');
+          }
+          parts.push('<path d="M '+cx0.toFixed(1)+' '+(pad.t+plotH)+' L '+cx0.toFixed(1)+' '+cy0.toFixed(1)+' L '+cx1.toFixed(1)+' '+cy1.toFixed(1)+' L '+cx1.toFixed(1)+' '+(pad.t+plotH)+' Z" fill="'+areaColor+'"/>');
+          parts.push('<line x1="'+cx0.toFixed(1)+'" y1="'+cy0.toFixed(1)+'" x2="'+cx1.toFixed(1)+'" y2="'+cy1.toFixed(1)+'" stroke="#d37a4c" stroke-width="2.2"/>');
+          var dotPts=[{cx:cx0,cy:cy0,v:pts[0],lbl:cmpPts[0].label,anchor:'start',lbl2:'BASELINE'},
+                      {cx:cx1,cy:cy1,v:pts[1],lbl:cmpPts[1].label,anchor:'end',lbl2:'CURRENT'}];
+          dotPts.forEach(function(pt){
+            parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(pt.cy-11).toFixed(1)+'" text-anchor="'+pt.anchor+'" font-size="11" font-weight="600" fill="'+textColor+'">'+fmtN(pt.v)+'</text>');
+            parts.push('<circle cx="'+pt.cx.toFixed(1)+'" cy="'+pt.cy.toFixed(1)+'" r="5" fill="#d37a4c" stroke="'+(dark?'#241a12':'#fbf7f2')+'" stroke-width="1.5"/>');
+            parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(H-pad.b+18)+'" text-anchor="'+pt.anchor+'" font-size="15" fill="'+textColor+'" font-family="ui-monospace,monospace">'+escH(pt.lbl)+'</text>');
+            parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(H-pad.b+32)+'" text-anchor="'+pt.anchor+'" font-size="9" font-weight="700" fill="'+textColor+'">'+escH(pt.lbl2)+'</text>');
+          });
+          parts.push('<text x="'+(pad.l+plotW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-size="10" fill="'+textColor+'">'+escH(cmpMetricLabel[metric]||metric)+'</text>');
+          svg.setAttribute('viewBox','0 0 '+W+' '+H);
+          svg.innerHTML=parts.join('');
+          // Hover: crosshair + tooltip (matches multi-scan timeline)
+          var cmpTT=document.getElementById('ic-tt');
+          svg.onmousemove=function(e){
+            var rect=svg.getBoundingClientRect();
+            var scaleX=W/rect.width;
+            var mouseX=(e.clientX-rect.left)*scaleX;
+            var nearest=-1,minDist=Infinity;
+            var cxArr=[cx0,cx1];
+            for(var k=0;k<2;k++){if(pts[k]==null)continue;var dx=Math.abs(cxArr[k]-mouseX);if(dx<minDist){minDist=dx;nearest=k;}}
+            if(nearest<0)return;
+            var nc=cxArr[nearest],ny=(nearest===0?cy0:cy1);
+            var xhair=svg.querySelector('.cmp-xhair');
+            if(!xhair){xhair=document.createElementNS('http://www.w3.org/2000/svg','g');xhair.setAttribute('class','cmp-xhair');svg.appendChild(xhair);}
+            xhair.innerHTML='<line x1="'+nc.toFixed(1)+'" y1="'+pad.t+'" x2="'+nc.toFixed(1)+'" y2="'+(pad.t+plotH)+'" stroke="rgba(211,122,76,0.55)" stroke-width="1.5" stroke-dasharray="4,3" pointer-events="none"/>';
+            if(!cmpTT)return;
+            var clbl=cmpPts[nearest].label;
+            var scanLbl=nearest===0?'Baseline':'Current';
+            cmpTT.innerHTML='<strong>'+scanLbl+'</strong> <span style="font-family:monospace;font-size:11px;opacity:.75">'+escH(clbl)+'</span><br>'+escH(cmpMetricLabel[metric]||metric)+': <strong>'+fmtN(pts[nearest])+'</strong>';
+            var bx=rect.left+(nc/W*rect.width)+18;
+            if(bx+220>window.innerWidth-8)bx=rect.left+(nc/W*rect.width)-228;
+            cmpTT.style.left=bx+'px';cmpTT.style.top=(e.clientY-38)+'px';cmpTT.style.display='block';
+          };
+          svg.onmouseleave=function(){
+            var xhair=svg.querySelector('.cmp-xhair');if(xhair)xhair.innerHTML='';
+            if(cmpTT)cmpTT.style.display='none';
+          };
+        }
+        document.querySelectorAll('.cmp-tl-btns .chart-metric-btn').forEach(function(btn){
+          btn.addEventListener('click',function(){
+            activeCmpMetric=this.dataset.cmpMetric;
+            document.querySelectorAll('.cmp-tl-btns .chart-metric-btn').forEach(function(b){b.classList.remove('active');});
+            this.classList.add('active');
+            renderCmpTL(activeCmpMetric);
+          });
+        });
+        var ttgl=document.getElementById('theme-toggle');
+        if(ttgl)ttgl.addEventListener('click',function(){setTimeout(function(){renderCmpTL(activeCmpMetric);},0);});
+        if(typeof ResizeObserver!=='undefined'){
+          var cmpSvg=document.getElementById('cmp-tl-svg');
+          if(cmpSvg)new ResizeObserver(function(){renderCmpTL(activeCmpMetric);}).observe(cmpSvg);
+        }
+        renderCmpTL(activeCmpMetric);
+      })();
+
+      // HTML legend hover -> highlight matching SVG bars within the SAME card only
+      document.querySelectorAll('.ic-leg-item[data-highlight]').forEach(function(leg){
+        var metric=leg.getAttribute('data-highlight');
+        var parentCard=leg.closest('.ic-card');
+        var chartEl=parentCard?parentCard.querySelector('[id]'):null;
+        if(!chartEl)return;
+        leg.addEventListener('mouseenter',function(){
+          chartEl.querySelectorAll('[data-ttl]').forEach(function(x){
+            if(x.getAttribute('data-ttl').indexOf(metric)===0){x.style.filter='brightness(1.35) drop-shadow(0 2px 8px rgba(0,0,0,0.28))';x.style.opacity='1';}
+            else{x.style.opacity='0.28';}
+          });
+        });
+        leg.addEventListener('mouseleave',function(){
+          chartEl.querySelectorAll('[data-ttl]').forEach(function(x){x.style.filter='';x.style.opacity='';});
+        });
+      });
+      document.querySelectorAll('.cmp-author-val').forEach(function(el){var h=el.nextElementSibling;if(h)h.textContent='/'+el.textContent.replace(/\s+/g,'');});
     })();
   </script>
   <script nonce="{{ csp_nonce }}">
@@ -24241,7 +26677,9 @@ struct CompareSelectTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';
+  if(location.protocol==='file:'){if(lbl)lbl.textContent='Offline';if(dot){dot.style.background='#888';dot.style.boxShadow='none';}if(pingEl)pingEl.textContent='';if(fm)fm.textContent='oxide-sloc v{{ version }} — Saved Report';var td=document.querySelector('.server-status-tip');if(td)td.textContent='Saved HTML report — server not connected.';return;}
+  if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -24275,6 +26713,12 @@ struct CompareTemplate {
     current_comments: u64,
     comment_lines_delta_str: String,
     comment_lines_delta_class: String,
+    baseline_code_fmt: String,
+    current_code_fmt: String,
+    baseline_files_fmt: String,
+    current_files_fmt: String,
+    baseline_comments_fmt: String,
+    current_comments_fmt: String,
     code_lines_pct_str: String,
     files_analyzed_pct_str: String,
     comment_lines_pct_str: String,
@@ -24310,6 +26754,10 @@ struct CompareTemplate {
     csp_nonce: String,
     /// Pre-built HTML for the coverage delta card, or empty string when no coverage data.
     coverage_delta_card: String,
+    baseline_test_count: u64,
+    current_test_count: u64,
+    baseline_coverage_pct: Option<f64>,
+    current_coverage_pct: Option<f64>,
 }
 
 // ── LoginTemplate ──────────────────────────────────────────────────────────────
