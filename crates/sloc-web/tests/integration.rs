@@ -2970,12 +2970,18 @@ async fn preview_handler_with_real_dir_returns_response() {
 
 #[tokio::test]
 async fn delete_run_after_ingest_returns_no_content_or_404() {
+    // Use a dedicated run-id so the subsequent remove_dir_all does not race with
+    // other parallel tests that share the "ingest-coverage-001" output directory.
+    let run = fixture_base_run("ingest-delete-only-001");
+    let mut run = run;
+    run.input_roots = vec!["/test/delete-only".into()];
+    let payload = serde_json::to_string(&run).unwrap();
+
     let app = make_test_router();
-    let (s, _, _) =
-        post_json_shared(app.clone(), "/api/ingest", &fixture_run_with_coverage()).await;
+    let (s, _, _) = post_json_shared(app.clone(), "/api/ingest", &payload).await;
     assert!(s.as_u16() < 500, "ingest failed");
 
-    let req = Request::delete("/api/runs/ingest-coverage-001")
+    let req = Request::delete("/api/runs/ingest-delete-only-001")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
