@@ -9158,7 +9158,7 @@ fn multi_compare_page(
       var dark=document.body.classList.contains('dark-theme');
       var pts=POINTS.map(function(p){{return p[metric]!=null?Number(p[metric]):null;}});
       var valid=pts.filter(function(v){{return v!=null;}});
-      if(!valid.length){{var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12"+'  font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}}
+      if(!valid.length){{var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12" font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}}
       var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
       if(minV===maxV){{minV=Math.max(0,minV-1);maxV=maxV+1;}}
       var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
@@ -26561,7 +26561,7 @@ struct CompareSelectTemplate {
           ];
           var pts=cmpPts.map(function(p){var v=p.v[metric];return(v==null)?null:Number(v);});
           var valid=pts.filter(function(v){return v!=null;});
-          if(!valid.length){var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12"+'  font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}
+          if(!valid.length){var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12" font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}
           var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
           if(minV===maxV){minV=Math.max(0,minV-1);maxV=maxV+1;}
           var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
