@@ -174,7 +174,7 @@ slides_data = [
      "title": "Introducing oxide-sloc",
      "tagline": "A fast, air-gapped-capable SLOC workbench built for enterprise teams",
      "points": [
-         ("41 Languages", "Rust, Python, Java, C/C++, TypeScript, SQL, and 35 more"),
+         ("60 Languages", "Rust, Python, Java, C/C++, TypeScript, SQL, and 54 more"),
          ("Zero Dependencies", "Runs entirely offline — no internet, no pre-installed Rust required"),
          ("Multiple Surfaces", "CLI for scripts · Web UI for ad-hoc use · REST API for automation"),
          ("Rich Reports", "HTML, PDF, CSV, Excel — beautiful charts included"),

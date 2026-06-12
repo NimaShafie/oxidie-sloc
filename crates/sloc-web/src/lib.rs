@@ -5021,13 +5021,23 @@ fn render_result_page(
         cocomo_staff_str,
         cocomo_ksloc_str,
         cocomo_mode_label,
+        cocomo_mode_tooltip,
     ) = {
         let ksloc = run.summary_totals.code_lines as f64 / 1_000.0;
         let mode_str = ctx.cocomo_mode.as_str();
-        let (a, b, c, d, label): (f64, f64, f64, f64, &str) = match mode_str {
-            "semi_detached" => (3.0, 1.12, 2.5, 0.35, "Semi-detached"),
-            "embedded" => (3.6, 1.20, 2.5, 0.32, "Embedded"),
-            _ => (2.4, 1.05, 2.5, 0.38, "Organic"),
+        let (a, b, c, d, label, tooltip): (f64, f64, f64, f64, &str, &str) = match mode_str {
+            "semi_detached" => (3.0, 1.12, 2.5, 0.35, "Semi-detached",
+                "Semi-detached: A mixed team with varying experience tackling a project with \
+                 moderate novelty and some rigid constraints. Typical for compilers, transaction \
+                 systems, and batch processors. Effort = 3.0 \u{00D7} KSLOC^1.12."),
+            "embedded" => (3.6, 1.20, 2.5, 0.32, "Embedded",
+                "Embedded: Tight hardware, software, or operational constraints requiring \
+                 significant innovation and deep integration work. Typical for real-time control \
+                 systems and safety-critical software. Effort = 3.6 \u{00D7} KSLOC^1.20."),
+            _ => (2.4, 1.05, 2.5, 0.38, "Organic",
+                "Organic: A small team working on a well-understood project in a familiar \
+                 environment with minimal external constraints. Suited for internal tools, \
+                 utilities, and projects with stable requirements. Effort = 2.4 \u{00D7} KSLOC^1.05."),
         };
         let effort = a * ksloc.powf(b);
         let duration = c * effort.powf(d);
@@ -5044,6 +5054,7 @@ fn render_result_page(
                 format!("{:.2}", (staff * 100.0).round() / 100.0),
                 format!("{:.2}", (ksloc * 100.0).round() / 100.0),
                 label.to_string(),
+                tooltip.to_string(),
             )
         } else {
             (
@@ -5053,6 +5064,7 @@ fn render_result_page(
                 String::new(),
                 String::new(),
                 label.to_string(),
+                tooltip.to_string(),
             )
         }
     };
@@ -5284,6 +5296,7 @@ fn render_result_page(
         cocomo_staff_str,
         cocomo_ksloc_str,
         cocomo_mode_label,
+        cocomo_mode_tooltip,
         complexity_alert,
     };
 
@@ -8241,7 +8254,13 @@ async fn multi_compare_handler(
         active_submodule.as_deref(),
         &entries,
     );
-    Html(html).into_response()
+    // no-store: this page is regenerated on every request and embeds inline JS; a cached
+    // copy after a rebuild would silently mask UI fixes.
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Html(html),
+    )
+        .into_response()
 }
 
 fn multi_delta_class(n: i64) -> &'static str {
@@ -8508,18 +8527,54 @@ fn multi_compare_page(
     }
 
     // ── Chart points JSON ─────────────────────────────────────────────────────
+    // Escape a value for embedding inside a JSON string literal.
+    let json_str = |s: &str| -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    };
     let mut points_json_parts: Vec<String> = Vec::with_capacity(n);
-    for pt in &multi.points {
+    for (i, pt) in multi.points.iter().enumerate() {
         let commit = pt.git_commit.as_deref().unwrap_or("");
         let branch = pt.git_branch.as_deref().unwrap_or("");
         let tags = pt.git_tags.as_deref().unwrap_or("");
+        let nearest = pt.git_nearest_tag.as_deref().unwrap_or("");
+        let scanned_ms = pt.timestamp.timestamp_millis();
+        let scanned = pt.timestamp.format("%Y-%m-%d %H:%M UTC").to_string();
+        // Commit date + author from the matching registry entry (same sort order as cards).
+        let entry = entries.get(i).filter(|e| e.run_id == pt.run_id);
+        let commit_date = entry
+            .and_then(|e| e.git_commit_date.as_deref())
+            .and_then(fmt_git_date)
+            .unwrap_or_default();
+        let author = entry
+            .and_then(|e| e.git_author.as_deref())
+            .unwrap_or("")
+            .to_string();
         let cov = pt
             .coverage_line_pct
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "null".to_string());
         points_json_parts.push(format!(
-            r#"{{"run_id":"{run_id}","commit":"{commit}","branch":"{branch}","tags":"{tags}","code":{code},"comments":{comments},"blank":{blank},"files":{files},"tests":{tests},"cov":{cov}}}"#,
-            run_id = pt.run_id,
+            r#"{{"run_id":"{run_id}","commit":"{commit}","branch":"{branch}","tags":"{tags}","nearest":"{nearest}","commit_date":"{commit_date}","author":"{author}","scanned":"{scanned}","scanned_ms":{scanned_ms},"code":{code},"comments":{comments},"blank":{blank},"files":{files},"tests":{tests},"cov":{cov}}}"#,
+            run_id = json_str(&pt.run_id),
+            commit = json_str(commit),
+            branch = json_str(branch),
+            tags = json_str(tags),
+            nearest = json_str(nearest),
+            commit_date = json_str(&commit_date),
+            author = json_str(&author),
+            scanned = json_str(&scanned),
             code = pt.code_lines,
             comments = pt.comment_lines,
             blank = pt.blank_lines,
@@ -8707,12 +8762,12 @@ fn multi_compare_page(
     body.dark-theme .mc-title{{background:linear-gradient(90deg,#f0a070 0%,#d37a4c 40%,#9bb8ff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}}
     .mc-desc{{font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.5;}}
     .mc-subtitle{{font-size:14px;color:var(--muted);margin:0 0 6px;}}
-    .mc-strip{{display:flex;align-items:stretch;flex-wrap:wrap;gap:12px;overflow-x:auto;padding-bottom:6px;margin-bottom:20px;width:100%;}}
-    .mc-strip.mc-strip-grid{{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;overflow-x:visible;padding-bottom:0;}}
+    .mc-strip{{display:flex;align-items:stretch;flex-wrap:wrap;gap:12px;overflow:visible;padding:8px 4px 6px;margin-bottom:20px;width:100%;}}
+    .mc-strip.mc-strip-grid{{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;overflow:visible;padding:8px 4px 6px;}}
     .mc-hero{{background:linear-gradient(180deg,rgba(255,255,255,0.18),transparent),var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 24px 24px;margin-bottom:18px;}}
     .mc-hero-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:16px;flex-wrap:wrap;}}
-    .mc-card{{background:var(--surface);border:1.5px solid var(--oxide);border-radius:14px;padding:22px 24px;flex:1;min-width:180px;min-height:200px;display:flex;flex-direction:column;justify-content:flex-start;transition:box-shadow .15s ease;overflow:hidden;}}
-    .mc-card:hover{{box-shadow:0 8px 24px rgba(77,44,20,0.14);}}
+    .mc-card{{background:var(--surface);border:1.5px solid var(--oxide);border-radius:14px;padding:16px 18px;flex:1 1 0;min-width:0;min-height:160px;display:flex;flex-direction:column;justify-content:flex-start;transition:box-shadow .15s ease,transform .12s ease;overflow:visible;position:relative;}}
+    .mc-card:hover{{box-shadow:0 10px 28px rgba(77,44,20,0.18);}}
     body.dark-theme .mc-card{{background:var(--surface-2);}}
     .mc-card-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px;}}
     .mc-card-num{{font-size:13px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted-2);}}
@@ -8744,7 +8799,7 @@ fn multi_compare_page(
     .submod-scope-btn{{padding:5px 13px;border-radius:7px;border:1.5px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:background .12s,border-color .12s,color .12s;}}
     .submod-scope-btn:hover{{background:var(--line);}}
     .submod-scope-btn.active{{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}}
-    .mc-arrow{{font-size:26px;color:var(--muted);align-self:center;padding:0 12px;flex-shrink:0;}}
+    .mc-arrow{{font-size:22px;color:var(--muted);align-self:center;padding:0 4px;flex-shrink:0;}}
     .panel{{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 24px;margin-bottom:18px;position:relative;}}
     .panel-title{{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);margin-bottom:14px;}}
     .metrics-table{{width:100%;border-collapse:collapse;font-size:13px;}}
@@ -8838,28 +8893,32 @@ fn multi_compare_page(
     body.pdf-mode{{background:#fff!important;}}
     .mc-modal-overlay{{position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,0.52);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .18s ease;}}
     .mc-modal-overlay.open{{opacity:1;pointer-events:auto;}}
-    .mc-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;box-shadow:0 24px 64px rgba(0,0,0,0.28);max-width:600px;width:92%;max-height:84vh;overflow-y:auto;position:relative;}}
+    .mc-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;box-shadow:0 24px 64px rgba(0,0,0,0.28);max-width:1000px;width:94%;max-height:86vh;overflow-y:auto;position:relative;}}
     .mc-modal-head{{background:var(--nav);color:#fff;padding:16px 20px;border-radius:14px 14px 0 0;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}}
     .mc-modal-title{{font-size:18px;font-weight:800;}}
     .mc-modal-sub{{font-size:12px;opacity:.72;margin-top:3px;word-break:break-all;}}
     .mc-modal-close{{background:rgba(255,255,255,0.18);border:none;color:#fff;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}}
     .mc-modal-close:hover{{background:rgba(255,255,255,0.32);}}
-    .mc-modal-body{{padding:16px 20px;}}
-    .mc-modal-sec{{margin-bottom:16px;}}
-    .mc-modal-sec-title{{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin-bottom:8px;}}
-    .mc-modal-stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;}}
-    .mc-modal-stat{{background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;}}
-    .mc-modal-stat-val{{font-size:16px;font-weight:900;color:var(--oxide);}}
-    .mc-modal-stat-lbl{{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:.05em;margin-top:2px;}}
-    .mc-modal-row{{display:flex;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line);align-items:baseline;}}
+    .mc-modal-body{{padding:18px 22px;}}
+    .mc-modal-sec{{margin-bottom:20px;}}
+    .mc-modal-sec-title{{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin-bottom:10px;}}
+    .mc-modal-stats{{display:flex;flex-wrap:nowrap;gap:8px;margin-bottom:8px;}}
+    .mc-modal-stat{{flex:1 1 0;min-width:0;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:default;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;}}
+    .mc-modal-stat:hover{{transform:translateY(-3px);box-shadow:0 8px 22px rgba(196,92,16,0.20);border-color:var(--oxide);}}
+    .mc-modal-stat-val{{font-size:17px;font-weight:900;color:var(--oxide);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+    .mc-modal-stat-lbl{{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:.05em;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+    .mc-modal-row{{display:flex;gap:14px;font-size:14px;padding:9px 0;border-bottom:1px solid var(--line);align-items:baseline;}}
     .mc-modal-row:last-child{{border-bottom:none;}}
-    .mc-modal-key{{color:var(--muted);font-weight:700;font-size:11px;text-transform:uppercase;flex-shrink:0;min-width:110px;}}
-    .mc-modal-val{{color:var(--text);word-break:break-all;}}
-    .mc-modal-val a{{color:var(--oxide);text-decoration:none;}}
+    .mc-modal-key{{color:var(--muted);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;flex-shrink:0;min-width:160px;}}
+    .mc-modal-val{{color:var(--text);font-size:14.5px;font-weight:600;word-break:break-all;}}
+    .mc-modal-val a{{color:var(--oxide);text-decoration:none;font-weight:700;}}
     .mc-modal-val a:hover{{text-decoration:underline;}}
     body.dark-theme .mc-modal-stat{{background:rgba(255,255,255,0.07);}}
-    .mc-card{{cursor:pointer;transition:transform .12s,box-shadow .12s;}}
-    .mc-card:hover{{transform:translateY(-3px);box-shadow:0 8px 24px rgba(196,92,16,0.22);}}
+    body.dark-theme .mc-modal-stat:hover{{box-shadow:0 8px 22px rgba(0,0,0,0.40);}}
+    .mc-modal-stat[data-tip]{{cursor:help;}}
+    #mc-stat-tt{{display:none;position:fixed;background:rgba(15,10,6,0.96);color:rgba(255,255,255,0.94);border-radius:8px;padding:9px 13px;font-size:12.5px;font-weight:500;line-height:1.5;pointer-events:none;z-index:9001;box-shadow:0 6px 22px rgba(0,0,0,0.34);max-width:300px;border:1px solid rgba(255,255,255,0.12);}}
+    .mc-card{{cursor:pointer;}}
+    .mc-card:hover{{transform:translateY(-4px);box-shadow:0 10px 28px rgba(196,92,16,0.24);z-index:10;}}
   </style>
 </head>
 <body>
@@ -8962,7 +9021,7 @@ fn multi_compare_page(
               <button class="chart-metric-btn" data-metric="files">Files</button>
               <button class="chart-metric-btn" data-metric="comments">Comments</button>
               <button class="chart-metric-btn" data-metric="tests">Tests</button>
-              <button class="chart-metric-btn" data-metric="cov">Coverage %</button>
+              <button class="chart-metric-btn" data-metric="cov">Coverage</button>
             </div>
           </div>
           <div class="chart-wrap"><svg id="mc-chart" height="280"></svg></div>
@@ -9013,14 +9072,6 @@ fn multi_compare_page(
           <button type="button" class="export-btn" id="mc-file-xls-btn">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Excel
-          </button>
-          <button type="button" class="export-btn" id="mc-file-html-btn">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export HTML
-          </button>
-          <button type="button" class="export-btn" id="mc-file-pdf-btn">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            Export PDF
           </button>
           </div>
         </div>
@@ -9145,10 +9196,16 @@ fn multi_compare_page(
     function fmtFull(n){{return Number(n).toLocaleString();}}
     function fmtDelta(n){{return n>0?'+'+fmt(n):fmt(n);}}
 
+    // ── Export filename: <project>_<n_scans>_<first_scan_short_commit> ──
+    function mcExportProj(){{return ('{project_label}'.replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^-+|-+$/g,''))||'project';}}
+    function mcShortRef(p,i){{var c=(p&&p.commit?String(p.commit):'').replace(/[^A-Za-z0-9]/g,'').slice(0,7);if(c)return c;var r=(p&&p.run_id?String(p.run_id):'').replace(/[^A-Za-z0-9]/g,'').slice(0,7);return r||('scan'+(i+1));}}
+    function mcExportBase(){{var first=POINTS.length?mcShortRef(POINTS[0],0):'scan1';return mcExportProj()+'_'+POINTS.length+'_'+first;}}
+    function mcExportName(ext){{return mcExportBase()+'.'+ext;}}
+
     // ── Timeline chart ───────────────────────────────────────────────────────
     var activeMetric='code';
     var metricKey={{code:'code',files:'files',comments:'comments',tests:'tests',cov:'cov'}};
-    var metricLabel={{code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage %'}};
+    var metricLabel={{code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage'}};
 
     function renderChart(metric){{
       var svg=document.getElementById('mc-chart');if(!svg)return;
@@ -9158,7 +9215,7 @@ fn multi_compare_page(
       var dark=document.body.classList.contains('dark-theme');
       var pts=POINTS.map(function(p){{return p[metric]!=null?Number(p[metric]):null;}});
       var valid=pts.filter(function(v){{return v!=null;}});
-      if(!valid.length){{var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12" font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}}
+      if(!valid.length){{var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.30)':'rgba(67,52,45,0.32)';var _nd_ts=_nd_dark?'rgba(255,255,255,0.55)':'rgba(67,52,45,0.60)';var _nd_lbl=(metricLabel[metric]||metric);var _nd_cov=metric==='cov';var _nd_msg=_nd_cov?'No coverage data for these scans':'No '+_nd_lbl.toLowerCase()+' recorded';var _nd_sub=_nd_cov?'Coverage appears once test results are captured during a scan.':'None of the selected scans reported a value for this metric.';var _cx=W/2,_cy=H/2;svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<g opacity="0.55"><rect x="'+(_cx-28).toFixed(1)+'" y="'+(_cy-50).toFixed(1)+'" width="56" height="34" rx="5" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6"/><polyline points="'+(_cx-20).toFixed(1)+','+(_cy-24).toFixed(1)+' '+(_cx-7).toFixed(1)+','+(_cy-30).toFixed(1)+' '+(_cx+6).toFixed(1)+','+(_cy-26).toFixed(1)+' '+(_cx+20).toFixed(1)+','+(_cy-34).toFixed(1)+'" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+4).toFixed(1)+'" text-anchor="middle" font-size="14" font-weight="700" fill="'+_nd_ts+'">'+escHtml(_nd_msg)+'</text>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+24).toFixed(1)+'" text-anchor="middle" font-size="11.5" fill="'+_nd_tc+'">'+escHtml(_nd_sub)+'</text>';return;}}
       var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
       if(minV===maxV){{minV=Math.max(0,minV-1);maxV=maxV+1;}}
       var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
@@ -9264,15 +9321,15 @@ fn multi_compare_page(
       for(var i=start;i<end;i++){{
         var f=filtered[i];
         var cells='<td class="left"><span class="file-path" title="'+escHtml(f.p)+'">'+escHtml(f.p)+'</span></td>';
-        cells+='<td class="left">'+(f.l?escHtml(f.l):'<span class="absent">—</span>')+'</td>';
+        cells+='<td class="left">'+(f.l?escHtml(f.l):'<span class="absent">\u2014</span>')+'</td>';
         cells+='<td class="left"><span class="status-badge '+f.s+'">'+f.s+'</span></td>';
         for(var j=0;j<N;j++){{
           var cv=f.c[j];
-          cells+='<td class="file-scan-col">'+(cv!=null?fmt(cv):'<span class="absent">—</span>')+'</td>';
+          cells+='<td class="file-scan-col">'+(cv!=null?fmt(cv):'<span class="absent">\u2014</span>')+'</td>';
           if(j<N-1){{
             var dv=f.d[j+1];
             cells+='<td class="file-delta-col '+(dv!=null?dv>0?'pos':dv<0?'neg':'zero':'absent-delta')+'">'+
-              (dv!=null?fmtDelta(dv):'<span class="absent">—</span>')+'</td>';
+              (dv!=null?fmtDelta(dv):'<span class="absent">\u2014</span>')+'</td>';
           }}
         }}
         var tc=f.t;
@@ -9358,8 +9415,8 @@ fn multi_compare_page(
     var exportBtn=document.getElementById('export-csv-btn');
     if(exportBtn)exportBtn.addEventListener('click',function(){{
       var header=['File','Language','Status'];
-      for(var i=0;i<N;i++){{header.push('Scan '+(i+1)+' Code');if(i<N-1)header.push('Δ→'+(i+2));}}
-      header.push('Net Δ');
+      for(var i=0;i<N;i++){{header.push('Scan '+(i+1)+' Code');if(i<N-1)header.push('Delta->'+(i+2));}}
+      header.push('Net Delta');
       var rows=[header.map(function(h){{return '"'+h.replace(/"/g,'""')+'"';}}).join(',')];
       var filtered=getFiltered();
       filtered.forEach(function(f){{
@@ -9373,7 +9430,7 @@ fn multi_compare_page(
       }});
       var blob=new Blob([rows.join('\r\n')],{{type:'text/csv'}});
       var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-      a.download='multi-compare.csv';a.click();
+      a.download=mcExportName('csv');a.click();
     }});
 
     // ── File matrix extra export buttons ─────────────────────────────────────
@@ -9386,69 +9443,123 @@ fn multi_compare_page(
         renderFilePage();
       }});
 
-      function mcFileGetData(){{
-        var header=['File','Language','Status'];
-        for(var i=0;i<N;i++){{header.push('Scan '+(i+1)+' Code');if(i<N-1)header.push('Δ→'+(i+2));}}
-        header.push('Net Δ');
+      // \u2500\u2500 File Matrix Excel export \u2014 Summary + File Delta tabs (matches Scan Delta) \u2500\u2500
+      function mcSignDelta(v){{if(v==null||v==='')return'';var n=+v;return n>0?'+'+n:String(n);}}
+      function mcMakeXlsx(fname){{
         var filtered=getFiltered();
-        var rowData=filtered.map(function(f){{
-          var cols=[f.p,f.l||'',f.s];
-          for(var j=0;j<N;j++){{cols.push(f.c[j]!=null?f.c[j]:'');if(j<N-1)cols.push(f.d[j+1]!=null?f.d[j+1]:'');}}
-          cols.push(f.t);return cols;
-        }});
-        return{{header:header,rows:rowData}};
-      }}
-
-      var xlsBtn=document.getElementById('mc-file-xls-btn');
-      if(xlsBtn)xlsBtn.addEventListener('click',function(){{
-        var d=mcFileGetData();
         var enc=new TextEncoder();
-        var CT=[],_n,_c,_k;for(_n=0;_n<256;_n++){{_c=_n;for(_k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}}
-        function crc32(d2){{var v=0xFFFFFFFF;for(var i=0;i<d2.length;i++)v=CT[(v^d2[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}}
-        function u2(n){{return[n&0xFF,(n>>8)&0xFF];}}function u4(n){{return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}}
-        var ss=[],si={{}};function S(v){{v=String(v==null?'':v);if(!(v in si)){{si[v]=ss.length;ss.push(v);}}return si[v];}}
+        var CT=[];for(var _n=0;_n<256;_n++){{var _c=_n;for(var _k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}}
+        function crc32(d){{var v=0xFFFFFFFF;for(var i=0;i<d.length;i++)v=CT[(v^d[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}}
+        function u2(n){{return[n&0xFF,(n>>8)&0xFF];}}
+        function u4(n){{return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}}
+        var ss=[],si={{}};
+        function S(v){{v=String(v==null?'':v);if(!(v in si)){{si[v]=ss.length;ss.push(v);}}return si[v];}}
         function xe(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-        var R=0,buf=[];
-        function cl(c){{return String.fromCharCode(65+c);}}
-        function sc(c,v){{return'<c r="'+cl(c)+(R+1)+'" t="s"><v>'+S(v)+'</v></c>';}}
-        function nc(c,v){{return(v===''||v==null)?'':'<c r="'+cl(c)+(R+1)+'"><v>'+(+v)+'</v></c>';}}
-        function row(cells){{buf.push('<row r="'+(R+1)+'">'+cells+'</row>');R++;}}
-        row(d.header.map(function(h,i){{return sc(i,h);}}).join(''));
-        d.rows.forEach(function(r){{row(r.map(function(v,i){{var n=Number(v);return(typeof v==='number'||(v!==''&&!isNaN(n)&&v!==null))?nc(i,n):sc(i,String(v));}}).join(''));}});
-        var sheetXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'+buf.join('')+'</sheetData></worksheet>';
+        function WS(){{
+          var R=0,buf=[];
+          function cl(c){{return String.fromCharCode(65+c);}}
+          function sc(c,v,st){{return'<c r="'+cl(c)+(R+1)+'" t="s"'+(st?' s="'+st+'"':'')+'><v>'+S(v)+'</v></c>';}}
+          function nc(c,v,st){{return(v===''||v==null)?'':'<c r="'+cl(c)+(R+1)+'"'+(st?' s="'+st+'"':'')+'><v>'+(+v)+'</v></c>';}}
+          function row(cells){{if(cells)buf.push('<row r="'+(R+1)+'">'+cells+'</row>');R++;}}
+          function xml(cw){{return'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/>'+(cw?'<cols>'+cw+'</cols>':'')+'<sheetData>'+buf.join('')+'</sheetData></worksheet>';}}
+          return{{sc:sc,nc:nc,row:row,xml:xml}};
+        }}
+        function dstyle(v){{var s=String(v);if(!s||s==='0'||s==='+0')return 7;return s.charAt(0)==='-'?6:5;}}
+        var proj=mcExportProj();
+        // \u2500\u2500 Summary sheet \u2500\u2500
+        var W1=WS(),s1=W1.sc,n1=W1.nc,r1=W1.row;
+        r1(s1(0,'OxideSLOC \u2014 Multi-Scan Timeline Report',1));
+        r1(s1(0,proj,2));
+        var firstTs=POINTS.length?(POINTS[0].scanned||''):'',lastTs=POINTS.length?(POINTS[POINTS.length-1].scanned||''):'';
+        r1(s1(0,firstTs+' \u2192 '+lastTs+'  ('+N+' scans)',2));
+        r1('');
+        r1(s1(0,'SCAN SUMMARY',8));
+        r1(s1(0,'Scan',3)+s1(1,'Commit',3)+s1(2,'Branch',3)+s1(3,'Timestamp',3)+s1(4,'Code Lines',3)+s1(5,'Comment Lines',3)+s1(6,'Files',3)+s1(7,'Tests',3));
+        POINTS.forEach(function(p,i){{
+          var sha=(p.commit||'').replace(/[^A-Za-z0-9]/g,'').slice(0,7);
+          r1(s1(0,'Scan '+(i+1))+s1(1,sha||'\u2014')+s1(2,p.branch||'\u2014')+s1(3,p.scanned||'')+n1(4,p.code,4)+n1(5,p.comments,4)+n1(6,p.files,4)+n1(7,p.tests,4));
+        }});
+        r1('');
+        if(POINTS.length>1){{
+          var pf=POINTS[0],pl=POINTS[POINTS.length-1];
+          r1(s1(0,'NET CHANGE (Scan 1 \u2192 Scan '+N+')',8));
+          r1(s1(0,'Metric',3)+s1(1,'Scan 1',3)+s1(2,'Scan '+N,3)+s1(3,'Delta',3));
+          var nr=function(lbl,a,b){{var d=(+b)-(+a),ds=d>0?'+'+d:String(d);r1(s1(0,lbl)+n1(1,a,4)+n1(2,b,4)+s1(3,ds,dstyle(ds)));}};
+          nr('Code Lines',pf.code,pl.code);
+          nr('Comment Lines',pf.comments,pl.comments);
+          nr('Files Analyzed',pf.files,pl.files);
+          nr('Tests',pf.tests,pl.tests);
+          r1('');
+        }}
+        var cMod=0,cAdd=0,cRem=0,cUnch=0;
+        FILES.forEach(function(f){{var s=f.s;if(s==='modified')cMod++;else if(s==='added')cAdd++;else if(s==='removed')cRem++;else cUnch++;}});
+        var totF=FILES.length||1;
+        function pct(n){{return(n/totF*100).toFixed(1)+'%';}}
+        r1(s1(0,'FILE CHANGES',8));
+        r1(s1(0,'Category',3)+s1(1,'Count',3)+s1(2,'% of Total',3));
+        r1(s1(0,'Modified')+n1(1,cMod,4)+s1(2,pct(cMod)));
+        r1(s1(0,'Added')+n1(1,cAdd,4)+s1(2,pct(cAdd)));
+        r1(s1(0,'Removed')+n1(1,cRem,4)+s1(2,pct(cRem)));
+        r1(s1(0,'Unchanged')+n1(1,cUnch,4)+s1(2,pct(cUnch)));
+        var lm={{}};
+        FILES.forEach(function(f){{var l=f.l||'Unknown',d=+f.t||0;if(!lm[l])lm[l]={{f:0,d:0}};lm[l].f++;lm[l].d+=d;}});
+        var langs=Object.keys(lm).sort(function(a,b){{return Math.abs(lm[b].d)-Math.abs(lm[a].d);}});
+        if(langs.length){{
+          r1('');r1(s1(0,'LANGUAGE BREAKDOWN',8));
+          r1(s1(0,'Language',3)+s1(1,'Files',3)+s1(2,'Net Code Delta',3));
+          langs.forEach(function(l){{var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);r1(s1(0,l)+n1(1,e.f,4)+s1(2,dv,dstyle(dv)));}});
+        }}
+        var sh1=W1.xml('<col min="1" max="1" width="22" customWidth="1"/><col min="2" max="8" width="15" customWidth="1"/>');
+        // \u2500\u2500 File Delta sheet \u2500\u2500
+        var W2=WS(),s2=W2.sc,n2=W2.nc,r2=W2.row;
+        var hcells=s2(0,'File',3)+s2(1,'Language',3)+s2(2,'Status',3),hc=3;
+        for(var hi=0;hi<N;hi++){{hcells+=s2(hc++,'Scan '+(hi+1)+' Code',3);if(hi<N-1)hcells+=s2(hc++,'Delta \u2192 '+(hi+2),3);}}
+        hcells+=s2(hc,'Net Delta',3);
+        r2(hcells);
+        filtered.forEach(function(f){{
+          var cells=s2(0,f.p)+s2(1,f.l||'')+s2(2,f.s||''),c=3;
+          for(var j=0;j<N;j++){{cells+=n2(c++,f.c[j]!=null?f.c[j]:'',4);if(j<N-1){{var dv=mcSignDelta(f.d[j+1]);cells+=s2(c++,dv,dstyle(dv));}}}}
+          var tv=mcSignDelta(f.t);cells+=s2(c,tv,dstyle(tv));
+          r2(cells);
+        }});
+        var ncols=3+N+(N-1)+1;
+        var sh2=W2.xml('<col min="1" max="1" width="42" customWidth="1"/><col min="2" max="'+ncols+'" width="13" customWidth="1"/>');
         var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){{return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}}).join('')+'</sst>';
         var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
-        var F={{'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
+        var F={{'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
           '_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-          'xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
-          'xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets><sheet name="File Matrix" sheetId="1" r:id="rId1"/></sheets></workbook>',
-          'xl/styles.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>',
-          'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sheetXml}};
+          'xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
+          'xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><bookViews><workbookView xWindow="0" yWindow="0" windowWidth="16384" windowHeight="8192"/></bookViews><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="File Delta" sheetId="2" r:id="rId2"/></sheets></workbook>',
+          'xl/styles.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="8"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="14"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font><font><sz val="10"/><color rgb="FF888888"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FF155724"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FF721C24"/><name val="Calibri"/></font><font><sz val="11"/><color rgb="FF888888"/><name val="Calibri"/></font><font><sz val="11"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC45C10"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD4EDDA"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF8D7DA"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="9"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="left"/></xf><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="4" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="5" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="6" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="7" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+          'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sh1,'xl/worksheets/sheet2.xml':sh2}};
         var zparts=[],zcds=[],zoff=0,znf=0;
-        ['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'].forEach(function(name){{
+        ['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml','xl/worksheets/sheet2.xml'].forEach(function(name){{
           var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);
           var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);
           var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);
           var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));
           var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);
-          zoff+=lha.length+nb.length+sz;znf++;
+          zoff+=entry.length;znf++;
         }});
-        var cdOff=zoff,cdSz=zcds.reduce(function(s,b){{return s+b.length;}},0);
-        var eocd=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(cdOff)).concat([0,0]);
+        var cdSz=zcds.reduce(function(s,b){{return s+b.length;}},0);
+        var eocd=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(zoff)).concat([0,0]);
         var totalLen=zoff+cdSz+eocd.length,out=new Uint8Array(totalLen),pos=0;
         zparts.forEach(function(b){{out.set(b,pos);pos+=b.length;}});
         zcds.forEach(function(b){{out.set(b,pos);pos+=b.length;}});
         out.set(new Uint8Array(eocd),pos);
         var blob=new Blob([out],{{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}});
-        var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='multi-compare.xlsx';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
-      }});
+        var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fname;a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
+      }}
+
+      var xlsBtn=document.getElementById('mc-file-xls-btn');
+      if(xlsBtn)xlsBtn.addEventListener('click',function(){{mcMakeXlsx(mcExportName('xlsx'));}});
 
       // File matrix HTML export — interactive: sort by column, filter by status
       function mcFileBuildHtml(){{
         function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
         var hdrs=['File','Language','Status'];
-        for(var _i=0;_i<N;_i++){{hdrs.push('Scan '+(_i+1)+' Code');if(_i<N-1)hdrs.push('Δ→'+(_i+2));}}
-        hdrs.push('Net Δ');
+        for(var _i=0;_i<N;_i++){{hdrs.push('Scan '+(_i+1)+' Code');if(_i<N-1)hdrs.push('\u0394\u2192'+(_i+2));}}
+        hdrs.push('Net \u0394');
         var SI=2;
         var allRows=FILES.map(function(f){{var r=[f.p,f.l||'',f.s||''];for(var _i=0;_i<N;_i++){{r.push(f.c[_i]!=null?f.c[_i]:null);if(_i<N-1)r.push(f.d[_i+1]!=null?f.d[_i+1]:null);}}r.push(f.t);return r;}});
         var dJson=JSON.stringify(allRows),hJson=JSON.stringify(hdrs);
@@ -9477,7 +9588,7 @@ fn multi_compare_page(
           'tr:hover td{{background:#f5f0ea;}}'+
           '.ap{{color:#2a6846;font-weight:700;}}.an{{color:#b23030;font-weight:700;}}'+
           '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:7px 20px;display:flex;justify-content:space-between;margin-top:16px;}}';
-        var thH=hdrs.map(function(h,i){{return'<th data-ci="'+i+'">'+esc(h)+'<span>⇅</span></th>';}}).join('');
+        var thH=hdrs.map(function(h,i){{return'<th data-ci="'+i+'">'+esc(h)+'<span>\u21c5</span></th>';}}).join('');
         var fH='<button class="fb on" data-f="">All ('+allRows.length+')</button>'+
           (cnt.modified?'<button class="fb" data-f="modified">Modified ('+cnt.modified+')</button>':'')+
           (cnt.added?'<button class="fb" data-f="added">Added ('+cnt.added+')</button>':'')+
@@ -9488,7 +9599,7 @@ fn multi_compare_page(
           'if(ci===SI){{return s==="added"?"<span class=\\"ap\\">added<\\/span>":s==="removed"?"<span class=\\"an\\">removed<\\/span>":s||"&mdash;";}}'+
           'var n=Number(v);if(ci>SI&&!isNaN(n)&&n!==0){{return n>0?"<span class=\\"ap\\">+"+n.toLocaleString()+"<\\/span>":"<span class=\\"an\\">"+n.toLocaleString()+"<\\/span>";}}'+
           'if(ci>=3&&typeof v==="number")return Number(v).toLocaleString();'+
-          'return s.length>80?"<abbr title=\\""+s.replace(/"/g,"&quot;")+"\\" style=\\"cursor:help\\">"+s.slice(0,78)+"…<\\/abbr>":esc(s);}}'+
+          'return s.length>80?"<abbr title=\\""+s.replace(/"/g,"&quot;")+"\\" style=\\"cursor:help\\">"+s.slice(0,78)+"\u2026<\\/abbr>":esc(s);}}'+
           'function esc(s){{return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}}'+
           'function render(){{var data=sf?ALL.filter(function(r){{return r[SI]===sf;}}):ALL.slice();'+
           'if(sc>=0)data.sort(function(a,b){{var av=a[sc],bv=b[sc];var an=Number(av),bn=Number(bv);'+
@@ -9500,8 +9611,8 @@ fn multi_compare_page(
           'document.querySelectorAll(".fb").forEach(function(x){{x.classList.remove("on");}});this.classList.add("on");render();}};}} );'+
           'document.querySelectorAll("th[data-ci]").forEach(function(th){{th.onclick=function(){{var ci=+this.dataset.ci;'+
           'sd=(sc===ci)?-sd:1;sc=ci;'+
-          'document.querySelectorAll("th[data-ci]").forEach(function(t){{t.querySelector("span").textContent="⇅";}});'+
-          'this.querySelector("span").textContent=sd>0?"▲":"▼";render();}};}} );'+
+          'document.querySelectorAll("th[data-ci]").forEach(function(t){{t.querySelector("span").textContent="\u21c5";}});'+
+          'this.querySelector("span").textContent=sd>0?"\u25b2":"\u25bc";render();}};}} );'+
           'render();';
         return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Multi-Scan File Matrix<\/title><style>'+css+'<\/style><\/head><body>'+
           '<div class="hd"><div><div class="brand">oxide-sloc<\/div><div class="ttl">Multi-Scan File Matrix<\/div>'+
@@ -9518,16 +9629,16 @@ fn multi_compare_page(
         var h=mcFileBuildHtml();
         var blob=new Blob([h],{{type:'text/html;charset=utf-8;'}});
         var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-        a.download='multi-compare-files.html';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
+        a.download=mcExportName('files.html');a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);
       }});
 
       var pdfBtn=document.getElementById('mc-file-pdf-btn');
       if(pdfBtn)pdfBtn.addEventListener('click',function(){{
-        var btn=pdfBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF…';
+        var btn=pdfBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF\u2026';
         var h=mcBuildPdfHtml();
-        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:h,filename:'multi-compare.pdf'}})}})
+        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:h,filename:mcExportName('files.pdf')}})}})
           .then(function(r){{if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();}})
-          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='multi-compare.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
+          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=mcExportName('files.pdf');a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
           .catch(function(e){{alert('PDF export failed: '+e.message);}})
           .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
       }});
@@ -9718,7 +9829,7 @@ fn multi_compare_page(
 
       // HTML export (full page with inlined images)
       function mcDoHtml(btn,fname){{
-        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting…';
+        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting\u2026';
         mcInlineImgs(mcRawHtml(false),function(html){{
           var blob=new Blob([html],{{type:'text/html;charset=utf-8;'}});
           var a=document.createElement('a');a.href=URL.createObjectURL(blob);
@@ -9729,16 +9840,19 @@ fn multi_compare_page(
       // PDF export — comprehensive document-style report: full numbers, all sections
       function mcBuildPdfHtml(){{
         function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-        function full(n){{if(n==null||n===''||isNaN(Number(n)))return'—';return Number(n).toLocaleString();}}
+        function full(n){{if(n==null||n===''||isNaN(Number(n)))return'\u2014';return Number(n).toLocaleString();}}
         function dStr(v){{return Number(v)>0?'+'+Number(v).toLocaleString():Number(v).toLocaleString();}}
         function dHtml(v){{var s=dStr(v);return Number(v)>0?'<span style="color:#2a6846;font-weight:700">'+s+'</span>':Number(v)<0?'<span style="color:#b23030;font-weight:700">'+s+'</span>':'<span>'+s+'</span>';}}
-        var now=new Date().toISOString().replace('T',' ').slice(0,16)+' UTC';
+        var tz;try{{tz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}}catch(e){{tz='America/Los_Angeles';}}
+        var now=(window.fmtTz?window.fmtTz(Date.now(),tz):new Date().toISOString().replace('T',' ').slice(0,16)+' UTC');
+        function ptRef(pt,i){{return pt.tags||(pt.branch?(pt.commit?pt.branch+' @ '+pt.commit.slice(0,7):pt.branch):(pt.commit?pt.commit.slice(0,12):'Scan '+(i+1)));}}
+        var commitsList=POINTS.map(function(pt,i){{return esc(ptRef(pt,i));}}).join(', ');
         var p0=N>0?POINTS[0]:null,pLast=N>0?POINTS[N-1]:null;
         var codeDelta=(p0&&pLast)?Number(pLast.code)-Number(p0.code):null;
         var css='body{{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}}'+
           '.hdr{{background:#1a2035;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:flex-start;}}'+
           '.brand{{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}}'+
-          '.title{{font-size:20px;font-weight:700;margin:3px 0 2px;}}'+
+          '.title{{font-size:20px;font-weight:700;margin:3px 0 2px;line-height:1.2;}}'+
           '.proj{{font-size:12px;color:#99aabb;margin-top:3px;}}'+
           '.hr{{font-size:11px;color:#8899aa;text-align:right;line-height:1.9;}}'+
           '.body{{padding:18px 24px;}}'+
@@ -9775,7 +9889,7 @@ fn multi_compare_page(
           var prev=POINTS[i];
           var cd=Number(pt.code)-Number(prev.code),cm=Number(pt.comments)-Number(prev.comments);
           var bl=Number(pt.blank)-Number(prev.blank),fd=Number(pt.files)-Number(prev.files);
-          return '<tr><td style="text-align:center;font-weight:700">'+(i+1)+' → '+(i+2)+'</td>'+
+          return '<tr><td style="font-weight:700;white-space:nowrap">'+esc(ptRef(prev,i))+' \u2192 '+esc(ptRef(pt,i+1))+'</td>'+
             '<td style="text-align:right">'+dHtml(cd)+'</td>'+
             '<td style="text-align:right">'+dHtml(cm)+'</td>'+
             '<td style="text-align:right">'+dHtml(bl)+'</td>'+
@@ -9784,25 +9898,27 @@ fn multi_compare_page(
         // ── File matrix (top 50 by |total delta|) ────────────────────────────
         var fmSection='';
         if(FILES&&FILES.length){{
-          var topFiles=FILES.slice().sort(function(a,b){{return Math.abs(Number(b.t))-Math.abs(Number(a.t));}}).slice(0,50);
+          // Hard cap on per-scan columns so the table never overflows the page width.
+          var MAXC=6;var startIdx=N>MAXC?N-MAXC:0;
+          var topFiles=FILES.slice().sort(function(a,b){{return Math.abs(Number(b.t))-Math.abs(Number(a.t));}});
           var fmHdr='<th>File</th><th>Language</th><th>Status</th>';
-          for(var fi=0;fi<N;fi++)fmHdr+='<th style="text-align:right">Scan '+(fi+1)+'</th>';
-          fmHdr+='<th style="text-align:right">Total Δ</th>';
+          for(var fi=startIdx;fi<N;fi++)fmHdr+='<th style="text-align:right">Scan '+(fi+1)+'</th>';
+          fmHdr+='<th style="text-align:right">Total \u0394</th>';
           var fmRows=topFiles.map(function(f){{
             var ss=f.s==='added'?'style="color:#2a6846;font-weight:700"':f.s==='removed'?'style="color:#b23030;font-weight:700"':'';
-            var cols='';for(var fi=0;fi<N;fi++)cols+='<td style="text-align:right">'+(f.c[fi]!=null?Number(f.c[fi]).toLocaleString():'&mdash;')+'</td>';
+            var cols='';for(var fi=startIdx;fi<N;fi++)cols+='<td style="text-align:right">'+(f.c[fi]!=null?Number(f.c[fi]).toLocaleString():'&mdash;')+'</td>';
             cols+='<td style="text-align:right">'+dHtml(Number(f.t))+'</td>';
-            var sp=f.p.length>55?'…'+f.p.slice(-53):f.p;
+            var sp=f.p.length>55?'\u2026'+f.p.slice(-53):f.p;
             return '<tr><td style="font-family:monospace;font-size:10px;word-break:break-all">'+esc(sp)+'</td><td>'+esc(f.l||'')+'</td><td '+ss+'>'+esc(f.s||'')+'</td>'+cols+'</tr>';
           }}).join('');
-          var moreMsg=FILES.length>50?'<tr><td colspan="'+(N+4)+'" style="color:#888;font-style:italic;text-align:center">… '+(FILES.length-50)+' more files</td></tr>':'';
-          fmSection='<div class="sec"><p class="sh">File Matrix — Top '+Math.min(FILES.length,50)+' by Change</p>'+
-            '<table><thead><tr>'+fmHdr+'</tr></thead><tbody>'+fmRows+moreMsg+'</tbody></table></div>';
+          var colNote=N>MAXC?' (latest '+MAXC+' scans shown)':'';
+          fmSection='<div class="sec"><p class="sh">File Matrix \u2014 All '+FILES.length+' Files'+colNote+'</p>'+
+            '<table><thead><tr>'+fmHdr+'</tr></thead><tbody>'+fmRows+'</tbody></table></div>';
         }}
         return '<!DOCTYPE html><html><head><meta charset="utf-8">'+
-          '<title>OxideSLOC — Multi-Scan Timeline</title><style>'+css+'</style></head><body>'+
+          '<title>OxideSLOC \u2014 Multi-Scan Timeline</title><style>'+css+'</style></head><body>'+
           '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Multi-Scan Timeline</div><div class="proj">{project_label}</div></div>'+
-          '<div class="hr">{n} scans<br>Generated: '+esc(now)+'</div></div>'+
+          '<div class="hr">{n} scans<br><span style="color:#7a8b9c">'+commitsList+'</span><br>Generated: '+esc(now)+'</div></div>'+
           '<div class="body">'+
           '<div class="sg">'+
           (pLast?'<div class="sc"><div class="sv">'+full(pLast.code)+'</div><div class="sl">Latest Code Lines</div></div>':
@@ -9817,8 +9933,8 @@ fn multi_compare_page(
           '<table><thead><tr>'+progHdr+'</tr></thead><tbody>'+progRows+'</tbody></table></div>'+
           (N>1?'<div class="sec"><p class="sh">Scan-to-Scan Changes</p>'+
           '<table><thead><tr><th style="text-align:center">Scans</th>'+
-          '<th style="text-align:right">Code Δ</th><th style="text-align:right">Comments Δ</th>'+
-          '<th style="text-align:right">Blank Δ</th><th style="text-align:right">Files Δ</th>'+
+          '<th style="text-align:right">Code \u0394</th><th style="text-align:right">Comments \u0394</th>'+
+          '<th style="text-align:right">Blank \u0394</th><th style="text-align:right">Files \u0394</th>'+
           '</tr></thead><tbody>'+deltaRows+'</tbody></table></div>':'')+
           fmSection+
           '</div>'+
@@ -9826,19 +9942,19 @@ fn multi_compare_page(
           '</body></html>';
       }}
       function mcDoPdf(btn){{
-        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF…';
+        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF\u2026';
         var html=mcBuildPdfHtml();
-        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:html,filename:'multi-scan-timeline.pdf'}})}})
+        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:html,filename:mcExportName('pdf')}})}})
           .then(function(r){{if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();}})
-          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='multi-scan-timeline.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
+          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=mcExportName('pdf');a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
           .catch(function(e){{alert('PDF export failed: '+e.message);}})
           .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
       }}
 
       var mcHtmlBtn=document.getElementById('mc-export-html-btn');
-      if(mcHtmlBtn)mcHtmlBtn.addEventListener('click',function(){{mcDoHtml(mcHtmlBtn,'multi-scan-timeline.html');}});
+      if(mcHtmlBtn)mcHtmlBtn.addEventListener('click',function(){{mcDoHtml(mcHtmlBtn,mcExportName('html'));}});
       var mcTopHtmlBtn=document.getElementById('mc-top-export-html-btn');
-      if(mcTopHtmlBtn)mcTopHtmlBtn.addEventListener('click',function(){{mcDoHtml(mcTopHtmlBtn,'multi-scan-timeline.html');}});
+      if(mcTopHtmlBtn)mcTopHtmlBtn.addEventListener('click',function(){{mcDoHtml(mcTopHtmlBtn,mcExportName('html'));}});
       var mcPdfBtn=document.getElementById('mc-export-pdf-btn');
       if(mcPdfBtn)mcPdfBtn.addEventListener('click',function(){{mcDoPdf(mcPdfBtn);}});
       var mcTopPdfBtn=document.getElementById('mc-top-export-pdf-btn');
@@ -9848,33 +9964,37 @@ fn multi_compare_page(
         [mcPdfBtn,mcTopPdfBtn,document.getElementById('mc-file-pdf-btn')].forEach(function(b){{if(b){{b.disabled=true;b.style.opacity='0.45';b.style.cursor='not-allowed';b.title='PDF export requires a running server';b.textContent='Export PDF';}}}} );
       }}
     }})();
-    // ── Scan card modal (inside outer IIFE — POINTS/N/FILES in scope) ────────
+    // ── Scan card modal — document-level click delegation (no timing/parse-order deps) ──
     (function(){{
-      var ov=document.getElementById('mc-modal-overlay'),closeBtn=document.getElementById('mc-modal-close');
-      var titleEl=document.getElementById('mc-modal-title'),subEl=document.getElementById('mc-modal-sub'),bodyEl=document.getElementById('mc-modal-body');
-      if(!ov||!POINTS||!N)return;
+      function $(id){{return document.getElementById(id);}}
       function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-      function full(n){{if(n==null||isNaN(Number(n)))return'—';return Number(n).toLocaleString();}}
+      function full(n){{if(n==null||isNaN(Number(n)))return'\u2014';return Number(n).toLocaleString();}}
       function dS(v){{return Number(v)>0?'+'+Number(v).toLocaleString():Number(v).toLocaleString();}}
       function dSt(v){{return Number(v)>0?'color:#2a6846;font-weight:700':Number(v)<0?'color:#b23030;font-weight:700':'';}}
       function openModal(idx){{
+        var ov=$('mc-modal-overlay');if(!ov)return;
+        var titleEl=$('mc-modal-title'),subEl=$('mc-modal-sub'),bodyEl=$('mc-modal-body');
         if(idx<0||idx>=N)return;
         var pt=POINTS[idx];
         titleEl.textContent='Scan '+(idx+1);
-        var lbl=pt.tags||(pt.branch?(pt.commit?pt.branch+' @ '+pt.commit:pt.branch):(pt.commit||'—'));
+        var lbl=pt.tags||(pt.branch?(pt.commit?pt.branch+' @ '+pt.commit:pt.branch):(pt.commit||'\u2014'));
         subEl.textContent=lbl;
         var sHtml='<div class="mc-modal-sec"><div class="mc-modal-sec-title">Metrics</div><div class="mc-modal-stats">'+
-          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.code)+'</div><div class="mc-modal-stat-lbl">Code Lines</div></div>'+
-          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.comments)+'</div><div class="mc-modal-stat-lbl">Comments</div></div>'+
-          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.blank)+'</div><div class="mc-modal-stat-lbl">Blank Lines</div></div>'+
-          '<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.files)+'</div><div class="mc-modal-stat-lbl">Files</div></div>'+
-          (pt.tests!=null&&Number(pt.tests)>0?'<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+full(pt.tests)+'</div><div class="mc-modal-stat-lbl">Tests</div></div>':'')+
-          (pt.cov!=null?'<div class="mc-modal-stat"><div class="mc-modal-stat-val">'+Number(pt.cov).toFixed(1)+'%</div><div class="mc-modal-stat-lbl">Coverage</div></div>':'')+
+          '<div class="mc-modal-stat" data-tip="Physical lines of source code that are neither blank nor comment-only. This is the primary SLOC metric used to size the codebase."><div class="mc-modal-stat-val">'+full(pt.code)+'</div><div class="mc-modal-stat-lbl">Code Lines</div></div>'+
+          '<div class="mc-modal-stat" data-tip="Lines made up of code comments (single-line or block). Documentation within the source that is not executed."><div class="mc-modal-stat-val">'+full(pt.comments)+'</div><div class="mc-modal-stat-lbl">Comments</div></div>'+
+          '<div class="mc-modal-stat" data-tip="Empty lines or lines containing only whitespace. Counted separately from code and comment lines."><div class="mc-modal-stat-val">'+full(pt.blank)+'</div><div class="mc-modal-stat-lbl">Blank Lines</div></div>'+
+          '<div class="mc-modal-stat" data-tip="Total number of source files analyzed in this scan across every supported language."><div class="mc-modal-stat-val">'+full(pt.files)+'</div><div class="mc-modal-stat-lbl">Files</div></div>'+
+          (pt.tests!=null&&Number(pt.tests)>0?'<div class="mc-modal-stat" data-tip="Number of unit-test definitions detected across the scanned files."><div class="mc-modal-stat-val">'+full(pt.tests)+'</div><div class="mc-modal-stat-lbl">Tests</div></div>':'')+
+          (pt.cov!=null?'<div class="mc-modal-stat" data-tip="Percentage of code lines covered by tests for this scan, shown when coverage results were captured."><div class="mc-modal-stat-val">'+Number(pt.cov).toFixed(1)+'%</div><div class="mc-modal-stat-lbl">Coverage</div></div>':'')+
           '</div></div>';
         var iHtml='<div class="mc-modal-sec"><div class="mc-modal-sec-title">Scan Info</div>'+
           (pt.commit?'<div class="mc-modal-row"><span class="mc-modal-key">Commit</span><span class="mc-modal-val"><a href="/runs/html/'+esc(pt.run_id)+'" target="_blank" rel="noopener">'+esc(pt.commit)+'</a></span></div>':'')+
           (pt.branch?'<div class="mc-modal-row"><span class="mc-modal-key">Branch</span><span class="mc-modal-val">'+esc(pt.branch)+'</span></div>':'')+
           (pt.tags?'<div class="mc-modal-row"><span class="mc-modal-key">Tags</span><span class="mc-modal-val">'+esc(pt.tags)+'</span></div>':'')+
+          (pt.nearest?'<div class="mc-modal-row"><span class="mc-modal-key">Nearest tag</span><span class="mc-modal-val">'+esc(pt.nearest)+'</span></div>':'')+
+          (pt.commit_date?'<div class="mc-modal-row"><span class="mc-modal-key">Last commit on</span><span class="mc-modal-val">'+esc(pt.commit_date)+'</span></div>':'')+
+          (pt.author?'<div class="mc-modal-row"><span class="mc-modal-key">Last commit by</span><span class="mc-modal-val">'+esc(pt.author)+'</span></div>':'')+
+          (pt.scanned?'<div class="mc-modal-row"><span class="mc-modal-key">Scanned on</span><span class="mc-modal-val">'+esc(pt.scanned)+'</span></div>':'')+
           '<div class="mc-modal-row"><span class="mc-modal-key">Run ID</span><span class="mc-modal-val"><a href="/runs/html/'+esc(pt.run_id)+'" target="_blank" rel="noopener">'+esc(pt.run_id)+'</a></span></div>'+
           '</div>';
         var dHtml='';
@@ -9882,22 +10002,43 @@ fn multi_compare_page(
           var prev=POINTS[idx-1];
           var cd=Number(pt.code)-Number(prev.code),fd=Number(pt.files)-Number(prev.files),cm=Number(pt.comments)-Number(prev.comments);
           dHtml='<div class="mc-modal-sec"><div class="mc-modal-sec-title">Change vs Scan '+idx+'</div><div class="mc-modal-stats">'+
-            '<div class="mc-modal-stat"><div class="mc-modal-stat-val" style="'+dSt(cd)+'">'+dS(cd)+'</div><div class="mc-modal-stat-lbl">Code Δ</div></div>'+
-            '<div class="mc-modal-stat"><div class="mc-modal-stat-val" style="'+dSt(fd)+'">'+dS(fd)+'</div><div class="mc-modal-stat-lbl">Files Δ</div></div>'+
-            '<div class="mc-modal-stat"><div class="mc-modal-stat-val" style="'+dSt(cm)+'">'+dS(cm)+'</div><div class="mc-modal-stat-lbl">Comments Δ</div></div>'+
+            '<div class="mc-modal-stat" data-tip="Net change in code lines compared with the previous scan in this timeline. Green is an increase, red a decrease."><div class="mc-modal-stat-val" style="'+dSt(cd)+'">'+dS(cd)+'</div><div class="mc-modal-stat-lbl">Code \u0394</div></div>'+
+            '<div class="mc-modal-stat" data-tip="Net change in the number of analyzed files compared with the previous scan."><div class="mc-modal-stat-val" style="'+dSt(fd)+'">'+dS(fd)+'</div><div class="mc-modal-stat-lbl">Files \u0394</div></div>'+
+            '<div class="mc-modal-stat" data-tip="Net change in comment lines compared with the previous scan."><div class="mc-modal-stat-val" style="'+dSt(cm)+'">'+dS(cm)+'</div><div class="mc-modal-stat-lbl">Comments \u0394</div></div>'+
             '</div></div>';
         }}
         bodyEl.innerHTML=sHtml+iHtml+dHtml;
         ov.classList.add('open');document.body.style.overflow='hidden';
       }}
-      function closeModal(){{ov.classList.remove('open');document.body.style.overflow='';}}
-      if(closeBtn)closeBtn.addEventListener('click',closeModal);
-      ov.addEventListener('click',function(e){{if(e.target===ov)closeModal();}});
-      document.addEventListener('keydown',function(e){{if(e.key==='Escape')closeModal();}});
-      document.querySelectorAll('.mc-card').forEach(function(card,i){{
-        card.setAttribute('title','Click to view full scan details');
-        card.addEventListener('click',function(e){{if(e.target.tagName==='A')return;openModal(i);}});
+      function closeModal(){{var ov=$('mc-modal-overlay');if(ov)ov.classList.remove('open');document.body.style.overflow='';}}
+      // Delegated click: robust to parse order, re-renders, and missing-at-attach elements.
+      document.addEventListener('click',function(e){{
+        if(!e.target||!e.target.closest)return;
+        if(e.target.closest('#mc-modal-close')){{closeModal();return;}}
+        if(e.target.id==='mc-modal-overlay'){{closeModal();return;}}
+        var card=e.target.closest('.mc-card');
+        if(!card)return;
+        if(e.target.closest('a'))return;
+        var cards=Array.prototype.slice.call(document.querySelectorAll('.mc-card'));
+        var i=cards.indexOf(card);
+        if(i>=0)openModal(i);
       }});
+      document.addEventListener('keydown',function(e){{if(e.key==='Escape')closeModal();}});
+      // Styled hover description for the metric boxes (fixed tooltip, never clipped by the modal scroll area).
+      var statTip=null;
+      document.addEventListener('mousemove',function(e){{
+        var box=(e.target&&e.target.closest)?e.target.closest('.mc-modal-stat[data-tip]'):null;
+        if(!box){{if(statTip)statTip.style.display='none';return;}}
+        if(!statTip){{statTip=document.createElement('div');statTip.id='mc-stat-tt';document.body.appendChild(statTip);}}
+        var tip=box.getAttribute('data-tip')||'';
+        if(statTip.textContent!==tip)statTip.textContent=tip;
+        statTip.style.display='block';
+        var w=statTip.offsetWidth,h=statTip.offsetHeight,x=e.clientX+14,y=e.clientY+16;
+        if(x+w>window.innerWidth-8)x=e.clientX-w-14;
+        if(y+h>window.innerHeight-8)y=e.clientY-h-16;
+        statTip.style.left=(x<8?8:x)+'px';statTip.style.top=(y<8?8:y)+'px';
+      }});
+      (function tagCards(){{var cs=document.querySelectorAll('.mc-card');for(var k=0;k<cs.length;k++)cs[k].setAttribute('title','Click to view full scan details');}})();
     }})();
   }})();
   </script>
@@ -13201,6 +13342,23 @@ fn render_embed_widget(
     )
 }
 
+/// Returns a process-wide mutex unique to `dir`, so that two requests writing
+/// artifacts into the *same* output directory (e.g. re-ingesting an identical
+/// `run_id`) serialize instead of corrupting each other's files. Directories that
+/// differ never contend, so legitimate parallel analyses keep their throughput.
+fn output_dir_lock(dir: &Path) -> Arc<std::sync::Mutex<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<std::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+        .entry(dir.to_path_buf())
+        .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
 #[allow(clippy::too_many_lines)]
 fn persist_run_artifacts(
     run: &sloc_core::AnalysisRun,
@@ -13210,6 +13368,13 @@ fn persist_run_artifacts(
     file_stem: &str,
     result_context: RunResultContext,
 ) -> Result<(RunArtifacts, PendingPdf)> {
+    // Serialize concurrent writers targeting this same output directory so their
+    // file writes cannot interleave and corrupt one another.
+    let dir_lock = output_dir_lock(run_dir);
+    let _dir_guard = dir_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     // Root dir + organised subdirectories.
     let html_dir = run_dir.join("html");
     let pdf_dir = run_dir.join("pdf");
@@ -13641,7 +13806,39 @@ fn generate_offline_index(
             .cocomo
             .as_ref()
             .map_or(String::new(), |c| format!("{:.2}", c.ksloc)),
-        cocomo_mode_label: "Organic".to_string(),
+        cocomo_mode_label: run.cocomo.as_ref().map_or("Organic".to_string(), |c| {
+            use sloc_core::CocomoMode;
+            match c.mode {
+                CocomoMode::Organic => "Organic",
+                CocomoMode::SemiDetached => "Semi-detached",
+                CocomoMode::Embedded => "Embedded",
+            }
+            .to_string()
+        }),
+        cocomo_mode_tooltip: run.cocomo.as_ref().map_or(String::new(), |c| {
+            use sloc_core::CocomoMode;
+            match c.mode {
+                CocomoMode::Organic => {
+                    "Organic: A small team working on a well-understood \
+                    project in a familiar environment with minimal external constraints. \
+                    Suited for internal tools, utilities, and projects with stable requirements. \
+                    Effort = 2.4 \u{00D7} KSLOC^1.05."
+                }
+                CocomoMode::SemiDetached => {
+                    "Semi-detached: A mixed team with varying experience \
+                    tackling a project with moderate novelty and some rigid constraints. \
+                    Typical for compilers, transaction systems, and batch processors. \
+                    Effort = 3.0 \u{00D7} KSLOC^1.12."
+                }
+                CocomoMode::Embedded => {
+                    "Embedded: Tight hardware, software, or operational \
+                    constraints requiring significant innovation and deep integration work. \
+                    Typical for real-time control systems and safety-critical software. \
+                    Effort = 3.6 \u{00D7} KSLOC^1.20."
+                }
+            }
+            .to_string()
+        }),
         complexity_alert: 0,
     };
 
@@ -15309,6 +15506,8 @@ struct SubmoduleRow {
     input[type="text"]:hover, textarea:hover, select:hover { border-color: var(--accent); }
     input[type="text"]:focus, textarea:focus, select:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,0.13); transform: translateY(-1px); }
     textarea { min-height: 128px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    textarea.glob-textarea { font-size: 13px; padding: 10px 12px; }
+    .glob-label-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; min-height:28px; }
     .hint { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .path-history-badge { margin-top: 6px; padding: 4px 10px; border-radius: 6px; font-size: 12px; line-height: 1.4; display: inline-flex; align-items: center; gap: 4px; }
     .path-history-badge.found { background: var(--info-bg, #eef3ff); color: var(--info-text, #4467d8); border: 1px solid rgba(100,130,220,0.25); }
@@ -15372,6 +15571,12 @@ struct SubmoduleRow {
     .glob-guidance-card { padding: 14px; border-radius: 12px; border:1px solid var(--line); background: var(--surface-2); }
     .glob-guidance-card strong { display:block; margin-bottom: 8px; color: var(--text); }
     .glob-guidance-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.58; }
+    .lbl-opt { font-weight:400; font-size:12px; color:var(--muted); margin-left:4px; }
+    .include-scope-badge { display:flex; align-items:center; gap:7px; padding:7px 12px; border-radius:8px; font-size:12px; font-weight:700; margin-bottom:7px; transition:background .2s,color .2s,border-color .2s; }
+    .include-scope-badge.scope-all { background:rgba(42,104,70,0.1); border:1px solid rgba(42,104,70,0.25); color:#2a6846; }
+    .include-scope-badge.scope-narrow { background:rgba(184,93,51,0.08); border:1px solid rgba(184,93,51,0.22); color:var(--nav,#b85d33); }
+    body.dark-theme .include-scope-badge.scope-all { background:rgba(90,186,138,0.12); border-color:rgba(90,186,138,0.3); color:#5aba8a; }
+    body.dark-theme .include-scope-badge.scope-narrow { background:rgba(210,130,70,0.12); border-color:rgba(210,130,70,0.3); color:#e0a060; }
     .toggle-card { border:1px solid var(--line); border-radius: 12px; background: var(--surface-2); padding: 16px; }
     .checkbox { display:flex; align-items:flex-start; gap: 10px; font-size: 15px; font-weight:700; }
     .checkbox input { width: 16px; height: 16px; margin-top: 3px; accent-color: var(--accent); }
@@ -15385,11 +15590,16 @@ struct SubmoduleRow {
     .toggle-card.compact { padding: 0; background: none; border: none; box-shadow: none; }
     .docstring-example-inset { padding: 14px 16px 14px 32px; background: var(--surface-2); border-left: 3px solid var(--line-strong); border-radius: 0 0 10px 10px; margin-top: -1px; }
     .docstring-example-inset .field-help-title { margin-bottom: 6px; }
-    .always-tracked-tip { display:flex; align-items:flex-start; gap: 14px; padding: 16px 18px; border-radius: 14px; border: 1px solid rgba(37,99,235,0.18); background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(37,99,235,0.02)); margin-top: 8px; }
+    .always-tracked-tip { display:flex; align-items:flex-start; gap: 14px; padding: 16px 18px; border-radius: 14px; border: 1px solid rgba(37,99,235,0.18); background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(37,99,235,0.02)); margin-top: 8px; width:100%; box-sizing:border-box; }
     .always-tracked-tip-icon { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; background: rgba(37,99,235,0.12); color: var(--accent-2); display:flex; align-items:center; justify-content:center; font-size: 14px; font-weight: 900; margin-top: 2px; }
+    .always-tracked-tip-body { flex:1; min-width:0; }
     .always-tracked-tip-body .field-help-title { color: var(--accent-2); }
     .always-tracked-tip-body h4 { margin: 2px 0 6px; font-size: 15px; }
     .always-tracked-tip-body .advanced-rule-description { font-size: 14px; color: var(--muted); line-height: 1.6; }
+    .always-tracked-metrics-row { display:grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap:6px 18px; margin:8px 0 0; }
+    .always-tracked-metrics-row > div { font-size:13px; color:var(--muted); line-height:1.5; }
+    .always-tracked-metrics-row strong { display:block; font-size:13px; color:var(--text); margin-bottom:2px; white-space:nowrap; }
+    @media (max-width:900px) { .always-tracked-metrics-row { grid-template-columns: repeat(2,minmax(0,1fr)); } }
     .advanced-rule-head h4 { margin: 6px 0 0; font-size: 16px; }
     .advanced-rule-description { color: var(--muted); font-size: 13px; line-height: 1.6; }
     .advanced-rule-description strong { color: var(--text); }
@@ -15642,7 +15852,7 @@ struct SubmoduleRow {
     </span>
     <button class="ofb-dismiss" id="ofb-dismiss-btn" type="button">Dismiss</button>
   </div>
-  <script>(function(){if(location.protocol==='file:'){var b=document.getElementById('offline-file-banner');if(b)b.classList.add('show');var d=document.getElementById('ofb-dismiss-btn');if(d)d.addEventListener('click',function(){b.classList.remove('show');});}})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){if(location.protocol==='file:'){var b=document.getElementById('offline-file-banner');if(b)b.classList.add('show');var d=document.getElementById('ofb-dismiss-btn');if(d)d.addEventListener('click',function(){b.classList.remove('show');});}})();</script>
   <div class="background-watermarks" aria-hidden="true">
     <img src="/images/logo/logo-text.png" alt="" />
     <img src="/images/logo/logo-text.png" alt="" />
@@ -15764,10 +15974,10 @@ struct SubmoduleRow {
           <div class="ws-stat ws-stat-analyzers">
             <span class="ws-label">Analyzers</span>
             <span class="ws-value">
-              <span class="ws-badge">41 languages</span>
+              <span class="ws-badge">60 languages</span>
             </span>
             <div class="ws-lang-tooltip">
-              <div class="ws-lang-tooltip-hdr">41 supported languages</div>
+              <div class="ws-lang-tooltip-hdr">60 supported languages</div>
               <div class="ws-lang-tooltip-desc">Language detection engines loaded for this session. Each engine uses a lexical state machine to count code, comment, and blank lines.</div>
               <div class="ws-lang-grid">
                 <span class="ws-lang-item">Assembly</span>
@@ -15811,6 +16021,25 @@ struct SubmoduleRow {
                 <span class="ws-lang-item">Vue</span>
                 <span class="ws-lang-item">XML</span>
                 <span class="ws-lang-item">Zig</span>
+                <span class="ws-lang-item">Solidity</span>
+                <span class="ws-lang-item">Protobuf</span>
+                <span class="ws-lang-item">HCL</span>
+                <span class="ws-lang-item">GraphQL</span>
+                <span class="ws-lang-item">Ada</span>
+                <span class="ws-lang-item">VHDL</span>
+                <span class="ws-lang-item">Verilog</span>
+                <span class="ws-lang-item">Tcl</span>
+                <span class="ws-lang-item">Pascal</span>
+                <span class="ws-lang-item">Visual Basic</span>
+                <span class="ws-lang-item">Lisp</span>
+                <span class="ws-lang-item">Fortran</span>
+                <span class="ws-lang-item">Nix</span>
+                <span class="ws-lang-item">Crystal</span>
+                <span class="ws-lang-item">D</span>
+                <span class="ws-lang-item">GLSL</span>
+                <span class="ws-lang-item">CMake</span>
+                <span class="ws-lang-item">Elm</span>
+                <span class="ws-lang-item">Awk</span>
               </div>
             </div>
           </div>
@@ -15934,7 +16163,7 @@ struct SubmoduleRow {
                       <input type="hidden" name="git_repo" value="{{ git_repo }}" />
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
-                      <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required onblur="this.scrollLeft=this.scrollWidth" />
+                      <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
                       <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload{% else %}Browse{% endif %}</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
                       {% endif %}
@@ -16002,13 +16231,18 @@ struct SubmoduleRow {
               <div class="section">
                 <div class="field-grid">
                   <div class="field">
-                    <label for="include_globs">Include globs</label>
-                    <textarea id="include_globs" name="include_globs" placeholder="examples:&#10;src/**/*.py&#10;scripts/*.sh"></textarea>
-                    <div class="hint">Use line-separated or comma-separated patterns when you want to narrow the scan to only certain folders or file types. If you leave this empty, everything under the project path is eligible first, and then exclude rules trim it down.</div>
+                    <div class="glob-label-row">
+                      <label for="include_globs" style="margin:0;flex-shrink:0;">Include globs <span class="lbl-opt">— optional</span></label>
+                      <div id="include-scope-badge" class="include-scope-badge scope-all" aria-live="polite" style="margin:0;padding:4px 10px;font-size:11px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg> All files eligible &mdash; no include filter active</div>
+                    </div>
+                    <textarea id="include_globs" name="include_globs" class="glob-textarea" placeholder="Leave blank to scan everything&#10;&#10;Or narrow scope with patterns:&#10;src/**/*.py&#10;lib/**/*.js&#10;scripts/*.sh"></textarea>
+                    <div class="hint"><strong>Leave blank to scan everything</strong> under the project path. Only add patterns here when you want to limit the scan to specific folders or file types. Patterns are line- or comma-separated and relative to the project path.</div>
                   </div>
                   <div class="field">
-                    <label for="exclude_globs">Exclude globs</label>
-                    <textarea id="exclude_globs" name="exclude_globs" placeholder="examples:&#10;vendor/**&#10;**/*.min.js"></textarea>
+                    <div class="glob-label-row">
+                      <label for="exclude_globs" style="margin:0;flex-shrink:0;">Exclude globs</label>
+                    </div>
+                    <textarea id="exclude_globs" name="exclude_globs" class="glob-textarea" placeholder="examples:&#10;vendor/**&#10;**/*.min.js"></textarea>
                     <div id="quick-exclude-chips" class="quick-excl-row">
                       <span class="quick-excl-label">Quick add:</span>
                       <button type="button" class="quick-excl-chip" data-pattern="third_party/**">third_party/**</button>
@@ -16028,7 +16262,7 @@ struct SubmoduleRow {
                   </div>
                   <div class="glob-guidance-card">
                     <strong>Common include examples</strong>
-                    <p><code>src/**/*.rs</code> only Rust sources in src, <code>scripts/*</code> top-level scripts folder, <code>tests/**</code> everything under tests.</p>
+                    <p><strong>Empty (default)</strong> — scans everything. <code>src/**/*.rs</code> only Rust sources, <code>scripts/*</code> top-level scripts only, <code>tests/**</code> everything under tests.</p>
                   </div>
                   <div class="glob-guidance-card">
                     <strong>Common exclude examples</strong>
@@ -16368,14 +16602,17 @@ int main() { … }   ← code
 # Duplicate groups chip always shows the count.</div>
                   </div>
                 </div>
-                <div class="preset-inline-row" style="grid-column:1/-1;">
-                  <div class="always-tracked-tip" style="margin:0;width:100%;">
-                    <div class="always-tracked-tip-icon">ℹ</div>
-                    <div class="always-tracked-tip-body">
-                      <div class="field-help-title">Always computed &mdash; every scan produces these automatically</div>
-                      <h4>Cyclomatic complexity &nbsp;·&nbsp; Logical SLOC &nbsp;·&nbsp; ULOC &amp; DRYness &nbsp;·&nbsp; COCOMO estimate</h4>
-                      <div class="advanced-rule-description">These four metrics are computed on every scan at no extra cost. <strong>Cyclomatic complexity</strong> counts branch keywords per file. <strong>Logical SLOC</strong> counts executable statements (available for C-family, Python, Ruby, Shell, and more). <strong>ULOC</strong> (Unique Lines of Code) de-duplicates identical lines across the whole project; DRYness % = ULOC ÷ Code Lines. <strong>COCOMO I</strong> converts total SLOC into effort, schedule, and team-size estimates. All appear in the results page — the settings above only affect how they are displayed or whether edge cases are excluded.</div>
+                <div class="always-tracked-tip" style="margin:8px 0 0;">
+                  <div class="always-tracked-tip-icon">ℹ</div>
+                  <div class="always-tracked-tip-body">
+                    <div class="field-help-title">Always computed &mdash; every scan produces these automatically</div>
+                    <div class="always-tracked-metrics-row">
+                      <div><strong>Cyclomatic complexity</strong>Counts branch keywords per file.</div>
+                      <div><strong>Logical SLOC</strong>Executable statements &mdash; C-family, Python, Ruby, Shell &amp; more.</div>
+                      <div><strong>ULOC &amp; DRYness</strong>De-duplicates lines project-wide; DRYness&nbsp;%&nbsp;=&nbsp;ULOC&nbsp;&divide;&nbsp;Code&nbsp;Lines.</div>
+                      <div><strong>COCOMO&nbsp;I</strong>Converts total SLOC into effort, schedule &amp; team-size estimates.</div>
                     </div>
+                    <div class="hint" style="margin-top:8px;">All four appear in the results page. The settings above only affect how they are displayed or whether edge cases are excluded.</div>
                   </div>
                 </div>
               </div>
@@ -16448,7 +16685,7 @@ int main() { … }   ← code
                     <div class="hint">Output path is managed by the server — each run stores artifacts in a unique timestamped subfolder automatically.</div>
                     {% else %}
                     <div class="input-group compact">
-                      <input id="output_dir" name="output_dir" type="text" value="" placeholder="auto: project/sloc" onblur="this.scrollLeft=this.scrollWidth" />
+                      <input id="output_dir" name="output_dir" type="text" value="" placeholder="auto: project/sloc" />
                       <button type="button" class="mini-button oxide" id="browse-output-dir">Browse</button>
                       <button type="button" class="mini-button" id="use-default-output">Use default</button>
                     </div>
@@ -16596,6 +16833,15 @@ int main() { … }   ← code
       var coverageSuggestTimer = null;
       var covAutoFilled = false;
       var SERVER_MODE = {% if server_mode %}true{% else %}false{% endif %};
+
+      // Scroll long path inputs to end on blur (replaces inline onblur="..." removed for CSP).
+      (function() {
+        var ids = ["path", "output_dir"];
+        ids.forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el) el.addEventListener("blur", function() { this.scrollLeft = this.scrollWidth; });
+        });
+      }());
       function fmtBytes(b) {
         b = Number(b) || 0;
         if (b >= 1073741824) return (b / 1073741824).toFixed(1).replace(/\.0$/, '') + ' GB';
@@ -16630,6 +16876,27 @@ int main() { … }   ← code
       var artifactPreset = document.getElementById("artifact_preset");
       var includeGlobsInput = document.getElementById("include_globs");
       var excludeGlobsInput = document.getElementById("exclude_globs");
+
+      // Include globs scope badge — updates reactively as the user types.
+      (function() {
+        var badge = document.getElementById("include-scope-badge");
+        if (!badge || !includeGlobsInput) return;
+        var iconCheck = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg> ';
+        var iconFilter = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg> ';
+        function update() {
+          var val = includeGlobsInput.value.trim();
+          if (!val) {
+            badge.className = "include-scope-badge scope-all";
+            badge.innerHTML = iconCheck + "All files eligible — no include filter active";
+          } else {
+            var count = val.split(/[\n,]+/).filter(function(s) { return s.trim(); }).length;
+            badge.className = "include-scope-badge scope-narrow";
+            badge.innerHTML = iconFilter + "Scoped to " + count + " pattern" + (count === 1 ? "" : "s") + " — only matching files will be included";
+          }
+        }
+        includeGlobsInput.addEventListener("input", update);
+        update();
+      }());
 
       // Quick-exclude chips — append pattern to exclude_globs textarea.
       document.querySelectorAll(".quick-excl-chip").forEach(function(chip) {
@@ -17636,6 +17903,10 @@ int main() { … }   ← code
       }
 
       function pickDirectory(targetInput, kind) {
+        if (!targetInput) {
+          showBannerToast("Directory picker: input element not found.", true);
+          return;
+        }
         if (SERVER_MODE) {
           if (kind === 'output') {
             showBannerToast(
@@ -18685,13 +18956,13 @@ struct IndexTemplate {
     "name": "oxide-sloc",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Windows, Linux",
-    "description": "IEEE 1045-1992 SLOC analysis workbench — CLI, web UI, MCP server, 41 languages, offline-first. Counts code, comment, and blank lines; detects unit tests; produces HTML and PDF reports.",
+    "description": "IEEE 1045-1992 SLOC analysis workbench — CLI, web UI, MCP server, 60 languages, offline-first. Counts code, comment, and blank lines; detects unit tests; produces HTML and PDF reports.",
     "softwareVersion": "{{ version }}",
     "author": { "@type": "Person", "name": "Nima Shafie", "url": "https://github.com/NimaShafie" },
     "license": "https://www.gnu.org/licenses/agpl-3.0.html",
     "url": "https://github.com/oxide-sloc/oxide-sloc",
     "downloadUrl": "https://github.com/oxide-sloc/oxide-sloc/releases",
-    "featureList": "41 language analysis, IEEE 1045-1992 SLOC counting, HTML and PDF reports, REST API, MCP server, CI/CD integration, trend reports, test metrics, git integration",
+    "featureList": "60 language analysis, IEEE 1045-1992 SLOC counting, HTML and PDF reports, REST API, MCP server, CI/CD integration, trend reports, test metrics, git integration",
     "programmingLanguage": "Rust",
     "keywords": "sloc, code analysis, source lines of code, metrics, MCP, AI agent"
   }
@@ -19110,9 +19381,9 @@ struct IndexTemplate {
 
     <div class="info-strip">
       <div class="info-chip">
-        <div class="info-chip-tip">C · C++ · Rust · Go · Python · Java · Kotlin · Swift<br>TypeScript · Zig · Haskell · Elixir · and 29 more</div>
+        <div class="info-chip-tip">C · C++ · Rust · Go · Python · Java · Kotlin · Swift<br>TypeScript · Zig · Haskell · Elixir · and 48 more</div>
         <div class="chip-slide">
-          <div class="info-chip-val">41</div>
+          <div class="info-chip-val">60</div>
           <div class="info-chip-label">Languages</div>
         </div>
       </div>
@@ -19346,7 +19617,7 @@ struct IndexTemplate {
       })();
       (function chipSlideshow() {
         var slides = [
-          [{v:'41',l:'Languages'},{v:'Rust · Go · Python',l:'and 38 more'},{v:'C · Java · TypeScript',l:'Swift · Kotlin · Zig'}],
+          [{v:'60',l:'Languages'},{v:'Rust · Go · Python',l:'and 57 more'},{v:'C · Java · TypeScript',l:'Swift · Kotlin · Zig'}],
           [{v:'100%',l:'Self-contained'},{v:'Zero',l:'Dependencies'},{v:'Single',l:'Binary'}],
           [{v:'HTML+PDF',l:'Exportable reports'},{v:'Light+Dark',l:'Themed'},{v:'Offline',l:'No server needed'}],
           [{v:'Webhook',l:'3 platforms'},{v:'GitHub + GitLab',l:'+ Bitbucket'},{v:'Auto-scan',l:'On every push'}],
@@ -20126,17 +20397,26 @@ struct ScanSetupTemplate {
     .empty-card-note { padding: 18px; color: var(--muted); font-size: 14px; line-height: 1.65; border-radius: 12px; border: 1px dashed var(--line-strong); background: var(--surface-2); margin-top: 8px; }
     .action-empty-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
     /* Stat chips (matches HTML report) */
-    .summary-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-top:18px; }
-    @media(max-width:1100px){.summary-strip{grid-template-columns:repeat(3,1fr);}}
+    .summary-strip { display:grid; grid-template-columns:repeat(8,1fr); gap:10px; margin-top:18px; }
+    @media(max-width:1200px){.summary-strip{grid-template-columns:repeat(4,1fr);}}
     @media(max-width:640px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
     .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; overflow:visible; }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; line-height:1.6; white-space:normal; max-width:280px; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:340px; min-width:180px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
+    .cocomo-box { margin-top:14px; background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
+    .cocomo-box-head { display:flex; align-items:center; gap:10px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+    .cocomo-box-title { font-size:16px; font-weight:800; color:var(--text); letter-spacing:-0.01em; }
+    .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
+    .cocomo-mode-pill { display:inline-flex; align-items:center; padding:3px 10px; border-radius:999px; background:var(--surface-3); border:1px solid var(--line-strong); font-size:11px; font-weight:700; color:var(--muted); }
+    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .cocomo-mode-tip::before { content:''; position:absolute; bottom:100%; left:14px; border:5px solid transparent; border-bottom-color:var(--text); }
+    .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; }
+    .cocomo-box-note { font-size:11px; color:var(--muted); margin-top:10px; line-height:1.5; }
     /* Submodule panel */
     .submodule-panel { margin-top: 18px; margin-bottom: 18px; padding: 18px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
     /* Metrics tables stack */
@@ -20390,7 +20670,7 @@ struct ScanSetupTemplate {
         <span class="meta-chip">Files skipped <b>{{ files_skipped }}</b></span>
       </div>
 
-      <!-- 12 summary stat chips -->
+      <!-- All summary stat chips in one unified strip (8 columns) -->
       <div class="summary-strip">
         <div class="stat-chip" data-raw="{{ physical_lines }}">
           <div class="stat-chip-label">Physical lines</div>
@@ -20464,17 +20744,12 @@ struct ScanSetupTemplate {
           <div class="stat-chip-exact"></div>
           <div class="stat-chip-tip">Total number of source files included in this analysis.</div>
         </div>
-      </div>
-
-      <!-- New metrics: complexity, LSLOC, ULOC, duplicates -->
-      {% if cyclomatic_complexity > 0 || uloc > 0 || duplicate_group_count > 0 %}
-      <div class="summary-strip" style="margin-top:12px;">
         {% if cyclomatic_complexity > 0 %}
         <div class="stat-chip" data-raw="{{ cyclomatic_complexity }}" {% if complexity_alert > 0 && cyclomatic_complexity > complexity_alert as u64 %}style="border-color:var(--oxide-2);"{% endif %}>
           <div class="stat-chip-label">Complexity score</div>
           <div class="stat-chip-val">{{ cyclomatic_complexity }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a lexical approximation of McCabe cyclomatic complexity.{% if complexity_alert > 0 %}<br>Alert threshold: {{ complexity_alert }}.{% endif %}</div>
+          <div class="stat-chip-tip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a lexical approximation of McCabe cyclomatic complexity.{% if complexity_alert > 0 %} Alert threshold: {{ complexity_alert }}.{% endif %}</div>
         </div>
         {% endif %}
         {% if let Some(ls) = lsloc %}
@@ -20482,7 +20757,7 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Logical SLOC</div>
           <div class="stat-chip-val">{{ ls }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Logical SLOC: count of executable statements (semicolons for C/Java/Go/Rust; non-continuation lines for Python/Ruby/Shell).<br>Normalises across formatting styles.</div>
+          <div class="stat-chip-tip">Count of executable statements (semicolons for C/Java/Go/Rust; non-continuation lines for Python/Ruby/Shell). Normalises across formatting styles.</div>
         </div>
         {% endif %}
         {% if uloc > 0 %}
@@ -20490,7 +20765,15 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Unique SLOC (ULOC)</div>
           <div class="stat-chip-val">{{ uloc }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Unique Lines of Code: distinct non-blank code lines across all files.{% if dryness_pct_str != "" %}<br>DRYness: {{ dryness_pct_str }}% (higher = less copy-paste).{% endif %}</div>
+          <div class="stat-chip-tip">Unique Lines of Code: distinct non-blank code lines across all files. Counts each line once regardless of how many files it appears in.</div>
+        </div>
+        {% endif %}
+        {% if uloc > 0 && dryness_pct_str != "" %}
+        <div class="stat-chip">
+          <div class="stat-chip-label">DRYness</div>
+          <div class="stat-chip-val">{{ dryness_pct_str }}%</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">ULOC &divide; Code Lines — the fraction of code lines that are unique. Higher = less copy-paste across the codebase. 100% means every code line is distinct.</div>
         </div>
         {% endif %}
         {% if duplicate_group_count > 0 %}
@@ -20498,29 +20781,43 @@ struct ScanSetupTemplate {
           <div class="stat-chip-label">Duplicate groups</div>
           <div class="stat-chip-val">{{ duplicate_group_count }}</div>
           <div class="stat-chip-exact"></div>
-          <div class="stat-chip-tip">Groups of files with identical content detected.<br>These may inflate SLOC counts.<br>Enable "Exclude duplicates" in the scan settings to remove them from totals.</div>
+          <div class="stat-chip-tip">Groups of files with identical content detected. These may inflate SLOC counts. Enable "Exclude duplicates" in scan settings to remove them from totals.</div>
         </div>
         {% endif %}
       </div>
-      {% endif %}
 
       {% if has_cocomo %}
-      <div class="compare-banner" style="margin-top:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:14px 18px;">
-        <div class="compare-banner-body" style="gap:16px;">
-          <div class="compare-banner-meta">
-            <span class="compare-label">COCOMO I — {{ cocomo_mode_label }} mode</span>
-            <div class="compare-banner-stats" style="margin-top:6px;flex-wrap:wrap;gap:14px;">
-              <span><strong>{{ cocomo_effort_str }}</strong> person-months</span>
-              <span class="compare-arrow">·</span>
-              <span><strong>{{ cocomo_duration_str }}</strong> months schedule</span>
-              <span class="compare-arrow">·</span>
-              <span><strong>{{ cocomo_staff_str }}</strong> avg. engineers</span>
-              <span class="compare-arrow">·</span>
-              <span>Input: <strong>{{ cocomo_ksloc_str }}K</strong> SLOC</span>
-            </div>
-            <div style="font-size:11px;color:var(--muted);margin-top:6px;">Estimate only — COCOMO I (Basic). Actual effort varies widely by team experience and domain complexity.</div>
+      <div class="cocomo-box">
+        <div class="cocomo-box-head">
+          <span class="cocomo-box-title">Constructive Cost Model &mdash; COCOMO I</span>
+          <span class="cocomo-mode-pill-wrap" style="margin-left:10px;">
+            <span class="cocomo-mode-pill">{{ cocomo_mode_label }} mode</span>
+            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
+          </span>
+        </div>
+        <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
+          <div class="stat-chip">
+            <div class="stat-chip-label">Person-months</div>
+            <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+            <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 ({{ cocomo_mode_label }} mode).</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Schedule (months)</div>
+            <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+            <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Avg. Team Size</div>
+            <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+            <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Input KSLOC</div>
+            <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+            <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded.</div>
           </div>
         </div>
+        <div class="cocomo-box-note">COCOMO I (Constructive Cost Model) is a classic algorithmic cost-estimation model developed by Barry Boehm in 1981. It translates source lines of code into effort, schedule, and team-size estimates using empirically derived power-law equations calibrated against real project data. These figures are ballpark approximations &mdash; actual outcomes depend heavily on team experience, toolchain maturity, process overhead, and domain complexity.</div>
       </div>
       {% endif %}
 
@@ -22179,6 +22476,8 @@ struct ResultTemplate {
     cocomo_ksloc_str: String,
     /// COCOMO mode label shown in the card (e.g. "Organic").
     cocomo_mode_label: String,
+    /// Tooltip text explaining the selected COCOMO mode.
+    cocomo_mode_tooltip: String,
     /// Per-file complexity alert threshold. 0 = off (no highlighting).
     complexity_alert: u32,
 }
@@ -25330,8 +25629,10 @@ struct CompareSelectTemplate {
     .delta-val.pos{color:var(--pos);}
     .delta-val.neg{color:var(--neg);}
     .delta-val.zero{color:var(--muted);}
-    .from-to{display:flex;align-items:center;gap:4px;white-space:nowrap;color:var(--muted);font-size:12px;}
-    .from-to strong{color:var(--text);}
+    .from-to{display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:13px;}
+    .from-to strong{color:var(--text);font-weight:700;}
+    .from-to .ft-sep{color:var(--muted-2);font-size:11px;}
+    .from-to .ft-absent{color:var(--muted);font-weight:600;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
     body.pdf-mode .top-nav,body.pdf-mode .background-watermarks,body.pdf-mode #code-particles,body.pdf-mode .export-group,body.pdf-mode .btn-reset,body.pdf-mode .filter-tabs,body.pdf-mode .filter-tabs-row,body.pdf-mode .pagination,body.pdf-mode select.per-page,body.pdf-mode .settings-modal,body.pdf-mode .site-footer,body.pdf-mode .scope-bar,body.pdf-mode .submod-scope-bar{display:none!important;}
@@ -25415,7 +25716,7 @@ struct CompareSelectTemplate {
     <div class="top-nav-inner">
       <a class="brand" href="/">
         <img class="brand-logo" src="/images/logo/small-logo.png" alt="OxideSLOC logo">
-        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Scan delta</div></div>
+        <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">Scan Delta</div></div>
       </a>
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
@@ -25653,7 +25954,7 @@ struct CompareSelectTemplate {
               <button class="chart-metric-btn" data-cmp-metric="files">Files</button>
               <button class="chart-metric-btn" data-cmp-metric="comments">Comments</button>
               <button class="chart-metric-btn" data-cmp-metric="tests">Tests</button>
-              <button class="chart-metric-btn" data-cmp-metric="cov">Coverage %</button>
+              <button class="chart-metric-btn" data-cmp-metric="cov">Coverage</button>
             </div>
           </div>
           <div class="chart-wrap"><svg id="cmp-tl-svg" width="100%" height="280"></svg></div>
@@ -25700,14 +26001,6 @@ struct CompareSelectTemplate {
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               Excel
             </button>
-            <button type="button" class="export-btn" id="delta-charts-btn">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              Export HTML
-            </button>
-            <button type="button" class="export-btn" id="delta-pdf-btn">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              Export PDF
-            </button>
           </div>
         </div>
       </div>
@@ -25748,7 +26041,7 @@ struct CompareSelectTemplate {
             <td title="{{ row.relative_path }}"><span class="file-path">{{ row.relative_path }}</span></td>
             <td class="hide-sm">{{ row.language }}</td>
             <td><span class="status-badge {{ row.status }}">{{ row.status }}</span></td>
-            <td><span class="from-to"><strong>{{ row.baseline_code_display }}</strong><span>→</span><strong>{{ row.current_code_display }}</strong></span></td>
+            <td><span class="from-to" data-baseline="{{ row.baseline_code }}" data-current="{{ row.current_code }}">{% if row.baseline_code_display == "—" %}<span class="ft-absent">—</span>{% else %}<strong>{{ row.baseline_code_display }}</strong>{% endif %}<span class="ft-sep">→</span>{% if row.current_code_display == "—" %}<span class="ft-absent">—</span>{% else %}<strong>{{ row.current_code_display }}</strong>{% endif %}</span></td>
             <td><span class="delta-val {{ row.code_delta_class }}">{{ row.code_delta_str }}</span></td>
             <td class="hide-sm"><span class="delta-val {{ row.comment_delta_class }}">{{ row.comment_delta_str }}</span></td>
             <td><span class="delta-val {{ row.total_delta_class }}">{{ row.total_delta_str }}</span></td>
@@ -25777,7 +26070,7 @@ struct CompareSelectTemplate {
 
   <footer class="site-footer">
     local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} \u2014 Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
@@ -25900,7 +26193,7 @@ struct CompareSelectTemplate {
     })();
 
     function parseDeltaNum(str) {
-      if (!str || str === '—') return 0;
+      if (!str || str === '\u2014') return 0;
       return parseFloat(str.replace(/[^0-9.\-]/g, '')) * (str.trim().startsWith('-') ? -1 : 1);
     }
 
@@ -25982,6 +26275,43 @@ struct CompareSelectTemplate {
 
     renderDeltaPage();
 
+    // Compact number formatter (shared by the delta table; charts define their own locally)
+    function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
+    function fmtFull(n){return Number(n).toLocaleString();}
+
+    // Format from-to numbers with fmt() and ensure zero→dash for added/removed
+    function fmtFromTo() {
+      var tbody = document.getElementById('delta-tbody');
+      if (!tbody) return;
+      tbody.querySelectorAll('.delta-row').forEach(function(row) {
+        var status = row.dataset.status || '';
+        var ft = row.querySelector('.from-to');
+        if (!ft) return;
+        var bv = parseInt(ft.getAttribute('data-baseline') || '0', 10);
+        var cv = parseInt(ft.getAttribute('data-current') || '0', 10);
+        var strongs = ft.querySelectorAll('strong');
+        // Apply fmt() to non-absent strong values
+        strongs.forEach(function(el) {
+          var n = parseInt(el.textContent, 10);
+          if (!isNaN(n)) el.textContent = fmt(n);
+        });
+        // Safety: force dash for genuinely absent sides
+        if (status === 'added' && bv === 0) {
+          var bs = ft.querySelector('strong:first-of-type');
+          if (bs && bs.textContent === '0') {
+            bs.outerHTML = '<span class="ft-absent">\u2014</span>';
+          }
+        }
+        if (status === 'removed' && cv === 0) {
+          var cs = ft.querySelector('strong:last-of-type');
+          if (cs && cs.textContent === '0') {
+            cs.outerHTML = '<span class="ft-absent">\u2014</span>';
+          }
+        }
+      });
+    }
+    fmtFromTo();
+
     // ── Event wiring (CSP-safe: no inline handlers) ───────────────────────────
     (function() {
       Array.prototype.slice.call(document.querySelectorAll('.tab-btn[data-filter]')).forEach(function(btn) {
@@ -26018,7 +26348,7 @@ struct CompareSelectTemplate {
       }
       var chartsBtn = document.getElementById('delta-charts-btn');
       if (chartsBtn) chartsBtn.addEventListener('click', function() {
-        var btn=chartsBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting…';
+        var btn=chartsBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting\u2026';
         sdInlineImgs(buildFullPageHtml(false), function(html) {
           var blob=new Blob([html],{type:'text/html;charset=utf-8;'});
           var a=document.createElement('a');a.href=URL.createObjectURL(blob);
@@ -26028,7 +26358,7 @@ struct CompareSelectTemplate {
       });
       var pageHtmlBtn = document.getElementById('page-export-html-btn');
       if (pageHtmlBtn) pageHtmlBtn.addEventListener('click', function() {
-        var btn=pageHtmlBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting…';
+        var btn=pageHtmlBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Exporting\u2026';
         sdInlineImgs(buildFullPageHtml(false), function(html) {
           var blob=new Blob([html],{type:'text/html;charset=utf-8;'});
           var a=document.createElement('a');a.href=URL.createObjectURL(blob);
@@ -26040,10 +26370,13 @@ struct CompareSelectTemplate {
       function buildDeltaPdfHtml() {
         var sd=_sd, dr=getDeltaExportRows();
         var projEl=document.querySelector('[data-folder]'), proj=projEl?projEl.getAttribute('data-folder'):'';
-        var now=new Date().toISOString().replace('T',' ').slice(0,16)+' UTC';
+        var projName=proj?(String(proj).replace(/[\\/]+$/,'').split(/[\\/]/).pop()||proj):proj;
+        var tz;try{tz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){tz='America/Los_Angeles';}
+        var now=(window.fmtTz?window.fmtTz(Date.now(),tz):new Date().toISOString().replace('T',' ').slice(0,16)+' UTC');
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function fmtN(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
-        function delt(v){var s=String(v==null?'—':v);if(!s||s==='0'||s==='—')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
+        function fullN(n){var v=Number(n);return isNaN(v)?'\u2014':v.toLocaleString();}
+        function delt(v){var s=String(v==null?'\u2014':v);if(!s||s==='0'||s==='\u2014')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
         var lm={};
         dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
         var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
@@ -26059,8 +26392,9 @@ struct CompareSelectTemplate {
           '.sc{border:1px solid #ddd;border-radius:8px;padding:10px 12px;}'+
           '.sv{font-size:18px;font-weight:900;color:#c45c10;}'+
           '.sl{font-size:10px;font-weight:700;text-transform:uppercase;color:#888;margin-top:3px;letter-spacing:.06em;}'+
-          '.meta{background:#f5f2ee;border:1px solid #e5e0d8;border-radius:6px;padding:8px 12px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:18px;}'+
-          '.ml{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.06em;}.mv{font-weight:700;margin-top:1px;}'+
+          '.meta{background:#f5f2ee;border:1px solid #e5e0d8;border-radius:6px;padding:12px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:center;}'+
+          '.meta>div{flex:1 1 0;}'+
+          '.ml{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.06em;}.mv{font-weight:700;margin-top:4px;font-size:15px;}'+
           '.sec{margin-bottom:18px;}'+
           '.sh{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}'+
           'table{width:100%;border-collapse:collapse;font-size:12px;}'+
@@ -26076,38 +26410,38 @@ struct CompareSelectTemplate {
             '<td style="text-align:right">'+fmtN(r[4])+'</td>'+
             '<td style="text-align:right">'+delt(r[5])+'</td></tr>';
         }).join('');
-        var more=dr.length>200?'<tr><td colspan="6" style="color:#888;font-style:italic;text-align:center">… '+fmtN(dr.length-200)+' more files — export to XLS for full list</td></tr>':'';
+        var more=dr.length>200?'<tr><td colspan="6" style="color:#888;font-style:italic;text-align:center">\u2026 '+fmtN(dr.length-200)+' more files \u2014 export to XLS for full list</td></tr>':'';
         var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
-        return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC — Scan Delta</title><style>'+css+'</style></head><body>'+
-          '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Scan Delta</div><div class="proj">'+esc(proj)+'</div></div>'+
+        return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC \u2014 Scan Delta</title><style>'+css+'</style></head><body>'+
+          '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Scan Delta</div><div class="proj">'+esc(projName)+'</div></div>'+
           '<div class="hr">'+esc(_blabel)+'<br>'+esc(_clabel)+'<br>Generated: '+esc(now)+'</div></div>'+
           '<div class="body">'+
           '<div class="sg">'+
-          '<div class="sc"><div class="sv">'+delt(sd.cd)+'</div><div class="sl">Code Lines Δ</div></div>'+
-          '<div class="sc"><div class="sv">'+delt(sd.fd)+'</div><div class="sl">Files Δ</div></div>'+
-          '<div class="sc"><div class="sv">'+delt(sd.cmd)+'</div><div class="sl">Comment Lines Δ</div></div>'+
+          '<div class="sc"><div class="sv">'+delt(sd.cd)+'</div><div class="sl">Code Lines \u0394</div></div>'+
+          '<div class="sc"><div class="sv">'+delt(sd.fd)+'</div><div class="sl">Files \u0394</div></div>'+
+          '<div class="sc"><div class="sv">'+delt(sd.cmd)+'</div><div class="sl">Comment Lines \u0394</div></div>'+
           '<div class="sc"><div class="sv" style="color:#111">'+fmtN(tfTotal)+'</div><div class="sl">Total Files</div></div>'+
           '</div>'+
           '<div class="meta">'+
-          '<div><div class="ml">Baseline Code</div><div class="mv">'+fmtN(sd.bc)+'</div></div>'+
-          '<div><div class="ml">Current Code</div><div class="mv">'+fmtN(sd.cc)+'</div></div>'+
-          '<div><div class="ml">Modified</div><div class="mv">'+fmtN(sd.fm)+'</div></div>'+
-          '<div><div class="ml">Added</div><div class="mv" style="color:#2a6846">+'+fmtN(sd.fa)+'</div></div>'+
-          '<div><div class="ml">Removed</div><div class="mv" style="color:#b23030">-'+fmtN(sd.fr)+'</div></div>'+
-          '<div><div class="ml">Unchanged</div><div class="mv">'+fmtN(sd.fu)+'</div></div>'+
+          '<div><div class="ml">Baseline Code</div><div class="mv">'+fullN(sd.bc)+'</div></div>'+
+          '<div><div class="ml">Current Code</div><div class="mv">'+fullN(sd.cc)+'</div></div>'+
+          '<div><div class="ml">Modified</div><div class="mv">'+fullN(sd.fm)+'</div></div>'+
+          '<div><div class="ml">Added</div><div class="mv" style="color:#2a6846">+'+fullN(sd.fa)+'</div></div>'+
+          '<div><div class="ml">Removed</div><div class="mv" style="color:#b23030">-'+fullN(sd.fr)+'</div></div>'+
+          '<div><div class="ml">Unchanged</div><div class="mv">'+fullN(sd.fu)+'</div></div>'+
           '</div>'+
-          (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code Δ</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
+          (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
           '<div class="sec"><p class="sh">File Delta ('+fmtN(dr.length)+' files)</p>'+
           '<table><thead><tr><th>File</th><th>Language</th><th>Status</th>'+
-          '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code Δ</th>'+
+          '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code \u0394</th>'+
           '</tr></thead><tbody>'+fileRows+more+'</tbody></table></div>'+
           '</div>'+
           '<div class="ftr"><span>oxide-sloc v{{ version }}</span><span>Scan Delta Report</span>'+
-          '<span>'+esc(sd.bid)+' → '+esc(sd.cid)+'</span></div>'+
+          '<span>'+esc(sd.bid)+' \u2192 '+esc(sd.cid)+'</span></div>'+
           '</body></html>';
       }
       function doDeltaPdf(btn) {
-        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF…';
+        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF\u2026';
         var html=buildDeltaPdfHtml();
         fetch('/export/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({html:html,filename:getExportFilename('pdf')})})
           .then(function(r){if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();})
@@ -26174,9 +26508,9 @@ struct CompareSelectTemplate {
       function _ps(p){if(!p)return 0;if(p==='0.0%')return 7;if(p==='new')return 5;return p.charAt(0)==='-'?6:5;}
       // Summary sheet
       var W1=WS(),s1=W1.sc,n1=W1.nc,r1=W1.row;
-      r1(s1(0,'OxideSLOC — Scan Delta Report',1));
+      r1(s1(0,'OxideSLOC \u2014 Scan Delta Report',1));
       r1(s1(0,proj,2));
-      r1(s1(0,sd.bts+' → '+sd.cts,2));
+      r1(s1(0,sd.bts+' \u2192 '+sd.cts,2));
       r1('');
       r1(s1(0,'Metric',3)+s1(1,_blabel,3)+s1(2,_clabel,3)+s1(3,'Delta',3)+s1(4,'% Change',3));
       r1(s1(0,'Code Lines')+n1(1,sd.bc,4)+n1(2,sd.cc,4)+s1(3,sd.cd,dstyle(sd.cd))+s1(4,_sp(sd.cc-sd.bc,sd.bc),_ps(_sp(sd.cc-sd.bc,sd.bc))));
@@ -26258,7 +26592,7 @@ struct CompareSelectTemplate {
     function getSummaryExportRows(){return[['Code Lines',String(_sd.bc),String(_sd.cc),_sd.cd,_slPct(_sd.cc-_sd.bc,_sd.bc)],['Files Analyzed',String(_sd.bf),String(_sd.cf),_sd.fd,_slPct(_sd.cf-_sd.bf,_sd.bf)],['Comment Lines',String(_sd.bcm),String(_sd.ccm),_sd.cmd,_slPct(_sd.ccm-_sd.bcm,_sd.bcm)],['Modified Files','0','0',String(_sd.fm),_tfPct(_sd.fm)],['Added Files','0','0',String(_sd.fa),_tfPct(_sd.fa)],['Removed Files','0','0',String(_sd.fr),_tfPct(_sd.fr)],['Unchanged Files','0','0',String(_sd.fu),_tfPct(_sd.fu)]];}
     var _dh = ['File','Language','Status','Code Before ('+_blabel+')','Code After ('+_clabel+')','Code Delta','Comment Delta','Total Delta','% Code Chg'];
     function getDeltaExportRows(){var r=[];document.querySelectorAll('#delta-tbody .delta-row').forEach(function(tr){var b=parseInt(tr.getAttribute('data-baseline-code'))||0,c=parseInt(tr.getAttribute('data-current-code'))||0,st=tr.getAttribute('data-status')||'';r.push([tr.getAttribute('data-path')||'',tr.getAttribute('data-language')||'',st,tr.getAttribute('data-baseline-code')||'',tr.getAttribute('data-current-code')||'',tr.getAttribute('data-code-delta')||'',tr.getAttribute('data-comment-delta')||'',tr.getAttribute('data-total-delta')||'',_filePct(b,c,st)]);});return r;}
-    window.exportDeltaCsv = function(){slocCsv(_exportBase+'_summary.csv',_summaryHdrs,getSummaryExportRows());};
+    window.exportDeltaCsv = function(){slocCsv(_exportBase+'.csv',_dh,getDeltaExportRows());};
     window.exportDeltaXls = function(){slocMakeXlsx(getExportFilename('xlsx'),_sd,getDeltaExportRows());};
 
     // ── Chart HTML report ─────────────────────────────────────────────────────
@@ -26548,7 +26882,7 @@ struct CompareSelectTemplate {
       // Compare Timeline chart (Baseline vs Current, 2 points)
       (function() {
         var activeCmpMetric='code';
-        var cmpMetricLabel={code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage %'};
+        var cmpMetricLabel={code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage'};
         function renderCmpTL(metric) {
           var svg=document.getElementById('cmp-tl-svg');if(!svg)return;
           var W=svg.getBoundingClientRect().width||800,H=280;
@@ -26561,7 +26895,7 @@ struct CompareSelectTemplate {
           ];
           var pts=cmpPts.map(function(p){var v=p.v[metric];return(v==null)?null:Number(v);});
           var valid=pts.filter(function(v){return v!=null;});
-          if(!valid.length){var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.28)':'rgba(67,52,45,0.28)';svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<line x1="'+(W*0.3).toFixed(0)+'" y1="'+(H/2).toFixed(0)+'" x2="'+(W*0.7).toFixed(0)+'" y2="'+(H/2).toFixed(0)+'"'+'  stroke="'+_nd_tc+'" stroke-width="1" stroke-dasharray="5,4"/>'+'<text x="50%" y="50%" dy="0.35em" text-anchor="middle" font-size="12" font-style="italic" fill="'+_nd_tc+'">No data available for this metric</text>';return;}
+          if(!valid.length){var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.30)':'rgba(67,52,45,0.32)';var _nd_ts=_nd_dark?'rgba(255,255,255,0.55)':'rgba(67,52,45,0.60)';var _nd_lbl=(cmpMetricLabel[metric]||metric);var _nd_cov=metric==='cov';var _nd_msg=_nd_cov?'No coverage data for these scans':'No '+_nd_lbl.toLowerCase()+' recorded';var _nd_sub=_nd_cov?'Coverage appears once test results are captured during a scan.':'Neither the baseline nor current scan reported a value for this metric.';var _cx=W/2,_cy=H/2;svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<g opacity="0.55"><rect x="'+(_cx-28).toFixed(1)+'" y="'+(_cy-50).toFixed(1)+'" width="56" height="34" rx="5" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6"/><polyline points="'+(_cx-20).toFixed(1)+','+(_cy-24).toFixed(1)+' '+(_cx-7).toFixed(1)+','+(_cy-30).toFixed(1)+' '+(_cx+6).toFixed(1)+','+(_cy-26).toFixed(1)+' '+(_cx+20).toFixed(1)+','+(_cy-34).toFixed(1)+'" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+4).toFixed(1)+'" text-anchor="middle" font-size="14" font-weight="700" fill="'+_nd_ts+'">'+_nd_msg+'</text>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+24).toFixed(1)+'" text-anchor="middle" font-size="11.5" fill="'+_nd_tc+'">'+_nd_sub+'</text>';return;}
           var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
           if(minV===maxV){minV=Math.max(0,minV-1);maxV=maxV+1;}
           var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
@@ -30373,5 +30707,137 @@ mod utility_tests {
     fn display_path_unc_network_stripped() {
         let result = display_path(Path::new(r"\\?\UNC\server\share"));
         assert_eq!(result, r"\\server\share");
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_unit_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    // Both scenarios live in one test (sequential, under a Tokio runtime) because
+    // load_runtime_security_config spawns a pruning task and mutates process-global
+    // env vars — parallel sub-tests would race on both.
+    #[tokio::test]
+    async fn runtime_security_config_scenarios() {
+        std::env::remove_var("SLOC_API_KEYS");
+        std::env::remove_var("SLOC_API_KEY");
+        std::env::remove_var("SLOC_TLS_CERT");
+        std::env::remove_var("SLOC_TLS_KEY");
+        std::env::remove_var("SLOC_TRUST_PROXY");
+        std::env::remove_var("SLOC_TRUSTED_PROXY_IPS");
+        let cfg = load_runtime_security_config(false);
+        assert!(cfg.api_keys.is_empty());
+        assert!(!cfg.tls_enabled);
+        assert!(!cfg.trust_proxy);
+
+        std::env::set_var("SLOC_API_KEYS", "alpha, beta ,");
+        std::env::set_var("SLOC_TRUST_PROXY", "1");
+        std::env::set_var("SLOC_TRUSTED_PROXY_IPS", "127.0.0.1, 10.0.0.2");
+        std::env::set_var("SLOC_RATE_LIMIT", "250");
+        std::env::set_var("SLOC_AUTH_LOCKOUT_FAILS", "5");
+        std::env::set_var("SLOC_AUTH_LOCKOUT_SECS", "60");
+        let cfg = load_runtime_security_config(true);
+        assert_eq!(cfg.api_keys.len(), 2, "two non-empty keys parsed");
+        assert!(cfg.trust_proxy);
+        assert_eq!(cfg.trusted_proxy_ips.len(), 2);
+        std::env::remove_var("SLOC_API_KEYS");
+        std::env::remove_var("SLOC_TRUST_PROXY");
+        std::env::remove_var("SLOC_TRUSTED_PROXY_IPS");
+        std::env::remove_var("SLOC_RATE_LIMIT");
+        std::env::remove_var("SLOC_AUTH_LOCKOUT_FAILS");
+        std::env::remove_var("SLOC_AUTH_LOCKOUT_SECS");
+    }
+
+    #[test]
+    fn cors_layer_builds_both_modes() {
+        let _ = build_cors_layer(true);
+        let _ = build_cors_layer(false);
+    }
+
+    #[test]
+    fn primary_lan_ip_callable() {
+        // May be Some or None depending on the host; both are valid.
+        let _ = primary_lan_ip();
+    }
+
+    #[test]
+    fn safe_redirect_allows_relative_rejects_absolute() {
+        assert_eq!(safe_redirect("/view-reports"), "/view-reports");
+        assert_eq!(safe_redirect("https://evil.example/x"), "/");
+        assert_eq!(safe_redirect("javascript:alert(1)"), "/");
+        assert_eq!(default_redirect(), "/view-reports");
+    }
+
+    #[test]
+    fn tarball_size_caps_env_override() {
+        std::env::set_var("SLOC_MAX_TARBALL_MB", "1");
+        std::env::set_var("SLOC_MAX_TARBALL_DECOMPRESSED_MB", "2");
+        let (c, d) = parse_tarball_size_caps();
+        assert_eq!(c, 1024 * 1024);
+        assert_eq!(d, 2 * 1024 * 1024);
+        std::env::remove_var("SLOC_MAX_TARBALL_MB");
+        std::env::remove_var("SLOC_MAX_TARBALL_DECOMPRESSED_MB");
+        let (c2, _) = parse_tarball_size_caps();
+        assert_eq!(c2, 2048 * 1024 * 1024, "default 2048 MB");
+    }
+
+    #[test]
+    fn upload_path_helpers() {
+        let base = upload_base_dir();
+        let staged = upload_staging_path("abc123");
+        assert!(staged.starts_with(&base));
+        assert!(
+            is_upload_tmp_path(&staged),
+            "staging path is an upload tmp path"
+        );
+        assert!(!is_upload_tmp_path(Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn git_clones_dir_env_override() {
+        std::env::remove_var("SLOC_GIT_CLONES_DIR");
+        let def = resolve_git_clones_dir(Path::new("/out"));
+        assert_eq!(def, PathBuf::from("/out").join("git-clones"));
+        std::env::set_var("SLOC_GIT_CLONES_DIR", "/custom/clones");
+        assert_eq!(
+            resolve_git_clones_dir(Path::new("/out")),
+            PathBuf::from("/custom/clones")
+        );
+        std::env::remove_var("SLOC_GIT_CLONES_DIR");
+    }
+
+    #[test]
+    fn html_report_file_detection() {
+        let dir = std::env::temp_dir().join("sloc_html_detect");
+        let _ = std::fs::create_dir_all(&dir);
+        let good = dir.join("report_x.html");
+        std::fs::write(&good, "<html></html>").unwrap();
+        let bad = dir.join("notes.txt");
+        std::fs::write(&bad, "x").unwrap();
+        assert!(is_html_report_file(&good));
+        assert!(!is_html_report_file(&bad));
+        assert!(find_html_report_in_dir(&dir).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_delta_class_and_format() {
+        assert_eq!(multi_delta_class(5), "pos");
+        assert_eq!(multi_delta_class(-5), "neg");
+        assert_eq!(multi_delta_class(0), "zero");
+        assert_eq!(multi_fmt_delta(3), "+3");
+        assert_eq!(multi_fmt_delta(-3), "-3");
+        assert_eq!(multi_fmt_delta(0), "0");
+    }
+
+    #[test]
+    fn git_clone_dest_sanitizes() {
+        let dest = git_clone_dest("https://github.com/org/repo.git", Path::new("/clones"));
+        assert!(dest.starts_with("/clones"));
+        let name = dest.file_name().unwrap().to_str().unwrap();
+        assert!(name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.')));
     }
 }

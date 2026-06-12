@@ -6,7 +6,7 @@ Language detection and lexical SLOC analysis for [oxide-sloc](https://github.com
 
 This crate provides:
 
-- **`Language` enum** — 41 supported languages with `display_name()`, `as_slug()`, `from_name()`
+- **`Language` enum** — 60 supported languages with `display_name()`, `as_slug()`, `from_name()`
 - **`analyze_text(language, text, options)`** — hand-rolled character-by-character state machine returning `RawFileAnalysis` with counts for code, comment, blank, and compiler-directive lines
 - **`AnalysisOptions`** — carries IEEE 1045-1992 flags: continuation-line policy, blank-in-block-comment policy, compiler-directive tracking
 
