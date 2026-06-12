@@ -233,6 +233,25 @@ fn empty_file_all_languages() {
         Language::Vue,
         Language::Xml,
         Language::Zig,
+        Language::Solidity,
+        Language::Protobuf,
+        Language::Hcl,
+        Language::GraphQl,
+        Language::Ada,
+        Language::Vhdl,
+        Language::Verilog,
+        Language::Tcl,
+        Language::Pascal,
+        Language::VisualBasic,
+        Language::Lisp,
+        Language::Fortran,
+        Language::Nix,
+        Language::Crystal,
+        Language::D,
+        Language::Glsl,
+        Language::Cmake,
+        Language::Elm,
+        Language::Awk,
     ] {
         let result = analyze_text(lang, "", AnalysisOptions::default());
         assert_eq!(
@@ -580,6 +599,280 @@ fn powershell_basic() {
     assert!(r.total_physical_lines >= 3);
     assert!(r.code_only_lines >= 1);
     assert!(r.single_comment_only_lines >= 1);
+}
+
+// ─── Pass 1 language detection ────────────────────────────────────────────────
+
+#[test]
+fn detect_by_extension_tsx_is_typescript() {
+    let path = std::path::Path::new("App.tsx");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::TypeScript));
+}
+
+#[test]
+fn detect_by_extension_jsx_is_javascript() {
+    let path = std::path::Path::new("App.jsx");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::JavaScript));
+}
+
+#[test]
+fn detect_by_extension_sol_is_solidity() {
+    let path = std::path::Path::new("Token.sol");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Solidity));
+}
+
+#[test]
+fn detect_by_extension_proto_is_protobuf() {
+    let path = std::path::Path::new("service.proto");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Protobuf));
+}
+
+#[test]
+fn detect_by_extension_tf_is_hcl() {
+    let path = std::path::Path::new("main.tf");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::Hcl));
+}
+
+#[test]
+fn detect_by_extension_graphql_is_graphql() {
+    let path = std::path::Path::new("schema.graphql");
+    let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
+    assert_eq!(lang, Some(Language::GraphQl));
+}
+
+// ─── Pass 1 analysis behaviour ────────────────────────────────────────────────
+
+#[test]
+fn solidity_classifies_comments_and_code() {
+    let src = "// SPDX-License-Identifier: MIT\n\
+               pragma solidity ^0.8.0;\n\
+               /* a block\n   comment */\n\
+               contract Token {\n\
+               \x20\x20function mint() public {}\n\
+               }\n";
+    let r = &analyze_text(Language::Solidity, src, AnalysisOptions::default()).raw;
+    assert!(
+        r.single_comment_only_lines >= 1,
+        "expected a // comment line"
+    );
+    assert!(
+        r.multi_comment_only_lines >= 1,
+        "expected a block comment line"
+    );
+    assert!(
+        r.code_only_lines >= 3,
+        "expected pragma/contract/function code lines"
+    );
+}
+
+#[test]
+fn graphql_hash_comment_is_comment() {
+    let src = "# the root query type\n\
+               type Query {\n\
+               \x20\x20hello: String\n\
+               }\n";
+    let r = &analyze_text(Language::GraphQl, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1);
+    assert!(r.code_only_lines >= 2);
+}
+
+#[test]
+fn hcl_supports_hash_and_slash_comments() {
+    let src = "# hash comment\n\
+               // slash comment\n\
+               resource \"aws_s3_bucket\" \"b\" {\n\
+               \x20\x20bucket = \"my-bucket\"\n\
+               }\n";
+    let r = &analyze_text(Language::Hcl, src, AnalysisOptions::default()).raw;
+    assert_eq!(
+        r.single_comment_only_lines, 2,
+        "both # and // are line comments"
+    );
+    assert!(r.code_only_lines >= 2);
+}
+
+// ─── Pass 2 language detection (legacy + embedded / HDL) ──────────────────────
+
+#[test]
+fn detect_pass2_extensions() {
+    let cases = [
+        ("pkg.adb", Language::Ada),
+        ("cpu.vhd", Language::Vhdl),
+        ("alu.sv", Language::Verilog),
+        ("alu.v", Language::Verilog),
+        ("build.tcl", Language::Tcl),
+        ("unit.pas", Language::Pascal),
+        ("Form1.vb", Language::VisualBasic),
+        ("core.lisp", Language::Lisp),
+        ("init.el", Language::Lisp),
+        ("main.scm", Language::Lisp),
+    ];
+    for (path, expected) in cases {
+        let lang = detect_language(
+            std::path::Path::new(path),
+            None,
+            &std::collections::BTreeMap::new(),
+            false,
+        );
+        assert_eq!(lang, Some(expected), "{path} should detect as {expected:?}");
+    }
+}
+
+// ─── Pass 2 analysis behaviour ────────────────────────────────────────────────
+
+#[test]
+fn ada_dash_dash_comment_is_comment() {
+    let src = "-- a comment\n\
+               procedure Main is\n\
+               begin\n\
+               \x20\x20null;\n\
+               end Main;\n";
+    let r = &analyze_text(Language::Ada, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1);
+    assert!(r.code_only_lines >= 3);
+}
+
+#[test]
+fn verilog_classifies_slash_comments() {
+    let src = "// line comment\n\
+               module top;\n\
+               /* block */\n\
+               \x20\x20wire a;\n\
+               endmodule\n";
+    let r = &analyze_text(Language::Verilog, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1);
+    assert_eq!(r.multi_comment_only_lines, 1);
+    assert!(r.code_only_lines >= 3);
+}
+
+#[test]
+fn pascal_brace_block_and_slash_line_comments() {
+    let src = "{ a brace block comment }\n\
+               // a line comment\n\
+               procedure Hello;\n\
+               begin\n\
+               end;\n";
+    let r = &analyze_text(Language::Pascal, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.multi_comment_only_lines, 1, "{{ }} is a block comment");
+    assert_eq!(r.single_comment_only_lines, 1, "// is a line comment");
+    assert!(r.code_only_lines >= 3);
+}
+
+#[test]
+fn visual_basic_apostrophe_is_comment_not_string() {
+    let src = "' a comment\n\
+               Public Sub Main()\n\
+               \x20\x20Dim x As String = \"hi\"\n\
+               End Sub\n";
+    let r = &analyze_text(Language::VisualBasic, src, AnalysisOptions::default()).raw;
+    assert_eq!(
+        r.single_comment_only_lines, 1,
+        "' opens a comment, not a string"
+    );
+    assert!(r.code_only_lines >= 3);
+}
+
+#[test]
+fn assembly_gas_block_comment_now_counted() {
+    // Regression for the Assembly dialect fix: GAS `/* */` blocks are recognized.
+    let src = "; nasm-style line comment\n\
+               /* gas block\n   comment */\n\
+               mov eax, 1\n";
+    let r = &analyze_text(Language::Assembly, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1, "; line comment");
+    assert!(r.multi_comment_only_lines >= 1, "/* */ block now counted");
+    assert!(r.code_only_lines >= 1);
+}
+
+// ─── Pass 3 language detection (scientific / infra / systems / graphics) ──────
+
+#[test]
+fn detect_pass3_extensions() {
+    let cases = [
+        ("solver.f90", Language::Fortran),
+        ("legacy.f", Language::Fortran),
+        ("default.nix", Language::Nix),
+        ("server.cr", Language::Crystal),
+        ("app.d", Language::D),
+        ("shader.frag", Language::Glsl),
+        ("compute.wgsl", Language::Glsl),
+        ("build.cmake", Language::Cmake),
+        ("Main.elm", Language::Elm),
+        ("report.awk", Language::Awk),
+    ];
+    for (path, expected) in cases {
+        let lang = detect_language(
+            std::path::Path::new(path),
+            None,
+            &std::collections::BTreeMap::new(),
+            false,
+        );
+        assert_eq!(lang, Some(expected), "{path} should detect as {expected:?}");
+    }
+}
+
+#[test]
+fn detect_cmakelists_by_filename() {
+    let lang = detect_language(
+        std::path::Path::new("CMakeLists.txt"),
+        None,
+        &std::collections::BTreeMap::new(),
+        false,
+    );
+    assert_eq!(lang, Some(Language::Cmake));
+}
+
+// ─── Pass 3 analysis behaviour ────────────────────────────────────────────────
+
+#[test]
+fn fortran_bang_comment_is_comment() {
+    let src = "! a comment\n\
+               program demo\n\
+               \x20\x20print *, 1  ! inline\n\
+               end program demo\n";
+    let r = &analyze_text(Language::Fortran, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1, "leading ! comment");
+    assert_eq!(r.mixed_code_single_comment_lines, 1, "inline ! comment");
+    assert!(r.code_only_lines >= 2);
+}
+
+#[test]
+fn nix_hash_line_and_slash_block_comments() {
+    let src = "# hash comment\n\
+               /* block */\n\
+               { pkgs }:\n\
+               pkgs.hello\n";
+    let r = &analyze_text(Language::Nix, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1);
+    assert_eq!(r.multi_comment_only_lines, 1);
+    assert!(r.code_only_lines >= 2);
+}
+
+#[test]
+fn cmake_hash_and_bracket_block_comments() {
+    let src = "# a comment\n\
+               #[[ a block\n   comment ]]\n\
+               project(Demo)\n";
+    let r = &analyze_text(Language::Cmake, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1, "# line comment");
+    assert!(r.multi_comment_only_lines >= 1, "#[[ ]] block comment");
+    assert!(r.code_only_lines >= 1);
+}
+
+#[test]
+fn elm_dash_block_comment() {
+    let src = "-- line\n\
+               {- block -}\n\
+               module Main exposing (..)\n";
+    let r = &analyze_text(Language::Elm, src, AnalysisOptions::default()).raw;
+    assert_eq!(r.single_comment_only_lines, 1);
+    assert_eq!(r.multi_comment_only_lines, 1);
+    assert!(r.code_only_lines >= 1);
 }
 
 // ─── detect_language tests ────────────────────────────────────────────────────
@@ -1050,10 +1343,10 @@ fn as_slug_non_empty_for_all_languages() {
 }
 
 #[test]
-fn supported_languages_count_is_41() {
+fn supported_languages_count_is_60() {
     use sloc_languages::supported_languages;
     let count = supported_languages().len();
-    assert_eq!(count, 41, "expected 41 supported languages, got {count}");
+    assert_eq!(count, 60, "expected 60 supported languages, got {count}");
 }
 
 // ─── AnalysisOptions non-defaults ────────────────────────────────────────────

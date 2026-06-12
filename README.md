@@ -32,7 +32,7 @@ bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 
 - **CLI + web UI** — `analyze / report / diff / serve / send / init` commands; guided 4-step web flow with Quick Scan
 - **IEEE 1045-1992 physical SLOC** — configurable mixed-line, continuation-line, compiler-directive, and blank-in-comment policies; symbol counting (functions, classes, variables, imports)
-- **Test Metrics** — lexical test function detection across 41 languages; test-to-code density; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, Istanbul/NYC JSON)
+- **Test Metrics** — lexical test function detection across 60 languages; test-to-code density; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, Istanbul/NYC JSON)
 - **Flexible output** — HTML reports, PDF, CSV, and 4-sheet Excel export; re-render any saved JSON
 - **Git integration** — branch/tag/commit browser, GitHub/GitLab/Bitbucket webhooks and polling, submodule breakdown
 - **CI/CD** — GitHub Actions, Jenkins, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable widget, SMTP/webhook delivery
@@ -42,7 +42,7 @@ bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 
 | Capability | oxide-sloc | cloc | tokei | scc |
 |---|---|---|---|---|
-| Languages | 41 | 250+ | 240+ | 240+ |
+| Languages | 60 | 250+ | 240+ | 240+ |
 | Web UI + HTML/PDF reports | ✓ | — | — | — |
 | MCP server (AI agent tools) | ✓ | — | — | — |
 | Test function detection | ✓ | — | — | — |
@@ -147,9 +147,9 @@ IEEE 1045-1992 counting parameters — `mixed_line_policy`, `continuation_line_p
 
 ---
 
-## Supported Languages (41)
+## Supported Languages (60)
 
-Assembly, C, C++, C#, Clojure, CSS, Dart, Dockerfile, Elixir, Erlang, F#, Go, Groovy, Haskell, HTML, Java, JavaScript, Julia, Kotlin, Lua, Makefile, Nim, Objective-C, OCaml, Perl, PHP, PowerShell, Python, R, Ruby, Rust, Scala, SCSS/Sass, Shell, SQL, Svelte, Swift, TypeScript, Vue, XML/SVG, Zig.
+Ada, Assembly, Awk, C, C++, C#, Clojure, CMake, Crystal, CSS, D, Dart, Dockerfile, Elixir, Elm, Erlang, F#, Fortran, GLSL/HLSL, Go, GraphQL, Groovy, Haskell, HCL/Terraform, HTML, Java, JavaScript, Julia, Kotlin, Lisp/Scheme, Lua, Makefile, Nim, Nix, Objective-C, OCaml, Pascal/Delphi, Perl, PHP, PowerShell, Protocol Buffers, Python, R, Ruby, Rust, Scala, SCSS/Sass, Shell, Solidity, SQL, Svelte, Swift, Tcl, TypeScript, Verilog/SystemVerilog, VHDL, Visual Basic, Vue, XML/SVG, Zig.
 
 > TOML, Markdown, and YAML are intentionally not supported — no meaningful SLOC metric applies.
 

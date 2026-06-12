@@ -1752,7 +1752,7 @@ async fn full_analyze_cycle_html_json_csv_artifacts() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-            if v["status"] == "complete" {
+            if v["state"] == "complete" {
                 run_id = v["run_id"].as_str().unwrap_or("").to_owned();
                 break;
             }
@@ -1923,7 +1923,7 @@ async fn full_analyze_cycle_compare_two_runs() {
         if rid1.is_empty() {
             let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wid1}/status")).await;
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if v["status"] == "complete" {
+                if v["state"] == "complete" {
                     rid1 = v["run_id"].as_str().unwrap_or("").to_owned();
                 }
             }
@@ -1931,7 +1931,7 @@ async fn full_analyze_cycle_compare_two_runs() {
         if rid2.is_empty() {
             let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wid2}/status")).await;
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if v["status"] == "complete" {
+                if v["state"] == "complete" {
                     rid2 = v["run_id"].as_str().unwrap_or("").to_owned();
                 }
             }
@@ -2534,7 +2534,7 @@ async fn full_analyze_cycle_multi_language_project() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-            if v["status"] == "complete" {
+            if v["state"] == "complete" {
                 run_id = v["run_id"].as_str().unwrap_or("").to_owned();
                 break;
             }

@@ -173,7 +173,7 @@
 //! submodule_breakdown = false  # per-submodule stats in output
 //!
 //! [analysis]
-//! enabled_languages = []         # empty = all 41 languages
+//! enabled_languages = []         # empty = all 60 languages
 //! mixed_line_policy = "code-only"
 //! python_docstrings_as_comments = true
 //! generated_file_detection      = true
@@ -287,13 +287,15 @@
 //!
 //! ## Supported languages
 //!
-//! 41 languages detected by file extension and shebang:
+//! 60 languages detected by file extension and shebang:
 //!
-//! Assembly, C, C++, C#, Clojure, CSS, Dart, Dockerfile, Elixir, Erlang, F#,
-//! Go, Groovy, Haskell, HTML, Java, JavaScript, Julia, Kotlin, Lua, Makefile,
-//! Nim, Objective-C, OCaml, Perl, PHP, PowerShell, Python, R, Ruby, Rust,
-//! Scala, SCSS/Sass, Shell (bash/sh/zsh/ksh), SQL, Svelte, Swift, TypeScript,
-//! Vue, XML/SVG, and Zig.
+//! Ada, Assembly, Awk, C, C++, C#, Clojure, CMake, Crystal, CSS, D, Dart,
+//! Dockerfile, Elixir, Elm, Erlang, F#, Fortran, GLSL/HLSL, Go, GraphQL, Groovy,
+//! Haskell, HCL/Terraform, HTML, Java, JavaScript, Julia, Kotlin, Lisp/Scheme,
+//! Lua, Makefile, Nim, Nix, Objective-C, OCaml, Pascal/Delphi, Perl, PHP,
+//! PowerShell, Protocol Buffers, Python, R, Ruby, Rust, Scala, SCSS/Sass,
+//! Shell (bash/sh/zsh/ksh), Solidity, SQL, Svelte, Swift, Tcl, TypeScript,
+//! Verilog/SystemVerilog, VHDL, Visual Basic, Vue, XML/SVG, and Zig.
 //!
 //! TOML, Markdown, and YAML are intentionally excluded — no meaningful SLOC
 //! metric applies to them.

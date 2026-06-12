@@ -54,6 +54,28 @@ pub enum Language {
     Vue,
     Xml,
     Zig,
+    // --- Pass 1: modern declarative / smart-contract languages ---
+    Solidity,
+    Protobuf,
+    Hcl,
+    GraphQl,
+    // --- Pass 2: legacy + embedded / hardware-description languages ---
+    Ada,
+    Vhdl,
+    Verilog,
+    Tcl,
+    Pascal,
+    VisualBasic,
+    Lisp,
+    // --- Pass 3: scientific / infra / systems / graphics ---
+    Fortran,
+    Nix,
+    Crystal,
+    D,
+    Glsl,
+    Cmake,
+    Elm,
+    Awk,
 }
 
 impl Language {
@@ -101,6 +123,25 @@ impl Language {
             Self::Vue => "Vue",
             Self::Xml => "XML",
             Self::Zig => "Zig",
+            Self::Solidity => "Solidity",
+            Self::Protobuf => "Protocol Buffers",
+            Self::Hcl => "HCL/Terraform",
+            Self::GraphQl => "GraphQL",
+            Self::Ada => "Ada",
+            Self::Vhdl => "VHDL",
+            Self::Verilog => "Verilog/SystemVerilog",
+            Self::Tcl => "Tcl",
+            Self::Pascal => "Pascal/Delphi",
+            Self::VisualBasic => "Visual Basic",
+            Self::Lisp => "Lisp/Scheme",
+            Self::Fortran => "Fortran",
+            Self::Nix => "Nix",
+            Self::Crystal => "Crystal",
+            Self::D => "D",
+            Self::Glsl => "GLSL/HLSL",
+            Self::Cmake => "CMake",
+            Self::Elm => "Elm",
+            Self::Awk => "Awk",
         }
     }
 
@@ -148,6 +189,25 @@ impl Language {
             Self::Vue => "vue",
             Self::Xml => "xml",
             Self::Zig => "zig",
+            Self::Solidity => "solidity",
+            Self::Protobuf => "protobuf",
+            Self::Hcl => "hcl",
+            Self::GraphQl => "graphql",
+            Self::Ada => "ada",
+            Self::Vhdl => "vhdl",
+            Self::Verilog => "verilog",
+            Self::Tcl => "tcl",
+            Self::Pascal => "pascal",
+            Self::VisualBasic => "visualbasic",
+            Self::Lisp => "lisp",
+            Self::Fortran => "fortran",
+            Self::Nix => "nix",
+            Self::Crystal => "crystal",
+            Self::D => "d",
+            Self::Glsl => "glsl",
+            Self::Cmake => "cmake",
+            Self::Elm => "elm",
+            Self::Awk => "awk",
         }
     }
 
@@ -195,6 +255,25 @@ impl Language {
             "vue" => Some(Self::Vue),
             "xml" => Some(Self::Xml),
             "zig" => Some(Self::Zig),
+            "solidity" | "sol" => Some(Self::Solidity),
+            "protobuf" | "proto" | "protocolbuffers" => Some(Self::Protobuf),
+            "hcl" | "terraform" | "tf" => Some(Self::Hcl),
+            "graphql" | "gql" => Some(Self::GraphQl),
+            "ada" => Some(Self::Ada),
+            "vhdl" => Some(Self::Vhdl),
+            "verilog" | "systemverilog" | "sv" => Some(Self::Verilog),
+            "tcl" => Some(Self::Tcl),
+            "pascal" | "delphi" | "pas" => Some(Self::Pascal),
+            "visualbasic" | "vb" | "vbnet" | "vb.net" => Some(Self::VisualBasic),
+            "lisp" | "scheme" | "racket" | "clisp" | "elisp" => Some(Self::Lisp),
+            "fortran" | "f90" | "f95" => Some(Self::Fortran),
+            "nix" => Some(Self::Nix),
+            "crystal" | "cr" => Some(Self::Crystal),
+            "d" | "dlang" => Some(Self::D),
+            "glsl" | "hlsl" | "shader" | "wgsl" => Some(Self::Glsl),
+            "cmake" => Some(Self::Cmake),
+            "elm" => Some(Self::Elm),
+            "awk" => Some(Self::Awk),
             _ => None,
         }
     }
@@ -367,6 +446,25 @@ pub fn supported_languages() -> BTreeSet<Language> {
         Language::Vue,
         Language::Xml,
         Language::Zig,
+        Language::Solidity,
+        Language::Protobuf,
+        Language::Hcl,
+        Language::GraphQl,
+        Language::Ada,
+        Language::Vhdl,
+        Language::Verilog,
+        Language::Tcl,
+        Language::Pascal,
+        Language::VisualBasic,
+        Language::Lisp,
+        Language::Fortran,
+        Language::Nix,
+        Language::Crystal,
+        Language::D,
+        Language::Glsl,
+        Language::Cmake,
+        Language::Elm,
+        Language::Awk,
     ]
     .into_iter()
     .collect()
@@ -437,6 +535,8 @@ fn detect_by_extension(ext: &str) -> Option<Language> {
         ("ts", Language::TypeScript),
         ("mts", Language::TypeScript),
         ("cts", Language::TypeScript),
+        ("tsx", Language::TypeScript),
+        ("jsx", Language::JavaScript),
         ("asm", Language::Assembly),
         ("s", Language::Assembly),
         ("clj", Language::Clojure),
@@ -496,6 +596,54 @@ fn detect_by_extension(ext: &str) -> Option<Language> {
         ("xslt", Language::Xml),
         ("svg", Language::Xml),
         ("zig", Language::Zig),
+        ("sol", Language::Solidity),
+        ("proto", Language::Protobuf),
+        ("tf", Language::Hcl),
+        ("tfvars", Language::Hcl),
+        ("hcl", Language::Hcl),
+        ("graphql", Language::GraphQl),
+        ("gql", Language::GraphQl),
+        ("adb", Language::Ada),
+        ("ads", Language::Ada),
+        ("ada", Language::Ada),
+        ("vhd", Language::Vhdl),
+        ("vhdl", Language::Vhdl),
+        ("v", Language::Verilog),
+        ("sv", Language::Verilog),
+        ("svh", Language::Verilog),
+        ("vh", Language::Verilog),
+        ("tcl", Language::Tcl),
+        ("pas", Language::Pascal),
+        ("dpr", Language::Pascal),
+        ("vb", Language::VisualBasic),
+        ("bas", Language::VisualBasic),
+        ("lisp", Language::Lisp),
+        ("lsp", Language::Lisp),
+        ("el", Language::Lisp),
+        ("scm", Language::Lisp),
+        ("ss", Language::Lisp),
+        ("rkt", Language::Lisp),
+        ("f90", Language::Fortran),
+        ("f95", Language::Fortran),
+        ("f03", Language::Fortran),
+        ("f08", Language::Fortran),
+        ("f", Language::Fortran),
+        ("for", Language::Fortran),
+        ("nix", Language::Nix),
+        ("cr", Language::Crystal),
+        ("d", Language::D),
+        ("glsl", Language::Glsl),
+        ("vert", Language::Glsl),
+        ("frag", Language::Glsl),
+        ("comp", Language::Glsl),
+        ("geom", Language::Glsl),
+        ("tesc", Language::Glsl),
+        ("tese", Language::Glsl),
+        ("hlsl", Language::Glsl),
+        ("wgsl", Language::Glsl),
+        ("cmake", Language::Cmake),
+        ("elm", Language::Elm),
+        ("awk", Language::Awk),
     ];
     EXT_MAP.iter().find_map(|&(e, l)| (e == ext).then_some(l))
 }
@@ -522,6 +670,11 @@ fn detect_by_filename(filename: &str, filename_lower: &str) -> Option<Language> 
         "Rakefile" | "Gemfile" | "Guardfile" | "Vagrantfile" | "Fastfile" | "Podfile"
     ) {
         return Some(Language::Ruby);
+    }
+    // CMake build scripts: `CMakeLists.txt` has a `.txt` extension, so it must be
+    // matched by exact name before extension-based detection.
+    if filename == "CMakeLists.txt" || filename_lower == "cmakelists.txt" {
+        return Some(Language::Cmake);
     }
     None
 }
@@ -702,6 +855,33 @@ const BRANCH_PERL: &[&str] = &[
     "if", "elsif", "else", "unless", "until", "for", "while", "foreach", "||", "&&",
 ];
 const BRANCH_R: &[&str] = &["if", "else", "for", "while", "repeat", "||", "&&"];
+// Pass 2 branch-keyword lists (legacy + embedded / HDL).
+const BRANCH_ADA: &[&str] = &[
+    "if", "elsif", "else", "case", "when", "loop", "while", "for", "and", "or",
+];
+const BRANCH_VHDL: &[&str] = &[
+    "if", "elsif", "else", "case", "when", "loop", "while", "for", "and", "or", "nand", "nor",
+    "xor",
+];
+const BRANCH_VERILOG: &[&str] = &[
+    "if", "else", "case", "casex", "casez", "for", "while", "&&", "||",
+];
+const BRANCH_TCL: &[&str] = &["if", "elseif", "else", "switch", "while", "for", "foreach"];
+const BRANCH_PASCAL: &[&str] = &[
+    "if", "then", "else", "case", "while", "for", "repeat", "until", "and", "or",
+];
+const BRANCH_VB: &[&str] = &[
+    "If", "Then", "ElseIf", "Else", "Select", "Case", "While", "For", "Do", "And", "Or",
+];
+const BRANCH_LISP: &[&str] = &["if", "when", "unless", "cond", "case", "and", "or"];
+// Pass 3 branch-keyword lists (scientific / infra / systems / graphics).
+const BRANCH_FORTRAN: &[&str] = &[
+    "if", "then", "else", "elseif", "case", "do", "while", "where",
+];
+const BRANCH_NIX: &[&str] = &["if", "then", "else"];
+const BRANCH_CMAKE: &[&str] = &["if(", "elseif(", "else(", "while(", "foreach("];
+const BRANCH_ELM: &[&str] = &["if", "then", "else", "case", "of"];
+const BRANCH_AWK: &[&str] = &["if", "else", "while", "for", "do"];
 
 /// Returns (branch_keywords, lsloc_strategy) for the given language.
 /// Kept separate from `LANG_SCAN_TABLE` to avoid touching that large table.
@@ -750,6 +930,28 @@ const fn language_complexity_config(
         Language::Erlang => (&[], LslocStrategy::Unsupported),
         Language::Php => (BRANCH_PHP, LslocStrategy::Semicolons),
         Language::Julia => (BRANCH_JULIA, LslocStrategy::NonContinuationNewlines),
+        // ── Pass 1 additions ──────────────────────────────────────────────────
+        Language::Solidity => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
+        Language::Protobuf => (&[], LslocStrategy::Semicolons),
+        Language::Hcl => (&[], LslocStrategy::NonContinuationNewlines),
+        Language::GraphQl => (&[], LslocStrategy::Unsupported),
+        // ── Pass 2 additions (legacy + embedded / HDL) ────────────────────────
+        Language::Ada => (BRANCH_ADA, LslocStrategy::Semicolons),
+        Language::Vhdl => (BRANCH_VHDL, LslocStrategy::Semicolons),
+        Language::Verilog => (BRANCH_VERILOG, LslocStrategy::Semicolons),
+        Language::Tcl => (BRANCH_TCL, LslocStrategy::NonContinuationNewlines),
+        Language::Pascal => (BRANCH_PASCAL, LslocStrategy::Semicolons),
+        Language::VisualBasic => (BRANCH_VB, LslocStrategy::NonContinuationNewlines),
+        Language::Lisp => (BRANCH_LISP, LslocStrategy::Unsupported),
+        // ── Pass 3 additions (scientific / infra / systems / graphics) ────────
+        Language::Fortran => (BRANCH_FORTRAN, LslocStrategy::NonContinuationNewlines),
+        Language::Nix => (BRANCH_NIX, LslocStrategy::Unsupported),
+        Language::Crystal => (BRANCH_RUBY, LslocStrategy::NonContinuationNewlines),
+        Language::D => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
+        Language::Glsl => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
+        Language::Cmake => (BRANCH_CMAKE, LslocStrategy::Unsupported),
+        Language::Elm => (BRANCH_ELM, LslocStrategy::Unsupported),
+        Language::Awk => (BRANCH_AWK, LslocStrategy::NonContinuationNewlines),
     }
 }
 
@@ -795,6 +997,190 @@ impl SymbolPatterns {
 }
 
 const SP_NONE: SymbolPatterns = SymbolPatterns::none(); // all fields are &[]
+
+// Solidity: `function`/`modifier`/`constructor` definitions; `contract`/`interface`/
+// `library` are the structural units (mapped to classes alongside struct/enum).
+const SP_SOLIDITY: SymbolPatterns = SymbolPatterns {
+    functions: &[
+        "function ",
+        "modifier ",
+        "constructor",
+        "receive ",
+        "fallback ",
+    ],
+    functions_prefix_paren: &[],
+    classes: &["contract ", "interface ", "library ", "struct ", "enum "],
+    variables: &[],
+    imports: &["import "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+// Protocol Buffers: `message`/`service`/`enum` declarations are the structural units;
+// `rpc` entries are the closest thing to functions.
+const SP_PROTOBUF: SymbolPatterns = SymbolPatterns {
+    functions: &["rpc "],
+    functions_prefix_paren: &[],
+    classes: &["message ", "service ", "enum "],
+    variables: &[],
+    imports: &["import "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+// ── Pass 2 symbol patterns (legacy + embedded / HDL) ──────────────────────────
+const SP_ADA: SymbolPatterns = SymbolPatterns {
+    functions: &["procedure ", "function "],
+    functions_prefix_paren: &[],
+    classes: &["package ", "type ", "task ", "protected "],
+    variables: &[],
+    imports: &["with ", "use "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_VHDL: SymbolPatterns = SymbolPatterns {
+    functions: &["function ", "procedure ", "process "],
+    functions_prefix_paren: &[],
+    classes: &["entity ", "architecture ", "package ", "component "],
+    variables: &[],
+    imports: &["library ", "use "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_VERILOG: SymbolPatterns = SymbolPatterns {
+    functions: &["function ", "task "],
+    functions_prefix_paren: &[],
+    classes: &["module ", "interface ", "class ", "package "],
+    variables: &[],
+    imports: &["import ", "`include"],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_TCL: SymbolPatterns = SymbolPatterns {
+    functions: &["proc "],
+    functions_prefix_paren: &[],
+    classes: &[],
+    variables: &[],
+    imports: &["source ", "package require "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_PASCAL: SymbolPatterns = SymbolPatterns {
+    functions: &["procedure ", "function "],
+    functions_prefix_paren: &[],
+    classes: &["type ", "class ", "record "],
+    variables: &[],
+    imports: &["uses "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_VB: SymbolPatterns = SymbolPatterns {
+    functions: &[
+        "Sub ",
+        "Function ",
+        "Private Sub ",
+        "Public Sub ",
+        "Private Function ",
+        "Public Function ",
+    ],
+    functions_prefix_paren: &[],
+    classes: &["Class ", "Module ", "Structure "],
+    variables: &[],
+    imports: &["Imports "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_LISP: SymbolPatterns = SymbolPatterns {
+    functions: &["(defun ", "(defmacro ", "(define ", "(defmethod ", "(defn "],
+    functions_prefix_paren: &[],
+    classes: &["(defclass ", "(defstruct "],
+    variables: &[],
+    imports: &["(require ", "(import ", "(use-package "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+// ── Pass 3 symbol patterns (scientific / infra / systems / graphics) ──────────
+const SP_FORTRAN: SymbolPatterns = SymbolPatterns {
+    functions: &["subroutine ", "function "],
+    functions_prefix_paren: &[],
+    classes: &["module ", "program ", "type "],
+    variables: &[],
+    imports: &["use ", "include "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_CRYSTAL: SymbolPatterns = SymbolPatterns {
+    functions: &["def "],
+    functions_prefix_paren: &[],
+    classes: &["class ", "module ", "struct ", "enum "],
+    variables: &[],
+    imports: &["require "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_D: SymbolPatterns = SymbolPatterns {
+    functions: &[],
+    functions_prefix_paren: &[],
+    classes: &["class ", "struct ", "interface ", "enum ", "template "],
+    variables: &[],
+    imports: &["import "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_CMAKE: SymbolPatterns = SymbolPatterns {
+    functions: &["function(", "macro("],
+    functions_prefix_paren: &[],
+    classes: &[],
+    variables: &[],
+    imports: &["include(", "add_subdirectory("],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_ELM: SymbolPatterns = SymbolPatterns {
+    functions: &[],
+    functions_prefix_paren: &[],
+    classes: &["type "],
+    variables: &[],
+    imports: &["import "],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
+
+const SP_AWK: SymbolPatterns = SymbolPatterns {
+    functions: &["function "],
+    functions_prefix_paren: &[],
+    classes: &[],
+    variables: &[],
+    imports: &[],
+    tests: &[],
+    assertions: &[],
+    test_suites: &[],
+};
 
 const SP_RUST: SymbolPatterns = SymbolPatterns {
     functions: &[
@@ -2104,14 +2490,18 @@ static LANG_SCAN_TABLE: &[(Language, StaticLangConfig)] = &[
             ..C_SLASH_BASE
         },
     ),
-    // Assembly / Clojure: `;` line comment, no block, no string literals
+    // Assembly: `;` line comment (NASM/MASM) + `/* */` block (GAS), double-quote
+    // strings for `.ascii`/`.string` directives. `#` (GAS x86) and `@` (ARM) line
+    // comments are intentionally NOT added: `#` is an immediate prefix in ARM
+    // (`mov r0, #5`) and `@` appears in x86 symbol versioning (`memcpy@plt`), so a
+    // universal superset would mis-count one dialect or the other.
     (
         Language::Assembly,
         StaticLangConfig {
             line_comments: &[";"],
-            block_comment: None,
+            block_comment: Some(("/*", "*/")),
             allow_single_quote_strings: false,
-            allow_double_quote_strings: false,
+            allow_double_quote_strings: true,
             symbol_patterns: SP_ASSEMBLY,
             ..C_SLASH_BASE
         },
@@ -2157,6 +2547,195 @@ static LANG_SCAN_TABLE: &[(Language, StaticLangConfig)] = &[
             allow_triple_quote_strings: true,
             symbol_patterns: SP_JULIA,
             ..C_SLASH_BASE
+        },
+    ),
+    // ── Pass 1 additions ──────────────────────────────────────────────────────
+    // Solidity: C-slash family (`//`, `/* */`, single + double quotes).
+    (
+        Language::Solidity,
+        StaticLangConfig {
+            symbol_patterns: SP_SOLIDITY,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Protocol Buffers: C-slash family, statements terminated by `;`.
+    (
+        Language::Protobuf,
+        StaticLangConfig {
+            symbol_patterns: SP_PROTOBUF,
+            ..C_SLASH_BASE
+        },
+    ),
+    // HCL / Terraform: `#` or `//` line, `/* */` block, double-quote strings only.
+    (
+        Language::Hcl,
+        StaticLangConfig {
+            line_comments: &["#", "//"],
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_NONE,
+            ..C_SLASH_BASE
+        },
+    ),
+    // GraphQL: `#` line comment, no block; `"""` block-string descriptions, no single quotes.
+    (
+        Language::GraphQl,
+        StaticLangConfig {
+            allow_single_quote_strings: false,
+            allow_triple_quote_strings: true,
+            symbol_patterns: SP_NONE,
+            ..HASH_BASE
+        },
+    ),
+    // ── Pass 2 additions (legacy + embedded / HDL) ────────────────────────────
+    // Ada: `--` line comment, no block; `'` is a char/attribute tick, not a string.
+    (
+        Language::Ada,
+        StaticLangConfig {
+            line_comments: &["--"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_ADA,
+            ..C_SLASH_BASE
+        },
+    ),
+    // VHDL: `--` line comment, no block; `'` is a bit/char literal, not a string.
+    (
+        Language::Vhdl,
+        StaticLangConfig {
+            line_comments: &["--"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_VHDL,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Verilog / SystemVerilog: C-slash family; `'` is a sized-literal base, not a string.
+    (
+        Language::Verilog,
+        StaticLangConfig {
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_VERILOG,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Tcl: `#` line comment, no block; `"` strings only.
+    (
+        Language::Tcl,
+        StaticLangConfig {
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_TCL,
+            ..HASH_BASE
+        },
+    ),
+    // Pascal / Delphi: `//` line, `{ }` block; strings are single-quoted.
+    (
+        Language::Pascal,
+        StaticLangConfig {
+            line_comments: &["//"],
+            block_comment: Some(("{", "}")),
+            allow_single_quote_strings: true,
+            allow_double_quote_strings: false,
+            symbol_patterns: SP_PASCAL,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Visual Basic: `'` line comment, no block; `"` strings only.
+    (
+        Language::VisualBasic,
+        StaticLangConfig {
+            line_comments: &["'"],
+            block_comment: None,
+            allow_single_quote_strings: false,
+            allow_double_quote_strings: true,
+            symbol_patterns: SP_VB,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Lisp / Scheme: `;` line comment, `#| |#` block; `"` strings, `'` is the quote operator.
+    (
+        Language::Lisp,
+        StaticLangConfig {
+            line_comments: &[";"],
+            block_comment: Some(("#|", "|#")),
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_LISP,
+            ..C_SLASH_BASE
+        },
+    ),
+    // ── Pass 3 additions (scientific / infra / systems / graphics) ────────────
+    // Fortran: `!` line comment (free-form), no block; single + double strings.
+    (
+        Language::Fortran,
+        StaticLangConfig {
+            line_comments: &["!"],
+            block_comment: None,
+            symbol_patterns: SP_FORTRAN,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Nix: `#` line, `/* */` block; double-quote strings (and `''` multi-line).
+    (
+        Language::Nix,
+        StaticLangConfig {
+            block_comment: Some(("/*", "*/")),
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_NONE,
+            ..HASH_BASE
+        },
+    ),
+    // Crystal: `#` line comment, no block; Ruby-like single + double strings.
+    (
+        Language::Crystal,
+        StaticLangConfig {
+            symbol_patterns: SP_CRYSTAL,
+            ..HASH_BASE
+        },
+    ),
+    // D: C-slash family (`//`, `/* */`); single-quote char literals + double strings.
+    (
+        Language::D,
+        StaticLangConfig {
+            symbol_patterns: SP_D,
+            ..C_SLASH_BASE
+        },
+    ),
+    // GLSL / HLSL / WGSL shaders: C-slash family; no char literals.
+    (
+        Language::Glsl,
+        StaticLangConfig {
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_NONE,
+            ..C_SLASH_BASE
+        },
+    ),
+    // CMake: `#` line, `#[[ ]]` block; double-quote strings only.
+    (
+        Language::Cmake,
+        StaticLangConfig {
+            block_comment: Some(("#[[", "]]")),
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_CMAKE,
+            ..HASH_BASE
+        },
+    ),
+    // Elm: `--` line, `{- -}` block; double-quote strings only.
+    (
+        Language::Elm,
+        StaticLangConfig {
+            line_comments: &["--"],
+            block_comment: Some(("{-", "-}")),
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_ELM,
+            ..C_SLASH_BASE
+        },
+    ),
+    // Awk: `#` line comment, no block; double-quote strings only.
+    (
+        Language::Awk,
+        StaticLangConfig {
+            allow_single_quote_strings: false,
+            symbol_patterns: SP_AWK,
+            ..HASH_BASE
         },
     ),
 ];

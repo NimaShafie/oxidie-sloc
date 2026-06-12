@@ -1199,4 +1199,94 @@ mod http_tests {
             "update_server should succeed"
         );
     }
+
+    /// Minimal AnalysisRun for post_to_confluence (render_confluence_storage input).
+    fn tiny_run() -> sloc_core::AnalysisRun {
+        sloc_core::AnalysisRun {
+            tool: sloc_core::ToolMetadata {
+                name: "oxide-sloc".into(),
+                version: "1.5.66".into(),
+                run_id: "conf-001".into(),
+                timestamp_utc: chrono::Utc::now(),
+            },
+            environment: sloc_core::EnvironmentMetadata {
+                operating_system: "linux".into(),
+                architecture: "x86_64".into(),
+                runtime_mode: "test".into(),
+                initiator_username: "tester".into(),
+                initiator_hostname: "ci".into(),
+                ci_name: None,
+            },
+            effective_configuration: sloc_config::AppConfig::default(),
+            input_roots: vec!["/test/proj".into()],
+            summary_totals: sloc_core::SummaryTotals {
+                files_considered: 1,
+                files_analyzed: 1,
+                code_lines: 42,
+                ..Default::default()
+            },
+            totals_by_language: vec![],
+            per_file_records: vec![],
+            skipped_file_records: vec![],
+            warnings: vec![],
+            submodule_summaries: vec![],
+            git_commit_short: None,
+            git_commit_long: None,
+            git_branch: None,
+            git_commit_author: None,
+            git_tags: None,
+            git_nearest_tag: None,
+            git_commit_date: None,
+            git_remote_url: None,
+            style_summary: None,
+            cocomo: None,
+            uloc: 0,
+            dryness_pct: None,
+            duplicate_groups: vec![],
+            duplicates_excluded: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn post_to_confluence_cloud_creates_new_page() {
+        // spaces lookup → page search (empty) → create.
+        let app = Router::new()
+            .route(
+                "/wiki/api/v2/spaces",
+                routing::get(|| async { Json(serde_json::json!({"results": [{"id": "sp1"}]})) }),
+            )
+            .route(
+                "/wiki/api/v2/pages",
+                routing::get(|| async { Json(serde_json::json!({"results": []})) })
+                    .post(|| async { Json(serde_json::json!({"id": "page-new"})) }),
+            );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        let id = post_to_confluence(&client, &tiny_run(), "My Report", Some("/runs/result/x"))
+            .await
+            .expect("cloud post should create a page");
+        assert_eq!(id, "page-new");
+    }
+
+    #[tokio::test]
+    async fn post_to_confluence_server_updates_existing_page() {
+        // page search (found) → update.
+        let app = Router::new()
+            .route(
+                "/rest/api/content",
+                routing::get(|| async {
+                    Json(serde_json::json!({"results": [{"id": "p9", "version": {"number": 4}}]}))
+                }),
+            )
+            .route(
+                "/rest/api/content/{id}",
+                routing::put(|| async { Json(serde_json::json!({"id": "p9"})) }),
+            );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        let id = post_to_confluence(&client, &tiny_run(), "My Report", None)
+            .await
+            .expect("server post should update the page");
+        assert_eq!(id, "p9");
+    }
 }

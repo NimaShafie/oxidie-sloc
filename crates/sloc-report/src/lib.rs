@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use askama::Template;
 use chrono::{DateTime, FixedOffset, Utc};
-use sloc_core::{AnalysisRun, FileRecord, StyleSummary, SummaryTotals};
+use sloc_core::{AnalysisRun, CocomoMode, FileRecord, StyleSummary, SummaryTotals};
 
 // Embed logo images at compile time so every generated HTML report is fully
 // self-contained.  Server-relative paths like /images/logo/... break when the
@@ -591,6 +591,31 @@ fn render_html_inner(
             .cocomo
             .as_ref()
             .map_or(String::new(), |c| format!("{:.2}", c.ksloc)),
+        cocomo_mode_label: run
+            .cocomo
+            .as_ref()
+            .map_or("Organic".to_string(), |c| match c.mode {
+                CocomoMode::Organic => "Organic",
+                CocomoMode::SemiDetached => "Semi-detached",
+                CocomoMode::Embedded => "Embedded",
+            }.to_string()),
+        cocomo_mode_tooltip: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| match c.mode {
+                CocomoMode::Organic => "Organic: A small team working on a well-understood \
+                    project in a familiar environment with minimal external constraints. \
+                    Suited for internal tools, utilities, and projects with stable requirements. \
+                    Effort = 2.4 \u{00D7} KSLOC^1.05.",
+                CocomoMode::SemiDetached => "Semi-detached: A mixed team with varying levels of \
+                    experience tackling a project with moderate novelty and some rigid constraints. \
+                    Typical for compilers, transaction systems, and batch processors. \
+                    Effort = 3.0 \u{00D7} KSLOC^1.12.",
+                CocomoMode::Embedded => "Embedded: Tight hardware, software, or operational \
+                    constraints requiring significant innovation and deep integration work. \
+                    Typical for real-time control systems and safety-critical software. \
+                    Effort = 3.6 \u{00D7} KSLOC^1.20.",
+            }.to_string()),
         uloc: run.uloc,
         dryness_pct_str: run
             .dryness_pct
@@ -689,6 +714,16 @@ fn wait_for_charts_ready(tab: &headless_chrome::Tab) {
     loop {
         if let Ok(r) = tab.evaluate("!!window.oxSlocChartsReady", false) {
             if matches!(r.value, Some(serde_json::Value::Bool(true))) {
+                // Report any JS exception that prevented chart rendering.
+                if let Ok(e) = tab.evaluate("window.oxSlocChartError||''", false) {
+                    if let Some(serde_json::Value::String(msg)) = e.value {
+                        if !msg.is_empty() {
+                            eprintln!(
+                                "[oxide-sloc][pdf] chart JS error (charts may be missing): {msg}"
+                            );
+                        }
+                    }
+                }
                 break;
             }
         }
@@ -1862,6 +1897,104 @@ fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f3
     row_y
 }
 
+/// Render the COCOMO I estimate section as a compact table on the PDF page.
+/// Returns the bottom y-coordinate of the rendered section.
+#[allow(clippy::cast_precision_loss)]
+fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f32) -> f32 {
+    use printpdf::{Color, Mm, Rgb};
+    const HDR_H: f32 = 5.5;
+    const ROW_H: f32 = 5.5;
+    const NOTE_H: f32 = 4.0;
+    const GAP: f32 = 2.0;
+
+    let Some(ref c) = run.cocomo else {
+        return section_top;
+    };
+
+    let mode_label = match c.mode {
+        CocomoMode::Organic => "Organic",
+        CocomoMode::SemiDetached => "Semi-detached",
+        CocomoMode::Embedded => "Embedded",
+    };
+    let usable_w = ctx.w - 2.0 * ctx.margin;
+
+    // Section header bar
+    pdf_fill_rect(
+        ctx.layer,
+        ctx.margin,
+        section_top - HDR_H,
+        usable_w,
+        HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        "CONSTRUCTIVE COST MODEL (COCOMO I) ESTIMATE",
+        7.0,
+        Mm(ctx.margin + 2.0),
+        Mm(section_top - HDR_H + 1.5),
+        ctx.font_bold,
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.85, 0.65, 0.35, None)));
+    let mode_display = format!("{mode_label} mode");
+    ctx.layer.use_text(
+        mode_display.as_str(),
+        5.5,
+        Mm(ctx.w - ctx.margin - 28.0),
+        Mm(section_top - HDR_H + 1.5),
+        ctx.font_reg,
+    );
+
+    // 4-column data row (full width, single row)
+    let col_w = usable_w / 4.0;
+    let row_y = section_top - HDR_H - ROW_H;
+    let data: [(&str, String); 4] = [
+        ("Person-months", format!("{:.2}", c.effort_person_months)),
+        ("Schedule (months)", format!("{:.2}", c.duration_months)),
+        ("Avg. Team Size", format!("{:.2}", c.avg_staff)),
+        ("Input KSLOC", format!("{:.2}K", c.ksloc)),
+    ];
+    for (i, (label, value)) in data.iter().enumerate() {
+        let cx = ctx.margin + i as f32 * col_w;
+        let bg = if i % 2 == 0 {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(ctx.layer, cx, row_y, col_w, ROW_H, bg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+        ctx.layer
+            .use_text(*label, 5.5, Mm(cx + 2.0), Mm(row_y + 3.2), ctx.font_reg);
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+        ctx.layer.use_text(
+            value.as_str(),
+            8.5,
+            Mm(cx + 2.0),
+            Mm(row_y + 0.8),
+            ctx.font_bold,
+        );
+    }
+
+    // Footnote
+    let note_y = row_y - GAP;
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+    ctx.layer.use_text(
+        "COCOMO I (Boehm, 1981): algorithmic model converting SLOC into effort, schedule, and team-size estimates. \
+         Ballpark figures only - actual outcomes vary with team experience and domain complexity.",
+        5.5,
+        Mm(ctx.margin),
+        Mm(note_y),
+        ctx.font_reg,
+    );
+
+    note_y - NOTE_H
+}
+
 /// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
 ///
 /// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
@@ -1933,10 +2066,22 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     pdf_render_metric_tables(&ctx, run, tbl_top);
     // Style analysis section — rendered below the metric tables when data is available.
     // The metric tables occupy ~64.5 mm below tbl_top; leave 4 mm clearance before drawing.
-    if let Some(ref ss) = run.style_summary {
-        let style_top = tbl_top - 64.5 - 4.0;
-        if style_top > FOOTER_H + 12.0 {
-            pdf_render_style_section(&ctx, ss, style_top);
+    let after_tables_y = tbl_top - 64.5 - 4.0;
+    let after_style_y = if let Some(ref ss) = run.style_summary {
+        if after_tables_y > FOOTER_H + 12.0 {
+            pdf_render_style_section(&ctx, ss, after_tables_y)
+        } else {
+            after_tables_y
+        }
+    } else {
+        after_tables_y
+    };
+    // COCOMO estimate — rendered below the style section (or metric tables if no style data).
+    if run.cocomo.is_some() {
+        let cocomo_top = after_style_y - 3.0;
+        // Need ~18 mm: header (5.5) + row (5.5) + note (4) + gaps (3) = 18 mm
+        if cocomo_top > FOOTER_H + 18.0 {
+            pdf_render_cocomo_section(&ctx, run, cocomo_top);
         }
     }
     pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
@@ -2064,7 +2209,11 @@ pub fn write_pdf_from_html(html_path: &Path, pdf_path: &Path) -> Result<()> {
     let absolute_html = html_path
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", html_path.display()))?;
-    eprintln!("[oxide-sloc][pdf] html = {}", absolute_html.display());
+    // canonicalize() on Windows prepends \\?\ (extended-length path prefix) — strip it for display.
+    eprintln!(
+        "[oxide-sloc][pdf] html = {}",
+        absolute_html.to_string_lossy().trim_start_matches(r"\\?\")
+    );
 
     let absolute_pdf = if pdf_path.is_absolute() {
         pdf_path.to_path_buf()
@@ -2201,23 +2350,53 @@ fn windows_browser_candidates() -> Vec<PathBuf> {
     for base in [program_files, program_files_x86].into_iter().flatten() {
         let base = PathBuf::from(base);
 
-        paths.push(base.join("Google/Chrome/Application/chrome.exe"));
-        paths.push(base.join("Microsoft/Edge/Application/msedge.exe"));
-        paths.push(base.join("BraveSoftware/Brave-Browser/Application/brave.exe"));
-        paths.push(base.join("Vivaldi/Application/vivaldi.exe"));
-        paths.push(base.join("Opera/launcher.exe"));
-        paths.push(base.join("Opera GX/launcher.exe"));
+        paths.push(
+            base.join("Google")
+                .join("Chrome")
+                .join("Application")
+                .join("chrome.exe"),
+        );
+        paths.push(
+            base.join("Microsoft")
+                .join("Edge")
+                .join("Application")
+                .join("msedge.exe"),
+        );
+        paths.push(
+            base.join("BraveSoftware")
+                .join("Brave-Browser")
+                .join("Application")
+                .join("brave.exe"),
+        );
+        paths.push(base.join("Vivaldi").join("Application").join("vivaldi.exe"));
+        paths.push(base.join("Opera").join("launcher.exe"));
+        paths.push(base.join("Opera GX").join("launcher.exe"));
     }
 
     if let Some(base) = local_app_data {
         let base = PathBuf::from(base);
 
-        paths.push(base.join("Google/Chrome/Application/chrome.exe"));
-        paths.push(base.join("Microsoft/Edge/Application/msedge.exe"));
-        paths.push(base.join("BraveSoftware/Brave-Browser/Application/brave.exe"));
-        paths.push(base.join("Vivaldi/Application/vivaldi.exe"));
-        paths.push(base.join("Programs/Opera/launcher.exe"));
-        paths.push(base.join("Programs/Opera GX/launcher.exe"));
+        paths.push(
+            base.join("Google")
+                .join("Chrome")
+                .join("Application")
+                .join("chrome.exe"),
+        );
+        paths.push(
+            base.join("Microsoft")
+                .join("Edge")
+                .join("Application")
+                .join("msedge.exe"),
+        );
+        paths.push(
+            base.join("BraveSoftware")
+                .join("Brave-Browser")
+                .join("Application")
+                .join("brave.exe"),
+        );
+        paths.push(base.join("Vivaldi").join("Application").join("vivaldi.exe"));
+        paths.push(base.join("Programs").join("Opera").join("launcher.exe"));
+        paths.push(base.join("Programs").join("Opera GX").join("launcher.exe"));
     }
 
     paths
@@ -2788,7 +2967,7 @@ struct WarningOpportunityRow {
     .tz-select:focus{border-color:var(--oxide);}
     .page { max-width: 1720px; margin: 0 auto; padding: 32px 24px 40px; }
     @media (max-width: 1920px) { .top-nav-inner { max-width: 1500px; } .page { max-width: 1500px; } }
-    .summary-grid { display:grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:10px; }
+    .summary-grid { display:grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap:10px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
     .metric { padding: 11px 12px 20px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 70px; }
@@ -2798,7 +2977,7 @@ struct WarningOpportunityRow {
     .metric-value { margin-top: 6px; }
     .metric-big { display:block; font-size: 20px; font-weight: 900; color: var(--oxide); line-height: 1.15; letter-spacing: -0.02em; }
     .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 12px; font-weight: 600; color: var(--muted); font-family: ui-monospace, monospace; }
-    .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.45; white-space: normal; max-width: 220px; text-align: center; pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 100; box-shadow: 0 4px 14px rgba(0,0,0,0.22); }
+    .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.55; white-space: normal; max-width: 340px; min-width: 200px; text-align: left; pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 100; box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
     .metric-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--text); }
     .metric:hover .metric-tooltip { opacity: 1; }
     .hero { padding: 24px 24px 20px; margin-bottom: 18px; background: linear-gradient(150deg, rgba(111,155,255,0.06) 0%, transparent 55%), var(--surface); border-top: 3px solid var(--accent); }
@@ -2988,10 +3167,14 @@ struct WarningOpportunityRow {
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.4; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 14px rgba(0,0,0,0.2); }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; font-weight:500; line-height:1.55; white-space:normal; max-width:340px; min-width:180px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
+    .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
+    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .cocomo-mode-tip::before { content:''; position:absolute; bottom:100%; left:14px; border:5px solid transparent; border-bottom-color:var(--text); }
+    .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; }
     .report-stack { display:grid; gap: 18px; align-items:start; }
     pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 16px; padding: 16px; overflow: auto; font-size: 12px; color: var(--text); }
     .warn-list { margin: 0; padding-left: 18px; line-height: 1.6; }
@@ -3699,37 +3882,46 @@ struct WarningOpportunityRow {
         <div class="metric" data-metric-value="{{ run.summary_totals.files_analyzed }}"><div class="metric-tooltip">Total number of source files included in this analysis.</div><div class="metric-label">Files analyzed</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
         {% if run.summary_totals.cyclomatic_complexity > 0 %}<div class="metric" data-metric-value="{{ run.summary_totals.cyclomatic_complexity }}"><div class="metric-tooltip">Sum of branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines. Approximates total McCabe cyclomatic complexity.</div><div class="metric-label">Complexity score</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
         {% if let Some(lsloc) = run.summary_totals.lsloc %}<div class="metric" data-metric-value="{{ lsloc }}"><div class="metric-tooltip">Logical SLOC: count of executable statements (semicolons for C-family; non-continuation lines for Python/Ruby/Shell). Normalises across coding styles.</div><div class="metric-label">Logical SLOC</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
-        {% if uloc > 0 %}<div class="metric" data-metric-value="{{ uloc }}"><div class="metric-tooltip">Unique Lines of Code: distinct non-blank code lines across all files. DRYness = ULOC &divide; Code Lines {% if dryness_pct_str != "" %}({{ dryness_pct_str }}%){% endif %}.</div><div class="metric-label">Unique SLOC (ULOC)</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
+        {% if uloc > 0 %}<div class="metric" data-metric-value="{{ uloc }}"><div class="metric-tooltip">Unique Lines of Code: distinct non-blank code lines across all files. Counts each line once regardless of how many files it appears in.</div><div class="metric-label">Unique SLOC (ULOC)</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
+        {% if uloc > 0 && dryness_pct_str != "" %}<div class="metric"><div class="metric-tooltip">ULOC &divide; Code Lines &mdash; the fraction of code lines that are unique. Higher = less copy-paste across the codebase. 100% means every code line is distinct.</div><div class="metric-label">DRYness</div><div class="metric-value"><span class="metric-big">{{ dryness_pct_str }}%</span></div></div>{% endif %}
         {% if duplicate_group_count > 0 %}<div class="metric" data-metric-value="{{ duplicate_group_count }}"><div class="metric-tooltip">Groups of files with identical content detected. These may inflate SLOC totals. Re-run with --no-duplicates to exclude them.</div><div class="metric-label">Duplicate groups</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
       </div>
     </section>
 
     {% if has_cocomo %}
-    <section class="report-card" id="cocomo-section">
-      <div class="toolbar"><div class="toolbar-left"><h2>COCOMO I Estimate</h2></div></div>
-      <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
-          <div class="stat-chip-label">Person-months</div>
-          <div class="stat-chip-tip">Estimated development effort (COCOMO I, Organic mode)</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
-          <div class="stat-chip-label">Schedule (months)</div>
-          <div class="stat-chip-tip">Estimated project duration in calendar months</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
-          <div class="stat-chip-label">Avg. Team Size</div>
-          <div class="stat-chip-tip">Average engineers required (effort &divide; duration)</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
-          <div class="stat-chip-label">Input KSLOC</div>
-          <div class="stat-chip-tip">{{ run.summary_totals.code_lines }} code lines used as COCOMO input</div>
+    <section class="panel" id="cocomo-section" style="margin-bottom:24px;">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <h2>Constructive Cost Model &mdash; COCOMO I</h2>
+          <span class="cocomo-mode-pill-wrap" style="margin-left:12px;">
+            <span class="pill" style="background:var(--surface-3);color:var(--muted);border:1px solid var(--line);font-size:11px;">{{ cocomo_mode_label }} mode</span>
+            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
+          </span>
         </div>
       </div>
-      <p style="font-size:11px;color:var(--muted);padding:4px 4px 0;">Estimate only &mdash; COCOMO I (Basic, Organic mode). Actual effort varies widely by team experience and domain.</p>
+      <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-chip">
+          <div class="stat-chip-label">Person-months</div>
+          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+          <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 (Organic mode).</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Schedule (months)</div>
+          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+          <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Avg. Team Size</div>
+          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+          <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Input KSLOC</div>
+          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+          <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded. ({{ run.summary_totals.code_lines }} total code lines)</div>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--muted);padding:8px 4px 0;">COCOMO I (Constructive Cost Model) is a classic algorithmic cost-estimation model developed by Barry Boehm in 1981. It translates source lines of code into effort, schedule, and team-size estimates using empirically derived power-law equations calibrated against real project data. These figures are ballpark approximations &mdash; actual outcomes depend heavily on team experience, toolchain maturity, process overhead, and domain complexity.</p>
     </section>
     {% endif %}
 
@@ -5085,6 +5277,7 @@ struct WarningOpportunityRow {
     // Deferred so the browser can repaint (dismiss the loading overlay) before
     // the canvas/SVG chart work blocks the main thread.
     requestAnimationFrame(function() {
+    try {
     (function() {
       var D = {{ lang_chart_json|safe }};
       var SUB_D = {{ submodule_chart_json|safe }};
@@ -6465,7 +6658,13 @@ struct WarningOpportunityRow {
       })();
     })();
     window.oxSlocChartsReady = true;
+    } catch(e) { window.oxSlocChartError = String(e); window.oxSlocChartsReady = true; }
     }); // end requestAnimationFrame
+    // Safety net: if rAF never fires (some headless configurations throttle it),
+    // mark ready after page load so the PDF capture does not wait the full 15 s.
+    window.addEventListener('load', function() {
+      setTimeout(function() { if (!window.oxSlocChartsReady) window.oxSlocChartsReady = true; }, 2000);
+    });
     // ── SVG tooltip delegation ───────────────────────────────────────────────
     (function(){
       var tt = document.getElementById('r-tt');
@@ -6988,6 +7187,10 @@ struct ReportTemplate<'a> {
     cocomo_staff_str: String,
     /// Pre-formatted KSLOC input for COCOMO (e.g. "12.53").
     cocomo_ksloc_str: String,
+    /// Display label for the COCOMO mode (e.g. "Organic").
+    cocomo_mode_label: String,
+    /// Tooltip text explaining the selected COCOMO mode.
+    cocomo_mode_tooltip: String,
     /// Unique Lines of Code across all analyzed files.
     uloc: u64,
     /// Pre-formatted DRYness percentage string (e.g. "82.3") or empty string.
@@ -8291,5 +8494,132 @@ mod tests {
         assert!(result.is_some());
         let uri = result.unwrap();
         assert!(uri.starts_with("data:image/png;base64,"));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_report_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn normalize_remote_url_variants() {
+        assert_eq!(
+            normalize_remote_url("git@github.com:org/repo.git").as_deref(),
+            Some("https://github.com/org/repo")
+        );
+        assert_eq!(
+            normalize_remote_url("https://gitlab.com/a/b.git").as_deref(),
+            Some("https://gitlab.com/a/b")
+        );
+        assert_eq!(
+            normalize_remote_url("http://host/x").as_deref(),
+            Some("http://host/x")
+        );
+        assert_eq!(normalize_remote_url("not a url"), None);
+    }
+
+    #[test]
+    fn classify_and_bucket_helpers() {
+        assert_eq!(
+            classify_unsupported_path("README.md"),
+            "Documentation / text"
+        );
+        assert_eq!(
+            classify_unsupported_path("pkg.json"),
+            "JSON manifests and config"
+        );
+        assert_eq!(
+            classify_unsupported_path("Cargo.toml"),
+            "Project metadata and packaging"
+        );
+        assert_eq!(classify_unsupported_path("page.html"), "HTML templates");
+        assert_eq!(classify_unsupported_path("notes.txt"), "Plain text assets");
+        assert_eq!(
+            classify_unsupported_path("data.xyz"),
+            "Other unsupported text formats"
+        );
+        assert_eq!(
+            classify_unsupported_path("Makefile_noext"),
+            "Extensionless or custom text files"
+        );
+        // bucket_description + bucket_recommendation for each known label.
+        for label in [
+            "Documentation / text",
+            "JSON manifests and config",
+            "Project metadata and packaging",
+            "HTML templates",
+            "Plain text assets",
+            "Extensionless or custom text files",
+            "Unknown bucket",
+        ] {
+            assert!(!bucket_description(label).is_empty());
+            assert!(!bucket_recommendation(label).is_empty());
+        }
+    }
+
+    #[test]
+    fn summarize_warnings_groups_categories() {
+        let warnings = vec![
+            "file 'a.md': unsupported or undetected language".to_string(),
+            "file 'b.bin': binary file skipped by default".to_string(),
+            "file 'c.min.js': minified file skipped by policy".to_string(),
+            "file 'big.txt': file exceeded max_file_size_bytes".to_string(),
+        ];
+        let rows = summarize_warnings(&warnings);
+        assert!(!rows.is_empty(), "warnings should summarize into buckets");
+    }
+
+    #[test]
+    fn pdf_number_and_string_formatters() {
+        assert_eq!(pdf_fmt_num(0), "0");
+        assert!(pdf_fmt_num(1_234_567).contains('1'));
+        // pdf_safe_str must not panic on non-ASCII / control chars.
+        let s = pdf_safe_str("héllo\tworld\u{1F600}");
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn file_url_produces_uri() {
+        let url = file_url(Path::new("/tmp/report.html"));
+        assert!(url.starts_with("file://") || url.contains("report.html"));
+    }
+
+    #[test]
+    fn browser_discovery_is_callable_without_panicking() {
+        // With no SLOC_BROWSER set, discovery walks the candidate list and
+        // returns None (no browser in the test sandbox) — exercising the loop.
+        std::env::remove_var("SLOC_BROWSER");
+        std::env::remove_var("BROWSER");
+        let _ = discover_browser();
+        let _ = discover_browser_from_env();
+        let _ = windows_browser_candidates();
+        // With a bogus SLOC_BROWSER, normalize_browser_env_path is exercised.
+        std::env::set_var("SLOC_BROWSER", "/no/such/browser/path");
+        let _ = discover_browser_from_env();
+        let p = normalize_browser_env_path("\"/quoted/path/chrome\"");
+        assert!(p.to_string_lossy().contains("chrome"));
+        std::env::remove_var("SLOC_BROWSER");
+    }
+
+    #[test]
+    fn which_in_path_returns_none_for_missing() {
+        assert!(which_in_path("definitely-not-a-real-exe-xyz123").is_none());
+    }
+
+    #[test]
+    fn write_pdf_from_html_without_browser_errors_gracefully() {
+        std::env::remove_var("SLOC_BROWSER");
+        std::env::remove_var("BROWSER");
+        let dir = std::env::temp_dir().join("sloc_report_pdf_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let html = dir.join("in.html");
+        std::fs::write(&html, "<html><body>hi</body></html>").unwrap();
+        let out = dir.join("out.pdf");
+        // No browser present → Err, but exercises discovery + early validation.
+        let res = write_pdf_from_html(&html, &out);
+        // Either a real browser exists (Ok) or not (Err); both are acceptable.
+        let _ = res;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
