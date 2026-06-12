@@ -5,7 +5,7 @@ info:
   version: "1.5.5"
   description: |
     Machine-readable code metrics API for oxide-sloc — IEEE 1045-1992 SLOC
-    analysis, unit test detection, and coverage reporting across 41 languages.
+    analysis, unit test detection, and coverage reporting across 60 languages.
 
     **Authentication**: When `SLOC_API_KEY` is set on the server, all endpoints
     except `/healthz`, `/api/health`, `/api/version`, `/api/openapi.yaml`, and

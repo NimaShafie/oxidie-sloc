@@ -667,4 +667,33 @@ bind_address = "127.0.0.1:4317"
             assert_eq!(variant, back);
         }
     }
+
+    #[test]
+    fn apply_profile_overrides_sections() {
+        let mut cfg = AppConfig::default();
+        let mut analysis = cfg.analysis.clone();
+        analysis.count_compiler_directives = !analysis.count_compiler_directives;
+        let mut reporting = cfg.reporting.clone();
+        reporting.report_title = "Profiled".to_string();
+        cfg.profiles.insert(
+            "ci".to_string(),
+            ProfileConfig {
+                discovery: Some(cfg.discovery.clone()),
+                analysis: Some(analysis.clone()),
+                reporting: Some(reporting),
+            },
+        );
+        cfg.apply_profile("ci").expect("profile should apply");
+        assert_eq!(cfg.reporting.report_title, "Profiled");
+        assert_eq!(
+            cfg.analysis.count_compiler_directives,
+            analysis.count_compiler_directives
+        );
+    }
+
+    #[test]
+    fn apply_profile_unknown_name_errors() {
+        let mut cfg = AppConfig::default();
+        assert!(cfg.apply_profile("does-not-exist").is_err());
+    }
 }

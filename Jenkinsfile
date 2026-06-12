@@ -157,7 +157,7 @@ pipeline {
             name:         'ENABLED_LANGUAGES',
             defaultValue: '',
             description:  'Comma-separated language filter — restricts analysis to the listed languages. ' +
-                          'Example: rust,python,javascript   (empty = all 41 supported languages)'
+                          'Example: rust,python,javascript   (empty = all 60 supported languages)'
         )
         string(
             name:         'INCLUDE_GLOBS',

@@ -36,7 +36,7 @@ with build-over-build trend data (Plot plugin), JUnit test results (cargo-nextes
 and code coverage (cargo-llvm-cov / cargo-tarpaulin).
 
 Feature tiers — all configurable via "Build with Parameters":
-  • 41-language SLOC analysis with 4 mixed-line policies and IEEE 1045-1992 options
+  • 60-language SLOC analysis with 4 mixed-line policies and IEEE 1045-1992 options
   • HTML / PDF (pure-Rust) / CSV / XLSX report artifacts
   • JUnit test results: set TEST_RUNNER=cargo-nextest, PUBLISH_TEST_RESULTS=true
   • Code coverage: check COVERAGE_STANDALONE (requires cargo-llvm-cov or cargo-tarpaulin)

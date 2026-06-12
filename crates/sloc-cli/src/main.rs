@@ -1059,7 +1059,7 @@ fn run_init(args: &InitArgs) -> Result<()> {
 # submodule_breakdown = false
 
 [analysis]
-# enabled_languages = []   # empty = all 41 supported languages
+# enabled_languages = []   # empty = all 60 supported languages
 # mixed_line_policy = "code-only"   # code-only | code-and-comment | comment-only | separate-mixed-category
 # python_docstrings_as_comments = true
 # generated_file_detection = true

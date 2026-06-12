@@ -11,7 +11,7 @@ HTML/PDF reports, REST API, and an MCP server for AI agent integration.
 | `sloc-config` | `AppConfig` TOML schema and enums |
 | `sloc-core` | `analyze()` entry point — file discovery, decoding, aggregation |
 | `sloc-git` | Git CLI wrappers, webhook parsing |
-| `sloc-languages` | Language detection + lexical line analyzers (41 languages) |
+| `sloc-languages` | Language detection + lexical line analyzers (60 languages) |
 | `sloc-report` | Askama HTML templates + headless-Chromium PDF export |
 | `sloc-web` | Axum web server, REST API, form handlers, artifact storage |
 | `sloc-mcp` | MCP server binary (7 tools for AI agents) |
@@ -51,7 +51,7 @@ cargo test --workspace
 - OpenAPI 3.1 spec: `docs/openapi.yaml`
 - LLM context files: `docs/ai/llms.txt`, `docs/ai/llms-full.txt`
 
-## Supported languages (41)
+## Supported Languages (60)
 
 oxide-sloc intentionally excludes TOML, Markdown, and YAML — no meaningful SLOC metric applies.
 Adding a language requires updating both `sloc-languages` (analyzer) and `sloc-config` (extension map).

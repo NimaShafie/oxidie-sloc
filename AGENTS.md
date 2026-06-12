@@ -69,7 +69,7 @@ crates/
   sloc-config/    # AppConfig TOML schema and enums
   sloc-core/      # analyze() — file discovery, decoding, aggregation
   sloc-git/       # Git CLI wrappers and webhook parsing
-  sloc-languages/ # Language detection + lexical line analyzers (41 languages)
+  sloc-languages/ # Language detection + lexical line analyzers (60 languages)
   sloc-report/    # HTML/PDF rendering
   sloc-web/       # Axum web server and REST API
   sloc-mcp/       # MCP server binary

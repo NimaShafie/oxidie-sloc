@@ -19,7 +19,7 @@
 oxide-sloc is a Rust-based local code analysis workbench.
 
 **Features:**
-- IEEE 1045-1992 source line counting across 41 languages
+- IEEE 1045-1992 source line counting across 60 languages
 - Unit test detection and coverage reporting
 - Rich HTML and PDF reports
 - Localhost web UI (no cloud required)
