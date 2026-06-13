@@ -20786,41 +20786,6 @@ struct ScanSetupTemplate {
         {% endif %}
       </div>
 
-      {% if has_cocomo %}
-      <div class="cocomo-box">
-        <div class="cocomo-box-head">
-          <span class="cocomo-box-title">Constructive Cost Model &mdash; COCOMO I</span>
-          <span class="cocomo-mode-pill-wrap" style="margin-left:10px;">
-            <span class="cocomo-mode-pill">{{ cocomo_mode_label }} mode</span>
-            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
-          </span>
-        </div>
-        <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
-          <div class="stat-chip">
-            <div class="stat-chip-label">Person-months</div>
-            <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
-            <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 ({{ cocomo_mode_label }} mode).</div>
-          </div>
-          <div class="stat-chip">
-            <div class="stat-chip-label">Schedule (months)</div>
-            <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
-            <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
-          </div>
-          <div class="stat-chip">
-            <div class="stat-chip-label">Avg. Team Size</div>
-            <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
-            <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
-          </div>
-          <div class="stat-chip">
-            <div class="stat-chip-label">Input KSLOC</div>
-            <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
-            <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded.</div>
-          </div>
-        </div>
-        <div class="cocomo-box-note">COCOMO I (Constructive Cost Model) is a classic algorithmic cost-estimation model developed by Barry Boehm in 1981. It translates source lines of code into effort, schedule, and team-size estimates using empirically derived power-law equations calibrated against real project data. These figures are ballpark approximations &mdash; actual outcomes depend heavily on team experience, toolchain maturity, process overhead, and domain complexity.</div>
-      </div>
-      {% endif %}
-
       {% if let Some(prev_id) = prev_run_id %}{% if let Some(prev_ts) = prev_run_timestamp %}
       <div class="compare-banner">
         <div class="compare-banner-body">
@@ -20881,7 +20846,11 @@ struct ScanSetupTemplate {
             Line-level delta not available — previous scan's result file could not be read. Re-running will restore full delta tracking.
           </p>
           {% endif %}
-          <a class="button" href="/compare?a={{ prev_id }}&b={{ run_id }}" style="white-space:nowrap;flex:0 0 auto;">Full diff →</a>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;flex:0 0 auto;align-items:center;">
+            <a class="button secondary" href="/runs/result/{{ prev_id }}" style="white-space:nowrap;">View previous report</a>
+            <a class="button secondary" href="/compare-scans" style="white-space:nowrap;">Compare scans</a>
+            <a class="button" href="/compare?a={{ prev_id }}&b={{ run_id }}" style="white-space:nowrap;">Full diff →</a>
+          </div>
         </div>
       </div>
       {% endif %}{% endif %}
@@ -21316,6 +21285,41 @@ struct ScanSetupTemplate {
       </div>
 
     </section>
+
+      {% if has_cocomo %}
+      <div class="cocomo-box" style="margin-top:18px;">
+        <div class="cocomo-box-head">
+          <span class="cocomo-box-title">Constructive Cost Model &mdash; COCOMO I</span>
+          <span class="cocomo-mode-pill-wrap" style="margin-left:10px;">
+            <span class="cocomo-mode-pill">{{ cocomo_mode_label }} mode</span>
+            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
+          </span>
+        </div>
+        <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
+          <div class="stat-chip">
+            <div class="stat-chip-label">Person-months</div>
+            <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+            <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 ({{ cocomo_mode_label }} mode).</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Schedule (months)</div>
+            <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+            <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Avg. Team Size</div>
+            <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+            <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Input KSLOC</div>
+            <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+            <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded.</div>
+          </div>
+        </div>
+        <div class="cocomo-box-note" style="white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</div>
+      </div>
+      {% endif %}
     </div>
 
   </div>
