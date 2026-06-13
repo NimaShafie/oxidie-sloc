@@ -2076,15 +2076,66 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     } else {
         after_tables_y
     };
-    // COCOMO estimate — rendered below the style section (or metric tables if no style data).
-    if run.cocomo.is_some() {
-        let cocomo_top = after_style_y - 3.0;
-        // Need ~18 mm: header (5.5) + row (5.5) + note (4) + gaps (3) = 18 mm
-        if cocomo_top > FOOTER_H + 18.0 {
-            pdf_render_cocomo_section(&ctx, run, cocomo_top);
-        }
+    // COCOMO estimate — on page 1 if room remains, otherwise on its own page 2.
+    // Need ~20 mm: header (5.5) + data row (5.5) + note (4) + gaps (5).
+    let cocomo_fits_page1 = run.cocomo.is_some() && (after_style_y - 3.0) > FOOTER_H + 20.0;
+    if cocomo_fits_page1 {
+        pdf_render_cocomo_section(&ctx, run, after_style_y - 3.0);
     }
     pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
+
+    // If COCOMO didn't fit on page 1, render it on a dedicated page 2.
+    if run.cocomo.is_some() && !cocomo_fits_page1 {
+        let (c2_page, c2_layer_idx) = doc.add_page(Mm(W), Mm(H), "Content");
+        let c2_layer = doc.get_page(c2_page).get_layer(c2_layer_idx);
+        let c2_ctx = PdfCtx {
+            layer: &c2_layer,
+            font_reg: &font_reg,
+            font_bold: &font_bold,
+            w: W,
+            margin: MARGIN,
+            row_h: ROW_H,
+            tbl_hdr_h: TBL_HDR_H,
+        };
+        // Small page header so the reader knows which report this is.
+        use printpdf::{Color, Mm as PdfMm, Rgb};
+        pdf_fill_rect(
+            &c2_layer,
+            0.0,
+            H - 8.0,
+            W,
+            8.0,
+            Rgb::new(0.098, 0.11, 0.15, None),
+        );
+        c2_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+        c2_layer.use_text("oxide-sloc", 9.0, PdfMm(MARGIN), PdfMm(H - 5.5), &font_bold);
+        c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+        c2_layer.use_text(
+            pdf_trunc(&pdf_safe_str(&title), 55),
+            7.5,
+            PdfMm(46.0),
+            PdfMm(H - 5.5),
+            &font_reg,
+        );
+        pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
+        // Footer on COCOMO page.
+        pdf_fill_rect(
+            &c2_layer,
+            0.0,
+            0.0,
+            W,
+            FOOTER_H,
+            Rgb::new(0.93, 0.91, 0.87, None),
+        );
+        c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+        c2_layer.use_text(
+            format!("oxide-sloc v{version}  |  AGPL-3.0-or-later"),
+            6.5,
+            PdfMm(MARGIN),
+            PdfMm(3.0),
+            &font_reg,
+        );
+    }
 
     if !run.per_file_records.is_empty() {
         pdf_render_per_file_pages(
@@ -3847,18 +3898,6 @@ struct WarningOpportunityRow {
             <div class="delta-card-tip">Files with no changes since {{ prev_scan_label }}</div>
           </div>
         </div>
-        {% if prev_run_id != "" %}
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <a href="/view-reports" target="_blank" rel="noopener" class="delta-panel-link">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-            View previous report
-          </a>
-          <a href="/compare-scans" target="_blank" rel="noopener" class="delta-panel-link">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="18"/><rect x="14" y="3" width="7" height="18"/></svg>
-            Compare scans
-          </a>
-        </div>
-        {% endif %}
       </div>
       {% else %}
       <div class="prev-scan-banner prev-scan-banner-empty" aria-label="No previous scan">
@@ -3887,43 +3926,6 @@ struct WarningOpportunityRow {
         {% if duplicate_group_count > 0 %}<div class="metric" data-metric-value="{{ duplicate_group_count }}"><div class="metric-tooltip">Groups of files with identical content detected. These may inflate SLOC totals. Re-run with --no-duplicates to exclude them.</div><div class="metric-label">Duplicate groups</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
       </div>
     </section>
-
-    {% if has_cocomo %}
-    <section class="panel" id="cocomo-section" style="margin-bottom:24px;">
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <h2>Constructive Cost Model &mdash; COCOMO I</h2>
-          <span class="cocomo-mode-pill-wrap" style="margin-left:12px;">
-            <span class="pill" style="background:var(--surface-3);color:var(--muted);border:1px solid var(--line);font-size:11px;">{{ cocomo_mode_label }} mode</span>
-            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
-          </span>
-        </div>
-      </div>
-      <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
-        <div class="stat-chip">
-          <div class="stat-chip-label">Person-months</div>
-          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
-          <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 (Organic mode).</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-label">Schedule (months)</div>
-          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
-          <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-label">Avg. Team Size</div>
-          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
-          <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-label">Input KSLOC</div>
-          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
-          <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded. ({{ run.summary_totals.code_lines }} total code lines)</div>
-        </div>
-      </div>
-      <p style="font-size:11px;color:var(--muted);padding:8px 4px 0;">COCOMO I (Constructive Cost Model) is a classic algorithmic cost-estimation model developed by Barry Boehm in 1981. It translates source lines of code into effort, schedule, and team-size estimates using empirically derived power-law equations calibrated against real project data. These figures are ballpark approximations &mdash; actual outcomes depend heavily on team experience, toolchain maturity, process overhead, and domain complexity.</p>
-    </section>
-    {% endif %}
 
     <!-- ── PDF-only pre-rendered chart variants (hidden on screen) ─────── -->
     <div id="pdf-variants" class="pdf-variants-root"></div>
@@ -4547,6 +4549,43 @@ struct WarningOpportunityRow {
         </div>
       </section>
     </div>
+
+    {% if has_cocomo %}
+    <section class="panel" id="cocomo-section" style="margin-top:18px;margin-bottom:24px;">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <h2>Constructive Cost Model &mdash; COCOMO I</h2>
+          <span class="cocomo-mode-pill-wrap" style="margin-left:12px;">
+            <span class="pill" style="background:var(--surface-3);color:var(--muted);border:1px solid var(--line);font-size:11px;">{{ cocomo_mode_label }} mode</span>
+            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
+          </span>
+        </div>
+      </div>
+      <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-chip">
+          <div class="stat-chip-label">Person-months</div>
+          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+          <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 (Organic mode).</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Schedule (months)</div>
+          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+          <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Avg. Team Size</div>
+          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+          <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Input KSLOC</div>
+          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+          <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded. ({{ run.summary_totals.code_lines }} total code lines)</div>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--muted);padding:8px 4px 0;white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</p>
+    </section>
+    {% endif %}
   </div>
 
   <div id="r-tt" aria-hidden="true"></div>
@@ -8593,7 +8632,10 @@ mod coverage_boost_report_tests {
         std::env::remove_var("BROWSER");
         let _ = discover_browser();
         let _ = discover_browser_from_env();
+        #[cfg(windows)]
         let _ = windows_browser_candidates();
+        #[cfg(not(windows))]
+        let _ = linux_browser_candidates();
         // With a bogus SLOC_BROWSER, normalize_browser_env_path is exercised.
         std::env::set_var("SLOC_BROWSER", "/no/such/browser/path");
         let _ = discover_browser_from_env();
