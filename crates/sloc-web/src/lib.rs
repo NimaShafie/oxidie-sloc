@@ -14289,7 +14289,7 @@ pub fn sanitize_project_label(raw: &str) -> String {
     let candidate = raw
         .split(['/', '\\'])
         .filter(|s| !s.is_empty())
-        .last()
+        .next_back()
         .unwrap_or("project");
 
     let mut value = String::with_capacity(candidate.len());
