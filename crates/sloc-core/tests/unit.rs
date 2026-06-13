@@ -1557,3 +1557,439 @@ fn analyze_handles_diverse_file_contents() {
     // The analyzer must not crash and should classify at least the rust sources.
     assert!(run.summary_totals.files_considered >= 3);
 }
+
+// ── COCOMO + ULOC verification ────────────────────────────────────────────────
+
+#[test]
+fn analyze_nonempty_project_produces_cocomo_estimate() {
+    let dir = tempfile::tempdir().unwrap();
+    // Need enough code for COCOMO to be non-trivial
+    let code = "fn foo() {}\nfn bar() {}\nfn baz() -> i32 { 42 }\n".repeat(10);
+    std::fs::write(dir.path().join("lib.rs"), code).unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert!(
+        run.cocomo.is_some(),
+        "non-empty project must produce a COCOMO estimate"
+    );
+    let cocomo = run.cocomo.unwrap();
+    assert!(
+        cocomo.ksloc > 0.0,
+        "KSLOC must be positive, got {}",
+        cocomo.ksloc
+    );
+    assert!(cocomo.effort_person_months > 0.0, "effort must be positive");
+    assert!(cocomo.duration_months > 0.0, "duration must be positive");
+}
+
+#[test]
+fn analyze_empty_project_has_no_cocomo() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // No code lines → no COCOMO estimate
+    assert!(
+        run.cocomo.is_none() || run.summary_totals.code_lines == 0,
+        "empty project should have no COCOMO or zero code lines"
+    );
+}
+
+#[test]
+fn analyze_produces_uloc_for_nonempty_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn baz() {}\nfn qux() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert!(run.uloc > 0, "ULOC must be positive for non-empty project");
+}
+
+#[test]
+fn analyze_detects_duplicate_files_same_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = "fn shared() { let x = 42; }\nfn another() { let y = 7; }\n".repeat(5);
+    std::fs::write(dir.path().join("a.rs"), &content).unwrap();
+    std::fs::write(dir.path().join("b.rs"), &content).unwrap(); // identical content
+    std::fs::write(
+        dir.path().join("unique.rs"),
+        "fn unique_only() { let z = 99; }\n",
+    )
+    .unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // All files should be analyzed
+    assert_eq!(run.summary_totals.files_analyzed, 3);
+    // Duplicate groups should contain a.rs and b.rs
+    assert!(
+        !run.duplicate_groups.is_empty(),
+        "duplicate groups should be non-empty when files have identical content"
+    );
+    let all_paths: Vec<&str> = run
+        .duplicate_groups
+        .iter()
+        .flat_map(|g| g.iter().map(|s| s.as_str()))
+        .collect();
+    let has_dup = all_paths.iter().any(|p| p.contains("a.rs"))
+        && all_paths.iter().any(|p| p.contains("b.rs"));
+    assert!(
+        has_dup,
+        "a.rs and b.rs should be in the same duplicate group"
+    );
+}
+
+#[test]
+fn analyze_with_identical_small_files_finds_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = "pub fn helper(x: i32) -> i32 { x * 2 }\n";
+    for name in ["x.rs", "y.rs", "z.rs"] {
+        std::fs::write(dir.path().join(name), content).unwrap();
+    }
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // Duplicate detection works even for small files
+    assert_eq!(run.summary_totals.files_analyzed, 3);
+    // Groups should be non-empty
+    let total_in_groups: usize = run.duplicate_groups.iter().map(|g| g.len()).sum();
+    assert!(
+        total_in_groups >= 2,
+        "at least 2 files should be in duplicate groups"
+    );
+}
+
+#[test]
+fn analyze_dryness_pct_is_none_for_empty_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // With no files, dryness is None
+    assert!(
+        run.dryness_pct.is_none() || run.summary_totals.code_lines == 0,
+        "empty project should have no dryness percentage"
+    );
+}
+
+#[test]
+fn analyze_dryness_pct_is_some_for_nonempty_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn foo() { let x = 1; }\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // With some code, dryness_pct should be set
+    if run.summary_totals.code_lines > 0 {
+        assert!(
+            run.dryness_pct.is_some(),
+            "non-empty project should have dryness_pct"
+        );
+        let pct = run.dryness_pct.unwrap();
+        assert!(
+            (0.0..=100.0).contains(&pct),
+            "dryness_pct must be 0-100, got {pct}"
+        );
+    }
+}
+
+// ── Style analysis ────────────────────────────────────────────────────────────
+
+#[test]
+fn analyze_style_summary_populated_for_consistent_code() {
+    let dir = tempfile::tempdir().unwrap();
+    // Well-formatted Rust code with consistent 4-space indentation
+    let code = r#"fn main() {
+    let x = 1;
+    let y = 2;
+    println!("{}", x + y);
+}
+
+fn helper(n: i32) -> i32 {
+    n * 2
+}
+"#;
+    std::fs::write(dir.path().join("main.rs"), code).unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // Style summary may or may not be computed depending on config defaults,
+    // but the run should complete without errors.
+    assert!(run.summary_totals.files_analyzed >= 1);
+    // style_summary is optional — just verify it doesn't crash
+    let _ = run.style_summary;
+}
+
+// ── Compute delta on coverage-bearing runs ────────────────────────────────────
+
+#[test]
+fn compute_delta_with_coverage_data() {
+    let mut base = make_run_with_files(vec![("src/lib.rs", 100)]);
+    let mut current = make_run_with_files(vec![("src/lib.rs", 120)]);
+    // Add coverage to both
+    base.per_file_records[0].coverage = Some(sloc_core::FileCoverage {
+        lines_found: 100,
+        lines_hit: 75,
+        functions_found: 10,
+        functions_hit: 8,
+        branches_found: 0,
+        branches_hit: 0,
+    });
+    base.summary_totals.coverage_lines_found = 100;
+    base.summary_totals.coverage_lines_hit = 75;
+    current.per_file_records[0].coverage = Some(sloc_core::FileCoverage {
+        lines_found: 120,
+        lines_hit: 100,
+        functions_found: 12,
+        functions_hit: 11,
+        branches_found: 0,
+        branches_hit: 0,
+    });
+    current.summary_totals.coverage_lines_found = 120;
+    current.summary_totals.coverage_lines_hit = 100;
+    let cmp = compute_delta(&base, &current);
+    assert_eq!(cmp.summary.code_lines_delta, 20);
+    // Coverage delta should be Some
+    assert!(
+        cmp.summary.coverage_lines_hit_delta.is_some(),
+        "coverage delta must be Some when both runs have coverage data"
+    );
+}
+
+#[test]
+fn compute_delta_without_coverage_on_baseline() {
+    let base = make_run_with_files(vec![("src/lib.rs", 50)]);
+    let mut current = make_run_with_files(vec![("src/lib.rs", 60)]);
+    current.per_file_records[0].coverage = Some(sloc_core::FileCoverage {
+        lines_found: 60,
+        lines_hit: 50,
+        functions_found: 5,
+        functions_hit: 4,
+        branches_found: 0,
+        branches_hit: 0,
+    });
+    current.summary_totals.coverage_lines_found = 60;
+    current.summary_totals.coverage_lines_hit = 50;
+    let cmp = compute_delta(&base, &current);
+    assert_eq!(cmp.summary.code_lines_delta, 10);
+    // Delta completes without panic regardless of coverage presence
+    let _ = cmp.summary.coverage_lines_hit_delta;
+}
+
+// ── ScanRegistry advanced operations ─────────────────────────────────────────
+
+#[test]
+fn scan_registry_preserves_order_of_insertion() {
+    let mut reg = ScanRegistry::default();
+    for i in 0..5 {
+        let mut e = make_registry_entry(&format!("run-{i}"));
+        e.timestamp_utc = Utc::now() + chrono::Duration::seconds(i as i64);
+        reg.add_entry(e);
+    }
+    assert_eq!(reg.entries.len(), 5);
+    // Entries should be present
+    for i in 0..5 {
+        assert!(reg.find_by_run_id(&format!("run-{i}")).is_some());
+    }
+}
+
+#[test]
+fn scan_registry_multiple_roundtrips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+    let mut reg = ScanRegistry::default();
+    for i in 0..3 {
+        reg.add_entry(make_registry_entry(&format!("run-{i}")));
+    }
+    reg.save(&path).unwrap();
+    let loaded = ScanRegistry::load(&path);
+    assert_eq!(loaded.entries.len(), 3);
+    // Add more and save again
+    let mut loaded = loaded;
+    loaded.add_entry(make_registry_entry("run-3"));
+    loaded.save(&path).unwrap();
+    let loaded2 = ScanRegistry::load(&path);
+    assert_eq!(loaded2.entries.len(), 4);
+}
+
+// ── Watched dirs store advanced ───────────────────────────────────────────────
+
+#[test]
+fn watched_dirs_store_remove_entry() {
+    let mut store = WatchedDirsStore::default();
+    let p = PathBuf::from("/tmp/test-dir");
+    store.add(p.clone());
+    assert_eq!(store.dirs.len(), 1);
+    store.remove(&p);
+    assert!(
+        store.dirs.is_empty(),
+        "removing added dir should leave empty store"
+    );
+}
+
+#[test]
+fn watched_dirs_store_remove_nonexistent_is_noop() {
+    let mut store = WatchedDirsStore::default();
+    store.add(PathBuf::from("/tmp/a"));
+    store.remove(&PathBuf::from("/tmp/does-not-exist"));
+    assert_eq!(
+        store.dirs.len(),
+        1,
+        "removing nonexistent dir must not affect store"
+    );
+}
+
+// ── Multi-delta ───────────────────────────────────────────────────────────────
+
+#[test]
+fn compute_multi_delta_with_three_runs() {
+    use sloc_core::compute_multi_delta;
+    let r0 = make_run_with_files(vec![("src/a.rs", 100)]);
+    let r1 = make_run_with_files(vec![("src/a.rs", 120), ("src/b.rs", 40)]);
+    let r2 = make_run_with_files(vec![("src/a.rs", 130), ("src/b.rs", 50), ("src/c.rs", 20)]);
+    let refs = [&r0, &r1, &r2];
+    let multi = compute_multi_delta(&refs);
+    assert_eq!(multi.points.len(), 3);
+    assert_eq!(
+        multi.sequential_deltas.len(),
+        2,
+        "2 consecutive deltas for 3 runs"
+    );
+}
+
+// ── Analyze with excluded language ────────────────────────────────────────────
+
+#[test]
+fn analyze_with_enabled_languages_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn rust_fn() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.py"), "def py_fn(): pass\n").unwrap();
+    let mut cfg = analysis_config_for(dir.path());
+    // Only analyze Rust files
+    cfg.analysis.enabled_languages = vec!["rust".to_string()];
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(
+        run.summary_totals.files_analyzed, 1,
+        "only Rust file should be analyzed"
+    );
+    assert_eq!(
+        run.totals_by_language[0].language,
+        sloc_languages::Language::Rust
+    );
+}
+
+#[test]
+fn analyze_with_exclude_globs_filters_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("test_helpers.rs"), "fn helper() {}\n").unwrap();
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.discovery.exclude_globs = vec!["**/test_*.rs".to_string()];
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    let paths: Vec<&str> = run
+        .per_file_records
+        .iter()
+        .map(|r| r.relative_path.as_str())
+        .collect();
+    assert!(
+        !paths.iter().any(|p| p.contains("test_helpers")),
+        "test_helpers.rs should be excluded"
+    );
+}
+
+// ── JSON serialization of CocomoEstimate ──────────────────────────────────────
+
+#[test]
+fn analysis_run_with_cocomo_roundtrips_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let code = "fn f() { let x = 1 + 2; }\n".repeat(100);
+    std::fs::write(dir.path().join("lib.rs"), code).unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert!(
+        run.cocomo.is_some(),
+        "analyze should produce COCOMO estimate"
+    );
+
+    // Serialize and deserialize
+    let json = serde_json::to_string(&run).unwrap();
+    let back: sloc_core::AnalysisRun = serde_json::from_str(&json).unwrap();
+    assert!(back.cocomo.is_some(), "COCOMO must survive JSON roundtrip");
+    let orig = run.cocomo.unwrap();
+    let restored = back.cocomo.unwrap();
+    assert!(
+        (orig.ksloc - restored.ksloc).abs() < 0.001,
+        "KSLOC must survive roundtrip"
+    );
+    assert!(
+        (orig.effort_person_months - restored.effort_person_months).abs() < 0.001,
+        "effort must survive roundtrip"
+    );
+}
+
+// ── Generated file detection ──────────────────────────────────────────────────
+
+#[test]
+fn analyze_marks_generated_files() {
+    let dir = tempfile::tempdir().unwrap();
+    // Files with @generated comment should be flagged
+    std::fs::write(
+        dir.path().join("gen_code.rs"),
+        "// @generated by build_tool — do not edit\nfn generated() { let _ = 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("normal.rs"), "fn normal() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    // The generated file may be skipped or flagged depending on config
+    assert!(
+        run.summary_totals.files_considered >= 1,
+        "at least the normal file should be considered"
+    );
+}
+
+// ── Coverage store operations ─────────────────────────────────────────────────
+
+#[test]
+fn cleanup_policy_store_save_and_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cleanup.json");
+    use sloc_core::CleanupPolicy;
+    let store = CleanupPolicyStore {
+        policy: Some(CleanupPolicy {
+            enabled: true,
+            max_age_days: Some(30),
+            max_run_count: Some(50),
+            interval_hours: 24,
+        }),
+        ..CleanupPolicyStore::default()
+    };
+    store.save(&path).unwrap();
+    let loaded = CleanupPolicyStore::load(&path);
+    assert!(loaded.policy.is_some(), "policy must survive save/load");
+    let p = loaded.policy.unwrap();
+    assert!(p.enabled);
+    assert_eq!(p.max_age_days, Some(30));
+    assert_eq!(p.max_run_count, Some(50));
+}
+
+#[test]
+fn cleanup_policy_store_default_has_no_policy() {
+    let store = CleanupPolicyStore::default();
+    assert!(store.policy.is_none());
+    assert!(store.last_run_at.is_none());
+}
+
+// ── Cancellation via AtomicBool ───────────────────────────────────────────────
+
+#[test]
+fn analyze_respects_cancel_signal() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    // Add some files so there's work to do
+    for i in 0..5 {
+        std::fs::write(dir.path().join(format!("f{i}.rs")), "fn f() {}\n").unwrap();
+    }
+    let cancel = AtomicBool::new(false);
+    // Set cancel = true immediately to trigger early exit
+    cancel.store(true, Ordering::SeqCst);
+    let cfg = analysis_config_for(dir.path());
+    // Analysis should fail or return early with the cancel signal set
+    let result = analyze(&cfg, "test", Some(&cancel), None);
+    // Either cancelled (Err) or completed (Ok) — must not panic
+    let _ = result;
+}

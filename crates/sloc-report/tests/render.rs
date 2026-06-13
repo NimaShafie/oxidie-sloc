@@ -7,15 +7,17 @@
 use chrono::Utc;
 use sloc_config::AppConfig;
 use sloc_core::{
-    AnalysisRun, EffectiveCounts, EnvironmentMetadata, FileChangeStatus, FileCoverage, FileDelta,
-    FileRecord, FileStatus, LanguageStyleGroup, LanguageSummary, ScanComparison, StyleSummary,
-    SubmoduleSummary, SummaryDelta, SummaryTotals, ToolMetadata,
+    AnalysisRun, CocomoEstimate, CocomoMode, EffectiveCounts, EnvironmentMetadata,
+    FileChangeStatus, FileCoverage, FileDelta, FileRecord, FileStatus, LanguageStyleGroup,
+    LanguageSummary, ScanComparison, StyleSummary, SubmoduleSummary, SummaryDelta, SummaryTotals,
+    ToolMetadata,
 };
 use sloc_languages::{Language, ParseMode, RawLineCounts};
 use sloc_report::{
     render_confluence_storage, render_confluence_wiki_markup, render_html, render_html_with_delta,
     render_sub_report_html, write_csv, write_diff_csv, write_diff_xlsx,
-    write_html as write_html_report, write_html_with_pdf_link, write_xlsx, ReportDeltaContext,
+    write_html as write_html_report, write_html_with_pdf_link, write_pdf_from_run, write_xlsx,
+    ReportDeltaContext,
 };
 
 // ── Fixture helpers ───────────────────────────────────────────────────────────
@@ -1463,4 +1465,643 @@ fn render_html_with_all_41_languages_exercises_rendering() {
     let html = render_html(&run).unwrap();
     assert!(!html.is_empty());
     assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
+}
+
+// ── COCOMO fixture and tests ─────────────────────────────────────────────────
+
+fn make_cocomo() -> CocomoEstimate {
+    CocomoEstimate {
+        mode: CocomoMode::Organic,
+        ksloc: 5.0,
+        effort_person_months: 13.2,
+        duration_months: 6.8,
+        avg_staff: 1.94,
+    }
+}
+
+fn make_run_with_cocomo() -> AnalysisRun {
+    let mut run = make_run();
+    run.cocomo = Some(make_cocomo());
+    run.summary_totals.code_lines = 5_000;
+    run
+}
+
+fn make_run_with_cocomo_semi() -> AnalysisRun {
+    let mut run = make_run();
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::SemiDetached,
+        ksloc: 20.0,
+        effort_person_months: 72.4,
+        duration_months: 11.6,
+        avg_staff: 6.2,
+    });
+    run.summary_totals.code_lines = 20_000;
+    run
+}
+
+fn make_run_with_cocomo_embedded() -> AnalysisRun {
+    let mut run = make_multi_lang_run();
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::Embedded,
+        ksloc: 100.0,
+        effort_person_months: 640.0,
+        duration_months: 23.0,
+        avg_staff: 27.8,
+    });
+    run.summary_totals.code_lines = 100_000;
+    run
+}
+
+#[test]
+fn render_html_cocomo_section_is_present() {
+    let run = make_run_with_cocomo();
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
+    assert!(
+        html.to_lowercase().contains("cocomo") || html.contains("Person-months"),
+        "COCOMO section should appear when cocomo data is present"
+    );
+}
+
+#[test]
+fn render_html_cocomo_organic_mode_renders() {
+    let run = make_run_with_cocomo();
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(
+        html.contains("Organic") || html.contains("organic"),
+        "Organic mode label should appear"
+    );
+}
+
+#[test]
+fn render_html_cocomo_semi_detached_mode_renders() {
+    let run = make_run_with_cocomo_semi();
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(
+        html.contains("Semi") || html.contains("semi") || html.to_lowercase().contains("cocomo"),
+        "SemiDetached mode should appear in report"
+    );
+}
+
+#[test]
+fn render_html_cocomo_embedded_mode_renders() {
+    let run = make_run_with_cocomo_embedded();
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(
+        html.contains("Embedded")
+            || html.contains("embedded")
+            || html.to_lowercase().contains("cocomo"),
+        "Embedded mode label should appear"
+    );
+}
+
+#[test]
+fn render_html_no_cocomo_when_none() {
+    let run = make_run();
+    assert!(run.cocomo.is_none());
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn write_html_with_cocomo_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo();
+    write_html_report(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+    assert!(content.contains("<!doctype html>") || content.contains("<!DOCTYPE html>"));
+}
+
+#[test]
+fn write_html_with_cocomo_semi_detached() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo_semi();
+    write_html_report(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+}
+
+#[test]
+fn write_csv_with_cocomo_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo();
+    write_csv(&run, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!content.is_empty());
+}
+
+#[test]
+fn write_xlsx_with_cocomo_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo();
+    write_xlsx(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn render_sub_report_html_with_cocomo() {
+    let run = make_run_with_cocomo();
+    let html = render_sub_report_html(&run, None).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_confluence_storage_with_cocomo_data() {
+    let run = make_run_with_cocomo();
+    let out = render_confluence_storage(&run, None);
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn render_confluence_wiki_markup_with_cocomo_data() {
+    let run = make_run_with_cocomo();
+    let out = render_confluence_wiki_markup(&run);
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn render_html_with_delta_and_cocomo() {
+    let run = make_run_with_cocomo();
+    let delta = make_delta();
+    let html = render_html_with_delta(&run, Some(&delta)).unwrap();
+    assert!(!html.is_empty());
+    assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
+}
+
+#[test]
+fn render_html_with_cocomo_large_codebase() {
+    let mut run = make_empty_run();
+    run.summary_totals.code_lines = 1_500_000;
+    run.summary_totals.files_analyzed = 50_000;
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::Organic,
+        ksloc: 1500.0,
+        effort_person_months: 4200.0,
+        duration_months: 42.0,
+        avg_staff: 100.0,
+    });
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_with_cocomo_and_coverage() {
+    let mut run = make_run_with_cocomo();
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 100,
+        lines_hit: 85,
+        functions_found: 10,
+        functions_hit: 9,
+        branches_found: 20,
+        branches_hit: 18,
+    });
+    run.summary_totals.coverage_lines_found = 100;
+    run.summary_totals.coverage_lines_hit = 85;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_with_cocomo_and_style() {
+    let mut run = make_run_with_cocomo();
+    run.style_summary = Some(StyleSummary {
+        files_analyzed: 1,
+        common_indent_style: "Spaces(4)".into(),
+        line80_compliant_pct: 95,
+        line_col_compliant_pct: 90,
+        col_threshold: 100,
+        by_language: vec![LanguageStyleGroup {
+            language_family: "Rust".into(),
+            files_count: 1,
+            dominant_guide: "Rust Official".into(),
+            dominant_score_pct: 98,
+            common_indent_style: "Spaces(4)".into(),
+            guide_avg_scores: vec![("Rust Official".into(), 98)],
+            line80_compliant_pct: 95,
+            line_col_compliant_pct: 90,
+        }],
+    });
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn write_html_with_pdf_link_and_cocomo() {
+    let dir = tempfile::tempdir().unwrap();
+    let html_path = dir.path().join("report.html");
+    let pdf_path = dir.path().join("report.pdf");
+    let run = make_run_with_cocomo();
+    write_html_with_pdf_link(&run, &html_path, Some(&pdf_path)).unwrap();
+    let content = std::fs::read_to_string(&html_path).unwrap();
+    assert!(!content.is_empty());
+    assert!(content.contains("<!doctype html>") || content.contains("<!DOCTYPE html>"));
+}
+
+// ── ULOC / dryness tests ─────────────────────────────────────────────────────
+
+#[test]
+fn render_html_with_uloc_and_dryness_data() {
+    let mut run = make_run();
+    run.uloc = 42;
+    run.dryness_pct = Some(87.5);
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_with_duplicate_groups() {
+    let mut run = make_run();
+    run.duplicate_groups = vec![
+        vec!["src/a.rs".into(), "src/b.rs".into()],
+        vec!["lib/x.rs".into(), "lib/y.rs".into(), "lib/z.rs".into()],
+    ];
+    run.duplicates_excluded = 3;
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+}
+
+#[test]
+fn render_html_with_all_optional_data() {
+    let mut run = make_run_with_cocomo();
+    // Add coverage
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 50,
+        lines_hit: 45,
+        functions_found: 5,
+        functions_hit: 5,
+        branches_found: 10,
+        branches_hit: 9,
+    });
+    run.summary_totals.coverage_lines_found = 50;
+    run.summary_totals.coverage_lines_hit = 45;
+    // Add test counts
+    run.summary_totals.test_count = 25;
+    run.summary_totals.test_assertion_count = 75;
+    run.summary_totals.test_suite_count = 5;
+    // Add style
+    run.style_summary = Some(StyleSummary {
+        files_analyzed: 1,
+        common_indent_style: "Spaces(4)".into(),
+        line80_compliant_pct: 90,
+        line_col_compliant_pct: 88,
+        col_threshold: 100,
+        by_language: vec![],
+    });
+    // Add ULOC
+    run.uloc = 120;
+    run.dryness_pct = Some(94.0);
+    // Add duplicates
+    run.duplicate_groups = vec![vec!["src/a.rs".into(), "src/b.rs".into()]];
+    run.duplicates_excluded = 1;
+    // Add git metadata
+    run.git_remote_url = Some("https://github.com/test/repo.git".into());
+    run.git_branch = Some("main".into());
+    run.git_commit_short = Some("abc123d".into());
+    run.git_nearest_tag = Some("v1.5.0".into());
+    let html = render_html(&run).unwrap();
+    assert!(!html.is_empty());
+    assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
+}
+
+// ── write_pdf_from_run tests (printpdf-based, no browser required) ────────────
+//
+// write_pdf_from_run generates a PDF in-process using the printpdf crate.
+// No Chromium installation is required. These tests exercise the entire
+// pdf_render_* family: header, summary chips, info lines, metric tables,
+// page 1 footer, per-file pages, style section, and COCOMO section.
+
+#[test]
+fn write_pdf_from_run_basic_succeeds() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "PDF must be non-empty");
+}
+
+#[test]
+fn write_pdf_from_run_empty_project_succeeds() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_empty_run();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "PDF for empty project must be non-empty");
+}
+
+#[test]
+fn write_pdf_from_run_multi_language_succeeds() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_multi_lang_run();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_cocomo_fits_page1() {
+    // Small COCOMO estimate — fits on page 1 (after_style_y - 3 > FOOTER_H + 20)
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run_with_cocomo();
+    run.summary_totals.code_lines = 5_000;
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(
+        meta.len() > 0,
+        "PDF with COCOMO on page 1 must be non-empty"
+    );
+}
+
+#[test]
+fn write_pdf_from_run_with_cocomo_page2() {
+    // To force page-2 COCOMO path, fill the page with many per-file records
+    // so after_tables_y drops below FOOTER_H + 20, pushing COCOMO to page 2.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_empty_run();
+    // Add many file records to consume page-1 space
+    for i in 0..40_u64 {
+        run.per_file_records.push(make_file_record(
+            &format!("src/file_{i:02}.rs"),
+            Language::Rust,
+            50 + i,
+        ));
+    }
+    run.totals_by_language = vec![make_lang_summary(Language::Rust, 40, 3000)];
+    run.summary_totals.files_analyzed = 40;
+    run.summary_totals.code_lines = 3_000;
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::Organic,
+        ksloc: 3.0,
+        effort_person_months: 7.8,
+        duration_months: 5.5,
+        avg_staff: 1.4,
+    });
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(
+        meta.len() > 0,
+        "PDF with COCOMO on page 2 must be non-empty"
+    );
+}
+
+#[test]
+fn write_pdf_from_run_with_style_analysis() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_style();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "PDF with style analysis must be non-empty");
+}
+
+#[test]
+fn write_pdf_from_run_with_coverage_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_coverage();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_all_git_metadata() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_all_git();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_submodules() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_submodules();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_warnings() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_warnings();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_skipped_files() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_skipped();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_per_file_pages_triggered() {
+    // 15+ per-file records triggers pdf_render_per_file_pages (multi-page PDF)
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_empty_run();
+    for i in 0..20_u64 {
+        run.per_file_records.push(make_file_record(
+            &format!("src/module_{i:02}.rs"),
+            Language::Rust,
+            30 + i,
+        ));
+    }
+    run.totals_by_language = vec![make_lang_summary(Language::Rust, 20, 1000)];
+    run.summary_totals.files_analyzed = 20;
+    run.summary_totals.code_lines = 1_000;
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0, "multi-page PDF must be non-empty");
+}
+
+#[test]
+fn write_pdf_from_run_with_cocomo_and_coverage() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo_and_coverage();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+fn make_run_with_cocomo_and_coverage() -> AnalysisRun {
+    let mut run = make_run_with_cocomo();
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 50,
+        lines_hit: 40,
+        functions_found: 5,
+        functions_hit: 4,
+        branches_found: 10,
+        branches_hit: 8,
+    });
+    run.summary_totals.coverage_lines_found = 50;
+    run.summary_totals.coverage_lines_hit = 40;
+    run.summary_totals.test_count = 12;
+    run.summary_totals.test_assertion_count = 36;
+    run.summary_totals.test_suite_count = 3;
+    run.totals_by_language[0].coverage_lines_found = 50;
+    run.totals_by_language[0].coverage_lines_hit = 40;
+    run
+}
+
+#[test]
+fn write_pdf_from_run_large_codebase() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_empty_run();
+    run.summary_totals.code_lines = 250_000;
+    run.summary_totals.total_physical_lines = 300_000;
+    run.summary_totals.files_analyzed = 5_000;
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::SemiDetached,
+        ksloc: 250.0,
+        effort_person_months: 980.0,
+        duration_months: 32.0,
+        avg_staff: 30.6,
+    });
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_accent_color() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run_with_cocomo();
+    run.effective_configuration.reporting.accent_color = Some("#e05c00".into());
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_custom_title_and_banner() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run();
+    run.effective_configuration.reporting.report_title = "My Custom Report".into();
+    run.effective_configuration.reporting.report_header_footer =
+        Some("Confidential — Internal Use Only".into());
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_many_languages() {
+    use sloc_languages::supported_languages;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_empty_run();
+    for (i, lang) in supported_languages().into_iter().enumerate().take(15) {
+        run.per_file_records.push(make_file_record(
+            &format!("file{i}.src"),
+            lang,
+            10 + i as u64,
+        ));
+        run.totals_by_language
+            .push(make_lang_summary(lang, 1, 10 + i as u64));
+    }
+    run.summary_totals.files_analyzed = 15;
+    run.summary_totals.code_lines = 285;
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_cocomo_and_style() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo_and_style();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+fn make_run_with_cocomo_and_style() -> AnalysisRun {
+    let mut run = make_run_with_cocomo();
+    run.style_summary = Some(StyleSummary {
+        files_analyzed: 1,
+        common_indent_style: "Spaces(4)".into(),
+        line80_compliant_pct: 92,
+        line_col_compliant_pct: 88,
+        col_threshold: 100,
+        by_language: vec![LanguageStyleGroup {
+            language_family: "Rust".into(),
+            files_count: 1,
+            dominant_guide: "Rust Official".into(),
+            dominant_score_pct: 96,
+            common_indent_style: "Spaces(4)".into(),
+            guide_avg_scores: vec![("Rust Official".into(), 96)],
+            line80_compliant_pct: 92,
+            line_col_compliant_pct: 88,
+        }],
+    });
+    run
+}
+
+#[test]
+fn write_pdf_from_run_embedded_cocomo_mode() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run_with_cocomo_embedded();
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_creates_parent_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf_path = dir.path().join("nested").join("subdir").join("report.pdf");
+    let run = make_run();
+    write_pdf_from_run(&run, &pdf_path).unwrap();
+    assert!(
+        pdf_path.exists(),
+        "PDF must be created even when parent dirs are missing"
+    );
+    let meta = std::fs::metadata(&pdf_path).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_zero_coverage() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run();
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 100,
+        lines_hit: 0,
+        functions_found: 10,
+        functions_hit: 0,
+        branches_found: 20,
+        branches_hit: 0,
+    });
+    run.summary_totals.coverage_lines_found = 100;
+    run.summary_totals.coverage_lines_hit = 0;
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_with_full_coverage() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run();
+    run.per_file_records[0].coverage = Some(FileCoverage {
+        lines_found: 50,
+        lines_hit: 50,
+        functions_found: 5,
+        functions_hit: 5,
+        branches_found: 10,
+        branches_hit: 10,
+    });
+    run.summary_totals.coverage_lines_found = 50;
+    run.summary_totals.coverage_lines_hit = 50;
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    let meta = std::fs::metadata(tmp.path()).unwrap();
+    assert!(meta.len() > 0);
 }
