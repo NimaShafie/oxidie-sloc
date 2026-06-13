@@ -14284,9 +14284,12 @@ pub fn build_sub_run(
 
 #[must_use]
 pub fn sanitize_project_label(raw: &str) -> String {
-    let candidate = Path::new(raw)
-        .file_name()
-        .and_then(|name| name.to_str())
+    // Split on both '/' and '\' so Windows paths work correctly on Linux CI runners,
+    // where `Path` treats '\' as a literal character, not a separator.
+    let candidate = raw
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .last()
         .unwrap_or("project");
 
     let mut value = String::with_capacity(candidate.len());
