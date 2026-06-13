@@ -14288,8 +14288,7 @@ pub fn sanitize_project_label(raw: &str) -> String {
     // where `Path` treats '\' as a literal character, not a separator.
     let candidate = raw
         .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .rfind(|s| !s.is_empty())
         .unwrap_or("project");
 
     let mut value = String::with_capacity(candidate.len());
