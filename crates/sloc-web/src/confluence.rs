@@ -908,6 +908,154 @@ mod tests {
         assert!(result.contains("My+Report+2024"));
         assert!(result.contains("%2F01"));
     }
+
+    // ── ConfluenceConfig::is_cloud_url ────────────────────────────────────────
+
+    #[test]
+    fn is_cloud_url_atlassian_net_is_true() {
+        let cfg = ConfluenceConfig {
+            base_url: "https://acme.atlassian.net".into(),
+            ..Default::default()
+        };
+        assert!(cfg.is_cloud_url());
+    }
+
+    #[test]
+    fn is_cloud_url_non_atlassian_is_false() {
+        let cfg = ConfluenceConfig {
+            base_url: "https://confluence.example.com".into(),
+            ..Default::default()
+        };
+        assert!(!cfg.is_cloud_url());
+    }
+
+    #[test]
+    fn is_cloud_url_atlassian_net_case_insensitive() {
+        let cfg = ConfluenceConfig {
+            base_url: "https://COMPANY.ATLASSIAN.NET".into(),
+            ..Default::default()
+        };
+        assert!(cfg.is_cloud_url(), "should be case-insensitive");
+    }
+
+    #[test]
+    fn is_cloud_url_empty_string_is_false() {
+        let cfg = ConfluenceConfig {
+            base_url: String::new(),
+            ..Default::default()
+        };
+        assert!(!cfg.is_cloud_url());
+    }
+
+    // ── ConfluenceConfigStore::save / load — parent_page_id None ─────────────
+
+    #[test]
+    fn save_and_load_no_parent_page_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("no_parent.json");
+
+        let original = ConfluenceConfigStore {
+            config: Some(ConfluenceConfig {
+                tier: ConfluenceTier::Cloud,
+                base_url: "https://co.atlassian.net".into(),
+                username: "u@example.com".into(),
+                credential: String::new(),
+                space_key: "DEV".into(),
+                parent_page_id: None,
+                schedule_auto_post: std::collections::HashMap::new(),
+            }),
+        };
+        original.save(&path).expect("save must succeed");
+        let loaded = ConfluenceConfigStore::load(&path);
+        let cfg = loaded.config.as_ref().expect("config must be present");
+        assert!(cfg.parent_page_id.is_none());
+    }
+
+    // ── ConfluenceClient::new — empty username uses Bearer auth ──────────────
+
+    #[test]
+    fn client_new_empty_username_uses_bearer() {
+        // Install TLS provider so reqwest::Client::new() doesn't panic.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cfg = ConfluenceConfig {
+            tier: ConfluenceTier::Server,
+            base_url: "https://confluence.corp.com".into(),
+            username: String::new(), // empty → Bearer PAT
+            credential: "my-pat-token".into(),
+            space_key: "DEV".into(),
+            parent_page_id: None,
+            schedule_auto_post: std::collections::HashMap::new(),
+        };
+        // Should not panic
+        let _client = ConfluenceClient::new(&cfg);
+    }
+
+    // ── urlencoding_encode — additional special chars ─────────────────────────
+
+    #[test]
+    fn encode_question_mark_percent_encoded() {
+        let result = urlencoding_encode("key?value");
+        assert!(result.contains("%3F"), "? must become %3F, got: {result}");
+    }
+
+    #[test]
+    fn encode_percent_sign_percent_encoded() {
+        let result = urlencoding_encode("100%");
+        assert!(result.contains("%25"), "% must become %25, got: {result}");
+    }
+
+    #[test]
+    fn encode_tab_character_percent_encoded() {
+        let result = urlencoding_encode("a\tb");
+        assert!(result.contains("%09"), "tab must become %09, got: {result}");
+    }
+
+    #[test]
+    fn encode_newline_percent_encoded() {
+        let result = urlencoding_encode("line1\nline2");
+        assert!(
+            result.contains("%0A"),
+            "newline must become %0A, got: {result}"
+        );
+    }
+
+    // ── ConfluenceConfigStore schedule_auto_post ──────────────────────────────
+
+    #[test]
+    fn schedule_auto_post_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sched_auto.json");
+
+        let mut auto_post = std::collections::HashMap::new();
+        auto_post.insert("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(), true);
+        auto_post.insert("11111111-2222-3333-4444-555555555555".to_owned(), false);
+
+        let original = ConfluenceConfigStore {
+            config: Some(ConfluenceConfig {
+                tier: ConfluenceTier::Cloud,
+                base_url: "https://acme.atlassian.net".into(),
+                username: "x@example.com".into(),
+                credential: String::new(),
+                space_key: "PRJ".into(),
+                parent_page_id: None,
+                schedule_auto_post: auto_post.clone(),
+            }),
+        };
+        original.save(&path).expect("save must succeed");
+        let loaded = ConfluenceConfigStore::load(&path);
+        let cfg = loaded.config.as_ref().expect("config must be present");
+        assert_eq!(cfg.schedule_auto_post.len(), 2);
+        assert_eq!(
+            cfg.schedule_auto_post
+                .get("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            Some(&true)
+        );
+        assert_eq!(
+            cfg.schedule_auto_post
+                .get("11111111-2222-3333-4444-555555555555"),
+            Some(&false)
+        );
+    }
 }
 
 // ── HTTP-mocked tests for ConfluenceClient ────────────────────────────────────

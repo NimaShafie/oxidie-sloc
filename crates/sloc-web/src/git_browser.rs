@@ -1442,4 +1442,132 @@ mod tests {
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("invalid ref"));
     }
+
+    #[tokio::test]
+    async fn json_error_bad_gateway_status() {
+        use http_body_util::BodyExt;
+        let resp = json_error(StatusCode::BAD_GATEWAY, "repo unreachable");
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("repo unreachable"));
+    }
+
+    #[tokio::test]
+    async fn json_error_internal_server_error_status() {
+        use http_body_util::BodyExt;
+        let resp = json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("Internal server error"));
+    }
+
+    // ── is_valid_git_ref — additional valid patterns ─────────────────────────
+
+    #[test]
+    fn valid_ref_refs_tags_path() {
+        assert!(is_valid_git_ref("refs/tags/v2.0.0"));
+    }
+
+    #[test]
+    fn valid_ref_commit_sha_40_chars() {
+        let sha = "abcdef0123456789abcdef0123456789abcdef01";
+        assert_eq!(sha.len(), 40);
+        assert!(is_valid_git_ref(sha));
+    }
+
+    #[test]
+    fn valid_ref_single_char() {
+        assert!(is_valid_git_ref("a"));
+    }
+
+    #[test]
+    fn valid_ref_feature_with_ticket_number() {
+        assert!(is_valid_git_ref("feature/JIRA-1234"));
+    }
+
+    // ── is_valid_git_ref — additional invalid patterns ────────────────────────
+
+    #[test]
+    fn invalid_ref_double_dot_at_start() {
+        assert!(!is_valid_git_ref("..main"));
+    }
+
+    #[test]
+    fn invalid_ref_double_dot_at_end() {
+        assert!(!is_valid_git_ref("main.."));
+    }
+
+    #[test]
+    fn invalid_ref_backslash() {
+        assert!(!is_valid_git_ref("branch\\name"));
+    }
+
+    #[test]
+    fn invalid_ref_asterisk() {
+        assert!(!is_valid_git_ref("branch*glob"));
+    }
+
+    #[test]
+    fn invalid_ref_question_mark() {
+        assert!(!is_valid_git_ref("branch?name"));
+    }
+
+    #[test]
+    fn invalid_ref_colon() {
+        assert!(!is_valid_git_ref("branch:ref"));
+    }
+
+    #[test]
+    fn invalid_ref_caret() {
+        assert!(!is_valid_git_ref("HEAD^1"));
+    }
+
+    #[test]
+    fn invalid_ref_tilde() {
+        assert!(!is_valid_git_ref("HEAD~2"));
+    }
+
+    #[test]
+    fn invalid_ref_left_bracket() {
+        assert!(!is_valid_git_ref("branch[0]"));
+    }
+
+    // ── make_label — edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn make_label_only_git_extension() {
+        // repo URL that is just ".git" after stripping
+        let label = make_label("ssh://git@host/.git", "main");
+        assert!(!label.is_empty());
+        assert!(label.ends_with("_sloc"));
+    }
+
+    #[test]
+    fn make_label_numeric_in_ref() {
+        let label = make_label("https://github.com/org/repo", "release-2024-12-31");
+        assert_eq!(label, "repo_at_release-2024-12-31_sloc");
+    }
+
+    #[test]
+    fn make_label_special_chars_in_ref_become_underscore() {
+        // Braces are not in the alphanumeric / - . set, so they become _
+        let label = make_label("https://github.com/org/repo", "branch{name}");
+        assert!(label.contains("branch"), "must contain 'branch'");
+        assert!(!label.contains('{'), "curly braces must be replaced");
+        assert!(!label.contains('}'), "curly braces must be replaced");
+    }
+
+    #[test]
+    fn make_label_dot_in_ref_preserved() {
+        let label = make_label("https://github.com/org/repo.git", "v1.2.3");
+        assert_eq!(label, "repo_at_v1.2.3_sloc");
+    }
+
+    #[test]
+    fn make_label_hyphen_in_ref_preserved() {
+        let label = make_label("https://github.com/org/repo", "hot-fix-123");
+        assert_eq!(label, "repo_at_hot-fix-123_sloc");
+    }
 }

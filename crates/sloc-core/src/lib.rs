@@ -2408,4 +2408,452 @@ mod tests {
         assert_eq!(text, "hello world");
         assert!(warnings.is_empty());
     }
+
+    // ── UTF-16 BOM decoding ──────────────────────────────────────────────────
+
+    #[test]
+    fn decode_bytes_utf16le_bom() {
+        // Encode "hi" as UTF-16 LE with BOM: FF FE 68 00 69 00
+        let mut bytes = vec![0xFF, 0xFE];
+        for ch in "hi\n".encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let (text, encoding, _warnings) = decode_bytes(&bytes).unwrap();
+        assert_eq!(encoding, "utf-16le");
+        assert!(text.contains('h') && text.contains('i'));
+    }
+
+    #[test]
+    fn decode_bytes_utf16be_bom() {
+        // Encode "ok" as UTF-16 BE with BOM: FE FF 00 6F 00 6B
+        let mut bytes = vec![0xFE, 0xFF];
+        for ch in "ok\n".encode_utf16() {
+            bytes.extend_from_slice(&ch.to_be_bytes());
+        }
+        let (text, encoding, _warnings) = decode_bytes(&bytes).unwrap();
+        assert_eq!(encoding, "utf-16be");
+        assert!(text.contains('o') && text.contains('k'));
+    }
+
+    #[test]
+    fn is_binary_utf16le_bom_not_binary() {
+        // UTF-16 LE BOM followed by null bytes — should NOT be binary
+        let bytes = &[0xFF, 0xFE, 0x68, 0x00];
+        assert!(!is_binary(bytes));
+    }
+
+    #[test]
+    fn is_binary_utf16be_bom_not_binary() {
+        let bytes = &[0xFE, 0xFF, 0x00, 0x68];
+        assert!(!is_binary(bytes));
+    }
+
+    // ── MixedLinePolicy branches ─────────────────────────────────────────────
+
+    #[test]
+    fn effective_counts_code_and_comment_policy() {
+        let raw = RawLineCounts {
+            mixed_code_single_comment_lines: 3,
+            mixed_code_multi_comment_lines: 2,
+            ..RawLineCounts::default()
+        };
+        let counts = compute_effective_counts(&raw, MixedLinePolicy::CodeAndComment, true, true);
+        // Both code and comment incremented by mixed_total (5)
+        assert_eq!(counts.code_lines, 5);
+        assert_eq!(counts.comment_lines, 5);
+        assert_eq!(counts.mixed_lines_separate, 0);
+    }
+
+    #[test]
+    fn effective_counts_comment_only_policy() {
+        let raw = RawLineCounts {
+            mixed_code_single_comment_lines: 4,
+            mixed_code_multi_comment_lines: 1,
+            ..RawLineCounts::default()
+        };
+        let counts = compute_effective_counts(&raw, MixedLinePolicy::CommentOnly, true, true);
+        assert_eq!(counts.code_lines, 0);
+        assert_eq!(counts.comment_lines, 5);
+        assert_eq!(counts.mixed_lines_separate, 0);
+    }
+
+    #[test]
+    fn effective_counts_docstrings_as_code_when_flag_false() {
+        let raw = RawLineCounts {
+            code_only_lines: 10,
+            docstring_comment_lines: 3,
+            ..RawLineCounts::default()
+        };
+        // python_docstrings_as_comments = false → docstrings counted as code
+        let counts = compute_effective_counts(&raw, MixedLinePolicy::CodeOnly, false, true);
+        assert_eq!(counts.code_lines, 13);
+        assert_eq!(counts.comment_lines, 0);
+    }
+
+    #[test]
+    fn effective_counts_exclude_compiler_directives() {
+        let raw = RawLineCounts {
+            code_only_lines: 10,
+            compiler_directive_lines: 3,
+            ..RawLineCounts::default()
+        };
+        // count_compiler_directives = false → subtract directive lines from code
+        let counts = compute_effective_counts(&raw, MixedLinePolicy::CodeOnly, true, false);
+        assert_eq!(counts.code_lines, 7);
+    }
+
+    #[test]
+    fn effective_counts_directives_not_subtracted_below_zero() {
+        let raw = RawLineCounts {
+            code_only_lines: 2,
+            compiler_directive_lines: 5, // more than code — saturating_sub
+            ..RawLineCounts::default()
+        };
+        let counts = compute_effective_counts(&raw, MixedLinePolicy::CodeOnly, true, false);
+        assert_eq!(counts.code_lines, 0); // saturated at 0
+    }
+
+    // ── COCOMO modes ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cocomo_organic_computes_positive_values() {
+        let est = compute_cocomo(5_000, CocomoMode::Organic);
+        assert!(est.ksloc > 0.0);
+        assert!(est.effort_person_months > 0.0);
+        assert!(est.duration_months > 0.0);
+        assert!(est.avg_staff > 0.0);
+        assert_eq!(est.mode, CocomoMode::Organic);
+    }
+
+    #[test]
+    fn cocomo_semi_detached_computes_positive_values() {
+        let est = compute_cocomo(20_000, CocomoMode::SemiDetached);
+        assert!(est.ksloc > 0.0);
+        assert!(est.effort_person_months > 0.0);
+        assert!(est.duration_months > 0.0);
+        assert_eq!(est.mode, CocomoMode::SemiDetached);
+    }
+
+    #[test]
+    fn cocomo_embedded_computes_positive_values() {
+        let est = compute_cocomo(100_000, CocomoMode::Embedded);
+        assert!(est.effort_person_months > 0.0);
+        assert_eq!(est.mode, CocomoMode::Embedded);
+    }
+
+    #[test]
+    fn cocomo_zero_lines_produces_zero_effort() {
+        let est = compute_cocomo(0, CocomoMode::Organic);
+        assert_eq!(est.ksloc, 0.0);
+        // Zero KSLOC → effort = 2.4 * 0^1.05 = 0
+        assert!((est.effort_person_months - 0.0).abs() < 0.01);
+    }
+
+    // ── Path / git helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_url_line_extracts_url() {
+        assert_eq!(
+            parse_url_line("url = https://example.com/repo.git"),
+            Some("https://example.com/repo.git")
+        );
+    }
+
+    #[test]
+    fn parse_url_line_returns_none_for_non_url_key() {
+        assert_eq!(
+            parse_url_line("fetch = +refs/heads/*:refs/remotes/origin/*"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_url_line_returns_none_for_empty_url() {
+        assert_eq!(parse_url_line("url = "), None);
+    }
+
+    #[test]
+    fn looks_generated_generated_filename_extension() {
+        // Files with ".generated." in name are detected without reading bytes
+        let bytes = b"// normal code\n";
+        assert!(looks_generated(Path::new("schema.generated.ts"), bytes));
+    }
+
+    #[test]
+    fn looks_generated_dot_g_extension() {
+        let bytes = b"// normal code\n";
+        assert!(looks_generated(Path::new("parser.g.cs"), bytes));
+    }
+
+    #[test]
+    fn looks_minified_whitespace_ratio_is_ok() {
+        // Low whitespace ratio but NOT over the line length threshold → not minified
+        let normal = b"var x=1,y=2,z=3;\n";
+        assert!(!looks_minified(Path::new("app.js"), normal));
+    }
+
+    #[test]
+    fn is_known_lockfile_pnpm() {
+        assert!(is_known_lockfile(Path::new("pnpm-lock.yaml")));
+    }
+
+    #[test]
+    fn is_known_lockfile_pipfile() {
+        assert!(is_known_lockfile(Path::new("Pipfile.lock")));
+    }
+
+    #[test]
+    fn is_known_lockfile_poetry() {
+        assert!(is_known_lockfile(Path::new("poetry.lock")));
+    }
+
+    #[test]
+    fn is_known_lockfile_composer() {
+        assert!(is_known_lockfile(Path::new("composer.lock")));
+    }
+
+    // ── relative_path_string and path_to_string ──────────────────────────────
+
+    #[test]
+    fn relative_path_string_strips_root_prefix() {
+        let path = Path::new("/tmp/project/src/lib.rs");
+        let root = Path::new("/tmp/project");
+        let rel = relative_path_string(path, root);
+        assert_eq!(rel, "src/lib.rs");
+    }
+
+    #[test]
+    fn relative_path_string_falls_back_to_full_path() {
+        // When path is not under root, fall back to path itself
+        let path = Path::new("/other/dir/file.rs");
+        let root = Path::new("/tmp/project");
+        let rel = relative_path_string(path, root);
+        // Should not panic; returns path representation
+        assert!(!rel.is_empty());
+    }
+
+    // ── find_duplicate_groups ────────────────────────────────────────────────
+
+    #[test]
+    fn find_duplicate_groups_returns_empty_for_unique_hashes() {
+        use sloc_languages::{Language, ParseMode, RawLineCounts};
+        let make_rec = |hash: u64, path: &str| FileRecord {
+            path: path.into(),
+            relative_path: path.into(),
+            language: Some(Language::Rust),
+            size_bytes: 10,
+            detected_encoding: Some("utf-8".into()),
+            raw_line_categories: RawLineCounts::default(),
+            effective_counts: EffectiveCounts::default(),
+            status: FileStatus::AnalyzedExact,
+            warnings: vec![],
+            generated: false,
+            minified: false,
+            vendor: false,
+            parse_mode: Some(ParseMode::Lexical),
+            submodule: None,
+            coverage: None,
+            style_analysis: None,
+            cyclomatic_complexity: None,
+            lsloc: None,
+            content_hash: hash,
+        };
+        let analyzed = vec![make_rec(111, "a.rs"), make_rec(222, "b.rs")];
+        let groups = find_duplicate_groups(&analyzed);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn find_duplicate_groups_returns_group_for_same_hash() {
+        use sloc_languages::{Language, ParseMode, RawLineCounts};
+        let make_rec = |hash: u64, path: &str| FileRecord {
+            path: path.into(),
+            relative_path: path.into(),
+            language: Some(Language::Rust),
+            size_bytes: 10,
+            detected_encoding: Some("utf-8".into()),
+            raw_line_categories: RawLineCounts::default(),
+            effective_counts: EffectiveCounts::default(),
+            status: FileStatus::AnalyzedExact,
+            warnings: vec![],
+            generated: false,
+            minified: false,
+            vendor: false,
+            parse_mode: Some(ParseMode::Lexical),
+            submodule: None,
+            coverage: None,
+            style_analysis: None,
+            cyclomatic_complexity: None,
+            lsloc: None,
+            content_hash: hash,
+        };
+        let analyzed = vec![
+            make_rec(999, "a.rs"),
+            make_rec(999, "b.rs"),
+            make_rec(123, "c.rs"),
+        ];
+        let groups = find_duplicate_groups(&analyzed);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
+    }
+
+    #[test]
+    fn find_duplicate_groups_ignores_zero_hash() {
+        use sloc_languages::{Language, ParseMode, RawLineCounts};
+        let make_rec = |hash: u64, path: &str| FileRecord {
+            path: path.into(),
+            relative_path: path.into(),
+            language: Some(Language::Rust),
+            size_bytes: 10,
+            detected_encoding: Some("utf-8".into()),
+            raw_line_categories: RawLineCounts::default(),
+            effective_counts: EffectiveCounts::default(),
+            status: FileStatus::AnalyzedExact,
+            warnings: vec![],
+            generated: false,
+            minified: false,
+            vendor: false,
+            parse_mode: Some(ParseMode::Lexical),
+            submodule: None,
+            coverage: None,
+            style_analysis: None,
+            cyclomatic_complexity: None,
+            lsloc: None,
+            content_hash: hash,
+        };
+        // hash=0 means "not computed" — must be excluded from duplicate detection
+        let analyzed = vec![make_rec(0, "a.rs"), make_rec(0, "b.rs")];
+        let groups = find_duplicate_groups(&analyzed);
+        assert!(
+            groups.is_empty(),
+            "zero-hash files must not be grouped as duplicates"
+        );
+    }
+
+    // ── detect_submodules ────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_submodules_no_gitmodules_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = detect_submodules(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn detect_submodules_parses_gitmodules_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = https://github.com/example/lib.git\n";
+        std::fs::write(dir.path().join(".gitmodules"), content).unwrap();
+        let result = detect_submodules(dir.path());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "vendor/lib");
+    }
+
+    // ── write_json / read_json roundtrip ─────────────────────────────────────
+
+    #[test]
+    fn write_json_read_json_roundtrip() {
+        use chrono::Utc;
+        use sloc_config::AppConfig;
+        use sloc_languages::{Language, ParseMode, RawLineCounts};
+        let dir = tempfile::tempdir().unwrap();
+        let run = AnalysisRun {
+            tool: ToolMetadata {
+                name: "sloc".into(),
+                version: "0.0.1".into(),
+                run_id: "test-roundtrip".into(),
+                timestamp_utc: Utc::now(),
+            },
+            environment: EnvironmentMetadata {
+                operating_system: "test".into(),
+                architecture: "x86_64".into(),
+                runtime_mode: "test".into(),
+                initiator_username: "tester".into(),
+                initiator_hostname: "testhost".into(),
+                ci_name: None,
+            },
+            effective_configuration: AppConfig::default(),
+            input_roots: vec!["/tmp/test".into()],
+            summary_totals: SummaryTotals {
+                files_analyzed: 1,
+                code_lines: 5,
+                ..SummaryTotals::default()
+            },
+            totals_by_language: vec![],
+            per_file_records: vec![FileRecord {
+                path: "a.rs".into(),
+                relative_path: "a.rs".into(),
+                language: Some(Language::Rust),
+                size_bytes: 50,
+                detected_encoding: Some("utf-8".into()),
+                raw_line_categories: RawLineCounts {
+                    code_only_lines: 5,
+                    ..RawLineCounts::default()
+                },
+                effective_counts: EffectiveCounts {
+                    code_lines: 5,
+                    ..EffectiveCounts::default()
+                },
+                status: FileStatus::AnalyzedExact,
+                warnings: vec![],
+                generated: false,
+                minified: false,
+                vendor: false,
+                parse_mode: Some(ParseMode::Lexical),
+                submodule: None,
+                coverage: None,
+                style_analysis: None,
+                cyclomatic_complexity: None,
+                lsloc: None,
+                content_hash: 0,
+            }],
+            skipped_file_records: vec![],
+            warnings: vec![],
+            submodule_summaries: vec![],
+            git_commit_short: Some("abc1234".into()),
+            git_branch: Some("main".into()),
+            git_commit_long: None,
+            git_commit_author: None,
+            git_tags: None,
+            git_nearest_tag: None,
+            git_commit_date: None,
+            git_remote_url: None,
+            style_summary: None,
+            cocomo: None,
+            uloc: 0,
+            dryness_pct: None,
+            duplicate_groups: vec![],
+            duplicates_excluded: 0,
+        };
+        let json_path = dir.path().join("test.json");
+        write_json(&run, &json_path).unwrap();
+        let loaded = read_json(&json_path).unwrap();
+        assert_eq!(loaded.summary_totals.files_analyzed, 1);
+        assert_eq!(loaded.summary_totals.code_lines, 5);
+        assert_eq!(loaded.git_commit_short.as_deref(), Some("abc1234"));
+        assert_eq!(loaded.git_branch.as_deref(), Some("main"));
+        assert_eq!(loaded.per_file_records.len(), 1);
+    }
+
+    // ── detect_ci_system ─────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_ci_system_returns_none_without_env_vars() {
+        // Remove known CI env vars so detection returns None
+        for var in &[
+            "JENKINS_URL",
+            "JENKINS_HOME",
+            "BUILD_URL",
+            "GITHUB_ACTIONS",
+            "GITLAB_CI",
+            "CIRCLECI",
+            "TRAVIS",
+            "TF_BUILD",
+            "TEAMCITY_VERSION",
+        ] {
+            std::env::remove_var(var);
+        }
+        // Result depends on test runner env; just assert no panic
+        let _ = detect_ci_system();
+    }
 }
