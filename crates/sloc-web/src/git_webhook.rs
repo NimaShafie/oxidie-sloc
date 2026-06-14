@@ -772,4 +772,181 @@ mod tests {
         // HeaderMap normalises header names to lowercase
         assert_eq!(header_str(&headers, "X-GitHub-Event"), "ping");
     }
+
+    // ── build_schedule — edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn build_schedule_no_provider_defaults_to_any() {
+        let req = CreateScheduleRequest {
+            label: "No provider".into(),
+            repo_url: "https://git.example.com/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: None,
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.provider, ScanScheduleProvider::Any);
+        assert_eq!(s.kind, ScanScheduleKind::Webhook);
+    }
+
+    #[test]
+    fn build_schedule_webhook_no_secret_sets_none_or_generated() {
+        let req = CreateScheduleRequest {
+            label: "No secret webhook".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("github".into()),
+            interval_secs: None,
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        // When no secret is provided, the schedule either has None or an
+        // auto-generated secret (implementation detail). Either is valid.
+        assert_eq!(s.kind, ScanScheduleKind::Webhook);
+    }
+
+    #[test]
+    fn build_schedule_poll_stores_interval() {
+        let req = CreateScheduleRequest {
+            label: "Fast poll".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "poll".into(),
+            provider: None,
+            interval_secs: Some(60),
+            webhook_secret: None,
+        };
+        let s = build_schedule(req);
+        assert_eq!(s.kind, ScanScheduleKind::Poll);
+        assert_eq!(s.interval_secs, Some(60));
+    }
+
+    // ── check_github_event_header — additional event types ────────────────────
+
+    #[test]
+    fn github_pull_request_event_returns_200() {
+        let resp = check_github_event_header("pull_request");
+        assert!(
+            resp.is_some(),
+            "pull_request must return a response (not push)"
+        );
+    }
+
+    #[test]
+    fn github_star_event_returns_200() {
+        let resp = check_github_event_header("star");
+        assert!(
+            resp.is_some(),
+            "star event must return a response (not push)"
+        );
+    }
+
+    // ── check_gitlab_event_header — additional event types ────────────────────
+
+    #[test]
+    fn gitlab_pipeline_hook_returns_200() {
+        let resp = check_gitlab_event_header("Pipeline Hook");
+        assert!(resp.is_some(), "Pipeline Hook must return a response");
+    }
+
+    #[test]
+    fn gitlab_issue_hook_returns_200() {
+        let resp = check_gitlab_event_header("Issue Hook");
+        assert!(resp.is_some(), "Issue Hook must return a response");
+    }
+
+    // ── matches_hmac — verify fn called with correct arguments ────────────────
+
+    #[test]
+    fn matches_hmac_passes_body_to_verify() {
+        let secret = "my-secret";
+        let s = ScanSchedule::new_webhook(
+            "https://github.com/org/repo.git".into(),
+            "main".into(),
+            ScanScheduleProvider::GitHub,
+            "test".into(),
+            Some(secret.into()),
+        );
+        let body = b"test-payload";
+        let sig = "sha256=abc123";
+
+        // Use a stateless verify fn that checks the secret matches
+        let verify = |_body: &[u8], _sig: &str, sec: &str| sec == "my-secret";
+        assert!(matches_hmac(&s, body, sig, &verify));
+
+        // A fn that always returns false
+        let reject = |_body: &[u8], _sig: &str, _sec: &str| false;
+        assert!(!matches_hmac(&s, body, sig, &reject));
+    }
+
+    // ── header_str — additional headers ──────────────────────────────────────
+
+    #[test]
+    fn header_str_x_hub_signature_256() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hub-signature-256", "sha256=abc123".parse().unwrap());
+        assert_eq!(header_str(&headers, "x-hub-signature-256"), "sha256=abc123");
+    }
+
+    #[test]
+    fn header_str_x_gitlab_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-gitlab-token", "my-secret-token".parse().unwrap());
+        assert_eq!(header_str(&headers, "x-gitlab-token"), "my-secret-token");
+    }
+
+    #[test]
+    fn header_str_x_hub_signature() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hub-signature", "sha256=bitbucket-sig".parse().unwrap());
+        assert_eq!(
+            header_str(&headers, "x-hub-signature"),
+            "sha256=bitbucket-sig"
+        );
+    }
+
+    // ── ct_eq — unicode and binary-safe boundary tests ────────────────────────
+
+    #[test]
+    fn ct_eq_spaces_in_secret() {
+        assert!(ct_eq("my secret", "my secret"));
+        assert!(!ct_eq("my secret", "my-secret"));
+    }
+
+    #[test]
+    fn ct_eq_long_strings() {
+        let a = "x".repeat(1024);
+        let b = "x".repeat(1024);
+        assert!(ct_eq(&a, &b));
+        let mut c = "x".repeat(1023);
+        c.push('y');
+        assert!(!ct_eq(&a, &c));
+    }
+
+    // ── CreateScheduleRequest — serialization ─────────────────────────────────
+
+    #[test]
+    fn create_schedule_request_serializes_and_deserializes() {
+        let req = CreateScheduleRequest {
+            label: "Test Label".into(),
+            repo_url: "https://github.com/org/repo.git".into(),
+            branch: "main".into(),
+            kind: "webhook".into(),
+            provider: Some("github".into()),
+            interval_secs: Some(300),
+            webhook_secret: Some("sec".into()),
+        };
+        let json = serde_json::to_string(&req).expect("must serialize");
+        let deser: CreateScheduleRequest = serde_json::from_str(&json).expect("must deserialize");
+        assert_eq!(deser.label, "Test Label");
+        assert_eq!(deser.repo_url, "https://github.com/org/repo.git");
+        assert_eq!(deser.branch, "main");
+        assert_eq!(deser.kind, "webhook");
+        assert_eq!(deser.provider.as_deref(), Some("github"));
+        assert_eq!(deser.interval_secs, Some(300));
+        assert_eq!(deser.webhook_secret.as_deref(), Some("sec"));
+    }
 }

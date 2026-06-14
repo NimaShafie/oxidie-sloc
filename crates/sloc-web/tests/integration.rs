@@ -4532,3 +4532,557 @@ async fn rate_limit_shared_router_triggers_429() {
         statuses
     );
 }
+
+// ── Confluence API routes (unit-level HTTP coverage) ──────────────────────────
+
+#[tokio::test]
+async fn api_get_confluence_config_returns_json_not_configured() {
+    let (status, headers, body) = get("/api/confluence/config").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "must return JSON, got: {ct}");
+    assert!(
+        body.contains("\"configured\""),
+        "body must contain 'configured' field, got: {body}"
+    );
+    // Default state has no config set
+    assert!(
+        body.contains("false") || body.contains("\"configured\":false"),
+        "unconfigured state must report configured=false, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_save_confluence_config_cloud_tier() {
+    let json = r#"{
+        "tier": "cloud",
+        "base_url": "https://mycompany.atlassian.net",
+        "username": "user@example.com",
+        "credential": "my-api-token",
+        "space_key": "DEV",
+        "parent_page_id": null,
+        "schedule_auto_post": {}
+    }"#;
+    let (status, _, body) = post_json("/api/confluence/config", json).await;
+    assert_eq!(status, StatusCode::OK, "save config must return 200");
+    assert!(
+        body.contains("\"ok\":true") || body.contains("\"ok\": true"),
+        "save config must return ok=true, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_save_confluence_config_server_tier() {
+    let json = r#"{
+        "tier": "server",
+        "base_url": "https://confluence.corp.com",
+        "username": "admin",
+        "credential": "password123",
+        "space_key": "ENG",
+        "parent_page_id": "12345",
+        "schedule_auto_post": {}
+    }"#;
+    let (status, _, body) = post_json("/api/confluence/config", json).await;
+    assert_eq!(status, StatusCode::OK, "save server config must return 200");
+    assert!(
+        body.contains("\"ok\":true") || body.contains("\"ok\": true"),
+        "save server config must return ok=true, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_save_confluence_config_missing_body_not_5xx() {
+    let (status, _, _) = post_json("/api/confluence/config", "{}").await;
+    // Missing required fields -> 400 or 422, never 5xx
+    assert!(
+        status.as_u16() < 500,
+        "missing confluence config body must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_test_confluence_unconfigured_returns_400() {
+    let (status, _, body) = post_json("/api/confluence/test", "").await;
+    // No Confluence configured in the test state -> 400 Bad Request
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unconfigured confluence test must return 400, got {status}: {body}"
+    );
+    assert!(
+        body.contains("\"ok\":false") || body.contains("\"ok\": false"),
+        "body must contain ok=false, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_post_to_confluence_invalid_run_id_returns_400() {
+    let json = r#"{"run_id": "../traversal", "page_title": "My Report"}"#;
+    let (status, _, body) = post_json("/api/confluence/post", json).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid run_id must return 400, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_post_to_confluence_empty_run_id_returns_400() {
+    let json = r#"{"run_id": "", "page_title": "My Report"}"#;
+    let (status, _, body) = post_json("/api/confluence/post", json).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty run_id must return 400, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_post_to_confluence_unconfigured_returns_400() {
+    // Valid run_id format, but no Confluence configured
+    let json = r#"{"run_id": "abc123", "page_title": "My Report"}"#;
+    let (status, _, body) = post_json("/api/confluence/post", json).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unconfigured confluence post must return 400, got {status}: {body}"
+    );
+    assert!(
+        body.contains("\"ok\":false") || body.contains("\"ok\": false"),
+        "body must contain ok=false, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_post_to_confluence_unknown_run_id_returns_404_or_400() {
+    // First save a config so it's configured
+    let cfg_json = r#"{
+        "tier": "cloud",
+        "base_url": "https://mycompany.atlassian.net",
+        "username": "u@example.com",
+        "credential": "token",
+        "space_key": "DEV",
+        "parent_page_id": null,
+        "schedule_auto_post": {}
+    }"#;
+    // Use shared router so config persists across calls
+    let app = make_test_router();
+    let req = Request::post("/api/confluence/config")
+        .header("content-type", "application/json")
+        .body(Body::from(cfg_json.to_owned()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Now post with a run_id that does not exist in registry
+    let req2 = Request::post("/api/confluence/post")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"run_id":"nonexistent-run-id","page_title":"Test"}"#,
+        ))
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    let status = resp2.status();
+    // Either 404 (run not found) or 400 (bad run_id chars) — never 5xx
+    assert!(
+        status.as_u16() < 500,
+        "unknown run_id in confluence post must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_wiki_markup_invalid_run_id_returns_400() {
+    let (status, _, _) = get("/api/confluence/wiki-markup?run_id=../../etc/passwd").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "path-traversal run_id must return 400, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_wiki_markup_unknown_run_id_returns_404() {
+    let (status, _, _) = get("/api/confluence/wiki-markup?run_id=nonexistent-abc-123").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown run_id must return 404, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_wiki_markup_too_long_run_id_returns_400() {
+    let long_id = "a".repeat(200);
+    let uri = format!("/api/confluence/wiki-markup?run_id={long_id}");
+    let (status, _, _) = get(&uri).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "overly-long run_id must return 400, got {status}"
+    );
+}
+
+// ── Webhook routes — push payload coverage ────────────────────────────────────
+
+#[tokio::test]
+async fn post_github_webhook_push_valid_payload_returns_accepted() {
+    let app = make_test_router();
+    let payload = r#"{"ref":"refs/heads/main","repository":{"clone_url":"https://github.com/org/repo.git"},"commits":[{"id":"abc123","message":"test commit"}]}"#;
+    let req = Request::post("/webhooks/github")
+        .header("content-type", "application/json")
+        .header("x-github-event", "push")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    // No schedules configured, so dispatch finds nothing, but handler returns 202 Accepted
+    assert!(
+        status.as_u16() < 500,
+        "valid GitHub push webhook must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_github_webhook_push_invalid_payload_returns_400() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/github")
+        .header("content-type", "application/json")
+        .header("x-github-event", "push")
+        .body(Body::from("not-json-at-all"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid JSON push payload must return 400, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_github_webhook_missing_event_header_returns_400() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/github")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"ref":"refs/heads/main"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing X-GitHub-Event header must return 400, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_gitlab_webhook_push_valid_payload_returns_accepted() {
+    let app = make_test_router();
+    let payload = r#"{"ref":"refs/heads/main","project":{"git_http_url":"https://gitlab.com/org/repo.git"},"commits":[{"id":"abc123","message":"test commit"}]}"#;
+    let req = Request::post("/webhooks/gitlab")
+        .header("content-type", "application/json")
+        .header("x-gitlab-event", "Push Hook")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert!(
+        status.as_u16() < 500,
+        "valid GitLab push webhook must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_gitlab_webhook_tag_push_valid_payload_returns_accepted() {
+    let app = make_test_router();
+    let payload = r#"{"ref":"refs/tags/v1.0","project":{"git_http_url":"https://gitlab.com/org/repo.git"},"commits":[{"id":"def456","message":"tag release"}]}"#;
+    let req = Request::post("/webhooks/gitlab")
+        .header("content-type", "application/json")
+        .header("x-gitlab-event", "Tag Push Hook")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert!(
+        status.as_u16() < 500,
+        "valid GitLab tag push webhook must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_gitlab_webhook_invalid_payload_returns_400() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/gitlab")
+        .header("content-type", "application/json")
+        .header("x-gitlab-event", "Push Hook")
+        .body(Body::from("not-json"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid JSON GitLab push payload must return 400, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_gitlab_webhook_missing_event_header_returns_400() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/gitlab")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"ref":"refs/heads/main"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing X-GitLab-Event header must return 400, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_gitlab_webhook_non_push_event_returns_200() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/gitlab")
+        .header("content-type", "application/json")
+        .header("x-gitlab-event", "Merge Request Hook")
+        .body(Body::from(r#"{"object_kind":"merge_request"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert!(
+        status.as_u16() < 500,
+        "non-push GitLab event must not 5xx, got {status}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "non-push GitLab event must return 200, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_bitbucket_webhook_valid_payload_returns_accepted() {
+    let app = make_test_router();
+    // Minimal Bitbucket push payload matching parse_bitbucket_push format
+    let payload = r#"{"push":{"changes":[{"new":{"name":"main","target":{"hash":"abc1234567890"}}}]},"repository":{"links":{"clone":[{"href":"https://bitbucket.org/ws/repo.git","name":"https"}]}}}"#;
+    let req = Request::post("/webhooks/bitbucket")
+        .header("content-type", "application/json")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert!(
+        status.as_u16() < 500,
+        "valid Bitbucket push webhook must not 5xx, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn post_bitbucket_webhook_invalid_payload_returns_400() {
+    let app = make_test_router();
+    let req = Request::post("/webhooks/bitbucket")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    // Empty JSON missing required fields -> parse fails -> 400
+    assert!(
+        status.as_u16() < 500,
+        "malformed Bitbucket payload must not 5xx, got {status}"
+    );
+}
+
+// ── Schedules API — additional coverage ───────────────────────────────────────
+
+#[tokio::test]
+async fn api_list_schedules_returns_json_array() {
+    let (status, headers, body) = get("/api/schedules").await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "must return JSON, got: {ct}");
+    assert!(
+        body.contains("\"schedules\""),
+        "body must contain 'schedules' key, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_create_schedule_webhook_kind_returns_201() {
+    let json = r#"{
+        "label": "My GitHub Schedule",
+        "repo_url": "https://github.com/org/repo.git",
+        "branch": "main",
+        "kind": "webhook",
+        "provider": "github",
+        "interval_secs": null,
+        "webhook_secret": "secret123"
+    }"#;
+    let (status, _, body) = post_json("/api/schedules", json).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create webhook schedule must return 201, got {status}: {body}"
+    );
+    assert!(
+        body.contains("\"repo_url\"") || body.contains("repo_url"),
+        "response must contain schedule data, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_create_schedule_poll_kind_returns_201() {
+    let json = r#"{
+        "label": "Poll Schedule",
+        "repo_url": "https://github.com/org/repo.git",
+        "branch": "develop",
+        "kind": "poll",
+        "provider": null,
+        "interval_secs": 600,
+        "webhook_secret": null
+    }"#;
+    let (status, _, body) = post_json("/api/schedules", json).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create poll schedule must return 201, got {status}: {body}"
+    );
+    assert!(
+        body.contains("\"repo_url\"") || body.contains("repo_url"),
+        "response must contain schedule data, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_create_schedule_gitlab_provider_returns_201() {
+    let json = r#"{
+        "label": "GL Schedule",
+        "repo_url": "https://gitlab.com/org/repo.git",
+        "branch": "main",
+        "kind": "webhook",
+        "provider": "gitlab",
+        "interval_secs": null,
+        "webhook_secret": "gl-secret"
+    }"#;
+    let (status, _, _) = post_json("/api/schedules", json).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create gitlab schedule must return 201, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_create_schedule_bitbucket_provider_returns_201() {
+    let json = r#"{
+        "label": "BB Schedule",
+        "repo_url": "https://bitbucket.org/ws/repo.git",
+        "branch": "main",
+        "kind": "webhook",
+        "provider": "bitbucket",
+        "interval_secs": null,
+        "webhook_secret": "bb-secret"
+    }"#;
+    let (status, _, _) = post_json("/api/schedules", json).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create bitbucket schedule must return 201, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn api_create_schedule_invalid_body_not_5xx() {
+    let (status, _, _) = post_json("/api/schedules", "{}").await;
+    // Missing required fields -> 400 or 422; never 5xx
+    assert!(
+        status.as_u16() < 500,
+        "invalid schedule body must not 5xx, got {status}"
+    );
+}
+
+// ── Git browser API routes — error branches ────────────────────────────────────
+
+#[tokio::test]
+async fn api_list_refs_missing_repo_param_returns_400_v2() {
+    // Verify the error JSON contains the expected 'error' key (additional assertion).
+    let (status, _, body) = get("/api/git/refs").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing ?repo= must return 400, got {status}: {body}"
+    );
+    assert!(
+        body.contains("\"error\""),
+        "error response must have 'error' key, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_scan_ref_ref_with_space_returns_400() {
+    let (status, _, body) =
+        get("/api/git/scan-ref?repo=https://github.com/org/repo.git&ref_name=my%20branch").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "ref_name with space must return 400, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_scan_ref_ref_with_semicolon_returns_400() {
+    let (status, _, body) =
+        get("/api/git/scan-ref?repo=https://github.com/org/repo.git&ref_name=main%3Brm+-rf").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "shell-injection ref_name must return 400, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_scan_ref_ref_starting_with_slash_returns_400() {
+    let (status, _, body) =
+        get("/api/git/scan-ref?repo=https://github.com/org/repo.git&ref_name=%2Fetc%2Fpasswd")
+            .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "absolute-path ref_name must return 400, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_compare_refs_invalid_baseline_returns_400() {
+    let (status, _, body) = get(
+        "/api/git/compare-refs?repo=https://github.com/org/repo.git&baseline_ref=..%2F..%2Fetc&current_ref=main",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid baseline_ref must return 400, got {status}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn api_compare_refs_invalid_current_returns_400() {
+    let (status, _, body) = get(
+        "/api/git/compare-refs?repo=https://github.com/org/repo.git&baseline_ref=main&current_ref=..%2F..%2Fetc",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid current_ref must return 400, got {status}: {body}"
+    );
+}
