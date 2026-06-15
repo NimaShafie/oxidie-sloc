@@ -664,17 +664,17 @@ mod tests {
         let guides = vec![
             StyleGuideScore {
                 name: "A".into(),
-                description: "".into(),
+                description: String::new(),
                 score_pct: 70,
             },
             StyleGuideScore {
                 name: "B".into(),
-                description: "".into(),
+                description: String::new(),
                 score_pct: 95,
             },
             StyleGuideScore {
                 name: "C".into(),
-                description: "".into(),
+                description: String::new(),
                 score_pct: 80,
             },
         ];

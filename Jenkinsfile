@@ -228,7 +228,7 @@ pipeline {
             defaultValue: false,
             description:  'Run a dedicated Coverage stage. ' +
                           'Generates LCOV, Cobertura XML, and a browsable HTML coverage report. ' +
-                          'The HTML report is published as a "Coverage Report" sidebar link. ' +
+                          'The HTML report is published as a "Coverage Source" sidebar link. ' +
                           'Requires cargo-llvm-cov (preferred) or cargo-tarpaulin on the agent:\n' +
                           '  cargo install cargo-llvm-cov && rustup component add llvm-tools\n' +
                           'cargo-llvm-cov is vendored in ci/tools/Cargo.toml for air-gapped installs.'

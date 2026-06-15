@@ -505,6 +505,7 @@ fn detect_by_shebang(line: &str) -> Option<Language> {
 }
 
 /// Detect language purely from a (lowercased) file extension.
+#[allow(clippy::too_many_lines)]
 fn detect_by_extension(ext: &str) -> Option<Language> {
     // Static table avoids a large match statement; each extension maps 1-to-1 to a language.
     static EXT_MAP: &[(&str, Language)] = &[
@@ -883,29 +884,31 @@ const BRANCH_CMAKE: &[&str] = &["if(", "elseif(", "else(", "while(", "foreach("]
 const BRANCH_ELM: &[&str] = &["if", "then", "else", "case", "of"];
 const BRANCH_AWK: &[&str] = &["if", "else", "while", "for", "do"];
 
-/// Returns (branch_keywords, lsloc_strategy) for the given language.
+/// Returns (`branch_keywords`, `lsloc_strategy`) for the given language.
 /// Kept separate from `LANG_SCAN_TABLE` to avoid touching that large table.
 const fn language_complexity_config(
     language: Language,
 ) -> (&'static [&'static str], LslocStrategy) {
     match language {
-        // ── C preprocessor family ─────────────────────────────────────────────
-        Language::C | Language::Cpp | Language::ObjectiveC => {
-            (BRANCH_C_TERNARY, LslocStrategy::Semicolons)
+        // ── C-ternary family (ternary operator counted as branch) ─────────────
+        Language::C
+        | Language::Cpp
+        | Language::ObjectiveC
+        | Language::CSharp
+        | Language::JavaScript
+        | Language::TypeScript
+        | Language::Svelte
+        | Language::Vue
+        | Language::Dart
+        | Language::Groovy
+        | Language::Swift
+        | Language::Solidity => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
+        // ── C-family (no ternary keyword) ────────────────────────────────────
+        Language::Java | Language::Kotlin | Language::Scala | Language::D | Language::Glsl => {
+            (BRANCH_C_FAMILY, LslocStrategy::Semicolons)
         }
-        // ── C-slash family ────────────────────────────────────────────────────
-        Language::CSharp => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
         Language::Go => (BRANCH_GO, LslocStrategy::Semicolons),
-        Language::Java => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
-        Language::JavaScript | Language::TypeScript | Language::Svelte | Language::Vue => {
-            (BRANCH_C_TERNARY, LslocStrategy::Semicolons)
-        }
-        Language::Dart | Language::Groovy => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
-        Language::Kotlin => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
-        Language::Scala => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
-        Language::Scss => (&[], LslocStrategy::Unsupported),
         Language::Rust => (BRANCH_RUST, LslocStrategy::Semicolons),
-        Language::Swift => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
         Language::Zig => (BRANCH_ZIG, LslocStrategy::Semicolons),
         Language::FSharp => (BRANCH_FSHARP, LslocStrategy::Unsupported),
         // ── Hash-comment family ───────────────────────────────────────────────
@@ -913,29 +916,21 @@ const fn language_complexity_config(
         Language::Elixir => (BRANCH_ELIXIR, LslocStrategy::NonContinuationNewlines),
         Language::Perl => (BRANCH_PERL, LslocStrategy::Semicolons),
         Language::R => (BRANCH_R, LslocStrategy::NonContinuationNewlines),
-        Language::Ruby => (BRANCH_RUBY, LslocStrategy::NonContinuationNewlines),
+        Language::Ruby | Language::Crystal => (BRANCH_RUBY, LslocStrategy::NonContinuationNewlines),
         Language::Python => (BRANCH_PYTHON, LslocStrategy::NonContinuationNewlines),
         Language::PowerShell => (BRANCH_POWERSHELL, LslocStrategy::Unsupported),
         Language::Nim => (BRANCH_NIM, LslocStrategy::NonContinuationNewlines),
-        Language::Makefile | Language::Dockerfile => (&[], LslocStrategy::Unsupported),
         // ── Unique comment styles ─────────────────────────────────────────────
-        Language::Css => (&[], LslocStrategy::Unsupported),
-        Language::Html | Language::Xml => (&[], LslocStrategy::Unsupported),
         Language::Lua => (BRANCH_LUA, LslocStrategy::Unsupported),
         Language::Haskell => (BRANCH_HASKELL, LslocStrategy::Unsupported),
         Language::Sql => (BRANCH_SQL, LslocStrategy::Semicolons),
         Language::Ocaml => (BRANCH_OCAML, LslocStrategy::Semicolons),
-        Language::Assembly => (&[], LslocStrategy::Unsupported),
         Language::Clojure => (BRANCH_CLOJURE, LslocStrategy::Unsupported),
-        Language::Erlang => (&[], LslocStrategy::Unsupported),
         Language::Php => (BRANCH_PHP, LslocStrategy::Semicolons),
         Language::Julia => (BRANCH_JULIA, LslocStrategy::NonContinuationNewlines),
-        // ── Pass 1 additions ──────────────────────────────────────────────────
-        Language::Solidity => (BRANCH_C_TERNARY, LslocStrategy::Semicolons),
         Language::Protobuf => (&[], LslocStrategy::Semicolons),
         Language::Hcl => (&[], LslocStrategy::NonContinuationNewlines),
-        Language::GraphQl => (&[], LslocStrategy::Unsupported),
-        // ── Pass 2 additions (legacy + embedded / HDL) ────────────────────────
+        // ── Legacy / embedded / HDL ───────────────────────────────────────────
         Language::Ada => (BRANCH_ADA, LslocStrategy::Semicolons),
         Language::Vhdl => (BRANCH_VHDL, LslocStrategy::Semicolons),
         Language::Verilog => (BRANCH_VERILOG, LslocStrategy::Semicolons),
@@ -943,15 +938,22 @@ const fn language_complexity_config(
         Language::Pascal => (BRANCH_PASCAL, LslocStrategy::Semicolons),
         Language::VisualBasic => (BRANCH_VB, LslocStrategy::NonContinuationNewlines),
         Language::Lisp => (BRANCH_LISP, LslocStrategy::Unsupported),
-        // ── Pass 3 additions (scientific / infra / systems / graphics) ────────
+        // ── Scientific / infra / systems / graphics ───────────────────────────
         Language::Fortran => (BRANCH_FORTRAN, LslocStrategy::NonContinuationNewlines),
         Language::Nix => (BRANCH_NIX, LslocStrategy::Unsupported),
-        Language::Crystal => (BRANCH_RUBY, LslocStrategy::NonContinuationNewlines),
-        Language::D => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
-        Language::Glsl => (BRANCH_C_FAMILY, LslocStrategy::Semicolons),
         Language::Cmake => (BRANCH_CMAKE, LslocStrategy::Unsupported),
         Language::Elm => (BRANCH_ELM, LslocStrategy::Unsupported),
         Language::Awk => (BRANCH_AWK, LslocStrategy::NonContinuationNewlines),
+        // ── No branch detection / syntax unsupported ──────────────────────────
+        Language::Makefile
+        | Language::Dockerfile
+        | Language::Css
+        | Language::Html
+        | Language::Xml
+        | Language::Assembly
+        | Language::Erlang
+        | Language::GraphQl
+        | Language::Scss => (&[], LslocStrategy::Unsupported),
     }
 }
 
@@ -3045,6 +3047,7 @@ fn process_physical_line(
     classify_line(raw, &emit, trimmed);
 
     if emit.has_code {
+        use std::hash::{DefaultHasher, Hash, Hasher};
         let (f, c, v, i, t, a, s) = count_symbols(&config.symbol_patterns, trimmed);
         raw.functions += f;
         raw.classes += c;
@@ -3061,7 +3064,8 @@ fn process_physical_line(
         // Logical SLOC (language-specific strategy).
         match config.lsloc_strategy {
             LslocStrategy::Semicolons => {
-                let semi = trimmed.bytes().filter(|&b| b == b';').count() as u32;
+                let semi = u32::try_from(trimmed.bytes().filter(|&b| b == b';').count())
+                    .unwrap_or(u32::MAX);
                 *raw.lsloc.get_or_insert(0) += semi;
             }
             LslocStrategy::NonContinuationNewlines => {
@@ -3078,7 +3082,6 @@ fn process_physical_line(
         }
 
         // ULOC: hash each trimmed code line for cross-file unique-line counting.
-        use std::hash::{DefaultHasher, Hash, Hasher};
         let mut h = DefaultHasher::new();
         trimmed.hash(&mut h);
         raw.code_line_hashes.push(h.finish());

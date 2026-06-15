@@ -637,7 +637,7 @@ def runPostSuccess() {
                 String s = String.format('%.1f', v / 1_000_000.0) + 'M'
                 return s.replace('.0M', 'M')
             }
-            if (a >= 10_000L) return "${Math.round(v / 1_000.0)}K"
+            if (a >= 10_000L) return "${Math.round(v / 1_000.0d)}K"
             return String.format('%,d', v)
         }
         def desc = "${fmtN(t.code_lines)} code · " +
