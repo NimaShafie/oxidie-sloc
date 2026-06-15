@@ -456,9 +456,11 @@ pipeline {
                                            -W clippy::nursery \
                                            -A clippy::multiple_crate_versions \
                                         2>&1 | tee clippy-output.txt
+                                    CLIPPY_RC=$?
                                     WARN_COUNT=$(grep -c '^warning' clippy-output.txt 2>/dev/null || echo 0)
-                                    ERR_COUNT=$(grep -c '^error' clippy-output.txt 2>/dev/null || echo 0)
+                                    ERR_COUNT=$(grep -c '^error'   clippy-output.txt 2>/dev/null || echo 0)
                                     echo "Clippy: ${ERR_COUNT} errors, ${WARN_COUNT} warnings"
+                                    exit $CLIPPY_RC
                                 '''
                             }
                         }

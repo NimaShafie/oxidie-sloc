@@ -10,6 +10,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.67] — 2026-06-15
+
+### Fixed
+
+- **Jenkins Clippy stage exit-code propagation** (`Jenkinsfile`): The `cargo clippy` exit code
+  was previously lost because the output was piped through `tee`; the stage always reported
+  success even when Clippy found errors. The fix captures `$?` immediately after the clippy
+  invocation into `CLIPPY_RC` and calls `exit $CLIPPY_RC` at the end of the step so the
+  Jenkins stage correctly fails on any Clippy error. Also aligns whitespace in the
+  `ERR_COUNT` grep for consistency.
+
+---
+
 ## [1.5.66] — 2026-06-04
 
 ### Improved
