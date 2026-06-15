@@ -84,4 +84,16 @@ RUN set -eux; \
     mkdir -p /var/jenkins_home/.rust-cache; \
     chown -R jenkins:jenkins /var/jenkins_home/.rust-cache
 
+# Install CI tooling into the baked-in toolchain so every pipeline run can use
+# cargo-nextest (JUnit test results) and cargo-llvm-cov (coverage) without
+# touching the network.  Source for both tools is vendored in ci/tools/Cargo.toml
+# so that air-gapped agents can also install them via `cargo install --offline`.
+RUN set -eux; \
+    export CARGO_HOME=/opt/rust-toolchain/cargo \
+           RUSTUP_HOME=/opt/rust-toolchain/rustup \
+           PATH="/opt/rust-toolchain/cargo/bin:${PATH}"; \
+    cargo install cargo-nextest --locked; \
+    cargo install cargo-llvm-cov --locked; \
+    chmod -R a+rX /opt/rust-toolchain
+
 USER jenkins
