@@ -11,7 +11,7 @@ use std::path::Path;
 use sloc_languages::{analyze_text, detect_language, style, AnalysisOptions, Language};
 
 /// Every Language variant with a tiny representative snippet. Calling
-/// analyze_text on each forces language_scan_config to resolve that arm.
+/// `analyze_text` on each forces `language_scan_config` to resolve that arm.
 fn all_languages() -> Vec<(Language, &'static str)> {
     vec![
         (Language::C, "// c\nint x = 1;\n"),
