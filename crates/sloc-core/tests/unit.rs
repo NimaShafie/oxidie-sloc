@@ -1406,13 +1406,37 @@ fn analyze_walks_deeply_nested_directories() {
 
 #[test]
 fn analyze_ci_name_set_when_github_actions_env_present() {
+    // Isolate from the ambient CI environment (this suite itself runs under Jenkins,
+    // which sets JENKINS_URL/BUILD_URL and would otherwise win the precedence check).
+    let saved: Vec<(&str, Option<String>)> = [
+        "JENKINS_URL",
+        "JENKINS_HOME",
+        "BUILD_URL",
+        "GITLAB_CI",
+        "CI",
+        "GITHUB_ACTIONS",
+    ]
+    .iter()
+    .map(|k| (*k, std::env::var(k).ok()))
+    .collect();
+    for (k, _) in &saved {
+        std::env::remove_var(k);
+    }
+
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
-    // Set the env var before running analysis
     std::env::set_var("GITHUB_ACTIONS", "true");
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
-    std::env::remove_var("GITHUB_ACTIONS");
+
+    // Restore the original environment before asserting so a panic can't leak state.
+    for (k, v) in saved {
+        match v {
+            Some(val) => std::env::set_var(k, val),
+            None => std::env::remove_var(k),
+        }
+    }
+
     assert_eq!(
         run.environment.ci_name.as_deref(),
         Some("GitHub Actions"),
@@ -1422,13 +1446,29 @@ fn analyze_ci_name_set_when_github_actions_env_present() {
 
 #[test]
 fn analyze_sets_git_branch_from_github_ref_when_no_git_dir() {
+    // Isolate from ambient CI environment to avoid cross-test env pollution.
+    let saved: Vec<(&str, Option<String>)> =
+        ["GITHUB_REF", "GITHUB_REF_NAME", "BRANCH_NAME", "GIT_BRANCH"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+    for (k, _) in &saved {
+        std::env::remove_var(k);
+    }
+
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn g() {}\n").unwrap();
-    // Set GITHUB_REF — analyze should pick this up when there's no .git dir
     std::env::set_var("GITHUB_REF", "refs/heads/feature-branch");
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
-    std::env::remove_var("GITHUB_REF");
+
+    for (k, v) in saved {
+        match v {
+            Some(val) => std::env::set_var(k, val),
+            None => std::env::remove_var(k),
+        }
+    }
+
     // If a .git dir was found, git_branch might come from git; otherwise from env
     if run.git_branch.is_some() {
         assert!(

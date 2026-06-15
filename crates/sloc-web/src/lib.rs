@@ -7028,6 +7028,47 @@ fn build_coverage_delta_card(s: &sloc_core::SummaryDelta) -> String {
     )
 }
 
+/// Filter baseline/current run pair to a single submodule scope or super-repo scope.
+fn narrow_run_pair_by_scope(
+    mut baseline: AnalysisRun,
+    mut current: AnalysisRun,
+    active_sub: &Option<String>,
+    super_scope: bool,
+) -> (AnalysisRun, AnalysisRun) {
+    if let Some(ref sub_name) = active_sub {
+        baseline
+            .per_file_records
+            .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+        current
+            .per_file_records
+            .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+        recompute_summary_from_records(&mut baseline);
+        recompute_summary_from_records(&mut current);
+    } else if super_scope {
+        baseline.per_file_records.retain(|f| f.submodule.is_none());
+        current.per_file_records.retain(|f| f.submodule.is_none());
+        recompute_summary_from_records(&mut baseline);
+        recompute_summary_from_records(&mut current);
+    }
+    (baseline, current)
+}
+
+/// Filter all runs in a multi-compare to a single submodule scope or super-repo scope.
+fn apply_scope_filter(runs: &mut [AnalysisRun], active_sub: &Option<String>, super_scope: bool) {
+    if let Some(ref sub_name) = active_sub {
+        for run in runs.iter_mut() {
+            run.per_file_records
+                .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
+            recompute_summary_from_records(run);
+        }
+    } else if super_scope {
+        for run in runs.iter_mut() {
+            run.per_file_records.retain(|f| f.submodule.is_none());
+            recompute_summary_from_records(run);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn compare_handler(
     State(state): State<AppState>,
@@ -7147,27 +7188,12 @@ async fn compare_handler(
     let has_any_submodule_data = !submodule_options.is_empty();
 
     // Narrow per_file_records when a scope is active, then recompute totals.
-    let (effective_baseline, effective_current) = if let Some(ref sub_name) = active_submodule {
-        let mut b = baseline_run;
-        let mut c = current_run;
-        b.per_file_records
-            .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
-        c.per_file_records
-            .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
-        recompute_summary_from_records(&mut b);
-        recompute_summary_from_records(&mut c);
-        (b, c)
-    } else if super_scope_active {
-        let mut b = baseline_run;
-        let mut c = current_run;
-        b.per_file_records.retain(|f| f.submodule.is_none());
-        c.per_file_records.retain(|f| f.submodule.is_none());
-        recompute_summary_from_records(&mut b);
-        recompute_summary_from_records(&mut c);
-        (b, c)
-    } else {
-        (baseline_run, current_run)
-    };
+    let (effective_baseline, effective_current) = narrow_run_pair_by_scope(
+        baseline_run,
+        current_run,
+        &active_submodule,
+        super_scope_active,
+    );
 
     let comparison = compute_delta(&effective_baseline, &effective_current);
 
@@ -8221,18 +8247,7 @@ async fn multi_compare_handler(
     let super_scope_active = params.scope.as_deref() == Some("super");
 
     // Narrow per_file_records when a scope is active, then recompute totals.
-    if let Some(ref sub_name) = active_submodule {
-        for run in &mut runs {
-            run.per_file_records
-                .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
-            recompute_summary_from_records(run);
-        }
-    } else if super_scope_active {
-        for run in &mut runs {
-            run.per_file_records.retain(|f| f.submodule.is_none());
-            recompute_summary_from_records(run);
-        }
-    }
+    apply_scope_filter(&mut runs, &active_submodule, super_scope_active);
 
     let runs_csv = params.runs.as_deref().unwrap_or("").to_string();
     let project_label = entries
@@ -8281,39 +8296,88 @@ fn multi_fmt_delta(n: i64) -> String {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
-fn multi_compare_page(
+/// Escape a string for safe embedding inside a JSON/JS string literal (no allocation if clean).
+fn js_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Retrieve commit-date and author HTML strings from the registry entry at `(idx, run_id)`.
+fn mc_entry_html_data(entries: &[RegistryEntry], idx: usize, run_id: &str) -> (String, String) {
+    let Some(entry) = entries.get(idx).filter(|e| e.run_id == run_id) else {
+        return (
+            "&mdash;".to_string(),
+            "<span class=\"mc-row-val\">&mdash;</span>".to_string(),
+        );
+    };
+    let cd = entry
+        .git_commit_date
+        .as_deref()
+        .and_then(fmt_git_date)
+        .unwrap_or_else(|| "&mdash;".to_string());
+    let au = entry
+        .git_author
+        .as_deref()
+        .map(|a| {
+            format!(
+                "<span class=\"mc-row-val\"><span class=\"cmp-author-val\">{}</span>\
+                 <span class=\"cmp-author-handle\"></span></span>",
+                html_escape(a)
+            )
+        })
+        .unwrap_or_else(|| "<span class=\"mc-row-val\">&mdash;</span>".to_string());
+    (cd, au)
+}
+
+/// Render the scope badge chip for a scan card header.
+fn mc_scope_badge(active_sub: Option<&str>, super_scope_active: bool) -> String {
+    if let Some(s) = active_sub {
+        format!(
+            "<span class=\"mc-scope-tag mc-scope-sub\">{}</span>",
+            html_escape(s)
+        )
+    } else if super_scope_active {
+        "<span class=\"mc-scope-tag mc-scope-super\">Super-repo only</span>".to_string()
+    } else {
+        "<span class=\"mc-scope-tag mc-scope-full\">\
+         <svg width=\"9\" height=\"9\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\">\
+         <circle cx=\"12\" cy=\"12\" r=\"10\"></circle>\
+         <line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\"></line>\
+         <path d=\"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"></path>\
+         </svg> Full scan</span>"
+            .to_string()
+    }
+}
+
+/// Build the HTML for the horizontal strip of scan cards (with arrows between them).
+fn build_mc_scan_strip(
     multi: &MultiScanComparison,
-    project_label: &str,
-    version: &str,
-    csp_nonce: &str,
-    has_submodule_data: bool,
-    sub_names: &[String],
-    runs_csv: &str,
-    super_scope_active: bool,
-    active_sub: Option<&str>,
     entries: &[RegistryEntry],
+    n: usize,
+    is_many: bool,
+    active_sub: Option<&str>,
+    super_scope_active: bool,
+    project_label: &str,
 ) -> String {
     use std::fmt::Write as _;
-
-    let n = multi.points.len();
-    let is_many = n > 4;
-    let mc_strip_class = if is_many {
-        "mc-strip mc-strip-grid"
-    } else {
-        "mc-strip"
-    };
-
-    // ── Scan strip cards ──────────────────────────────────────────────────────
     let mut scan_strip = String::new();
     for (i, pt) in multi.points.iter().enumerate() {
         let ts_ms = pt.timestamp.timestamp_millis();
         let ts = pt.timestamp.format("%Y-%m-%d %H:%M UTC").to_string();
-        let commit = pt.git_commit.as_deref().unwrap_or("—");
+        let commit = pt.git_commit.as_deref().unwrap_or("\u{2014}");
         let branch = pt.git_branch.as_deref().unwrap_or("");
         let report_link = format!("/runs/html/{}", pt.run_id);
-        // Branch chip (empty branch → em dash)
         let branch_html = if branch.is_empty() {
             "<span class=\"mc-row-val\">&mdash;</span>".to_string()
         } else {
@@ -8322,31 +8386,7 @@ fn multi_compare_page(
                 html_escape(branch)
             )
         };
-        // Commit date and author from registry entry (matched by index, same sort order)
-        let (commit_date_html, author_html) = if let Some(entry) =
-            entries.get(i).filter(|e| e.run_id == pt.run_id)
-        {
-            let cd = entry
-                .git_commit_date
-                .as_deref()
-                .and_then(fmt_git_date)
-                .unwrap_or_else(|| "&mdash;".to_string());
-            let au = entry
-                    .git_author
-                    .as_deref()
-                    .map(|a| format!(
-                        "<span class=\"mc-row-val\"><span class=\"cmp-author-val\">{}</span><span class=\"cmp-author-handle\"></span></span>",
-                        html_escape(a)
-                    ))
-                    .unwrap_or_else(|| "<span class=\"mc-row-val\">&mdash;</span>".to_string());
-            (cd, au)
-        } else {
-            (
-                "&mdash;".to_string(),
-                "<span class=\"mc-row-val\">&mdash;</span>".to_string(),
-            )
-        };
-        // Tags row
+        let (commit_date_html, author_html) = mc_entry_html_data(entries, i, &pt.run_id);
         let tags_html = pt
             .git_tags
             .as_deref()
@@ -8359,7 +8399,8 @@ fn multi_compare_page(
                     .collect::<Vec<_>>()
                     .join(" ");
                 format!(
-                    "<div class=\"mc-card-row\"><span class=\"mc-row-label\">Tags:</span><span class=\"mc-row-val\">{chips}</span></div>"
+                    "<div class=\"mc-card-row\"><span class=\"mc-row-label\">Tags:</span>\
+                     <span class=\"mc-row-val\">{chips}</span></div>"
                 )
             })
             .unwrap_or_default();
@@ -8373,21 +8414,15 @@ fn multi_compare_page(
         } else {
             ""
         };
-        let scope_badge = if let Some(s) = active_sub {
-            format!(
-                "<span class=\"mc-scope-tag mc-scope-sub\">{}</span>",
-                html_escape(s)
-            )
-        } else if super_scope_active {
-            "<span class=\"mc-scope-tag mc-scope-super\">Super-repo only</span>".to_string()
-        } else {
-            "<span class=\"mc-scope-tag mc-scope-full\"><svg width=\"9\" height=\"9\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\"><circle cx=\"12\" cy=\"12\" r=\"10\"></circle><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\"></line><path d=\"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"></path></svg> Full scan</span>".to_string()
-        };
+        let scope_badge = mc_scope_badge(active_sub, super_scope_active);
         let nearest_html = if nearest.is_empty() {
             String::new()
         } else {
             format!(
-                "<span class=\"mc-card-nearest-wrap\"><span class=\"mc-card-nearest\">{nearest}</span><span class=\"mc-card-nearest-tip\">Nearest ancestor git release tag at scan time</span></span>"
+                "<span class=\"mc-card-nearest-wrap\">\
+                 <span class=\"mc-card-nearest\">{nearest}</span>\
+                 <span class=\"mc-card-nearest-tip\">Nearest ancestor git release tag at scan time</span>\
+                 </span>"
             )
         };
         write!(
@@ -8420,25 +8455,18 @@ fn multi_compare_page(
         )
         .unwrap();
     }
+    scan_strip
+}
 
-    // ── Summary metrics table ─────────────────────────────────────────────────
-    // Header row: Metric | Scan 1 | Δ | Scan 2 | Δ | ... | Net Δ
-    let mut metrics_thead = String::from("<tr><th class='mc-met-label'>Metric</th>");
-    for i in 0..n {
-        write!(metrics_thead, "<th class='mc-val-col'>Scan {}</th>", i + 1).unwrap();
-        if i < n - 1 {
-            metrics_thead.push_str("<th class='mc-delta-col'>&#8594;&#916;</th>");
-        }
-    }
-    metrics_thead.push_str("<th class='mc-net-col'>Net &#916;</th></tr>");
-
+/// Build the metric progression table (thead + tbody) for multi-compare.
+fn build_mc_metrics_table(multi: &MultiScanComparison, n: usize) -> (String, String) {
+    use std::fmt::Write as _;
     struct MetricRow<'a> {
         label: &'a str,
         values: Vec<i64>,
         seq_deltas: Vec<i64>,
         net_delta: i64,
     }
-
     let rows: Vec<MetricRow<'_>> = vec![
         MetricRow {
             label: "Code Lines",
@@ -8492,7 +8520,14 @@ fn multi_compare_page(
                 - multi.points.first().map_or(0, |f| f.test_count),
         },
     ];
-
+    let mut metrics_thead = String::from("<tr><th class='mc-met-label'>Metric</th>");
+    for i in 0..n {
+        write!(metrics_thead, "<th class='mc-val-col'>Scan {}</th>", i + 1).unwrap();
+        if i < n - 1 {
+            metrics_thead.push_str("<th class='mc-delta-col'>&#8594;&#916;</th>");
+        }
+    }
+    metrics_thead.push_str("<th class='mc-net-col'>Net &#916;</th></tr>");
     let mut metrics_tbody = String::new();
     for row in &rows {
         metrics_tbody.push_str("<tr>");
@@ -8525,25 +8560,12 @@ fn multi_compare_page(
         .unwrap();
         metrics_tbody.push_str("</tr>");
     }
+    (metrics_thead, metrics_tbody)
+}
 
-    // ── Chart points JSON ─────────────────────────────────────────────────────
-    // Escape a value for embedding inside a JSON string literal.
-    let json_str = |s: &str| -> String {
-        let mut out = String::with_capacity(s.len() + 2);
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out
-    };
-    let mut points_json_parts: Vec<String> = Vec::with_capacity(n);
+/// Build the JS-embeddable points JSON array for the multi-compare chart.
+fn build_mc_points_json(multi: &MultiScanComparison, entries: &[RegistryEntry]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(multi.points.len());
     for (i, pt) in multi.points.iter().enumerate() {
         let commit = pt.git_commit.as_deref().unwrap_or("");
         let branch = pt.git_branch.as_deref().unwrap_or("");
@@ -8551,7 +8573,6 @@ fn multi_compare_page(
         let nearest = pt.git_nearest_tag.as_deref().unwrap_or("");
         let scanned_ms = pt.timestamp.timestamp_millis();
         let scanned = pt.timestamp.format("%Y-%m-%d %H:%M UTC").to_string();
-        // Commit date + author from the matching registry entry (same sort order as cards).
         let entry = entries.get(i).filter(|e| e.run_id == pt.run_id);
         let commit_date = entry
             .and_then(|e| e.git_commit_date.as_deref())
@@ -8565,16 +8586,16 @@ fn multi_compare_page(
             .coverage_line_pct
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "null".to_string());
-        points_json_parts.push(format!(
+        parts.push(format!(
             r#"{{"run_id":"{run_id}","commit":"{commit}","branch":"{branch}","tags":"{tags}","nearest":"{nearest}","commit_date":"{commit_date}","author":"{author}","scanned":"{scanned}","scanned_ms":{scanned_ms},"code":{code},"comments":{comments},"blank":{blank},"files":{files},"tests":{tests},"cov":{cov}}}"#,
-            run_id = json_str(&pt.run_id),
-            commit = json_str(commit),
-            branch = json_str(branch),
-            tags = json_str(tags),
-            nearest = json_str(nearest),
-            commit_date = json_str(&commit_date),
-            author = json_str(&author),
-            scanned = json_str(&scanned),
+            run_id = js_escape(&pt.run_id),
+            commit = js_escape(commit),
+            branch = js_escape(branch),
+            tags = js_escape(tags),
+            nearest = js_escape(nearest),
+            commit_date = js_escape(&commit_date),
+            author = js_escape(&author),
+            scanned = js_escape(&scanned),
             code = pt.code_lines,
             comments = pt.comment_lines,
             blank = pt.blank_lines,
@@ -8582,10 +8603,12 @@ fn multi_compare_page(
             tests = pt.test_count,
         ));
     }
-    let points_json = format!("[{}]", points_json_parts.join(","));
+    format!("[{}]", parts.join(","))
+}
 
-    // ── File matrix JSON ──────────────────────────────────────────────────────
-    let mut file_json_parts: Vec<String> = Vec::with_capacity(multi.file_matrix.len());
+/// Build the JS-embeddable file-matrix JSON array for the multi-compare table.
+fn build_mc_file_matrix_json(multi: &MultiScanComparison) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(multi.file_matrix.len());
     for row in &multi.file_matrix {
         let lang = row.language.as_deref().unwrap_or("");
         let codes: Vec<String> = row
@@ -8598,7 +8621,7 @@ fn multi_compare_page(
             .iter()
             .map(|v| v.map_or("null".to_string(), |x| x.to_string()))
             .collect();
-        file_json_parts.push(format!(
+        parts.push(format!(
             r#"{{"p":"{path}","l":"{lang}","s":"{status}","c":[{codes}],"d":[{deltas}],"t":{total}}}"#,
             path = row.relative_path.replace('\\', "/").replace('"', "\\\""),
             status = row.overall_status,
@@ -8607,7 +8630,118 @@ fn multi_compare_page(
             total = row.total_code_delta,
         ));
     }
-    let file_matrix_json = format!("[{}]", file_json_parts.join(","));
+    format!("[{}]", parts.join(","))
+}
+
+/// Build the column header cells for the file-matrix table.
+fn build_mc_file_col_headers(n: usize) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for i in 0..n {
+        write!(out, "<th class='file-scan-col'>Scan {} Code</th>", i + 1).unwrap();
+        if i < n - 1 {
+            write!(
+                out,
+                "<th class='file-delta-col'>&#916;&#8594;{}</th>",
+                i + 2
+            )
+            .unwrap();
+        }
+    }
+    out
+}
+
+/// Build the submodule scope-selector bar HTML (empty string when no submodule data).
+fn build_mc_scope_bar(
+    has_submodule_data: bool,
+    sub_names: &[String],
+    runs_csv: &str,
+    active_sub: Option<&str>,
+    super_scope_active: bool,
+) -> String {
+    use std::fmt::Write as _;
+    if !has_submodule_data {
+        return String::new();
+    }
+    let base_url = format!("/multi-compare?runs={}", html_escape(runs_csv));
+    let full_active = active_sub.is_none() && !super_scope_active;
+    let mut bar = format!(
+        r#"<div class="submod-scope-bar">
+  <span class="submod-scope-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
+    Scope:
+  </span>
+  <div class="submod-scope-divider"></div>
+  <a class="submod-scope-btn{full_cls}" href="{base_url}" title="All files — super-repo and all submodules combined">Full scan</a>
+  <a class="submod-scope-btn{super_cls}" href="{base_url}&amp;scope=super" title="Only files not belonging to any submodule">Super-repo only</a>"#,
+        full_cls = if full_active { " active" } else { "" },
+        super_cls = if super_scope_active { " active" } else { "" },
+    );
+    for s in sub_names {
+        let is_active = active_sub == Some(s.as_str());
+        write!(
+            bar,
+            "\n  <a class=\"submod-scope-btn{cls}\" href=\"{base_url}&amp;sub={name_enc}\" title=\"Only files in submodule {name_esc}\">{name_esc}</a>",
+            cls = if is_active { " active" } else { "" },
+            name_enc = html_escape(s),
+            name_esc = html_escape(s),
+        )
+        .unwrap();
+    }
+    bar.push_str("\n</div>");
+    bar
+}
+
+/// Build the scope-description label shown in the page subtitle.
+fn build_mc_scope_label(active_sub: Option<&str>, super_scope_active: bool) -> String {
+    if let Some(s) = active_sub {
+        format!("Submodule: {} &mdash; ", html_escape(s))
+    } else if super_scope_active {
+        "Super-repo only &mdash; ".to_string()
+    } else {
+        String::new()
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+fn multi_compare_page(
+    multi: &MultiScanComparison,
+    project_label: &str,
+    version: &str,
+    csp_nonce: &str,
+    has_submodule_data: bool,
+    sub_names: &[String],
+    runs_csv: &str,
+    super_scope_active: bool,
+    active_sub: Option<&str>,
+    entries: &[RegistryEntry],
+) -> String {
+    let n = multi.points.len();
+    let is_many = n > 4;
+    let mc_strip_class = if is_many {
+        "mc-strip mc-strip-grid"
+    } else {
+        "mc-strip"
+    };
+
+    // ── Scan strip cards ──────────────────────────────────────────────────────
+    let scan_strip = build_mc_scan_strip(
+        multi,
+        entries,
+        n,
+        is_many,
+        active_sub,
+        super_scope_active,
+        project_label,
+    );
+
+    // ── Summary metrics table ─────────────────────────────────────────────────
+    let (metrics_thead, metrics_tbody) = build_mc_metrics_table(multi, n);
+
+    // ── Chart data and table helpers ──────────────────────────────────────────
+    let points_json = build_mc_points_json(multi, entries);
+    let file_matrix_json = build_mc_file_matrix_json(multi);
 
     // Counts for filter tabs
     let files_modified = multi
@@ -8632,68 +8766,16 @@ fn multi_compare_page(
         .count();
     let total_files = multi.file_matrix.len();
 
-    // Column headers for file matrix (Scan 1 Code | Δ→2 | Scan 2 Code | ...)
-    let mut file_col_headers = String::new();
-    for i in 0..n {
-        write!(
-            file_col_headers,
-            "<th class='file-scan-col'>Scan {} Code</th>",
-            i + 1
-        )
-        .unwrap();
-        if i < n - 1 {
-            write!(
-                file_col_headers,
-                "<th class='file-delta-col'>&#916;&#8594;{}</th>",
-                i + 2
-            )
-            .unwrap();
-        }
-    }
-
+    let file_col_headers = build_mc_file_col_headers(n);
     let nav_compare_active = "";
-
-    // Build scope bar HTML (only when submodule data exists).
-    let scope_bar_html: String = if has_submodule_data {
-        let base_url = format!("/multi-compare?runs={}", html_escape(runs_csv));
-        let full_active = active_sub.is_none() && !super_scope_active;
-        let mut bar = format!(
-            r#"<div class="submod-scope-bar">
-  <span class="submod-scope-label">
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
-    Scope:
-  </span>
-  <div class="submod-scope-divider"></div>
-  <a class="submod-scope-btn{full_cls}" href="{base_url}" title="All files — super-repo and all submodules combined">Full scan</a>
-  <a class="submod-scope-btn{super_cls}" href="{base_url}&amp;scope=super" title="Only files not belonging to any submodule">Super-repo only</a>"#,
-            full_cls = if full_active { " active" } else { "" },
-            super_cls = if super_scope_active { " active" } else { "" },
-        );
-        for s in sub_names {
-            let is_active = active_sub == Some(s.as_str());
-            write!(
-                bar,
-                "\n  <a class=\"submod-scope-btn{cls}\" href=\"{base_url}&amp;sub={name_enc}\" title=\"Only files in submodule {name_esc}\">{name_esc}</a>",
-                cls = if is_active { " active" } else { "" },
-                name_enc = html_escape(s),
-                name_esc = html_escape(s),
-            )
-            .unwrap();
-        }
-        bar.push_str("\n</div>");
-        bar
-    } else {
-        String::new()
-    };
-
-    // Build scope label for the subtitle line.
-    let scope_label: String = if let Some(s) = active_sub {
-        format!("Submodule: {} &mdash; ", html_escape(s))
-    } else if super_scope_active {
-        "Super-repo only &mdash; ".to_string()
-    } else {
-        String::new()
-    };
+    let scope_bar_html = build_mc_scope_bar(
+        has_submodule_data,
+        sub_names,
+        runs_csv,
+        active_sub,
+        super_scope_active,
+    );
+    let scope_label = build_mc_scope_label(active_sub, super_scope_active);
 
     format!(
         r##"<!doctype html>
@@ -20293,7 +20375,10 @@ struct ScanSetupTemplate {
     .hero-title { margin:0; font-size: 26px; font-weight: 850; letter-spacing: -0.03em; }
     .hero-subtitle { margin: 10px 0 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
     .compare-banner { margin-top: 18px; background: var(--info-bg, #eef3ff); border: 1px solid rgba(100,130,220,0.25); border-radius: 14px; padding: 14px 18px; }
-    .compare-banner-body { display:flex; align-items:center; gap: 14px; flex-wrap:wrap; }
+    .compare-banner-body { display:flex; flex-direction:column; gap: 10px; }
+    .compare-banner-top { display:flex; align-items:center; gap: 14px; flex-wrap:wrap; }
+    .compare-banner-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top: 1px solid rgba(100,130,220,0.15); padding-top: 10px; }
+    .compare-banner-actions-left { display:flex; gap:8px; flex-wrap:wrap; }
     .compare-banner-meta { display:flex; flex-direction:column; gap:2px; min-width:0; flex: 0 0 auto; }
     .delta-chip { font-size:12px; font-weight:700; padding:2px 8px; border-radius:999px; }
     .delta-chip.pos { background:var(--pos-bg); color:var(--pos); }
@@ -20407,18 +20492,18 @@ struct ScanSetupTemplate {
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:340px; min-width:180px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
-    .cocomo-box { margin-top:14px; background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
-    .cocomo-box-head { display:flex; align-items:center; gap:10px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
-    .cocomo-box-title { font-size:16px; font-weight:800; color:var(--text); letter-spacing:-0.01em; }
+    .cocomo-box { background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:20px 22px; }
+    .cocomo-box-head { display:flex; align-items:center; gap:10px; margin-bottom:16px; padding-bottom:14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+    .cocomo-box-title { font-size:18px; font-weight:750; color:var(--text); letter-spacing:-0.01em; }
     .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
     .cocomo-mode-pill { display:inline-flex; align-items:center; padding:3px 10px; border-radius:999px; background:var(--surface-3); border:1px solid var(--line-strong); font-size:11px; font-weight:700; color:var(--muted); }
     .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .cocomo-mode-tip::before { content:''; position:absolute; bottom:100%; left:14px; border:5px solid transparent; border-bottom-color:var(--text); }
     .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; }
-    .cocomo-box-note { font-size:11px; color:var(--muted); margin-top:10px; line-height:1.5; }
+    .cocomo-box-note { font-size:13px; color:var(--muted); margin-top:10px; line-height:1.6; }
     /* Submodule panel */
     .submodule-panel { margin-top: 18px; margin-bottom: 18px; padding: 18px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
     /* Metrics tables stack */
@@ -20791,6 +20876,7 @@ struct ScanSetupTemplate {
       {% if let Some(prev_id) = prev_run_id %}{% if let Some(prev_ts) = prev_run_timestamp %}
       <div class="compare-banner">
         <div class="compare-banner-body">
+          <div class="compare-banner-top">
           <div class="compare-banner-meta">
             <span class="compare-label">Previous scan</span>
             <span class="compare-ts">{{ prev_ts }}</span>
@@ -20848,9 +20934,12 @@ struct ScanSetupTemplate {
             Line-level delta not available — previous scan's result file could not be read. Re-running will restore full delta tracking.
           </p>
           {% endif %}
-          <div style="display:flex;gap:8px;flex-wrap:wrap;flex:0 0 auto;align-items:center;">
-            <a class="button secondary" href="/runs/result/{{ prev_id }}" style="white-space:nowrap;">View previous report</a>
-            <a class="button secondary" href="/compare-scans" style="white-space:nowrap;">Compare scans</a>
+          </div>
+          <div class="compare-banner-actions">
+            <div class="compare-banner-actions-left">
+              <a class="button secondary" href="/runs/result/{{ prev_id }}" style="white-space:nowrap;">View previous report</a>
+              <a class="button secondary" href="/compare-scans" style="white-space:nowrap;">Compare scans</a>
+            </div>
             <a class="button" href="/compare?a={{ prev_id }}&b={{ run_id }}" style="white-space:nowrap;">Full diff →</a>
           </div>
         </div>
@@ -21196,6 +21285,41 @@ struct ScanSetupTemplate {
       </div>
     </section>
 
+    {% if has_cocomo %}
+    <div class="cocomo-box" style="margin-top:24px;">
+      <div class="cocomo-box-head">
+        <span class="cocomo-box-title">Constructive Cost Model &mdash; COCOMO I</span>
+        <span class="cocomo-mode-pill-wrap" style="margin-left:10px;">
+          <span class="cocomo-mode-pill">{{ cocomo_mode_label }} mode</span>
+          <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
+        </span>
+      </div>
+      <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
+        <div class="stat-chip">
+          <div class="stat-chip-label">Person-months</div>
+          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+          <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 ({{ cocomo_mode_label }} mode).</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Schedule (months)</div>
+          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+          <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Avg. Team Size</div>
+          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+          <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
+        </div>
+        <div class="stat-chip">
+          <div class="stat-chip-label">Input KSLOC</div>
+          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+          <div class="stat-chip-tip">KSLOC = Kilo Source Lines of Code (1 KSLOC = 1,000 lines). This is the primary input to the COCOMO model. Only executable code lines are counted &mdash; blank lines and comments are excluded from this total.</div>
+        </div>
+      </div>
+      <div class="cocomo-box-note" style="white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</div>
+    </div>
+    {% endif %}
+
     <div class="section-pair">
     <section class="panel">
         <div class="toolbar-row">
@@ -21287,41 +21411,6 @@ struct ScanSetupTemplate {
       </div>
 
     </section>
-
-      {% if has_cocomo %}
-      <div class="cocomo-box" style="margin-top:18px;">
-        <div class="cocomo-box-head">
-          <span class="cocomo-box-title">Constructive Cost Model &mdash; COCOMO I</span>
-          <span class="cocomo-mode-pill-wrap" style="margin-left:10px;">
-            <span class="cocomo-mode-pill">{{ cocomo_mode_label }} mode</span>
-            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
-          </span>
-        </div>
-        <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
-          <div class="stat-chip">
-            <div class="stat-chip-label">Person-months</div>
-            <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
-            <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 ({{ cocomo_mode_label }} mode).</div>
-          </div>
-          <div class="stat-chip">
-            <div class="stat-chip-label">Schedule (months)</div>
-            <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
-            <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
-          </div>
-          <div class="stat-chip">
-            <div class="stat-chip-label">Avg. Team Size</div>
-            <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
-            <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
-          </div>
-          <div class="stat-chip">
-            <div class="stat-chip-label">Input KSLOC</div>
-            <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
-            <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded.</div>
-          </div>
-        </div>
-        <div class="cocomo-box-note" style="white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</div>
-      </div>
-      {% endif %}
     </div>
 
   </div>
