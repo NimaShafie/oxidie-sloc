@@ -1730,8 +1730,8 @@ async fn openapi_yaml_handler() -> impl IntoResponse {
     )
 }
 
-static LLMS_TXT: &str = include_str!("../../../docs/ai/llms.txt");
-static LLMS_FULL_TXT: &str = include_str!("../../../docs/ai/llms-full.txt");
+static LLMS_TXT: &str = include_str!("../assets/ai/llms.txt");
+static LLMS_FULL_TXT: &str = include_str!("../assets/ai/llms-full.txt");
 
 async fn llms_txt_handler() -> impl IntoResponse {
     (
