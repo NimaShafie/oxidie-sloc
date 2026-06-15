@@ -1140,8 +1140,9 @@ fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f
         );
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+        // Show the full comma-separated number (no K/M rounding) on the PDF stat cards.
         ctx.layer.use_text(
-            pdf_fmt_num(*value),
+            pdf_fmt_full(*value),
             13.0,
             Mm(cx + 4.0),
             Mm(row1_bot + 9.0),
@@ -1156,12 +1157,6 @@ fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f
             Mm(row1_bot + 3.0),
             ctx.font_reg,
         );
-        let exact = pdf_fmt_full(*value);
-        let exact_x = ((exact.len() as f32).mul_add(-1.1, cx + chip_w) - 1.5).max(cx + 4.0);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
-        ctx.layer
-            .use_text(exact, 5.5, Mm(exact_x), Mm(row1_bot + 1.5), ctx.font_reg);
     }
     let row2_bot = row1_bot - 3.0 - chip_h;
     let row2_4th = if tot.test_count > 0 {
@@ -1190,7 +1185,7 @@ fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.25, 0.55, None)));
         ctx.layer.use_text(
-            pdf_fmt_num(*value),
+            pdf_fmt_full(*value),
             13.0,
             Mm(cx + 4.0),
             Mm(row2_bot + 9.0),
@@ -1205,12 +1200,6 @@ fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f
             Mm(row2_bot + 3.0),
             ctx.font_reg,
         );
-        let exact = pdf_fmt_full(*value);
-        let exact_x = ((exact.len() as f32).mul_add(-1.1, cx + chip_w) - 1.5).max(cx + 4.0);
-        ctx.layer
-            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.60, None)));
-        ctx.layer
-            .use_text(exact, 5.5, Mm(exact_x), Mm(row2_bot + 1.5), ctx.font_reg);
     }
     row2_bot
 }
@@ -1223,13 +1212,25 @@ fn pdf_info_parts_stats(tot: &SummaryTotals) -> Vec<String> {
     let blank_pct = tot.blank_lines as f64 / total * 100.0;
     let mixed_pct = tot.mixed_lines_separate as f64 / total * 100.0;
     let mut parts = vec![
-        format!("Code {code_pct:.1}%"),
-        format!("Comments {cmt_pct:.1}%"),
-        format!("Blank {blank_pct:.1}%"),
+        format!(
+            "Code: {code_pct:.1}% ({} lines)",
+            pdf_fmt_full(tot.code_lines)
+        ),
+        format!(
+            "Comments: {cmt_pct:.1}% ({} lines)",
+            pdf_fmt_full(tot.comment_lines)
+        ),
+        format!(
+            "Blank: {blank_pct:.1}% ({} lines)",
+            pdf_fmt_full(tot.blank_lines)
+        ),
     ];
+    if tot.functions > 0 {
+        parts.push(format!("Functions: {}", pdf_fmt_full(tot.functions)));
+    }
     if tot.mixed_lines_separate > 0 {
         parts.push(format!(
-            "Mixed {mixed_pct:.1}% ({} lines)",
+            "Mixed: {mixed_pct:.1}% ({} lines)",
             pdf_fmt_full(tot.mixed_lines_separate)
         ));
     }
@@ -1254,13 +1255,13 @@ fn pdf_info_parts_git(run: &AnalysisRun) -> Vec<String> {
         parts.push(format!("Commit: {}", pdf_safe_str(c)));
     }
     if let Some(ref t) = run.git_nearest_tag {
-        parts.push(format!("Nearest Tag: {}", pdf_safe_str(t)));
+        parts.push(format!("Tag: {}", pdf_safe_str(t)));
     }
     if let Some(ref a) = run.git_commit_author {
         parts.push(format!("Author: {}", pdf_safe_str(a)));
     }
     if let Some(ref d) = run.git_commit_date {
-        parts.push(format!("Commit Date: {}", pdf_safe_str(d)));
+        parts.push(format!("Commit Date: {}", fmt_commit_date_pt(d)));
     }
     parts
 }
@@ -1519,8 +1520,162 @@ fn per_file_row_bg(ri: usize) -> printpdf::Rgb {
     }
 }
 
-// PDF per-file page renderer — all layout params are distinct and cannot be bundled further
-// without an opaque config struct that would obscure the call site in write_pdf_from_run.
+// ── Per-file page layout constants shared by the helpers below ─────────────────
+const PDF_PERFILE_HDR_H: f32 = 8.0;
+const PDF_PERFILE_SUB_H: f32 = 5.5;
+
+/// Doc/font/dims context for per-file page helpers; carries `doc` instead of `layer`
+/// because the page layer is created inside `pdf_draw_perfile_header`.
+struct PdfPerFileCtx<'a> {
+    doc: &'a printpdf::PdfDocumentReference,
+    font_reg: &'a printpdf::IndirectFontRef,
+    font_bold: &'a printpdf::IndirectFontRef,
+    w: f32,
+    h: f32,
+    margin: f32,
+}
+
+/// Compute the `[start, end)` record slice displayed on one per-file page.
+fn pdf_perfile_page_slice(
+    page_idx: usize,
+    use_continuation: bool,
+    has_first_page: bool,
+    fp_rows: usize,
+    rows_per_page: usize,
+    total_files: usize,
+) -> (usize, usize) {
+    if use_continuation {
+        (0, fp_rows.min(total_files))
+    } else if has_first_page {
+        let s = fp_rows + (page_idx - 1) * rows_per_page;
+        (s, (s + rows_per_page).min(total_files))
+    } else {
+        let s = page_idx * rows_per_page;
+        (s, (s + rows_per_page).min(total_files))
+    }
+}
+
+/// Obtain (or create) the PDF layer for one per-file page and render its page header.
+///
+/// Returns `(layer, sub_top)` where `sub_top` is the y-coordinate at the bottom of the
+/// header bar. When `use_continuation` is true the layer is taken from `first_page` and
+/// no new header is drawn — the COCOMO page already has one.
+#[allow(clippy::suboptimal_flops)]
+fn pdf_draw_perfile_header(
+    ctx: &PdfPerFileCtx<'_>,
+    use_continuation: bool,
+    first_page: Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)>,
+    page_idx: usize,
+    page_count: usize,
+    banner: Option<&str>,
+) -> (printpdf::PdfLayerReference, f32) {
+    use printpdf::{Color, Mm, Rgb};
+    if use_continuation {
+        let (fp_page, fp_layer_idx, fp_top) = first_page.unwrap();
+        let layer = ctx.doc.get_page(fp_page).get_layer(fp_layer_idx);
+        (layer, fp_top - PDF_PERFILE_SUB_H)
+    } else {
+        let (pf_page, pf_layer_idx) = ctx.doc.add_page(Mm(ctx.w), Mm(ctx.h), "Content");
+        let layer = ctx.doc.get_page(pf_page).get_layer(pf_layer_idx);
+        let hdr_top = ctx.h - PDF_PERFILE_HDR_H;
+        pdf_fill_rect(
+            &layer,
+            0.0,
+            hdr_top,
+            ctx.w,
+            PDF_PERFILE_HDR_H,
+            Rgb::new(0.098, 0.11, 0.15, None),
+        );
+        layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+        layer.use_text(
+            "oxide-sloc",
+            9.0,
+            Mm(ctx.margin),
+            Mm(hdr_top + 2.5),
+            ctx.font_bold,
+        );
+        layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+        layer.use_text(
+            "Per-File Detail",
+            8.0,
+            Mm(46.0),
+            Mm(hdr_top + 2.5),
+            ctx.font_reg,
+        );
+        layer.use_text(
+            format!("Page {} of {}", page_idx + 2, page_count + 1),
+            7.0,
+            Mm(ctx.w - 40.0),
+            Mm(hdr_top + 2.5),
+            ctx.font_reg,
+        );
+        if let Some(text) = banner {
+            let safe = pdf_trunc(&pdf_safe_str(text), 40);
+            let text_x = (ctx.w / 2.0 - safe.len() as f32 * 0.97).max(80.0);
+            layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+            layer.use_text(safe, 9.0, Mm(text_x), Mm(hdr_top + 2.5), ctx.font_bold);
+        }
+        (layer, hdr_top - PDF_PERFILE_SUB_H)
+    }
+}
+
+/// Render per-file data rows onto an existing PDF layer.
+#[allow(clippy::suboptimal_flops)]
+fn pdf_draw_perfile_rows(
+    ctx: &PdfCtx<'_>,
+    records: &[FileRecord],
+    col_x: &[f32; 13],
+    pf_tbl_top: f32,
+) {
+    use printpdf::{Color, Mm, Rgb};
+    for (ri, rec) in records.iter().enumerate() {
+        let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, pf_tbl_top - ctx.tbl_hdr_h);
+        let bg = per_file_row_bg(ri);
+        pdf_fill_rect(
+            ctx.layer,
+            ctx.margin,
+            ry,
+            2.0f32.mul_add(-ctx.margin, ctx.w),
+            ctx.row_h,
+            bg,
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        let file_str = pdf_safe_str(&rec.relative_path);
+        let lang_str = rec
+            .language
+            .as_ref()
+            .map_or_else(|| "--".to_string(), |l| l.display_name().to_string());
+        let raw = &rec.raw_line_categories;
+        let eff = &rec.effective_counts;
+        let cells = [
+            pdf_trunc_end(&file_str, 110),
+            lang_str,
+            pdf_fmt_full(raw.total_physical_lines),
+            pdf_fmt_full(eff.code_lines),
+            pdf_fmt_full(eff.comment_lines),
+            pdf_fmt_full(eff.blank_lines),
+            pdf_fmt_full(eff.mixed_lines_separate),
+            pdf_fmt_full(raw.functions),
+            pdf_fmt_full(raw.classes),
+            pdf_fmt_full(raw.variables),
+            pdf_fmt_full(raw.imports),
+            pdf_fmt_full(raw.test_count),
+            pdf_fmt_full(raw.test_assertion_count),
+        ];
+        for (ci, cell) in cells.iter().enumerate() {
+            ctx.layer.use_text(
+                cell.clone(),
+                5.5,
+                Mm(col_x[ci] + 0.5),
+                Mm(ry + 1.0),
+                ctx.font_reg,
+            );
+        }
+    }
+}
+
+// PDF per-file page renderer — layout params are distinct; see PdfPerFileCtx for bundling.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -1549,8 +1704,6 @@ fn pdf_render_per_file_pages(
     first_page: Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)>,
 ) {
     use printpdf::{Color, Mm, Rgb};
-    const HDR2_H: f32 = 8.0;
-    const SUB_H: f32 = 5.5;
     // File column gets ~136 mm; numeric columns compressed to minimum readable width.
     // Column widths: File=136, Lang=14, Phys=12, Code=10, Comments=13, Blank=10, Mixed=10,
     //   Functions=13, Classes=11, Variables=13, Imports=11, Tests=10, Assertions=14  → total 277 mm
@@ -1572,12 +1725,13 @@ fn pdf_render_per_file_pages(
         "Tests",
         "Assertions",
     ];
-    let rows_per_page = ((h - HDR2_H - SUB_H - tbl_hdr_h - footer_h) / row_h).floor() as usize;
+    let rows_per_page = ((h - PDF_PERFILE_HDR_H - PDF_PERFILE_SUB_H - tbl_hdr_h - footer_h) / row_h)
+        .floor() as usize;
     let total_files = run.per_file_records.len();
 
     // Rows that fit on the continuation page (COCOMO already occupies the top portion).
     let fp_rows = match first_page {
-        Some((_, _, fp_top)) => ((fp_top - SUB_H - tbl_hdr_h - footer_h) / row_h)
+        Some((_, _, fp_top)) => ((fp_top - PDF_PERFILE_SUB_H - tbl_hdr_h - footer_h) / row_h)
             .floor()
             .max(0.0) as usize,
         None => rows_per_page,
@@ -1587,87 +1741,71 @@ fn pdf_render_per_file_pages(
     } else {
         total_files.div_ceil(rows_per_page)
     };
+    let pf_ctx = PdfPerFileCtx {
+        doc,
+        font_reg,
+        font_bold,
+        w,
+        h,
+        margin,
+    };
 
     for page_idx in 0..page_count {
         let use_continuation = page_idx == 0 && first_page.is_some();
+        let (pf_layer, sub_top) = pdf_draw_perfile_header(
+            &pf_ctx,
+            use_continuation,
+            first_page,
+            page_idx,
+            page_count,
+            banner,
+        );
 
-        // Obtain the PDF layer and the y-coord of the bottom edge of the sub-bar (= pf_tbl_top).
-        let pf_layer;
-        let sub_top;
-        if use_continuation {
-            let (fp_page, fp_layer_idx, fp_top) = first_page.unwrap();
-            pf_layer = doc.get_page(fp_page).get_layer(fp_layer_idx);
-            sub_top = fp_top - SUB_H;
-            // No page header drawn here — the COCOMO page already has one.
-        } else {
-            let (pf_page, pf_layer_idx) = doc.add_page(Mm(w), Mm(h), "Content");
-            pf_layer = doc.get_page(pf_page).get_layer(pf_layer_idx);
-            let pf_hdr_top = h - HDR2_H;
-            sub_top = pf_hdr_top - SUB_H;
-            pdf_fill_rect(
-                &pf_layer,
-                0.0,
-                pf_hdr_top,
-                w,
-                HDR2_H,
-                Rgb::new(0.098, 0.11, 0.15, None),
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-            pf_layer.use_text(
-                "oxide-sloc",
-                9.0,
-                Mm(margin),
-                Mm(pf_hdr_top + 2.5),
-                font_bold,
-            );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-            pf_layer.use_text(
-                "Per-File Detail",
-                8.0,
-                Mm(46.0),
-                Mm(pf_hdr_top + 2.5),
-                font_reg,
-            );
-            pf_layer.use_text(
-                format!("Page {} of {}", page_idx + 2, page_count + 1),
-                7.0,
-                Mm(w - 40.0),
-                Mm(pf_hdr_top + 2.5),
-                font_reg,
-            );
-            // Report identification banner — white bold, centered in the per-file page header.
-            if let Some(text) = banner {
-                let safe = pdf_trunc(&pdf_safe_str(text), 40);
-                let text_x = (w / 2.0 - safe.len() as f32 * 0.97).max(80.0);
-                pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
-                pf_layer.use_text(safe, 9.0, Mm(text_x), Mm(pf_hdr_top + 2.5), font_bold);
-            }
-        }
-
-        // Sub-bar (title + file count) — rendered on every page including the continuation page.
+        // Sub-bar — rendered on every page including the continuation page.
         pdf_fill_rect(
             &pf_layer,
             0.0,
             sub_top,
             w,
-            SUB_H,
+            PDF_PERFILE_SUB_H,
             Rgb::new(0.94, 0.93, 0.91, None),
         );
-        pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.3, 0.3, 0.3, None)));
-        pf_layer.use_text(
-            pdf_trunc(title, 55),
-            6.5,
-            Mm(margin),
-            Mm(sub_top + 1.0),
-            font_reg,
-        );
-        pf_layer.use_text(
-            format!("{total_files} files  |  {ts}"),
-            6.5,
-            Mm(w - 80.0),
-            Mm(sub_top + 1.0),
-            font_reg,
-        );
+        if use_continuation {
+            // The COCOMO page header doesn't say "Per-File Detail", so label this section
+            // clearly on the left and push context (title + count + timestamp) to the right.
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
+            pf_layer.use_text(
+                "PER-FILE DETAIL",
+                7.5,
+                Mm(margin),
+                Mm(sub_top + 1.0),
+                font_bold,
+            );
+            let right = format!(
+                "{}  |  {} files  |  {ts}",
+                pdf_trunc(title, 30),
+                total_files
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+            let right_x = (w - margin - right.len() as f32 * 1.15).max(margin + 80.0);
+            pf_layer.use_text(right, 5.5, Mm(right_x), Mm(sub_top + 1.0), font_reg);
+        } else {
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.3, 0.3, 0.3, None)));
+            pf_layer.use_text(
+                pdf_trunc(title, 55),
+                6.5,
+                Mm(margin),
+                Mm(sub_top + 1.0),
+                font_reg,
+            );
+            pf_layer.use_text(
+                format!("{total_files} files  |  {ts}"),
+                6.5,
+                Mm(w - 80.0),
+                Mm(sub_top + 1.0),
+                font_reg,
+            );
+        }
 
         let pf_tbl_top = sub_top;
         pdf_fill_rect(
@@ -1689,54 +1827,31 @@ fn pdf_render_per_file_pages(
             );
         }
 
-        // Slice of file records for this page.
-        let (start, end) = if use_continuation {
-            (0, fp_rows.min(total_files))
-        } else if first_page.is_some() {
-            let s = fp_rows + (page_idx - 1) * rows_per_page;
-            (s, (s + rows_per_page).min(total_files))
-        } else {
-            let s = page_idx * rows_per_page;
-            (s, (s + rows_per_page).min(total_files))
+        let (start, end) = pdf_perfile_page_slice(
+            page_idx,
+            use_continuation,
+            first_page.is_some(),
+            fp_rows,
+            rows_per_page,
+            total_files,
+        );
+        let row_ctx = PdfCtx {
+            layer: &pf_layer,
+            font_reg,
+            font_bold,
+            w,
+            margin,
+            row_h,
+            tbl_hdr_h,
         };
+        pdf_draw_perfile_rows(
+            &row_ctx,
+            &run.per_file_records[start..end],
+            &col_x,
+            pf_tbl_top,
+        );
 
-        for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
-            let ry = ((ri + 1) as f32).mul_add(-row_h, pf_tbl_top - tbl_hdr_h);
-            let bg = per_file_row_bg(ri);
-            pdf_fill_rect(&pf_layer, margin, ry, 2.0f32.mul_add(-margin, w), row_h, bg);
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
-            let file_str = pdf_safe_str(&rec.relative_path);
-            let lang_str = rec
-                .language
-                .as_ref()
-                .map_or_else(|| "--".to_string(), |l| l.display_name().to_string());
-            let raw = &rec.raw_line_categories;
-            let eff = &rec.effective_counts;
-            let cells = [
-                pdf_trunc_end(&file_str, 110),
-                lang_str,
-                pdf_fmt_full(raw.total_physical_lines),
-                pdf_fmt_full(eff.code_lines),
-                pdf_fmt_full(eff.comment_lines),
-                pdf_fmt_full(eff.blank_lines),
-                pdf_fmt_full(eff.mixed_lines_separate),
-                pdf_fmt_full(raw.functions),
-                pdf_fmt_full(raw.classes),
-                pdf_fmt_full(raw.variables),
-                pdf_fmt_full(raw.imports),
-                pdf_fmt_full(raw.test_count),
-                pdf_fmt_full(raw.test_assertion_count),
-            ];
-            for (ci, cell) in cells.iter().enumerate() {
-                pf_layer.use_text(
-                    cell.clone(),
-                    5.5,
-                    Mm(col_x[ci] + 0.5),
-                    Mm(ry + 1.0),
-                    font_reg,
-                );
-            }
-        }
+        // Footer
         pdf_fill_rect(
             &pf_layer,
             0.0,
@@ -1746,7 +1861,6 @@ fn pdf_render_per_file_pages(
             Rgb::new(0.93, 0.91, 0.87, None),
         );
         pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-        // Left section.
         pf_layer.use_text(
             format!("oxide-sloc v{version}  |  AGPL-3.0-or-later"),
             6.5,
@@ -1754,17 +1868,15 @@ fn pdf_render_per_file_pages(
             Mm(3.0),
             font_reg,
         );
-        // Right section — github.com and Run ID, right-aligned (~1.27 mm per char at 6.5 pt).
         let right_text = format!(
             "github.com/oxide-sloc/oxide-sloc  |  Run ID: {}",
             pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
         );
         let right_x = (w - margin - right_text.len() as f32 * 1.27).max(margin + 80.0);
         pf_layer.use_text(right_text, 6.5, Mm(right_x), Mm(3.0), font_reg);
-        // Center section — banner text, no background, oxide brand color, bold.
+        // Center section — banner, oxide brand color, bold.
         if let Some(text) = banner {
             let safe = pdf_trunc(&pdf_safe_str(text), 40);
-            // Same per-char width as the header banner (0.97 mm at 9pt bold Helvetica).
             let text_x = (w / 2.0 - safe.len() as f32 * 0.97).max(margin + 50.0);
             pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
             pf_layer.use_text(safe, 9.0, Mm(text_x), Mm(2.6), font_bold);
@@ -2072,11 +2184,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     }
 
     let title = pdf_safe_str(&run.effective_configuration.reporting.report_title);
-    let ts = run
-        .tool
-        .timestamp_utc
-        .format("%Y-%m-%d %H:%M UTC")
-        .to_string();
+    let ts = to_pt_hhmm(run.tool.timestamp_utc);
     let version = env!("CARGO_PKG_VERSION");
     let banner = run
         .effective_configuration
@@ -2272,27 +2380,6 @@ fn pdf_trunc_end(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("...{}", &s[s.len() - max.saturating_sub(3)..])
-    }
-}
-
-#[allow(clippy::cast_precision_loss)] // formatting large numbers; sub-million precision doesn't matter
-fn pdf_fmt_num(n: u64) -> String {
-    if n >= 1_000_000 {
-        let m = n as f64 / 1_000_000.0;
-        let s = format!("{m:.1}M");
-        #[allow(clippy::case_sensitive_file_extension_comparisons)]
-        // not a file path; ".0M" is a number suffix
-        if s.ends_with(".0M") {
-            format!("{}M", n / 1_000_000)
-        } else {
-            s
-        }
-    } else if n >= 10_000 {
-        format!("{}K", n / 1_000)
-    } else if n >= 1_000 {
-        format!("{},{:03}", n / 1_000, n % 1_000)
-    } else {
-        n.to_string()
     }
 }
 
@@ -2689,6 +2776,37 @@ fn to_pst_display(dt: DateTime<Utc>) -> String {
         "{} {label}",
         dt.with_timezone(&offset).format("%Y-%m-%d %H:%M:%S")
     )
+}
+
+/// Format a UTC DateTime as "YYYY-MM-DD HH:MM PDT/PST" (no seconds).
+fn to_pt_hhmm(dt: DateTime<Utc>) -> String {
+    let (offset, label) = if is_pacific_dst_report(dt) {
+        (
+            FixedOffset::west_opt(7 * 3600).expect("valid PDT offset"),
+            "PDT",
+        )
+    } else {
+        (
+            FixedOffset::west_opt(8 * 3600).expect("valid PST offset"),
+            "PST",
+        )
+    };
+    format!(
+        "{} {label}",
+        dt.with_timezone(&offset).format("%Y-%m-%d %H:%M")
+    )
+}
+
+/// Parse an RFC 3339 / ISO 8601 git commit date string and reformat it as
+/// "YYYY-MM-DD HH:MM PDT/PST", converting from the embedded offset to Pacific time.
+fn fmt_commit_date_pt(s: &str) -> String {
+    use chrono::DateTime as ChronoDateTime;
+    if let Ok(dt) = ChronoDateTime::parse_from_rfc3339(s) {
+        to_pt_hhmm(dt.with_timezone(&Utc))
+    } else {
+        // Fallback: strip the T separator and tz offset for a cleaner look.
+        s.replace('T', " ").to_string()
+    }
 }
 
 fn build_warning_console(warnings: &[String]) -> String {
@@ -8675,8 +8793,8 @@ mod coverage_boost_report_tests {
 
     #[test]
     fn pdf_number_and_string_formatters() {
-        assert_eq!(pdf_fmt_num(0), "0");
-        assert!(pdf_fmt_num(1_234_567).contains('1'));
+        assert_eq!(pdf_fmt_full(0), "0");
+        assert!(pdf_fmt_full(1_234_567).contains('1'));
         // pdf_safe_str must not panic on non-ASCII / control chars.
         let s = pdf_safe_str("héllo\tworld\u{1F600}");
         assert!(!s.is_empty());

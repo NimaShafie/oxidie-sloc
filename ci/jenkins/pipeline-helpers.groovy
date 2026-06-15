@@ -72,15 +72,33 @@ def runUnitTests() {
     def resultsDir = "${outDir}/test-results"
     sh "mkdir -p '${resultsDir}'"
 
+    def useNextest = false
     if (params.TEST_RUNNER == 'cargo-nextest') {
-        sh """
-            if ! cargo nextest --version >/dev/null 2>&1; then
-                echo "ERROR: cargo-nextest not found on this agent."
-                echo "  Install: cargo install cargo-nextest"
-                echo "  Or set TEST_RUNNER to 'cargo-test'."
-                exit 1
-            fi
-        """
+        def alreadyInstalled = sh(
+            script: 'cargo nextest --version >/dev/null 2>&1',
+            returnStatus: true
+        ) == 0
+        if (!alreadyInstalled) {
+            echo 'cargo-nextest not found — attempting offline install from vendor...'
+            def installed = sh(
+                script: 'cargo install --offline cargo-nextest 2>&1 | tail -5',
+                returnStatus: true
+            ) == 0
+            if (installed) {
+                echo 'cargo-nextest installed from vendor successfully.'
+                useNextest = true
+            } else {
+                echo 'WARNING: cargo-nextest unavailable (not on PATH and not in vendor).'
+                echo '  JUnit XML output will not be produced this run.'
+                echo '  To enable: cargo install cargo-nextest  on the agent (then re-run install-rust-cache.sh).'
+                echo '  Falling back to cargo test.'
+            }
+        } else {
+            useNextest = true
+        }
+    }
+
+    if (useNextest) {
         def failFastFlag = params.TEST_FAIL_FAST ? '--fail-fast' : '--no-fail-fast'
         sh """
             cargo nextest run --workspace ${failFastFlag} --profile ci \
@@ -88,15 +106,13 @@ def runUnitTests() {
         """
         sh "mv -f junit.xml '${resultsDir}/junit.xml' 2>/dev/null || true"
         if (params.PUBLISH_TEST_RESULTS) {
-            junit testResults:         "${params.OUTPUT_SUBDIR}/test-results/junit.xml",
-                  allowEmptyResults:   true,
+            junit testResults:          "${params.OUTPUT_SUBDIR}/test-results/junit.xml",
+                  allowEmptyResults:    true,
                   skipPublishingChecks: false
         }
     } else {
         def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
-        sh """
-            cargo test --workspace ${failFastFlag}
-        """
+        sh "cargo test --workspace ${failFastFlag}"
     }
 }
 
