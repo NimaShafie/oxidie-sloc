@@ -314,6 +314,55 @@ pub struct MultiScanComparison {
     pub file_matrix: Vec<MultiFileDelta>,
 }
 
+/// Per-scan deltas for a single file path: delta[0] is always None (no previous), delta[i] is
+/// code[i] - code[i-1], or None when both sides are absent.
+fn sequential_code_deltas(code_per_scan: &[Option<i64>]) -> Vec<Option<i64>> {
+    let mut deltas = vec![None];
+    for i in 1..code_per_scan.len() {
+        if code_per_scan[i - 1].is_some() || code_per_scan[i].is_some() {
+            let prev = code_per_scan[i - 1].unwrap_or(0);
+            let curr = code_per_scan[i].unwrap_or(0);
+            deltas.push(Some(curr - prev));
+        } else {
+            deltas.push(None);
+        }
+    }
+    deltas
+}
+
+/// Classify a file's lifetime across scans as "added", "removed", "modified", or "unchanged".
+fn classify_file_status(code_per_scan: &[Option<i64>]) -> &'static str {
+    let n = code_per_scan.len();
+    let first_idx = code_per_scan.iter().position(|v| v.is_some());
+    let last_idx = code_per_scan.iter().rposition(|v| v.is_some());
+    match (first_idx, last_idx) {
+        (Some(f), Some(l)) if f > 0 && l == n - 1 => "added",
+        (Some(f), Some(l)) if f == 0 && l < n - 1 => "removed",
+        (Some(f), Some(l)) => {
+            let first_val = code_per_scan[f].unwrap_or(0);
+            if code_per_scan[f..=l]
+                .iter()
+                .all(|v| v.is_none_or(|x| x == first_val))
+            {
+                "unchanged"
+            } else {
+                "modified"
+            }
+        }
+        _ => "unchanged",
+    }
+}
+
+/// Net code-line change from the first scan where the file appeared to the last.
+fn net_code_delta(code_per_scan: &[Option<i64>]) -> i64 {
+    let first_idx = code_per_scan.iter().position(|v| v.is_some());
+    let last_idx = code_per_scan.iter().rposition(|v| v.is_some());
+    match (first_idx, last_idx) {
+        (Some(f), Some(l)) => code_per_scan[l].unwrap_or(0) - code_per_scan[f].unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// Compute a multi-point timeline comparison.
 ///
 /// `runs` must be sorted chronologically (oldest first) and contain at least 2 elements.
@@ -353,51 +402,14 @@ pub fn compute_multi_delta(runs: &[&AnalysisRun]) -> MultiScanComparison {
                         .map(|r| r.effective_counts.code_lines.cast_signed())
                 })
                 .collect();
-
-            // Delta at index i = code[i] - code[i-1], None when both sides are absent.
-            let mut code_delta_per_scan: Vec<Option<i64>> = vec![None];
-            for i in 1..code_per_scan.len() {
-                if code_per_scan[i - 1].is_some() || code_per_scan[i].is_some() {
-                    let prev = code_per_scan[i - 1].unwrap_or(0);
-                    let curr = code_per_scan[i].unwrap_or(0);
-                    code_delta_per_scan.push(Some(curr - prev));
-                } else {
-                    code_delta_per_scan.push(None);
-                }
-            }
-
-            let n = code_per_scan.len();
-            let first_idx = code_per_scan.iter().position(|v| v.is_some());
-            let last_idx = code_per_scan.iter().rposition(|v| v.is_some());
-
-            let overall_status = match (first_idx, last_idx) {
-                (Some(f), Some(l)) if f > 0 && l == n - 1 => "added".to_string(),
-                (Some(f), Some(l)) if f == 0 && l < n - 1 => "removed".to_string(),
-                (Some(f), Some(l)) => {
-                    let first_val = code_per_scan[f].unwrap_or(0);
-                    if code_per_scan[f..=l]
-                        .iter()
-                        .all(|v| v.is_none_or(|x| x == first_val))
-                    {
-                        "unchanged".to_string()
-                    } else {
-                        "modified".to_string()
-                    }
-                }
-                _ => "unchanged".to_string(),
-            };
-
-            let total_code_delta = match (first_idx, last_idx) {
-                (Some(f), Some(l)) => code_per_scan[l].unwrap_or(0) - code_per_scan[f].unwrap_or(0),
-                _ => 0,
-            };
-
+            let code_delta_per_scan = sequential_code_deltas(&code_per_scan);
+            let overall_status = classify_file_status(&code_per_scan).to_string();
+            let total_code_delta = net_code_delta(&code_per_scan);
             let language = run_maps.iter().find_map(|m| {
                 m.get(path.as_str())
                     .and_then(|r| r.language)
                     .map(|l| l.display_name().to_string())
             });
-
             MultiFileDelta {
                 relative_path: path,
                 language,

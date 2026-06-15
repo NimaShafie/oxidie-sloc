@@ -818,6 +818,29 @@ fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
     }
 }
 
+fn apply_complexity_gate(run: &AnalysisRun, max_cc: u32) {
+    let violators: Vec<_> = run
+        .per_file_records
+        .iter()
+        .filter(|f| f.cyclomatic_complexity.is_some_and(|cc| cc > max_cc))
+        .collect();
+    if !violators.is_empty() {
+        eprintln!(
+            "error: {} file(s) exceed --max-complexity {} (exit 6)",
+            violators.len(),
+            max_cc
+        );
+        for f in violators.iter().take(10) {
+            eprintln!(
+                "  {} complexity={}",
+                f.relative_path,
+                f.cyclomatic_complexity.unwrap_or(0)
+            );
+        }
+        std::process::exit(6);
+    }
+}
+
 async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     let config = resolve_analyze_config(&args)?;
     let quiet = args.quiet;
@@ -884,26 +907,7 @@ async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
 
     // Cyclomatic complexity gate: exit 6 if any file exceeds the threshold.
     if let Some(max_cc) = args.max_complexity {
-        let violators: Vec<_> = run
-            .per_file_records
-            .iter()
-            .filter(|f| f.cyclomatic_complexity.is_some_and(|cc| cc > max_cc))
-            .collect();
-        if !violators.is_empty() {
-            eprintln!(
-                "error: {} file(s) exceed --max-complexity {} (exit 6)",
-                violators.len(),
-                max_cc
-            );
-            for f in violators.iter().take(10) {
-                eprintln!(
-                    "  {} complexity={}",
-                    f.relative_path,
-                    f.cyclomatic_complexity.unwrap_or(0)
-                );
-            }
-            std::process::exit(6);
-        }
+        apply_complexity_gate(&run, max_cc);
     }
 
     // Baseline growth check.

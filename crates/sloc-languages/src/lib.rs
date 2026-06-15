@@ -3204,6 +3204,22 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     )
 }
 
+/// True when `line[start..end]` is surrounded by non-identifier characters.
+fn is_word_boundary(line: &[u8], start: usize, end: usize) -> bool {
+    let before_ok =
+        start == 0 || (!line[start - 1].is_ascii_alphanumeric() && line[start - 1] != b'_');
+    let after_ok = end >= line.len() || (!line[end].is_ascii_alphanumeric() && line[end] != b'_');
+    before_ok && after_ok
+}
+
+/// True when `kw_bytes` appears at `line[i..]`, respecting word boundaries when `word_kw` is set.
+fn keyword_matches_at(line: &[u8], i: usize, kw_bytes: &[u8], word_kw: bool) -> bool {
+    if &line[i..i + kw_bytes.len()] != kw_bytes {
+        return false;
+    }
+    !word_kw || is_word_boundary(line, i, i + kw_bytes.len())
+}
+
 /// Count branch keyword occurrences in `line` (ASCII bytes of a trimmed code line).
 ///
 /// Alphabetic keywords are matched word-bounded (not as substrings of longer identifiers).
@@ -3218,24 +3234,12 @@ fn count_branch_in_line(line: &[u8], keywords: &[&str]) -> u32 {
         let word_kw = kw.bytes().all(|b| b.is_ascii_alphabetic() || b == b'_');
         let mut i = 0usize;
         while i + kw_bytes.len() <= line.len() {
-            if &line[i..i + kw_bytes.len()] == kw_bytes {
-                let ok = if word_kw {
-                    let before_ok =
-                        i == 0 || (!line[i - 1].is_ascii_alphanumeric() && line[i - 1] != b'_');
-                    let end = i + kw_bytes.len();
-                    let after_ok = end >= line.len()
-                        || (!line[end].is_ascii_alphanumeric() && line[end] != b'_');
-                    before_ok && after_ok
-                } else {
-                    true
-                };
-                if ok {
-                    total += 1;
-                    i += kw_bytes.len();
-                    continue;
-                }
+            if keyword_matches_at(line, i, kw_bytes, word_kw) {
+                total += 1;
+                i += kw_bytes.len();
+            } else {
+                i += 1;
             }
-            i += 1;
         }
     }
     total

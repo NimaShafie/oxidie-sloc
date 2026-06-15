@@ -708,22 +708,26 @@ fn launch_cdp_browser(
     }
 }
 
+/// If a JS chart error was recorded on the page, print it to stderr.
+fn report_chart_error_if_any(tab: &headless_chrome::Tab) {
+    let Ok(e) = tab.evaluate("window.oxSlocChartError||''", false) else {
+        return;
+    };
+    let Some(serde_json::Value::String(msg)) = e.value else {
+        return;
+    };
+    if !msg.is_empty() {
+        eprintln!("[oxide-sloc][pdf] chart JS error (charts may be missing): {msg}");
+    }
+}
+
 /// Poll `window.oxSlocChartsReady` for up to 15 s so Chart.js canvases finish rendering.
 fn wait_for_charts_ready(tab: &headless_chrome::Tab) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         if let Ok(r) = tab.evaluate("!!window.oxSlocChartsReady", false) {
             if matches!(r.value, Some(serde_json::Value::Bool(true))) {
-                // Report any JS exception that prevented chart rendering.
-                if let Ok(e) = tab.evaluate("window.oxSlocChartError||''", false) {
-                    if let Some(serde_json::Value::String(msg)) = e.value {
-                        if !msg.is_empty() {
-                            eprintln!(
-                                "[oxide-sloc][pdf] chart JS error (charts may be missing): {msg}"
-                            );
-                        }
-                    }
-                }
+                report_chart_error_if_any(tab);
                 break;
             }
         }
@@ -1540,6 +1544,9 @@ fn pdf_render_per_file_pages(
     ts: &str,
     version: &str,
     banner: Option<&str>,
+    // When COCOMO is rendered on its own page, continue the per-file table on that same page
+    // rather than starting a new one.  Tuple: (page index, layer index, available top y-coord).
+    first_page: Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)>,
 ) {
     use printpdf::{Color, Mm, Rgb};
     const HDR2_H: f32 = 8.0;
@@ -1567,51 +1574,77 @@ fn pdf_render_per_file_pages(
     ];
     let rows_per_page = ((h - HDR2_H - SUB_H - tbl_hdr_h - footer_h) / row_h).floor() as usize;
     let total_files = run.per_file_records.len();
-    let page_count = total_files.div_ceil(rows_per_page);
+
+    // Rows that fit on the continuation page (COCOMO already occupies the top portion).
+    let fp_rows = match first_page {
+        Some((_, _, fp_top)) => ((fp_top - SUB_H - tbl_hdr_h - footer_h) / row_h)
+            .floor()
+            .max(0.0) as usize,
+        None => rows_per_page,
+    };
+    let page_count = if first_page.is_some() {
+        1 + total_files.saturating_sub(fp_rows).div_ceil(rows_per_page)
+    } else {
+        total_files.div_ceil(rows_per_page)
+    };
 
     for page_idx in 0..page_count {
-        let (pf_page, pf_layer_idx) = doc.add_page(Mm(w), Mm(h), "Content");
-        let pf_layer = doc.get_page(pf_page).get_layer(pf_layer_idx);
-        let pf_hdr_top = h - HDR2_H;
-        pdf_fill_rect(
-            &pf_layer,
-            0.0,
-            pf_hdr_top,
-            w,
-            HDR2_H,
-            Rgb::new(0.098, 0.11, 0.15, None),
-        );
-        pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-        pf_layer.use_text(
-            "oxide-sloc",
-            9.0,
-            Mm(margin),
-            Mm(pf_hdr_top + 2.5),
-            font_bold,
-        );
-        pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-        pf_layer.use_text(
-            "Per-File Detail",
-            8.0,
-            Mm(46.0),
-            Mm(pf_hdr_top + 2.5),
-            font_reg,
-        );
-        pf_layer.use_text(
-            format!("Page {} of {}", page_idx + 2, page_count + 1),
-            7.0,
-            Mm(w - 40.0),
-            Mm(pf_hdr_top + 2.5),
-            font_reg,
-        );
-        // Report identification banner — white bold, centered in the per-file page header.
-        if let Some(text) = banner {
-            let safe = pdf_trunc(&pdf_safe_str(text), 40);
-            let text_x = (w / 2.0 - safe.len() as f32 * 0.97).max(80.0);
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
-            pf_layer.use_text(safe, 9.0, Mm(text_x), Mm(pf_hdr_top + 2.5), font_bold);
+        let use_continuation = page_idx == 0 && first_page.is_some();
+
+        // Obtain the PDF layer and the y-coord of the bottom edge of the sub-bar (= pf_tbl_top).
+        let pf_layer;
+        let sub_top;
+        if use_continuation {
+            let (fp_page, fp_layer_idx, fp_top) = first_page.unwrap();
+            pf_layer = doc.get_page(fp_page).get_layer(fp_layer_idx);
+            sub_top = fp_top - SUB_H;
+            // No page header drawn here — the COCOMO page already has one.
+        } else {
+            let (pf_page, pf_layer_idx) = doc.add_page(Mm(w), Mm(h), "Content");
+            pf_layer = doc.get_page(pf_page).get_layer(pf_layer_idx);
+            let pf_hdr_top = h - HDR2_H;
+            sub_top = pf_hdr_top - SUB_H;
+            pdf_fill_rect(
+                &pf_layer,
+                0.0,
+                pf_hdr_top,
+                w,
+                HDR2_H,
+                Rgb::new(0.098, 0.11, 0.15, None),
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+            pf_layer.use_text(
+                "oxide-sloc",
+                9.0,
+                Mm(margin),
+                Mm(pf_hdr_top + 2.5),
+                font_bold,
+            );
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+            pf_layer.use_text(
+                "Per-File Detail",
+                8.0,
+                Mm(46.0),
+                Mm(pf_hdr_top + 2.5),
+                font_reg,
+            );
+            pf_layer.use_text(
+                format!("Page {} of {}", page_idx + 2, page_count + 1),
+                7.0,
+                Mm(w - 40.0),
+                Mm(pf_hdr_top + 2.5),
+                font_reg,
+            );
+            // Report identification banner — white bold, centered in the per-file page header.
+            if let Some(text) = banner {
+                let safe = pdf_trunc(&pdf_safe_str(text), 40);
+                let text_x = (w / 2.0 - safe.len() as f32 * 0.97).max(80.0);
+                pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+                pf_layer.use_text(safe, 9.0, Mm(text_x), Mm(pf_hdr_top + 2.5), font_bold);
+            }
         }
-        let sub_top = pf_hdr_top - SUB_H;
+
+        // Sub-bar (title + file count) — rendered on every page including the continuation page.
         pdf_fill_rect(
             &pf_layer,
             0.0,
@@ -1635,6 +1668,7 @@ fn pdf_render_per_file_pages(
             Mm(sub_top + 1.0),
             font_reg,
         );
+
         let pf_tbl_top = sub_top;
         pdf_fill_rect(
             &pf_layer,
@@ -1654,8 +1688,18 @@ fn pdf_render_per_file_pages(
                 font_bold,
             );
         }
-        let start = page_idx * rows_per_page;
-        let end = (start + rows_per_page).min(total_files);
+
+        // Slice of file records for this page.
+        let (start, end) = if use_continuation {
+            (0, fp_rows.min(total_files))
+        } else if first_page.is_some() {
+            let s = fp_rows + (page_idx - 1) * rows_per_page;
+            (s, (s + rows_per_page).min(total_files))
+        } else {
+            let s = page_idx * rows_per_page;
+            (s, (s + rows_per_page).min(total_files))
+        };
+
         for (ri, rec) in run.per_file_records[start..end].iter().enumerate() {
             let ry = ((ri + 1) as f32).mul_add(-row_h, pf_tbl_top - tbl_hdr_h);
             let bg = per_file_row_bg(ri);
@@ -1903,9 +1947,9 @@ fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f3
 fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f32) -> f32 {
     use printpdf::{Color, Mm, Rgb};
     const HDR_H: f32 = 5.5;
-    const ROW_H: f32 = 5.5;
-    const NOTE_H: f32 = 4.0;
-    const GAP: f32 = 2.0;
+    const ROW_H: f32 = 13.0; // tall enough for label + value with comfortable padding
+    const NOTE_H: f32 = 5.0;
+    const GAP: f32 = 5.0; // breathing room between data row and footnote
 
     let Some(ref c) = run.cocomo else {
         return section_top;
@@ -1967,14 +2011,14 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
         ctx.layer
-            .use_text(*label, 5.5, Mm(cx + 2.0), Mm(row_y + 3.2), ctx.font_reg);
+            .use_text(*label, 5.5, Mm(cx + 2.0), Mm(row_y + 9.0), ctx.font_reg);
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
         ctx.layer.use_text(
             value.as_str(),
-            8.5,
+            10.0,
             Mm(cx + 2.0),
-            Mm(row_y + 0.8),
+            Mm(row_y + 2.5),
             ctx.font_bold,
         );
     }
@@ -2077,15 +2121,17 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         after_tables_y
     };
     // COCOMO estimate — on page 1 if room remains, otherwise on its own page 2.
-    // Need ~20 mm: header (5.5) + data row (5.5) + note (4) + gaps (5).
-    let cocomo_fits_page1 = run.cocomo.is_some() && (after_style_y - 3.0) > FOOTER_H + 20.0;
+    // Need ~32 mm: header (5.5) + data row (13) + gap (5) + note (5) + margins (~3.5).
+    let cocomo_fits_page1 = run.cocomo.is_some() && (after_style_y - 3.0) > FOOTER_H + 32.0;
     if cocomo_fits_page1 {
         pdf_render_cocomo_section(&ctx, run, after_style_y - 3.0);
     }
     pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
 
     // If COCOMO didn't fit on page 1, render it on a dedicated page 2.
-    if run.cocomo.is_some() && !cocomo_fits_page1 {
+    // Capture the page/layer so that the per-file table can continue on the same page
+    // instead of starting a new one (eliminating the blank-page gap between the two sections).
+    let cocomo_page_ctx = if run.cocomo.is_some() && !cocomo_fits_page1 {
         let (c2_page, c2_layer_idx) = doc.add_page(Mm(W), Mm(H), "Content");
         let c2_layer = doc.get_page(c2_page).get_layer(c2_layer_idx);
         let c2_ctx = PdfCtx {
@@ -2117,8 +2163,9 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             PdfMm(H - 5.5),
             &font_reg,
         );
-        pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
-        // Footer on COCOMO page.
+        let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
+        // Footer on COCOMO page; if per-file records exist the per-file renderer re-draws
+        // this area with its richer footer (adds Run ID on the right), which is fine.
         pdf_fill_rect(
             &c2_layer,
             0.0,
@@ -2135,12 +2182,29 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             PdfMm(3.0),
             &font_reg,
         );
-    }
+        // Leave 3 mm of breathing room below the COCOMO note before the per-file sub-bar.
+        Some((c2_page, c2_layer_idx, cocomo_bottom - 3.0))
+    } else {
+        None
+    };
 
     if !run.per_file_records.is_empty() {
         pdf_render_per_file_pages(
-            &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, &title,
-            &ts, version, banner,
+            &doc,
+            &font_reg,
+            &font_bold,
+            run,
+            W,
+            H,
+            MARGIN,
+            FOOTER_H,
+            ROW_H,
+            TBL_HDR_H,
+            &title,
+            &ts,
+            version,
+            banner,
+            cocomo_page_ctx,
         );
     }
 
@@ -3218,7 +3282,7 @@ struct WarningOpportunityRow {
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; font-weight:500; line-height:1.55; white-space:normal; max-width:340px; min-width:180px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; font-weight:500; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
@@ -4296,6 +4360,43 @@ struct WarningOpportunityRow {
       </div>
       {% endif %}
 
+      {% if has_cocomo %}
+      <section class="panel" id="cocomo-section">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <h2>Constructive Cost Model &mdash; COCOMO I</h2>
+            <span class="cocomo-mode-pill-wrap" style="margin-left:12px;">
+              <span class="pill" style="background:var(--surface-3);color:var(--muted);border:1px solid var(--line);font-size:11px;">{{ cocomo_mode_label }} mode</span>
+              <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
+            </span>
+          </div>
+        </div>
+        <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
+          <div class="stat-chip">
+            <div class="stat-chip-label">Person-months</div>
+            <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+            <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 (Organic mode).</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Schedule (months)</div>
+            <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+            <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Avg. Team Size</div>
+            <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+            <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
+          </div>
+          <div class="stat-chip">
+            <div class="stat-chip-label">Input KSLOC</div>
+            <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+            <div class="stat-chip-tip">KSLOC = Kilo Source Lines of Code (1 KSLOC = 1,000 lines). This is the primary input to the COCOMO model. Only executable code lines are counted &mdash; blank lines and comments are excluded. ({{ run.summary_totals.code_lines }} total code lines)</div>
+          </div>
+        </div>
+        <p style="font-size:13px;color:var(--muted);padding:8px 4px 0;line-height:1.6;white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</p>
+      </section>
+      {% endif %}
+
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button></div>
@@ -4549,43 +4650,6 @@ struct WarningOpportunityRow {
         </div>
       </section>
     </div>
-
-    {% if has_cocomo %}
-    <section class="panel" id="cocomo-section" style="margin-top:18px;margin-bottom:24px;">
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <h2>Constructive Cost Model &mdash; COCOMO I</h2>
-          <span class="cocomo-mode-pill-wrap" style="margin-left:12px;">
-            <span class="pill" style="background:var(--surface-3);color:var(--muted);border:1px solid var(--line);font-size:11px;">{{ cocomo_mode_label }} mode</span>
-            <span class="cocomo-mode-tip">{{ cocomo_mode_tooltip }}</span>
-          </span>
-        </div>
-      </div>
-      <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
-        <div class="stat-chip">
-          <div class="stat-chip-label">Person-months</div>
-          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
-          <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 (Organic mode).</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-label">Schedule (months)</div>
-          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
-          <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-label">Avg. Team Size</div>
-          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
-          <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-chip-label">Input KSLOC</div>
-          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
-          <div class="stat-chip-tip">Source lines of code (in thousands) used as the COCOMO model input. Only executable code lines count; blanks and comments are excluded. ({{ run.summary_totals.code_lines }} total code lines)</div>
-        </div>
-      </div>
-      <p style="font-size:11px;color:var(--muted);padding:8px 4px 0;white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</p>
-    </section>
-    {% endif %}
   </div>
 
   <div id="r-tt" aria-hidden="true"></div>
