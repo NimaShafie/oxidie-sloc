@@ -489,9 +489,12 @@ once.  The first build must run **without parameters** to register them.
 1. On the job page, click **"Build Now"** in the left sidebar.
    The first build runs with defaults (`SKIP_WEB_CHECK` defaults to `true` for a
    fresh install).  The build executes these stages in order:
-   **Checkout → Load helpers → Setup → Quality Gates → Build → Analyze → Archive & Publish**,
-   then succeeds.  Analyze targets `tests/fixtures/basic` which exists in the repository,
-   and the Web UI check is skipped by default.
+   **Checkout → Load helpers → Setup → Quality Gates (Format, Lint, Unit tests) → Build →
+   Coverage → Analyze → Web UI health check → Deliver results (Send webhook, Send email) →
+   Archive & Publish → Push to Artifact Repository → Git-Ref Scan → Git-Ref Compare**,
+   then succeeds.  Analyze targets `tests/fixtures/basic` which exists in the repository.
+   Optional stages (Coverage, Web UI health check, webhook, email, artifact push, ref scan)
+   are skipped unless the corresponding parameters are configured.
 
    > **If the build fails** with `MethodTooLargeException` at compile time (before any
    > stage runs), see the [Troubleshooting → MethodTooLargeException](#methodtoolarge

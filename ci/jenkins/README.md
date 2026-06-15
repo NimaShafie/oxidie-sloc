@@ -77,7 +77,7 @@ rustup component add llvm-tools
 What you get:
 - LCOV (`lcov.info`) and Cobertura XML (`sonar-coverage.xml`) archived per build.
 - Browsable HTML report archived under `coverage/html/` per build.
-- **"Coverage Report"** sidebar link on each build.
+- **"Coverage Source"** sidebar link on each build.
 - "Line coverage % over time" trend chart on the job page.
 - Optional threshold gate: set `COVERAGE_THRESHOLD = 60` to fail builds below 60 % coverage.
 - When `GENERATE_COVERAGE` is also enabled, coverage runs once and is reused by SonarQube.
