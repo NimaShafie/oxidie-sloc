@@ -14,6 +14,7 @@ publish = false
 
 [dependencies]
 cargo-llvm-cov = "0.6"
+cargo-nextest = "0.9"
 tar = "0.4.46"
 
 # Prevents cargo from treating this package as a member of the parent workspace.

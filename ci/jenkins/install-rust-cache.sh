@@ -42,7 +42,7 @@ echo "Installing Rust ${TOOLCHAIN} into ${CACHE_DIR}..."
 mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 if rustup toolchain list 2>/dev/null | grep -q "${TOOLCHAIN}"; then
-    echo "Toolchain ${TOOLCHAIN} already present — nothing to do."
+    echo "Toolchain ${TOOLCHAIN} already present — skipping rustup install."
 else
     # Download rustup-init to a file before executing — avoids the curl|sh pattern
     # flagged by OpenSSF Scorecard Pinned-Dependencies.
@@ -54,6 +54,19 @@ else
         --component rustfmt clippy llvm-tools
     rm -f "${_RUSTUP_INIT}"
 fi
+
+# Ensure llvm-tools is present regardless of whether the toolchain was just installed
+# (it may be absent when the cache was seeded without the component, e.g. via rustup-init
+# without --component llvm-tools, or when the cached toolchain predates this requirement).
+rustup component add llvm-tools 2>/dev/null || true
+
+# Pre-install CI tooling so the pipeline's auto-install step is a no-op on this agent.
+# Both tools are also vendored in ci/tools/Cargo.toml for offline installs, but having
+# them pre-installed avoids the vendor-extract overhead on every nextest/coverage run.
+echo "Installing cargo-nextest..."
+cargo install cargo-nextest || echo "WARNING: cargo-nextest install failed (network required for fresh install)."
+echo "Installing cargo-llvm-cov..."
+cargo install cargo-llvm-cov || echo "WARNING: cargo-llvm-cov install failed (network required for fresh install)."
 
 JENKINS_HOME_GUESS="$(getent passwd jenkins 2>/dev/null | cut -d: -f6 || echo '/var/lib/jenkins')"
 
