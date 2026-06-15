@@ -333,8 +333,8 @@ fn sequential_code_deltas(code_per_scan: &[Option<i64>]) -> Vec<Option<i64>> {
 /// Classify a file's lifetime across scans as "added", "removed", "modified", or "unchanged".
 fn classify_file_status(code_per_scan: &[Option<i64>]) -> &'static str {
     let n = code_per_scan.len();
-    let first_idx = code_per_scan.iter().position(|v| v.is_some());
-    let last_idx = code_per_scan.iter().rposition(|v| v.is_some());
+    let first_idx = code_per_scan.iter().position(Option::is_some);
+    let last_idx = code_per_scan.iter().rposition(Option::is_some);
     match (first_idx, last_idx) {
         (Some(f), Some(l)) if f > 0 && l == n - 1 => "added",
         (Some(f), Some(l)) if f == 0 && l < n - 1 => "removed",
@@ -355,8 +355,8 @@ fn classify_file_status(code_per_scan: &[Option<i64>]) -> &'static str {
 
 /// Net code-line change from the first scan where the file appeared to the last.
 fn net_code_delta(code_per_scan: &[Option<i64>]) -> i64 {
-    let first_idx = code_per_scan.iter().position(|v| v.is_some());
-    let last_idx = code_per_scan.iter().rposition(|v| v.is_some());
+    let first_idx = code_per_scan.iter().position(Option::is_some);
+    let last_idx = code_per_scan.iter().rposition(Option::is_some);
     match (first_idx, last_idx) {
         (Some(f), Some(l)) => code_per_scan[l].unwrap_or(0) - code_per_scan[f].unwrap_or(0),
         _ => 0,
@@ -366,6 +366,10 @@ fn net_code_delta(code_per_scan: &[Option<i64>]) -> i64 {
 /// Compute a multi-point timeline comparison.
 ///
 /// `runs` must be sorted chronologically (oldest first) and contain at least 2 elements.
+///
+/// # Panics
+///
+/// Panics if `runs` contains fewer than 2 elements.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn compute_multi_delta(runs: &[&AnalysisRun]) -> MultiScanComparison {

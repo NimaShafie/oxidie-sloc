@@ -197,7 +197,7 @@ fn ingest(run: &AnalysisRun) -> String {
     serde_json::to_string(run).unwrap()
 }
 
-/// Ingest a run and return its run_id (the one supplied via `run.tool.run_id`).
+/// Ingest a run and return its `run_id` (the one supplied via `run.tool.run_id`).
 async fn ingest_run(app: Router, run: &AnalysisRun) -> String {
     let (st, _) = post_json_with(app, "/api/ingest", &ingest(run)).await;
     assert!(st.as_u16() < 500, "ingest must not 5xx, got {st}");
@@ -207,9 +207,9 @@ async fn ingest_run(app: Router, run: &AnalysisRun) -> String {
 // ── render_result_page: COCOMO mode branches ──────────────────────────────────
 
 /// Runs ingested with COCOMO estimates exercise the COCOMO rendering branch in
-/// render_result_page (the cocomo_mode_str match arm is evaluated at render time
+/// `render_result_page` (the `cocomo_mode_str` match arm is evaluated at render time
 /// from the scan wizard context, not from the stored estimate, but ingesting a
-/// run with code lines > 0 and a COCOMO estimate populates has_cocomo = true).
+/// run with code lines > 0 and a COCOMO estimate populates `has_cocomo` = true).
 #[tokio::test]
 async fn result_page_renders_for_run_with_cocomo_organic() {
     let app = make_test_router();
@@ -957,10 +957,10 @@ async fn trend_report_with_multiple_ingested_runs() {
     // Ingest several runs so trend-report has data to render
     for i in 0..5u32 {
         let mut run = base_run(&format!("trend-run-{i:03}"));
-        run.tool.timestamp_utc = Utc::now() - chrono::Duration::hours(i as i64 * 2);
+        run.tool.timestamp_utc = Utc::now() - chrono::Duration::hours(i64::from(i) * 2);
         run.git_branch = Some("main".into());
         run.git_commit_short = Some(format!("abc{i:04}"));
-        run.summary_totals.code_lines = 5000 + i as u64 * 100;
+        run.summary_totals.code_lines = 5000 + u64::from(i) * 100;
         let _ = ingest_run(app.clone(), &run).await;
     }
     let (st, body) = get_with(app, "/trend-reports").await;
@@ -1261,7 +1261,7 @@ async fn api_metrics_for_ingested_run_returns_json() {
     let id = ingest_run(app.clone(), &run).await;
     let (st, body) = get_with(app.clone(), &format!("/api/metrics/{id}")).await;
     assert!(st.as_u16() < 500, "/api/metrics/:id must not 5xx, got {st}");
-    assert!(body.contains("{"), "metrics must return JSON");
+    assert!(body.contains('{'), "metrics must return JSON");
 }
 
 #[tokio::test]
@@ -1361,7 +1361,7 @@ async fn healthz_always_returns_200() {
 
 // ── fmt_num helper via multi-compare page rendering ───────────────────────────
 
-/// fmt_num covers branches for values ≥1M, ≥10K, ≥1K, and <1K.
+/// `fmt_num` covers branches for values ≥1M, ≥10K, ≥1K, and <1K.
 /// Exercising multi-compare with large code totals ensures those paths run.
 #[tokio::test]
 async fn multi_compare_large_code_totals_exercise_fmt_num() {
@@ -1383,7 +1383,7 @@ async fn multi_compare_large_code_totals_exercise_fmt_num() {
 // ── build_coverage_delta_card branches ───────────────────────────────────────
 
 /// Ingest two runs where one has coverage data and the other doesn't → exercises
-/// the "only one has coverage" branch in build_coverage_delta_card.
+/// the "only one has coverage" branch in `build_coverage_delta_card`.
 #[tokio::test]
 async fn compare_one_with_coverage_one_without() {
     let app = make_test_router();
@@ -1474,7 +1474,7 @@ async fn metrics_history_with_multiple_runs() {
     let app = make_test_router();
     for i in 0..4u32 {
         let mut run = base_run(&format!("hist-{i:03}"));
-        run.tool.timestamp_utc = Utc::now() - chrono::Duration::hours(i as i64);
+        run.tool.timestamp_utc = Utc::now() - chrono::Duration::hours(i64::from(i));
         let _ = ingest_run(app.clone(), &run).await;
     }
     let (st, body) = get_with(app, "/api/metrics/history").await;
@@ -1483,7 +1483,7 @@ async fn metrics_history_with_multiple_runs() {
         "/api/metrics/history must not 5xx, got {st}"
     );
     assert!(
-        body.contains("[") || body.contains("{"),
+        body.contains('[') || body.contains('{'),
         "history must return JSON"
     );
 }
@@ -1521,7 +1521,7 @@ async fn scan_setup_with_cocomo_embedded_mode() {
 
 // ── fmt_comma helper exercises via multi-compare file matrix ──────────────────
 
-/// Exercises fmt_comma with values ≥1000, ≥1M, and negative.
+/// Exercises `fmt_comma` with values ≥1000, ≥1M, and negative.
 #[tokio::test]
 async fn multi_compare_negative_delta_exercises_fmt_comma() {
     let app = make_test_router();

@@ -99,6 +99,7 @@ fn sanitize_project_label_unicode_chars() {
 
 // ── build_sub_run ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn make_parent_run_with_submodule() -> (AnalysisRun, SubmoduleSummary) {
     let mut run = AnalysisRun {
         tool: ToolMetadata {

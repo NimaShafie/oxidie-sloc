@@ -1081,7 +1081,7 @@ mod http_tests {
             credential: "api-token-123".to_owned(),
             space_key: "MYSPACE".to_owned(),
             parent_page_id: None,
-            schedule_auto_post: Default::default(),
+            schedule_auto_post: HashMap::default(),
         }
     }
 
@@ -1093,7 +1093,7 @@ mod http_tests {
             credential: "password".to_owned(),
             space_key: "MYSPACE".to_owned(),
             parent_page_id: None,
-            schedule_auto_post: Default::default(),
+            schedule_auto_post: HashMap::default(),
         }
     }
 
@@ -1348,7 +1348,7 @@ mod http_tests {
         );
     }
 
-    /// Minimal AnalysisRun for post_to_confluence (render_confluence_storage input).
+    /// Minimal `AnalysisRun` for `post_to_confluence` (`render_confluence_storage` input).
     fn tiny_run() -> sloc_core::AnalysisRun {
         sloc_core::AnalysisRun {
             tool: sloc_core::ToolMetadata {
@@ -1427,6 +1427,7 @@ mod http_tests {
                 }),
             )
             .route(
+                #[allow(clippy::literal_string_with_formatting_args)]
                 "/rest/api/content/{id}",
                 routing::put(|| async { Json(serde_json::json!({"id": "p9"})) }),
             );
