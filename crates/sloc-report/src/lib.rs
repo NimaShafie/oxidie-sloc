@@ -594,11 +594,14 @@ fn render_html_inner(
         cocomo_mode_label: run
             .cocomo
             .as_ref()
-            .map_or("Organic".to_string(), |c| match c.mode {
-                CocomoMode::Organic => "Organic",
-                CocomoMode::SemiDetached => "Semi-detached",
-                CocomoMode::Embedded => "Embedded",
-            }.to_string()),
+            .map_or_else(|| "Organic".to_string(), |c| {
+                match c.mode {
+                    CocomoMode::Organic => "Organic",
+                    CocomoMode::SemiDetached => "Semi-detached",
+                    CocomoMode::Embedded => "Embedded",
+                }
+                .to_string()
+            }),
         cocomo_mode_tooltip: run
             .cocomo
             .as_ref()
@@ -619,7 +622,7 @@ fn render_html_inner(
         uloc: run.uloc,
         dryness_pct_str: run
             .dryness_pct
-            .map_or(String::new(), |d| format!("{:.1}", d)),
+            .map_or(String::new(), |d| format!("{d:.1}")),
         duplicate_group_count: run.duplicate_groups.len(),
     };
 
@@ -1560,7 +1563,7 @@ fn pdf_perfile_page_slice(
 /// Returns `(layer, sub_top)` where `sub_top` is the y-coordinate at the bottom of the
 /// header bar. When `use_continuation` is true the layer is taken from `first_page` and
 /// no new header is drawn — the COCOMO page already has one.
-#[allow(clippy::suboptimal_flops)]
+#[allow(clippy::suboptimal_flops, clippy::cast_precision_loss)]
 fn pdf_draw_perfile_header(
     ctx: &PdfPerFileCtx<'_>,
     use_continuation: bool,
@@ -1620,7 +1623,7 @@ fn pdf_draw_perfile_header(
 }
 
 /// Render per-file data rows onto an existing PDF layer.
-#[allow(clippy::suboptimal_flops)]
+#[allow(clippy::suboptimal_flops, clippy::cast_precision_loss)]
 fn pdf_draw_perfile_rows(
     ctx: &PdfCtx<'_>,
     records: &[FileRecord],
@@ -2072,7 +2075,7 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
         CocomoMode::SemiDetached => "Semi-detached",
         CocomoMode::Embedded => "Embedded",
     };
-    let usable_w = ctx.w - 2.0 * ctx.margin;
+    let usable_w = 2.0_f32.mul_add(-ctx.margin, ctx.w);
 
     // Section header bar
     pdf_fill_rect(
@@ -2113,7 +2116,7 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
         ("Input KSLOC", format!("{:.2}K", c.ksloc)),
     ];
     for (i, (label, value)) in data.iter().enumerate() {
-        let cx = ctx.margin + i as f32 * col_w;
+        let cx = (i as f32).mul_add(col_w, ctx.margin);
         let bg = if i % 2 == 0 {
             Rgb::new(0.975, 0.965, 0.95, None)
         } else {
@@ -2163,7 +2166,8 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
 )]
 pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     use printpdf::{BuiltinFont, Mm, PdfDocument};
@@ -2219,15 +2223,13 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     // Style analysis section — rendered below the metric tables when data is available.
     // The metric tables occupy ~64.5 mm below tbl_top; leave 4 mm clearance before drawing.
     let after_tables_y = tbl_top - 64.5 - 4.0;
-    let after_style_y = if let Some(ref ss) = run.style_summary {
+    let after_style_y = run.style_summary.as_ref().map_or(after_tables_y, |ss| {
         if after_tables_y > FOOTER_H + 12.0 {
             pdf_render_style_section(&ctx, ss, after_tables_y)
         } else {
             after_tables_y
         }
-    } else {
-        after_tables_y
-    };
+    });
     // COCOMO estimate — on page 1 if room remains, otherwise on its own page 2.
     // Need ~32 mm: header (5.5) + data row (13) + gap (5) + note (5) + margins (~3.5).
     let cocomo_fits_page1 = run.cocomo.is_some() && (after_style_y - 3.0) > FOOTER_H + 32.0;
@@ -2240,6 +2242,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     // Capture the page/layer so that the per-file table can continue on the same page
     // instead of starting a new one (eliminating the blank-page gap between the two sections).
     let cocomo_page_ctx = if run.cocomo.is_some() && !cocomo_fits_page1 {
+        use printpdf::{Color, Mm as PdfMm, Rgb};
         let (c2_page, c2_layer_idx) = doc.add_page(Mm(W), Mm(H), "Content");
         let c2_layer = doc.get_page(c2_page).get_layer(c2_layer_idx);
         let c2_ctx = PdfCtx {
@@ -2252,7 +2255,6 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             tbl_hdr_h: TBL_HDR_H,
         };
         // Small page header so the reader knows which report this is.
-        use printpdf::{Color, Mm as PdfMm, Rgb};
         pdf_fill_rect(
             &c2_layer,
             0.0,
@@ -2778,7 +2780,7 @@ fn to_pst_display(dt: DateTime<Utc>) -> String {
     )
 }
 
-/// Format a UTC DateTime as "YYYY-MM-DD HH:MM PDT/PST" (no seconds).
+/// Format a UTC `DateTime` as "YYYY-MM-DD HH:MM PDT/PST" (no seconds).
 fn to_pt_hhmm(dt: DateTime<Utc>) -> String {
     let (offset, label) = if is_pacific_dst_report(dt) {
         (
@@ -2801,12 +2803,10 @@ fn to_pt_hhmm(dt: DateTime<Utc>) -> String {
 /// "YYYY-MM-DD HH:MM PDT/PST", converting from the embedded offset to Pacific time.
 fn fmt_commit_date_pt(s: &str) -> String {
     use chrono::DateTime as ChronoDateTime;
-    if let Ok(dt) = ChronoDateTime::parse_from_rfc3339(s) {
-        to_pt_hhmm(dt.with_timezone(&Utc))
-    } else {
-        // Fallback: strip the T separator and tz offset for a cleaner look.
-        s.replace('T', " ").to_string()
-    }
+    ChronoDateTime::parse_from_rfc3339(s).map_or_else(
+        |_| s.replace('T', " "),
+        |dt| to_pt_hhmm(dt.with_timezone(&Utc)),
+    )
 }
 
 fn build_warning_console(warnings: &[String]) -> String {
@@ -7414,7 +7414,7 @@ struct ReportTemplate<'a> {
     cocomo_mode_tooltip: String,
     /// Unique Lines of Code across all analyzed files.
     uloc: u64,
-    /// Pre-formatted DRYness percentage string (e.g. "82.3") or empty string.
+    /// Pre-formatted `DRYness` percentage string (e.g. "82.3") or empty string.
     dryness_pct_str: String,
     /// Number of duplicate file groups detected.
     duplicate_group_count: usize,

@@ -244,7 +244,7 @@ fn fixture_file_record(path: &str, lang: Language, code: u64) -> FileRecord {
     }
 }
 
-fn fixture_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
+const fn fixture_lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
     LanguageSummary {
         language: lang,
         files,
@@ -3468,8 +3468,7 @@ fn git_available() -> bool {
 }
 
 fn init_local_repo(dir: &std::path::Path) -> bool {
-    let ok =
-        |c: &mut std::process::Command| c.output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = |c: &mut std::process::Command| c.output().is_ok_and(|o| o.status.success());
     ok(std::process::Command::new("git").args(["init", dir.to_str().unwrap_or(".")]))
         && ok(std::process::Command::new("git").current_dir(dir).args([
             "-c",
@@ -3518,8 +3517,7 @@ async fn api_scan_ref_with_local_repo_completes() {
     }
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
-    let ok =
-        |c: &mut std::process::Command| c.output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = |c: &mut std::process::Command| c.output().is_ok_and(|o| o.status.success());
     ok(std::process::Command::new("git").args(["init", dir.path().to_str().unwrap_or(".")]));
     ok(std::process::Command::new("git")
         .current_dir(&dir)
@@ -4047,8 +4045,8 @@ fn fixture_run_with_cocomo_embedded() -> String {
     run.summary_totals = SummaryTotals {
         files_considered: 3,
         files_analyzed: 3,
-        code_lines: 100000,
-        total_physical_lines: 100006,
+        code_lines: 100_000,
+        total_physical_lines: 100_006,
         ..SummaryTotals::default()
     };
     run.cocomo = Some(CocomoEstimate {
@@ -4521,15 +4519,13 @@ async fn rate_limit_shared_router_triggers_429() {
         .all(|s| *s == StatusCode::OK || *s == StatusCode::TOO_MANY_REQUESTS);
     assert!(
         all_ok_or_429,
-        "all responses must be 200 or 429, got: {:?}",
-        statuses
+        "all responses must be 200 or 429, got: {statuses:?}"
     );
     // At least some should be 429 given burst of 2
     let has_429 = statuses.contains(&StatusCode::TOO_MANY_REQUESTS);
     assert!(
         has_429,
-        "expected at least one 429 from tight rate limiter, got: {:?}",
-        statuses
+        "expected at least one 429 from tight rate limiter, got: {statuses:?}"
     );
 }
 

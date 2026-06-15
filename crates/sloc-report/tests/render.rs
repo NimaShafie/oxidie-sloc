@@ -1469,7 +1469,7 @@ fn render_html_with_all_41_languages_exercises_rendering() {
 
 // ── COCOMO fixture and tests ─────────────────────────────────────────────────
 
-fn make_cocomo() -> CocomoEstimate {
+const fn make_cocomo() -> CocomoEstimate {
     CocomoEstimate {
         mode: CocomoMode::Organic,
         ksloc: 5.0,
