@@ -449,6 +449,7 @@ pipeline {
                         stage('Lint') {
                             steps {
                                 sh '''
+                                    set -o pipefail
                                     cargo clippy --workspace --all-targets --all-features \
                                         -- -D warnings \
                                            -W clippy::pedantic \
@@ -456,7 +457,8 @@ pipeline {
                                            -A clippy::multiple_crate_versions \
                                         2>&1 | tee clippy-output.txt
                                     WARN_COUNT=$(grep -c '^warning' clippy-output.txt 2>/dev/null || echo 0)
-                                    echo "Clippy warnings captured: ${WARN_COUNT}"
+                                    ERR_COUNT=$(grep -c '^error' clippy-output.txt 2>/dev/null || echo 0)
+                                    echo "Clippy: ${ERR_COUNT} errors, ${WARN_COUNT} warnings"
                                 '''
                             }
                         }

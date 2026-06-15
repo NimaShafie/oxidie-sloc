@@ -513,7 +513,7 @@ struct RunResultContext {
     prev_entry: Option<RegistryEntry>,
     prev_scan_count: usize,
     project_path: String,
-    /// COCOMO mode chosen by the user in the scan wizard ("organic" | "semi_detached" | "embedded").
+    /// COCOMO mode chosen by the user in the scan wizard (`organic` | `semi_detached` | `embedded`).
     cocomo_mode: String,
     /// Per-file complexity alert threshold: files above this are highlighted. 0 = off.
     complexity_alert: u32,
@@ -957,7 +957,7 @@ pub fn make_test_router_exhausted_semaphore() -> Router {
 }
 
 /// Test router with a very tight rate limit (3 req/min). The third request from
-/// the same IP (0.0.0.0 when ConnectInfo is absent) returns 429.
+/// the same IP (0.0.0.0 when `ConnectInfo` is absent) returns 429.
 pub fn make_test_router_tight_rate_limit() -> Router {
     std::env::set_var("SLOC_HEADLESS", "1");
     let tmp = std::env::temp_dir().join("sloc_test_rate");
@@ -972,7 +972,7 @@ pub fn make_test_router_tight_rate_limit() -> Router {
         tls_enabled: false,
         api_keys: Arc::new(vec![]),
         rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             2,
             5,
             Duration::from_secs(5),
@@ -1827,7 +1827,7 @@ struct AnalyzeForm {
     style_analysis_enabled: Option<String>,
     style_score_threshold: Option<String>,
     style_lang_scope: Option<String>,
-    /// COCOMO I mode ("organic" | "semi_detached" | "embedded"). Defaults to organic.
+    /// COCOMO I mode (`organic` | `semi_detached` | `embedded`). Defaults to organic.
     cocomo_mode: Option<String>,
     /// Cyclomatic complexity alert threshold. Files above this are highlighted. Empty = off.
     complexity_alert: Option<String>,
@@ -4871,6 +4871,7 @@ async fn async_run_result_handler(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)] // abbreviated names (fa=files_analyzed, cl=code_lines, etc.) are intentional
+#[allow(clippy::cast_precision_loss)] // COCOMO ratio: f64 precision on line counts is adequate
 fn render_result_page(
     run: &AnalysisRun,
     artifacts: &RunArtifacts,
@@ -7029,6 +7030,7 @@ fn build_coverage_delta_card(s: &sloc_core::SummaryDelta) -> String {
 }
 
 /// Filter baseline/current run pair to a single submodule scope or super-repo scope.
+#[allow(clippy::ref_option)]
 fn narrow_run_pair_by_scope(
     mut baseline: AnalysisRun,
     mut current: AnalysisRun,
@@ -7054,6 +7056,7 @@ fn narrow_run_pair_by_scope(
 }
 
 /// Filter all runs in a multi-compare to a single submodule scope or super-repo scope.
+#[allow(clippy::ref_option)]
 fn apply_scope_filter(runs: &mut [AnalysisRun], active_sub: &Option<String>, super_scope: bool) {
     if let Some(ref sub_name) = active_sub {
         for run in runs.iter_mut() {
@@ -7284,12 +7287,12 @@ async fn compare_handler(
         current_comments: s.current_comments,
         comment_lines_delta_str: fmt_delta(s.comment_lines_delta),
         comment_lines_delta_class: delta_class(s.comment_lines_delta).into(),
-        baseline_code_fmt: fmt_comma(s.baseline_code as i64),
-        current_code_fmt: fmt_comma(s.current_code as i64),
-        baseline_files_fmt: fmt_comma(s.baseline_files as i64),
-        current_files_fmt: fmt_comma(s.current_files as i64),
-        baseline_comments_fmt: fmt_comma(s.baseline_comments as i64),
-        current_comments_fmt: fmt_comma(s.current_comments as i64),
+        baseline_code_fmt: fmt_comma(s.baseline_code.cast_signed()),
+        current_code_fmt: fmt_comma(s.current_code.cast_signed()),
+        baseline_files_fmt: fmt_comma(s.baseline_files.cast_signed()),
+        current_files_fmt: fmt_comma(s.current_files.cast_signed()),
+        baseline_comments_fmt: fmt_comma(s.baseline_comments.cast_signed()),
+        current_comments_fmt: fmt_comma(s.current_comments.cast_signed()),
         code_lines_pct_str: fmt_pct(s.code_lines_delta, s.baseline_code),
         files_analyzed_pct_str: fmt_pct(s.files_analyzed_delta, s.baseline_files),
         comment_lines_pct_str: fmt_pct(s.comment_lines_delta, s.baseline_comments),
@@ -8252,8 +8255,7 @@ async fn multi_compare_handler(
     let runs_csv = params.runs.as_deref().unwrap_or("").to_string();
     let project_label = entries
         .first()
-        .map(|e| e.project_label.as_str())
-        .unwrap_or("")
+        .map_or("", |e| e.project_label.as_str())
         .to_string();
     let run_refs: Vec<&AnalysisRun> = runs.iter().collect();
     let multi = compute_multi_delta(&run_refs);
@@ -8278,13 +8280,11 @@ async fn multi_compare_handler(
         .into_response()
 }
 
-fn multi_delta_class(n: i64) -> &'static str {
-    if n > 0 {
-        "pos"
-    } else if n < 0 {
-        "neg"
-    } else {
-        "zero"
+const fn multi_delta_class(n: i64) -> &'static str {
+    match n {
+        1.. => "pos",
+        ..=-1 => "neg",
+        0 => "zero",
     }
 }
 
@@ -8298,6 +8298,7 @@ fn multi_fmt_delta(n: i64) -> String {
 
 /// Escape a string for safe embedding inside a JSON/JS string literal (no allocation if clean).
 fn js_escape(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
@@ -8306,7 +8307,9 @@ fn js_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -8326,38 +8329,37 @@ fn mc_entry_html_data(entries: &[RegistryEntry], idx: usize, run_id: &str) -> (S
         .as_deref()
         .and_then(fmt_git_date)
         .unwrap_or_else(|| "&mdash;".to_string());
-    let au = entry
-        .git_author
-        .as_deref()
-        .map(|a| {
+    let au = entry.git_author.as_deref().map_or_else(
+        || "<span class=\"mc-row-val\">&mdash;</span>".to_string(),
+        |a| {
             format!(
                 "<span class=\"mc-row-val\"><span class=\"cmp-author-val\">{}</span>\
                  <span class=\"cmp-author-handle\"></span></span>",
                 html_escape(a)
             )
-        })
-        .unwrap_or_else(|| "<span class=\"mc-row-val\">&mdash;</span>".to_string());
+        },
+    );
     (cd, au)
 }
 
 /// Render the scope badge chip for a scan card header.
 fn mc_scope_badge(active_sub: Option<&str>, super_scope_active: bool) -> String {
-    if let Some(s) = active_sub {
-        format!(
-            "<span class=\"mc-scope-tag mc-scope-sub\">{}</span>",
-            html_escape(s)
-        )
-    } else if super_scope_active {
-        "<span class=\"mc-scope-tag mc-scope-super\">Super-repo only</span>".to_string()
-    } else {
-        "<span class=\"mc-scope-tag mc-scope-full\">\
-         <svg width=\"9\" height=\"9\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\">\
-         <circle cx=\"12\" cy=\"12\" r=\"10\"></circle>\
-         <line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\"></line>\
-         <path d=\"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"></path>\
-         </svg> Full scan</span>"
-            .to_string()
-    }
+    active_sub.map_or_else(
+        || {
+            if super_scope_active {
+                "<span class=\"mc-scope-tag mc-scope-super\">Super-repo only</span>".to_string()
+            } else {
+                "<span class=\"mc-scope-tag mc-scope-full\">\
+                 <svg width=\"9\" height=\"9\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\">\
+                 <circle cx=\"12\" cy=\"12\" r=\"10\"></circle>\
+                 <line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\"></line>\
+                 <path d=\"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"></path>\
+                 </svg> Full scan</span>"
+                    .to_string()
+            }
+        },
+        |s| format!("<span class=\"mc-scope-tag mc-scope-sub\">{}</span>", html_escape(s)),
+    )
 }
 
 /// Build the HTML for the horizontal strip of scan cards (with arrows between them).
@@ -8459,6 +8461,7 @@ fn build_mc_scan_strip(
 }
 
 /// Build the metric progression table (thead + tbody) for multi-compare.
+#[allow(clippy::too_many_lines)]
 fn build_mc_metrics_table(multi: &MultiScanComparison, n: usize) -> (String, String) {
     use std::fmt::Write as _;
     struct MetricRow<'a> {
@@ -8584,8 +8587,7 @@ fn build_mc_points_json(multi: &MultiScanComparison, entries: &[RegistryEntry]) 
             .to_string();
         let cov = pt
             .coverage_line_pct
-            .map(|v| format!("{v:.1}"))
-            .unwrap_or_else(|| "null".to_string());
+            .map_or_else(|| "null".to_string(), |v| format!("{v:.1}"));
         parts.push(format!(
             r#"{{"run_id":"{run_id}","commit":"{commit}","branch":"{branch}","tags":"{tags}","nearest":"{nearest}","commit_date":"{commit_date}","author":"{author}","scanned":"{scanned}","scanned_ms":{scanned_ms},"code":{code},"comments":{comments},"blank":{blank},"files":{files},"tests":{tests},"cov":{cov}}}"#,
             run_id = js_escape(&pt.run_id),
@@ -8694,13 +8696,16 @@ fn build_mc_scope_bar(
 
 /// Build the scope-description label shown in the page subtitle.
 fn build_mc_scope_label(active_sub: Option<&str>, super_scope_active: bool) -> String {
-    if let Some(s) = active_sub {
-        format!("Submodule: {} &mdash; ", html_escape(s))
-    } else if super_scope_active {
-        "Super-repo only &mdash; ".to_string()
-    } else {
-        String::new()
-    }
+    active_sub.map_or_else(
+        || {
+            if super_scope_active {
+                "Super-repo only &mdash; ".to_string()
+            } else {
+                String::new()
+            }
+        },
+        |s| format!("Submodule: {} &mdash; ", html_escape(s)),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -13888,15 +13893,18 @@ fn generate_offline_index(
             .cocomo
             .as_ref()
             .map_or(String::new(), |c| format!("{:.2}", c.ksloc)),
-        cocomo_mode_label: run.cocomo.as_ref().map_or("Organic".to_string(), |c| {
-            use sloc_core::CocomoMode;
-            match c.mode {
-                CocomoMode::Organic => "Organic",
-                CocomoMode::SemiDetached => "Semi-detached",
-                CocomoMode::Embedded => "Embedded",
-            }
-            .to_string()
-        }),
+        cocomo_mode_label: run.cocomo.as_ref().map_or_else(
+            || "Organic".to_string(),
+            |c| {
+                use sloc_core::CocomoMode;
+                match c.mode {
+                    CocomoMode::Organic => "Organic",
+                    CocomoMode::SemiDetached => "Semi-detached",
+                    CocomoMode::Embedded => "Embedded",
+                }
+                .to_string()
+            },
+        ),
         cocomo_mode_tooltip: run.cocomo.as_ref().map_or(String::new(), |c| {
             use sloc_core::CocomoMode;
             match c.mode {
@@ -13993,49 +14001,45 @@ async fn export_pdf_handler(Json(body): Json<ExportPdfRequest>) -> impl IntoResp
     }
     let pdf_result = write_pdf_from_html(&html_path, &pdf_path);
     let _ = std::fs::remove_file(&html_path);
-    match pdf_result {
+    if let Err(e) = pdf_result {
+        let _ = std::fs::remove_file(&pdf_path);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("PDF generation failed: {e}"),
+        )
+            .into_response();
+    }
+    let pdf_bytes = match std::fs::read(&pdf_path) {
+        Ok(b) => b,
         Err(e) => {
             let _ = std::fs::remove_file(&pdf_path);
-            (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("PDF generation failed: {e}"),
+                format!("Failed to read PDF: {e}"),
             )
-                .into_response()
+                .into_response();
         }
-        Ok(()) => {
-            let pdf_bytes = match std::fs::read(&pdf_path) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&pdf_path);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to read PDF: {e}"),
-                    )
-                        .into_response();
-                }
-            };
-            let _ = std::fs::remove_file(&pdf_path);
-            let safe_name: String = filename
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let disposition = format!("attachment; filename=\"{}\"", safe_name);
-            (
-                [
-                    (header::CONTENT_TYPE, "application/pdf".to_string()),
-                    (header::CONTENT_DISPOSITION, disposition),
-                ],
-                pdf_bytes,
-            )
-                .into_response()
-        }
-    }
+    };
+    let _ = std::fs::remove_file(&pdf_path);
+    let safe_name: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let disposition = format!("attachment; filename=\"{safe_name}\"");
+    (
+        [
+            (header::CONTENT_TYPE, "application/pdf".to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        pdf_bytes,
+    )
+        .into_response()
 }
 
 async fn export_config_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -22555,7 +22559,7 @@ struct ResultTemplate {
     lsloc: Option<u64>,
     /// Unique Lines of Code across all analyzed files.
     uloc: u64,
-    /// Pre-formatted DRYness percentage string (e.g. "82.3") or empty when not available.
+    /// Pre-formatted `DRYness` percentage string (e.g. "82.3") or empty when not available.
     dryness_pct_str: String,
     /// Number of duplicate file groups detected.
     duplicate_group_count: usize,

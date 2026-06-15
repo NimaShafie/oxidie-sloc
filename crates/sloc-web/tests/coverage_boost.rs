@@ -217,7 +217,7 @@ fn file_record(path: &str, lang: Language, code: u64) -> FileRecord {
     }
 }
 
-fn lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
+const fn lang_summary(lang: Language, files: u64, code: u64) -> LanguageSummary {
     LanguageSummary {
         language: lang,
         files,
@@ -558,6 +558,7 @@ async fn upload_directory_multipart_stages_and_not_5xx() {
 async fn upload_tarball_extracts_and_not_5xx() {
     // Build a tiny .tar.gz in-memory containing one source file.
     use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
     let mut tar_buf = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
@@ -571,7 +572,6 @@ async fn upload_tarball_extracts_and_not_5xx() {
         builder.finish().unwrap();
     }
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    use std::io::Write;
     gz.write_all(&tar_buf).unwrap();
     let gz_bytes = gz.finish().unwrap();
 

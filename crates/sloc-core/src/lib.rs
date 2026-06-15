@@ -385,7 +385,7 @@ pub struct AnalysisRun {
     /// Unique Lines of Code: count of distinct non-blank code lines across all analyzed files.
     #[serde(default)]
     pub uloc: u64,
-    /// DRYness percentage: `uloc / total_code_lines × 100`. `None` when code lines = 0.
+    /// `DRYness` percentage: `uloc / total_code_lines × 100`. `None` when code lines = 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dryness_pct: Option<f32>,
     /// Groups of files with identical content (relative paths). Only non-singleton groups included.
@@ -954,6 +954,7 @@ fn process_submodules(config: &AppConfig, analyzed: &mut [FileRecord]) -> Vec<Su
 }
 
 /// Compute Basic COCOMO I cost estimate from total code SLOC.
+#[allow(clippy::cast_precision_loss)] // COCOMO formula: line counts at f64 precision are sufficient
 fn compute_cocomo(code_lines: u64, mode: CocomoMode) -> CocomoEstimate {
     let ksloc = code_lines as f64 / 1_000.0;
     let (a, b, c, d): (f64, f64, f64, f64) = match mode {
@@ -978,7 +979,8 @@ fn compute_cocomo(code_lines: u64, mode: CocomoMode) -> CocomoEstimate {
     }
 }
 
-/// Collect ULOC hashes across all analyzed files, compute ULOC and DRYness.
+/// Collect ULOC hashes across all analyzed files, compute ULOC and `DRYness`.
+#[allow(clippy::cast_precision_loss)] // DRYness is a display percentage; f32 precision is adequate
 fn compute_uloc(analyzed: &[FileRecord]) -> (u64, Option<f32>) {
     use std::collections::HashSet as StdHashSet;
     let mut unique: StdHashSet<u64> = StdHashSet::new();
@@ -2544,7 +2546,7 @@ mod tests {
     #[test]
     fn cocomo_zero_lines_produces_zero_effort() {
         let est = compute_cocomo(0, CocomoMode::Organic);
-        assert_eq!(est.ksloc, 0.0);
+        assert!((est.ksloc).abs() < f64::EPSILON);
         // Zero KSLOC → effort = 2.4 * 0^1.05 = 0
         assert!((est.effort_person_months - 0.0).abs() < 0.01);
     }

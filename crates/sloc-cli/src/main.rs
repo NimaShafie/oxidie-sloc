@@ -1667,7 +1667,7 @@ fn print_plain_summary(run: &AnalysisRun) {
     }
     println!("uloc={}", run.uloc);
     if let Some(dry) = run.dryness_pct {
-        println!("dryness_pct={:.1}", dry);
+        println!("dryness_pct={dry:.1}");
     }
     println!("duplicate_groups={}", run.duplicate_groups.len());
     if let Some(ref c) = run.cocomo {
@@ -1737,7 +1737,7 @@ fn print_totals_header(run: &AnalysisRun, col: bool) {
     if run.uloc > 0 {
         let dry_str = run
             .dryness_pct
-            .map_or(String::new(), |d| format!("  ({:.1}% unique)", d));
+            .map_or(String::new(), |d| format!("  ({d:.1}% unique)"));
         println!(
             "  {}  {}{}",
             paint!(col, "36", "ULOC           :"),

@@ -289,7 +289,7 @@
 //!
 //! 60 languages detected by file extension and shebang:
 //!
-//! Ada, Assembly, Awk, C, C++, C#, Clojure, CMake, Crystal, CSS, D, Dart,
+//! Ada, Assembly, Awk, C, C++, C#, Clojure, `CMake`, Crystal, CSS, D, Dart,
 //! Dockerfile, Elixir, Elm, Erlang, F#, Fortran, GLSL/HLSL, Go, GraphQL, Groovy,
 //! Haskell, HCL/Terraform, HTML, Java, JavaScript, Julia, Kotlin, Lisp/Scheme,
 //! Lua, Makefile, Nim, Nix, Objective-C, OCaml, Pascal/Delphi, Perl, PHP,

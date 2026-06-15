@@ -1377,13 +1377,10 @@ fn analyze_skips_high_entropy_file_that_looks_binary() {
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
     // The .bin file should NOT be in analyzed files (either skipped or unrecognized language)
-    let analyzed_paths: Vec<&str> = run
-        .per_file_records
-        .iter()
-        .map(|r| r.relative_path.as_str())
-        .collect();
     assert!(
-        !analyzed_paths.contains(&"data.bin"),
+        !run.per_file_records
+            .iter()
+            .any(|r| r.relative_path == "data.bin"),
         "binary-like file should not be analyzed as a language file"
     );
 }
@@ -1551,7 +1548,7 @@ fn analyze_real_git_repo_populates_metadata() {
     std::fs::write(root.join("util.py"), "def f():\n    return 1\n").unwrap();
     let _ = run_git(&["add", "."]);
     let committed = run_git(&["-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"]);
-    if committed.map(|o| !o.status.success()).unwrap_or(true) {
+    if committed.map_or(true, |o| !o.status.success()) {
         return; // commit failed (e.g. no identity) — skip
     }
 
@@ -1667,7 +1664,7 @@ fn analyze_detects_duplicate_files_same_content() {
     let all_paths: Vec<&str> = run
         .duplicate_groups
         .iter()
-        .flat_map(|g| g.iter().map(|s| s.as_str()))
+        .flat_map(|g| g.iter().map(String::as_str))
         .collect();
     let has_dup = all_paths.iter().any(|p| p.contains("a.rs"))
         && all_paths.iter().any(|p| p.contains("b.rs"));
@@ -1689,7 +1686,7 @@ fn analyze_with_identical_small_files_finds_duplicates() {
     // Duplicate detection works even for small files
     assert_eq!(run.summary_totals.files_analyzed, 3);
     // Groups should be non-empty
-    let total_in_groups: usize = run.duplicate_groups.iter().map(|g| g.len()).sum();
+    let total_in_groups: usize = run.duplicate_groups.iter().map(Vec::len).sum();
     assert!(
         total_in_groups >= 2,
         "at least 2 files should be in duplicate groups"
@@ -1817,7 +1814,7 @@ fn scan_registry_preserves_order_of_insertion() {
     let mut reg = ScanRegistry::default();
     for i in 0..5 {
         let mut e = make_registry_entry(&format!("run-{i}"));
-        e.timestamp_utc = Utc::now() + chrono::Duration::seconds(i as i64);
+        e.timestamp_utc = Utc::now() + chrono::Duration::seconds(i64::from(i));
         reg.add_entry(e);
     }
     assert_eq!(reg.entries.len(), 5);
@@ -1986,9 +1983,9 @@ fn analyze_marks_generated_files() {
 
 #[test]
 fn cleanup_policy_store_save_and_load() {
+    use sloc_core::CleanupPolicy;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cleanup.json");
-    use sloc_core::CleanupPolicy;
     let store = CleanupPolicyStore {
         policy: Some(CleanupPolicy {
             enabled: true,
