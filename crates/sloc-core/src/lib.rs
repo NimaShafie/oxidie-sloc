@@ -2858,4 +2858,260 @@ mod tests {
         // Result depends on test runner env; just assert no panic
         let _ = detect_ci_system();
     }
+
+    // ── resolve_git_file_pointer ──────────────────────────────────────────────
+
+    #[test]
+    fn resolve_git_file_pointer_valid_absolute_gitdir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a real target directory (the "real" git dir)
+        let real_git = dir.path().join("real.git");
+        fs::create_dir_all(&real_git).unwrap();
+        // Write a .git file pointing at the real git dir
+        let git_file = dir.path().join(".git");
+        fs::write(&git_file, format!("gitdir: {}\n", real_git.display())).unwrap();
+
+        let result = resolve_git_file_pointer(&git_file, dir.path());
+        // Should resolve to the real git dir (or its canonicalized form)
+        assert!(
+            result.is_some(),
+            "should resolve a valid absolute gitdir pointer"
+        );
+        assert!(result.unwrap().is_dir());
+    }
+
+    #[test]
+    fn resolve_git_file_pointer_missing_gitdir_prefix_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_file = dir.path().join(".git");
+        fs::write(&git_file, "not a gitdir line\n").unwrap();
+        assert!(resolve_git_file_pointer(&git_file, dir.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_git_file_pointer_unreadable_path_returns_none() {
+        assert!(resolve_git_file_pointer(
+            Path::new("/nonexistent/__sloc_test_git_file__"),
+            Path::new("/nonexistent")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_git_file_pointer_nonexistent_target_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_file = dir.path().join(".git");
+        fs::write(&git_file, "gitdir: /nonexistent/__sloc_fake_gitdir_xyz__\n").unwrap();
+        // Target does not exist → returns None
+        assert!(resolve_git_file_pointer(&git_file, dir.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_git_file_pointer_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_git = dir.path().join("real_git_dir");
+        fs::create_dir_all(&real_git).unwrap();
+        let git_file = dir.path().join(".git");
+        // Relative path — should be resolved relative to base_dir
+        fs::write(&git_file, "gitdir: real_git_dir\n").unwrap();
+        let result = resolve_git_file_pointer(&git_file, dir.path());
+        assert!(result.is_some());
+    }
+
+    // ── resolve_ref ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_ref_from_loose_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        let sha = "abc1234567890abcdef1234567890abcdef123456";
+        fs::write(git_dir.join("refs/heads/main"), format!("{sha}\n")).unwrap();
+
+        let result = resolve_ref(git_dir, "refs/heads/main");
+        assert_eq!(result.as_deref(), Some(sha));
+    }
+
+    #[test]
+    fn resolve_ref_from_packed_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        let sha = "def5678def5678def5678def5678def5678def56";
+        fs::write(
+            git_dir.join("packed-refs"),
+            format!("# pack-refs with: peeled fully-peeled sorted\n{sha} refs/heads/feature\n"),
+        )
+        .unwrap();
+
+        let result = resolve_ref(git_dir, "refs/heads/feature");
+        assert_eq!(result.as_deref(), Some(sha));
+    }
+
+    #[test]
+    fn resolve_ref_not_found_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_ref(dir.path(), "refs/heads/nonexistent-branch-xyz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_ref_packed_refs_skips_comment_and_peeled() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        let sha = "aaa1111aaa1111aaa1111aaa1111aaa1111aaa11";
+        fs::write(
+            git_dir.join("packed-refs"),
+            format!("# comment\n^peeled-object-sha\n{sha} refs/tags/v1.0\n"),
+        )
+        .unwrap();
+
+        let result = resolve_ref(git_dir, "refs/tags/v1.0");
+        assert_eq!(result.as_deref(), Some(sha));
+    }
+
+    #[test]
+    fn resolve_ref_loose_sha_too_short_falls_through_to_packed() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        // Write an invalid (too short) SHA to the loose file
+        fs::write(git_dir.join("refs/heads/main"), "short\n").unwrap();
+        // No packed-refs → None
+        let result = resolve_ref(git_dir, "refs/heads/main");
+        assert!(result.is_none());
+    }
+
+    // ── read_git_remote_url ───────────────────────────────────────────────────
+
+    #[test]
+    fn read_git_remote_url_parses_origin_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://github.com/org/repo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        )
+        .unwrap();
+        let url = read_git_remote_url(&git_dir);
+        assert_eq!(url.as_deref(), Some("https://github.com/org/repo.git"));
+    }
+
+    #[test]
+    fn read_git_remote_url_no_config_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        // No config file
+        let url = read_git_remote_url(&git_dir);
+        assert!(url.is_none());
+    }
+
+    // ── detect_git_for_run — HEAD edge cases ──────────────────────────────────
+
+    #[test]
+    fn detect_git_for_run_no_git_dir_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .git directory or file
+        let info = detect_git_for_run(dir.path());
+        assert!(info.commit_long.is_none());
+    }
+
+    #[test]
+    fn detect_git_for_run_unreadable_head_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        // .git directory exists but no HEAD file → read fails → early return
+        let info = detect_git_for_run(dir.path());
+        assert!(info.commit_long.is_none());
+    }
+
+    #[test]
+    fn detect_git_for_run_detached_head_with_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        // Exactly 40 hex chars — the code checks len >= 40 and takes [..40]
+        let sha = "abc1234567890abcdef1234567890abcdef12345";
+        fs::write(git_dir.join("HEAD"), sha).unwrap();
+        let info = detect_git_for_run(dir.path());
+        // Detached HEAD — commit_long should be the first 40 chars of HEAD
+        assert_eq!(info.commit_long.as_deref(), Some(sha));
+        assert_eq!(info.commit_short.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn detect_git_for_run_with_packed_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        // HEAD points to a ref resolved via packed-refs
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let sha = "deadbeef00000000000000000000000000000000";
+        fs::write(
+            git_dir.join("packed-refs"),
+            format!("# pack-refs\n{sha} refs/heads/main\n"),
+        )
+        .unwrap();
+        let info = detect_git_for_run(dir.path());
+        assert_eq!(info.commit_long.as_deref(), Some(sha));
+        assert_eq!(info.branch.as_deref(), Some("main"));
+    }
+
+    // ── ci_branch_from_env ───────────────────────────────────────────────────
+
+    // Note: ci_branch_from_env env-var tests share a mutex to avoid parallel interference.
+    use std::sync::{Mutex, OnceLock};
+    static CI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn ci_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        CI_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn clear_branch_env_vars() {
+        for v in &[
+            "BRANCH_NAME",
+            "GIT_BRANCH",
+            "GITHUB_REF_NAME",
+            "CI_COMMIT_BRANCH",
+            "CIRCLE_BRANCH",
+            "TRAVIS_BRANCH",
+            "BUILD_SOURCEBRANCH",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
+
+    #[test]
+    fn ci_branch_from_env_strips_refs_heads_prefix() {
+        let _lock = ci_env_lock();
+        clear_branch_env_vars();
+        // Azure DevOps sets BUILD_SOURCEBRANCH = "refs/heads/main"
+        std::env::set_var("BUILD_SOURCEBRANCH", "refs/heads/my-branch");
+        let branch = ci_branch_from_env();
+        clear_branch_env_vars();
+        assert_eq!(branch.as_deref(), Some("my-branch"));
+    }
+
+    #[test]
+    fn ci_branch_from_env_strips_origin_prefix() {
+        let _lock = ci_env_lock();
+        clear_branch_env_vars();
+        std::env::set_var("GIT_BRANCH", "origin/develop");
+        let branch = ci_branch_from_env();
+        clear_branch_env_vars();
+        assert_eq!(branch.as_deref(), Some("develop"));
+    }
+
+    #[test]
+    fn ci_branch_from_env_returns_none_for_head() {
+        let _lock = ci_env_lock();
+        clear_branch_env_vars();
+        // "HEAD" is filtered out; with no other vars, should return None
+        std::env::set_var("BRANCH_NAME", "HEAD");
+        let branch = ci_branch_from_env();
+        clear_branch_env_vars();
+        // HEAD value is filtered → None (or falls through to other vars, but all cleared)
+        assert!(branch.is_none(), "HEAD should be filtered, got: {branch:?}");
+    }
 }

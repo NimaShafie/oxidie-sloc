@@ -858,6 +858,38 @@ mod tests {
         assert!(resp.is_some(), "Issue Hook must return a response");
     }
 
+    // ── is_valid_github_sig / is_valid_bitbucket_sig ─────────────────────────
+
+    #[test]
+    fn is_valid_github_sig_empty_sig_always_false() {
+        // An empty signature string cannot match any valid HMAC
+        assert!(!is_valid_github_sig(b"test-body", "", "some-secret"));
+    }
+
+    #[test]
+    fn is_valid_github_sig_wrong_format_returns_false() {
+        // GitHub sig must be "sha256=<hex>" — anything else is invalid
+        assert!(!is_valid_github_sig(
+            b"test-body",
+            "not-a-valid-sig",
+            "some-secret"
+        ));
+    }
+
+    #[test]
+    fn is_valid_bitbucket_sig_empty_sig_returns_false() {
+        assert!(!is_valid_bitbucket_sig(b"test-body", "", "some-secret"));
+    }
+
+    #[test]
+    fn is_valid_bitbucket_sig_wrong_sig_returns_false() {
+        assert!(!is_valid_bitbucket_sig(
+            b"test-body",
+            "sha256=wronghex",
+            "some-secret"
+        ));
+    }
+
     // ── matches_hmac — verify fn called with correct arguments ────────────────
 
     #[test]
