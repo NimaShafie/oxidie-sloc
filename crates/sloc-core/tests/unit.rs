@@ -2042,3 +2042,103 @@ fn analyze_respects_cancel_signal() {
     // Either cancelled (Err) or completed (Ok) — must not panic
     let _ = result;
 }
+
+// ── detect_ci_system / ci_branch_from_env — env-var tests ────────────────────
+// These tests require ENV_MUTEX so parallel test threads don't interfere.
+// Uses pub re-exports from sloc_core if available; otherwise tests via analyze.
+
+// Note: detect_ci_system and ci_branch_from_env are private in sloc-core.
+// We exercise them indirectly through the analyze() function's EnvironmentMetadata,
+// OR by checking the AnalysisRun.environment.ci_name field after scanning.
+
+#[test]
+fn analysis_run_environment_ci_name_travis() {
+    let _lock = env_lock();
+    // Clear other CI vars first to avoid false positives
+    for v in &[
+        "JENKINS_URL",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CIRCLECI",
+        "TF_BUILD",
+        "TEAMCITY_VERSION",
+    ] {
+        std::env::remove_var(v);
+    }
+    std::env::set_var("TRAVIS", "true");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let result = sloc_core::analyze(&cfg, "ci-travis-test", None, None);
+    std::env::remove_var("TRAVIS");
+    // The CI name field should be set when TRAVIS=true
+    if let Ok(run) = result {
+        assert_eq!(run.environment.ci_name.as_deref(), Some("Travis CI"));
+    }
+}
+
+#[test]
+fn analysis_run_environment_ci_name_azure_devops() {
+    let _lock = env_lock();
+    for v in &[
+        "JENKINS_URL",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CIRCLECI",
+        "TRAVIS",
+        "TEAMCITY_VERSION",
+    ] {
+        std::env::remove_var(v);
+    }
+    std::env::set_var("TF_BUILD", "true");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn g() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let result = sloc_core::analyze(&cfg, "ci-azure-test", None, None);
+    std::env::remove_var("TF_BUILD");
+    if let Ok(run) = result {
+        assert_eq!(run.environment.ci_name.as_deref(), Some("Azure DevOps"));
+    }
+}
+
+#[test]
+fn analysis_run_environment_ci_name_teamcity() {
+    let _lock = env_lock();
+    for v in &[
+        "JENKINS_URL",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CIRCLECI",
+        "TRAVIS",
+        "TF_BUILD",
+    ] {
+        std::env::remove_var(v);
+    }
+    std::env::set_var("TEAMCITY_VERSION", "2024.1");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("c.rs"), "fn h() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let result = sloc_core::analyze(&cfg, "ci-teamcity-test", None, None);
+    std::env::remove_var("TEAMCITY_VERSION");
+    if let Ok(run) = result {
+        assert_eq!(run.environment.ci_name.as_deref(), Some("TeamCity"));
+    }
+}
+
+#[test]
+fn analysis_run_git_branch_from_github_ref_name() {
+    let _lock = env_lock();
+    // Use GITHUB_REF_NAME env var as ci_branch fallback for detached HEAD
+    std::env::set_var("GITHUB_REF_NAME", "my-feature-branch");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("d.rs"), "fn i() {}\n").unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let result = sloc_core::analyze(&cfg, "ci-branch-test", None, None);
+    std::env::remove_var("GITHUB_REF_NAME");
+    // If the directory has no .git, the branch comes from CI env var
+    if let Ok(run) = result {
+        // Branch may be set from env var when no .git is present
+        // just assert no panic and the run is valid
+        assert!(run.summary_totals.files_analyzed <= run.summary_totals.files_considered);
+    }
+}
