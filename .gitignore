@@ -80,3 +80,5 @@ tests/fixtures/**/sloc/
 # Claude Code (project-local AI context — not for commit)
 CLAUDE.md
 .claude
+
+lcov*.info
