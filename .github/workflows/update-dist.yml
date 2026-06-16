@@ -22,7 +22,12 @@ jobs:
   # ── Build each platform binary ────────────────────────────────────────────
   build:
     name: Build ${{ matrix.target }}
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Only run when: manually dispatched with a tag input, OR triggered by a Release workflow
+    # that ran on an actual tag (not a workflow_dispatch branch run where head_branch = 'main').
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
