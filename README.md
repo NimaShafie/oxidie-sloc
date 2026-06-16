@@ -4,7 +4,7 @@
 [![Release](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml)
 [![Docker](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml)
 [![Latest Release](https://badgen.net/github/release/oxide-sloc/oxide-sloc?label=release&color=blue)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
-[![crates.io](https://img.shields.io/crates/v/oxide-sloc.svg)](https://crates.io/crates/oxide-sloc)
+[![crates.io](https://img.shields.io/crates/v/oxide-sloc)](https://crates.io/crates/oxide-sloc)
 [![codecov](https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg)](https://codecov.io/gh/oxide-sloc/oxide-sloc)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12976/badge)](https://www.bestpractices.dev/en/projects/12976)
