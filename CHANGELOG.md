@@ -10,6 +10,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.70] — 2026-06-16
+
+### Fixed
+
+- **`publish-crates` CI job** (`.github/workflows/release.yml`): Rewrote the per-crate
+  publish helper to capture exit code and stdout separately before grepping, and added
+  `CARGO_TERM_COLOR: never` to the step env so ANSI escape codes cannot interfere with
+  error string matching. Previously `CARGO_TERM_COLOR: always` (set globally by the GitHub
+  Actions runner) caused cargo's "already exists on crates.io index" message to be wrapped
+  in ANSI codes that broke the grep, making the job fail on every run where crates were
+  already published.
+
+---
+
 ## [1.5.69] — 2026-06-16
 
 ### Fixed
