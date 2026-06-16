@@ -10,6 +10,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.68] — 2026-06-16
+
+### Fixed
+
+- **Release workflow badge** (`.github/workflows/release.yml`): Removed the dead
+  `compute-slsa-subjects` job that was left behind after the SLSA reusable-workflow generator
+  was removed in v1.5.67. The orphaned job was aggregating hashes for a job that no longer
+  existed, causing the Release badge to stay red.
+
+### Added
+
+- **Automatic crates.io publishing** (`.github/workflows/release.yml`): New `publish-crates`
+  job runs after the GitHub Release is created on every stable tag. Publishes all seven crates
+  in dependency order (`sloc-git` → `sloc-config` → `sloc-languages` → `sloc-core` →
+  `sloc-report` → `sloc-web` → `oxide-sloc`), temporarily disabling the vendor-source redirect
+  in `.cargo/config.toml` so `cargo publish` can resolve workspace path deps. Requires
+  `CARGO_REGISTRY_TOKEN` secret configured in repository settings.
+
+- **Extended web server coverage tests** (`crates/sloc-web/tests/extra_coverage.rs`): Additional
+  integration tests covering image handler icon variants, `/llms.txt`, `/llms-full.txt`,
+  `/api/openapi.yaml`, `/static/chart-report.js`, badge handler edge cases, metrics/history/
+  submodule endpoints, project-history, suggest-coverage branches, and open/pick-directory/
+  pick-file server-mode paths.
+
+---
+
 ## [1.5.67] — 2026-06-15
 
 ### Fixed
