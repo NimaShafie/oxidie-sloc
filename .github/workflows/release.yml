@@ -869,7 +869,10 @@ jobs:
           toolchain: "1.95"
 
       - name: Disable vendor source redirect for publish
-        run: mv .cargo/config.toml .cargo/config.toml.bak
+        run: |
+          if [ -f .cargo/config.toml ]; then
+            mv .cargo/config.toml .cargo/config.toml.bak
+          fi
 
       - name: Publish crates in dependency order
         env:

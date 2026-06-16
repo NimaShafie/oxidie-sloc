@@ -996,6 +996,46 @@ pub fn make_test_router_tight_rate_limit() -> Router {
     build_router(state)
 }
 
+/// Test router with a very tight auth lockout (threshold=2, window=200ms).
+/// Used by tests that need to trigger and verify the auth lockout response.
+pub fn make_test_router_tight_auth_lockout(api_key: &str) -> Router {
+    std::env::set_var("SLOC_HEADLESS", "1");
+    let tmp = std::env::temp_dir().join("sloc_test_auth_lockout");
+    let state = AppState {
+        base_config: AppConfig::default(),
+        artifacts: Arc::new(Mutex::new(HashMap::new())),
+        async_runs: Arc::new(Mutex::new(HashMap::new())),
+        registry: Arc::new(Mutex::new(ScanRegistry::default())),
+        registry_path: tmp.join("registry.json"),
+        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
+        server_mode: false,
+        tls_enabled: false,
+        api_keys: Arc::new(vec![secrecy::SecretBox::new(Box::new(api_key.to_owned()))]),
+        rate_limiter: Arc::new(IpRateLimiter::new(
+            Duration::from_mins(1),
+            600,
+            2,                          // 2 failures triggers lockout
+            Duration::from_millis(200), // 200ms lockout window (expires fast in tests)
+        )),
+        trust_proxy: false,
+        trusted_proxy_ips: vec![],
+        git_clones_dir: tmp.join("git-clones"),
+        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
+        schedules_path: tmp.join("schedules.json"),
+        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
+        scan_profiles_path: tmp.join("scan_profiles.json"),
+        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
+        confluence_path: tmp.join("confluence_config.json"),
+        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
+        watched_dirs_path: tmp.join("watched_dirs.json"),
+        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
+        cleanup_policy_path: tmp.join("cleanup_policy.json"),
+        cleanup_task_handle: Arc::new(Mutex::new(None)),
+    };
+    build_router(state)
+}
+
 struct RuntimeSecurityConfig {
     api_keys: Vec<secrecy::SecretBox<String>>,
     tls_cert: Option<String>,
@@ -30938,5 +30978,100 @@ mod coverage_boost_unit_tests {
         assert!(name
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.')));
+    }
+}
+
+#[cfg(test)]
+mod tests_private {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn size_limit_reader_zero_remaining_returns_error() {
+        let data = b"hello world";
+        let mut reader = SizeLimitReader {
+            inner: &data[..],
+            remaining: 0,
+        };
+        let mut buf = [0u8; 4];
+        assert!(reader.read(&mut buf).is_err());
+    }
+
+    #[test]
+    fn size_limit_reader_counts_bytes() {
+        let data = b"hello world";
+        let mut reader = SizeLimitReader {
+            inner: &data[..],
+            remaining: 5,
+        };
+        let mut buf = [0u8; 4];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(reader.remaining, 1);
+    }
+
+    #[test]
+    fn resolve_or_create_staging_with_valid_uuid_reuses_id() {
+        let uuid = "12345678-1234-1234-1234-123456789012";
+        let (id, path) = resolve_or_create_staging(Some(uuid));
+        assert_eq!(id, uuid);
+        assert!(path.to_string_lossy().contains("oxide-sloc-uploads"));
+    }
+
+    #[test]
+    fn resolve_or_create_staging_with_none_creates_new() {
+        let (id1, _) = resolve_or_create_staging(None);
+        let (id2, _) = resolve_or_create_staging(None);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn resolve_or_create_staging_with_path_separator_creates_new() {
+        // "has/slash" contains '/' which is not alphanumeric or '-', so falls to new-id branch
+        let (id, _) = resolve_or_create_staging(Some("has/slash"));
+        assert_ne!(id, "has/slash");
+    }
+
+    #[test]
+    fn auth_lockout_remaining_secs_no_entry_returns_zero() {
+        use std::net::IpAddr;
+        use std::str::FromStr;
+        let limiter = IpRateLimiter::new(Duration::from_secs(60), 100, 5, Duration::from_secs(300));
+        let ip = IpAddr::from_str("192.168.1.1").unwrap();
+        assert_eq!(limiter.auth_lockout_remaining_secs(ip), 0);
+    }
+
+    #[test]
+    fn is_auth_locked_out_expired_entry_removed() {
+        use std::net::IpAddr;
+        use std::str::FromStr;
+        let limiter = IpRateLimiter::new(
+            Duration::from_secs(60),
+            100,
+            1, // 1 failure triggers lockout
+            Duration::from_millis(1),
+        );
+        let ip = IpAddr::from_str("192.168.1.2").unwrap();
+        limiter.record_auth_failure(ip);
+        // Wait for the 1ms window to expire
+        std::thread::sleep(Duration::from_millis(10));
+        // Expired entry should be removed, returning false
+        assert!(!limiter.is_auth_locked_out(ip));
+    }
+
+    #[test]
+    fn is_auth_locked_out_within_window_returns_true() {
+        use std::net::IpAddr;
+        use std::str::FromStr;
+        let limiter = IpRateLimiter::new(
+            Duration::from_secs(60),
+            100,
+            2, // 2 failures triggers lockout
+            Duration::from_secs(3600),
+        );
+        let ip = IpAddr::from_str("192.168.1.3").unwrap();
+        limiter.record_auth_failure(ip);
+        limiter.record_auth_failure(ip);
+        assert!(limiter.is_auth_locked_out(ip));
     }
 }
