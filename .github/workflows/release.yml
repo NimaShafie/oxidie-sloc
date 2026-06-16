@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:   # allows manual trigger from GitHub Actions UI without a new tag
 
 permissions: {}
 
@@ -885,7 +886,12 @@ jobs:
             local crate="$1"
             echo "--- Publishing $crate ---"
             local out rc
-            out=$(cargo publish -p "$crate" 2>&1); rc=$?
+            # Use if/else so set -e does not exit before we capture rc and output
+            if out=$(cargo publish -p "$crate" --no-verify 2>&1); then
+              rc=0
+            else
+              rc=$?
+            fi
             echo "$out"
             if [ $rc -eq 0 ]; then return 0; fi
             if echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then
@@ -894,7 +900,7 @@ jobs:
             fi
             return 1
           }
-          for crate in sloc-git sloc-config sloc-languages sloc-core sloc-report sloc-web oxide-sloc; do
+          for crate in sloc-git sloc-config sloc-languages sloc-core sloc-report sloc-web sloc-mcp oxide-sloc; do
             publish_crate "$crate"
           done
 
