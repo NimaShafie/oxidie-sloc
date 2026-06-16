@@ -2,6 +2,14 @@
 // Integration and unit tests for sloc-core submodules.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+// Tests that mutate environment variables must hold this lock for their entire
+// duration so parallel test threads cannot observe each other's env changes.
+static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 use chrono::Utc;
 use sloc_config::AppConfig;
@@ -1214,6 +1222,7 @@ fn baseline_check_result_print_summary_exceeded_does_not_panic() {
 
 #[test]
 fn resolve_baselines_path_uses_env_var() {
+    let _guard = env_lock();
     let dir = tempfile::tempdir().unwrap();
     let custom = dir.path().join("my_baselines.json");
     std::env::set_var("SLOC_BASELINES_PATH", custom.to_str().unwrap());
@@ -1224,6 +1233,7 @@ fn resolve_baselines_path_uses_env_var() {
 
 #[test]
 fn resolve_baselines_path_default_when_env_unset() {
+    let _guard = env_lock();
     std::env::remove_var("SLOC_BASELINES_PATH");
     let resolved = sloc_core::baseline::resolve_baselines_path();
     assert!(
@@ -1403,6 +1413,7 @@ fn analyze_walks_deeply_nested_directories() {
 
 #[test]
 fn analyze_ci_name_set_when_github_actions_env_present() {
+    let _guard = env_lock();
     // Isolate from the ambient CI environment (this suite itself runs under Jenkins,
     // which sets JENKINS_URL/BUILD_URL and would otherwise win the precedence check).
     let saved: Vec<(&str, Option<String>)> = [
@@ -1443,6 +1454,7 @@ fn analyze_ci_name_set_when_github_actions_env_present() {
 
 #[test]
 fn analyze_sets_git_branch_from_github_ref_when_no_git_dir() {
+    let _guard = env_lock();
     // Isolate from ambient CI environment to avoid cross-test env pollution.
     let saved: Vec<(&str, Option<String>)> =
         ["GITHUB_REF", "GITHUB_REF_NAME", "BRANCH_NAME", "GIT_BRANCH"]
