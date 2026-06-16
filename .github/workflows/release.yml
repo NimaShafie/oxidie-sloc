@@ -615,6 +615,8 @@ jobs:
     name: Publish GitHub Release
     needs: [build, vendor, sign, virustotal, sbom]
     runs-on: ubuntu-latest
+    # Creating a GitHub Release requires a tag ref; skip on workflow_dispatch (branch run)
+    if: github.event_name == 'push'
     permissions:
       contents: write
     steps:
@@ -794,6 +796,8 @@ jobs:
     name: Smoke test — install.sh --online (internal)
     needs: [publish]
     runs-on: ubuntu-latest
+    # Only meaningful when a real GitHub Release was created (tag push)
+    if: github.event_name == 'push'
     permissions:
       contents: read
     container:
@@ -859,8 +863,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Only stable releases; never publish alpha/beta/rc to crates.io
-    if: ${{ !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
+    # Run after publish succeeds (tag push) OR when publish was skipped (workflow_dispatch).
+    # Never run for pre-release tags.
+    if: |
+      always() &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
+      !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc')
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
