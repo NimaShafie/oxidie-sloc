@@ -2320,6 +2320,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sloc-web",
  "tempfile",
  "tokio",
  "tracing",

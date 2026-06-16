@@ -8723,6 +8723,71 @@ mod coverage_boost_report_tests {
     use super::*;
     use std::path::Path;
 
+    // ── derive_commit_url / derive_branch_url ────────────────────────────────
+
+    #[test]
+    fn derive_commit_url_github_uses_commit_segment() {
+        let url = derive_commit_url(
+            "https://github.com/org/repo.git",
+            "abc1234abc1234abc1234abc1234abc1234abc1234",
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/org/repo/commit/abc1234abc1234abc1234abc1234abc1234abc1234")
+        );
+    }
+
+    #[test]
+    fn derive_commit_url_bitbucket_uses_commits_plural() {
+        let url = derive_commit_url("https://bitbucket.org/org/repo.git", "deadbeef");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://bitbucket.org/org/repo/commits/deadbeef")
+        );
+    }
+
+    #[test]
+    fn derive_commit_url_gitlab_uses_dash_commit() {
+        let url = derive_commit_url("https://gitlab.example.com/org/repo.git", "cafe0000");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://gitlab.example.com/org/repo/-/commit/cafe0000")
+        );
+    }
+
+    #[test]
+    fn derive_branch_url_github_uses_tree() {
+        let url = derive_branch_url("https://github.com/org/repo.git", "main");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/org/repo/tree/main")
+        );
+    }
+
+    #[test]
+    fn derive_branch_url_bitbucket_uses_branch_segment() {
+        let url = derive_branch_url("https://bitbucket.org/org/repo.git", "develop");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://bitbucket.org/org/repo/branch/develop")
+        );
+    }
+
+    #[test]
+    fn derive_branch_url_gitlab_uses_dash_tree() {
+        let url = derive_branch_url("https://gitlab.mycompany.com/org/repo.git", "feature");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://gitlab.mycompany.com/org/repo/-/tree/feature")
+        );
+    }
+
+    #[test]
+    fn derive_commit_url_invalid_url_returns_none() {
+        let url = derive_commit_url("not-a-url", "abc123");
+        assert!(url.is_none());
+    }
+
     #[test]
     fn normalize_remote_url_variants() {
         assert_eq!(

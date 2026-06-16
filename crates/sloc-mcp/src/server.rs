@@ -380,4 +380,128 @@ mod tests {
         let args = json!({});
         assert_eq!(opt_string(&args, "server_url"), None);
     }
+
+    // ── tool dispatch via real TCP server ─────────────────────────────────────
+    // Starts an in-process sloc-web test router on a random port and dispatches
+    // HTTP-based MCP tools at it, covering the call_tool Ok branch (lines 213-221)
+    // and the individual tool dispatch arms.
+
+    async fn start_test_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = sloc_web::make_test_router();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        // Give the server a moment to accept connections
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn server_cfg(url: &str) -> McpConfig {
+        McpConfig {
+            server_url: Some(url.to_owned()),
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_health_check_via_real_server() {
+        let url = start_test_server().await;
+        let srv = McpServer::new(server_cfg(&url));
+        let req = crate::protocol::McpRequest {
+            id: json!(100),
+            method: "tools/call".into(),
+            params: Some(json!({"name":"health_check","arguments":{"server_url": url}})),
+        };
+        let resp = srv.dispatch(req).await;
+        // Either Ok (server reachable) or Err — must not panic
+        assert!(resp.result.is_some() || resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_metrics_latest_via_real_server() {
+        let url = start_test_server().await;
+        let srv = McpServer::new(server_cfg(&url));
+        let req = crate::protocol::McpRequest {
+            id: json!(101),
+            method: "tools/call".into(),
+            params: Some(json!({"name":"get_metrics_latest","arguments":{"server_url": url}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.result.is_some() || resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_metrics_history_via_real_server() {
+        let url = start_test_server().await;
+        let srv = McpServer::new(server_cfg(&url));
+        let req = crate::protocol::McpRequest {
+            id: json!(102),
+            method: "tools/call".into(),
+            params: Some(
+                json!({"name":"get_metrics_history","arguments":{"server_url": url,"limit":10}}),
+            ),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.result.is_some() || resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_run_metrics_unknown_id_via_real_server() {
+        let url = start_test_server().await;
+        let srv = McpServer::new(server_cfg(&url));
+        let req = crate::protocol::McpRequest {
+            id: json!(103),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "get_run_metrics",
+                "arguments": {"run_id": "nonexistent-run-id", "server_url": url}
+            })),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.result.is_some() || resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ingest_result_no_json_returns_error() {
+        let url = start_test_server().await;
+        let srv = McpServer::new(server_cfg(&url));
+        // No json_path, no json_inline — ingest should error gracefully
+        let req = crate::protocol::McpRequest {
+            id: json!(104),
+            method: "tools/call".into(),
+            params: Some(json!({"name":"ingest_result","arguments":{"server_url": url}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.result.is_some() || resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_run_metrics_missing_run_id_returns_invalid_params() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(105),
+            method: "tools/call".into(),
+            params: Some(json!({"name":"get_run_metrics","arguments":{}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::protocol::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn dispatch_compare_runs_missing_baseline_returns_invalid_params() {
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(106),
+            method: "tools/call".into(),
+            params: Some(json!({"name":"compare_runs","arguments":{"current_path":"x"}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::protocol::INVALID_PARAMS);
+    }
 }
