@@ -201,6 +201,45 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  version-sync:
+    name: Version consistency check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Check all internal path-deps match workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ws_ver=$(grep '^version\s*=' Cargo.toml | head -1 | grep -oP '"[^"]+"' | tr -d '"')
+          echo "Workspace version: $ws_ver"
+          # Any sloc-* path dep whose version string doesn't match the workspace version
+          # is a stale pin that will break crates.io publishing on the next release.
+          bad=$(grep -rn 'sloc-[a-z][a-z-]*.*path.*version\s*=\s*"' crates/*/Cargo.toml \
+                | grep -v "\"$ws_ver\"" || true)
+          if [ -n "$bad" ]; then
+            echo "ERROR: Internal path-dep version != workspace version ($ws_ver):"
+            echo "$bad"
+            echo "Bump these to match the workspace version before tagging."
+            exit 1
+          fi
+          echo "All internal path-dep versions match workspace ($ws_ver): OK"
+
+      - name: Check sonar version matches workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_ver=$(grep '^version\s*=' Cargo.toml | head -1 | grep -oP '"[^"]+"' | tr -d '"')
+          sonar_ver=$(grep 'sonar\.projectVersion\s*=' ci/sonar/sonar-project.properties | cut -d= -f2 | tr -d '[:space:]')
+          if [ "$cargo_ver" != "$sonar_ver" ]; then
+            echo "ERROR: sonar.projectVersion=$sonar_ver does not match Cargo.toml version=$cargo_ver"
+            echo "Update ci/sonar/sonar-project.properties before tagging."
+            exit 1
+          fi
+          echo "sonar.projectVersion matches workspace version ($cargo_ver): OK"
+
   vendor-sync:
     name: Verify vendor archive is current
     runs-on: ubuntu-latest
