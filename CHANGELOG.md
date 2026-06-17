@@ -10,6 +10,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.71] — 2026-06-16
+
+### Fixed
+
+- **`update-dist.yml` dist-commit jobs** (`.github/workflows/update-dist.yml`): Replaced the
+  `GITHUB_TOKEN`-based checkout (which cannot bypass branch protection) with a new
+  `DIST_PUSH_TOKEN` secret. Both `commit-dist-windows` and `commit-dist-linux` now check for
+  the secret at runtime and skip with a warning rather than failing when it is absent, so the
+  release pipeline is not blocked when the secret is unset. Added `continue-on-error: true` to
+  both jobs for the same reason.
+
+- **`release.yml` winget submission** (`.github/workflows/release.yml`): Changed the winget
+  installer regex from `oxide-sloc-windows-x86_64\.exe$` to `oxide-sloc-windows-x64\.zip$`
+  and added a preceding step that copies the exe into a zip archive named
+  `oxide-sloc-windows-x64.zip`. This aligns with the `NestedInstallerFiles` pattern so
+  winget resolves `oxide-sloc.exe` inside the zip correctly.
+
+### Added
+
+- **IEEE 1045-1992 fields in web scan-config** (`crates/sloc-web/src/lib.rs`): `ScanConfig`
+  now persists and round-trips `continuation_line_policy`, `blank_in_block_comment_policy`,
+  `count_compiler_directives`, `style_analysis_enabled`, `style_col_threshold`,
+  `style_score_threshold`, `style_lang_scope`, `coverage_file`, `cocomo_mode`,
+  `complexity_alert`, and `exclude_duplicates`. Query-param parsing mirrors these fields so
+  pre-filled scan URLs carry all advanced settings.
+
+- **Policy unit tests** (`crates/sloc-languages/src/lib.rs`): Four deterministic tests for
+  `blank_in_block_comment_policy` (CountAsComment / CountAsBlank) and
+  `continuation_line_policy` (EachPhysicalLine / CollapseToLogical) covering the C lexer.
+
+- **`mcp.json` version sync**: Updated MCP manifest version from `1.5.5` to `1.5.71` to
+  stay in lock-step with the Cargo workspace version.
+
+- **`AGENTS.md` crate count**: Corrected workspace crate count comment from 7 to 8
+  (`sloc-mcp` is the eighth crate).
+
+---
+
 ## [1.5.70] — 2026-06-16
 
 ### Fixed

@@ -4192,4 +4192,84 @@ def fn_a():
             );
         }
     }
+
+    // ── blank_in_block_comment_policy behavioral tests ───────────────────────
+
+    #[test]
+    fn blank_in_block_comment_defaults_to_comment() {
+        // Default: blank lines inside /* */ count as multi-comment lines (IEEE-aligned).
+        let input = "/*\n\n*/";
+        let opts = AnalysisOptions {
+            blank_in_block_comment_as_comment: true,
+            ..Default::default()
+        };
+        let result = analyze_text(Language::C, input, opts);
+        assert_eq!(
+            result.raw.multi_comment_only_lines, 3,
+            "all 3 block-comment lines must count as multi-comment with CountAsComment policy"
+        );
+        assert_eq!(
+            result.raw.blank_only_lines, 0,
+            "no blank lines expected with CountAsComment policy"
+        );
+    }
+
+    #[test]
+    fn blank_in_block_comment_counted_as_blank_when_policy_false() {
+        // CountAsBlank: blank lines inside /* */ count as blank, not comment.
+        let input = "/*\n\n*/";
+        let opts = AnalysisOptions {
+            blank_in_block_comment_as_comment: false,
+            ..Default::default()
+        };
+        let result = analyze_text(Language::C, input, opts);
+        assert_eq!(
+            result.raw.multi_comment_only_lines, 2,
+            "opener and closer must count as multi-comment with CountAsBlank policy"
+        );
+        assert_eq!(
+            result.raw.blank_only_lines, 1,
+            "the blank line inside the block comment must count as blank with CountAsBlank policy"
+        );
+    }
+
+    // ── continuation_line_policy behavioral tests ────────────────────────────
+
+    #[test]
+    fn continuation_lines_each_physical_default() {
+        // Default (EachPhysicalLine): every physical line counted separately.
+        let input = "#define FOO \\\n  1 \\\n  + 2\n";
+        let opts = AnalysisOptions {
+            collapse_continuation_lines: false,
+            ..Default::default()
+        };
+        let result = analyze_text(Language::C, input, opts);
+        assert_eq!(
+            result.raw.total_physical_lines, 3,
+            "3 physical lines expected"
+        );
+        assert_eq!(
+            result.raw.code_only_lines, 3,
+            "each physical line must count as code with EachPhysicalLine policy"
+        );
+    }
+
+    #[test]
+    fn continuation_lines_collapse_to_logical() {
+        // CollapseToLogical: 3 backslash-continued lines collapse to 1 logical code line.
+        let input = "#define FOO \\\n  1 \\\n  + 2\n";
+        let opts = AnalysisOptions {
+            collapse_continuation_lines: true,
+            ..Default::default()
+        };
+        let result = analyze_text(Language::C, input, opts);
+        assert_eq!(
+            result.raw.total_physical_lines, 3,
+            "physical line count is always 3 regardless of policy"
+        );
+        assert_eq!(
+            result.raw.code_only_lines, 1,
+            "3 continuation lines must collapse to 1 logical code line"
+        );
+    }
 }

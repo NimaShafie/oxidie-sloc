@@ -6,7 +6,7 @@ Build it, analyze code with it, and call its REST API or MCP tools directly from
 ## Build
 
 ```bash
-cargo build --workspace          # debug build (all 7 crates)
+cargo build --workspace          # debug build (all 8 crates)
 cargo build --release -p oxide-sloc  # release CLI binary
 ```
 
