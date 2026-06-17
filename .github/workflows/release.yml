@@ -697,6 +697,19 @@ jobs:
             fi
           done
 
+      - name: Create Windows zip archive
+        shell: bash
+        run: |
+          # Package the exe as oxide-sloc.exe inside the zip so that winget's
+          # NestedInstallerFiles RelativeFilePath: oxide-sloc.exe resolves correctly.
+          if [[ -f "artifacts/oxide-sloc-windows-x86_64.exe" ]]; then
+            cp artifacts/oxide-sloc-windows-x86_64.exe artifacts/oxide-sloc.exe
+            cd artifacts
+            zip oxide-sloc-windows-x64.zip oxide-sloc.exe
+            rm oxide-sloc.exe
+            echo "Created oxide-sloc-windows-x64.zip"
+          fi
+
       - name: Generate SHA-256 checksums
         shell: bash
         run: |
@@ -853,7 +866,7 @@ jobs:
       - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
         with:
           identifier: NimaShafie.OxideSLOC
-          installers-regex: 'oxide-sloc-windows-x86_64\.exe$'
+          installers-regex: 'oxide-sloc-windows-x64\.zip$'
           fork-user: NimaShafie
           token: ${{ secrets.WINGET_TOKEN }}
 

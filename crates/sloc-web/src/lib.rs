@@ -1641,6 +1641,34 @@ async fn index(
             binary_file_behavior: behavior,
             output_dir: query.output_dir.unwrap_or_default(),
             report_title: query.report_title.unwrap_or_default(),
+            continuation_line_policy: query
+                .continuation_line_policy
+                .unwrap_or_else(default_each_physical_line),
+            blank_in_block_comment_policy: query
+                .blank_in_block_comment_policy
+                .unwrap_or_else(default_count_as_comment),
+            count_compiler_directives: query.count_compiler_directives.as_deref()
+                != Some("disabled"),
+            style_analysis_enabled: query.style_analysis_enabled.as_deref() != Some("disabled"),
+            style_col_threshold: query
+                .style_col_threshold
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(80),
+            style_score_threshold: query
+                .style_score_threshold
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            style_lang_scope: query.style_lang_scope.unwrap_or_else(default_all_scope),
+            coverage_file: query.coverage_file.unwrap_or_default(),
+            cocomo_mode: query.cocomo_mode.unwrap_or_else(default_organic),
+            complexity_alert: query
+                .complexity_alert
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            exclude_duplicates: query.exclude_duplicates.as_deref() == Some("enabled"),
         };
         serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string())
     } else {
@@ -1892,6 +1920,48 @@ struct ScanConfig {
     binary_file_behavior: String,
     output_dir: String,
     report_title: String,
+    // IEEE 1045-1992 and advanced fields added in later release
+    #[serde(default = "default_each_physical_line")]
+    continuation_line_policy: String,
+    #[serde(default = "default_count_as_comment")]
+    blank_in_block_comment_policy: String,
+    #[serde(default = "default_true_bool")]
+    count_compiler_directives: bool,
+    #[serde(default = "default_true_bool")]
+    style_analysis_enabled: bool,
+    #[serde(default = "default_style_col_threshold")]
+    style_col_threshold: u16,
+    #[serde(default)]
+    style_score_threshold: u8,
+    #[serde(default = "default_all_scope")]
+    style_lang_scope: String,
+    #[serde(default)]
+    coverage_file: String,
+    #[serde(default = "default_organic")]
+    cocomo_mode: String,
+    #[serde(default)]
+    complexity_alert: u32,
+    #[serde(default)]
+    exclude_duplicates: bool,
+}
+
+fn default_each_physical_line() -> String {
+    "each_physical_line".to_string()
+}
+fn default_count_as_comment() -> String {
+    "count_as_comment".to_string()
+}
+fn default_true_bool() -> bool {
+    true
+}
+fn default_style_col_threshold() -> u16 {
+    80
+}
+fn default_all_scope() -> String {
+    "all".to_string()
+}
+fn default_organic() -> String {
+    "organic".to_string()
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1912,6 +1982,18 @@ struct IndexQuery {
     prefilled: Option<String>,
     git_repo: Option<String>,
     git_ref: Option<String>,
+    // IEEE 1045-1992 and advanced fields
+    continuation_line_policy: Option<String>,
+    blank_in_block_comment_policy: Option<String>,
+    count_compiler_directives: Option<String>,
+    style_analysis_enabled: Option<String>,
+    style_col_threshold: Option<String>,
+    style_score_threshold: Option<String>,
+    style_lang_scope: Option<String>,
+    coverage_file: Option<String>,
+    cocomo_mode: Option<String>,
+    complexity_alert: Option<String>,
+    exclude_duplicates: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4587,6 +4669,9 @@ async fn run_analysis_task(task: AnalysisTask) {
             &run,
             &task.project_path,
             task.output_dir.as_deref(),
+            &task.cocomo_mode,
+            task.complexity_alert,
+            task.exclude_duplicates,
         );
     }
 
@@ -4618,6 +4703,9 @@ fn save_scan_config_json(
     run: &sloc_core::AnalysisRun,
     project_path: &str,
     output_dir: Option<&str>,
+    cocomo_mode: &str,
+    complexity_alert: u32,
+    exclude_duplicates: bool,
 ) {
     let policy_str = serde_json::to_value(run.effective_configuration.analysis.mixed_line_policy)
         .ok()
@@ -4628,6 +4716,22 @@ fn save_scan_config_json(
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "skip".to_string());
+    let continuation_policy_str = serde_json::to_value(
+        run.effective_configuration
+            .analysis
+            .continuation_line_policy,
+    )
+    .ok()
+    .and_then(|v| v.as_str().map(String::from))
+    .unwrap_or_else(default_each_physical_line);
+    let blank_policy_str = serde_json::to_value(
+        run.effective_configuration
+            .analysis
+            .blank_in_block_comment_policy,
+    )
+    .ok()
+    .and_then(|v| v.as_str().map(String::from))
+    .unwrap_or_else(default_count_as_comment);
     let scan_cfg = ScanConfig {
         oxide_sloc_version: env!("CARGO_PKG_VERSION").to_string(),
         path: project_path.to_string(),
@@ -4660,6 +4764,30 @@ fn save_scan_config_json(
         binary_file_behavior: behavior_str,
         output_dir: output_dir.unwrap_or("").to_string(),
         report_title: run.effective_configuration.reporting.report_title.clone(),
+        continuation_line_policy: continuation_policy_str,
+        blank_in_block_comment_policy: blank_policy_str,
+        count_compiler_directives: run
+            .effective_configuration
+            .analysis
+            .count_compiler_directives,
+        style_analysis_enabled: run.effective_configuration.analysis.style_analysis_enabled,
+        style_col_threshold: run.effective_configuration.analysis.style_col_threshold,
+        style_score_threshold: run.effective_configuration.analysis.style_score_threshold,
+        style_lang_scope: run
+            .effective_configuration
+            .analysis
+            .style_lang_scope
+            .clone(),
+        coverage_file: run
+            .effective_configuration
+            .analysis
+            .coverage_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        cocomo_mode: cocomo_mode.to_string(),
+        complexity_alert,
+        exclude_duplicates,
     };
     if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
         let _ = std::fs::write(cfg_path, json);
@@ -18959,6 +19087,17 @@ int main() { … }   ← code
       setSelect('binary_file_behavior', raw.binary_file_behavior || 'skip');
       setChecked('generate_html', raw.generate_html !== false);
       setChecked('generate_pdf', !!raw.generate_pdf);
+      if (raw.continuation_line_policy) setSelect('continuation_line_policy', raw.continuation_line_policy);
+      if (raw.blank_in_block_comment_policy) setSelect('blank_in_block_comment_policy', raw.blank_in_block_comment_policy);
+      setSelect('count_compiler_directives', raw.count_compiler_directives === false ? 'disabled' : 'enabled');
+      setSelect('style_analysis_enabled', raw.style_analysis_enabled === false ? 'disabled' : 'enabled');
+      if (raw.style_col_threshold) setSelect('style_col_threshold', String(raw.style_col_threshold));
+      if (raw.style_score_threshold) setSelect('style_score_threshold', String(raw.style_score_threshold));
+      if (raw.style_lang_scope) setSelect('style_lang_scope', raw.style_lang_scope);
+      if (raw.coverage_file) setVal('coverage_file', raw.coverage_file);
+      if (raw.cocomo_mode) setSelect('cocomo_mode', raw.cocomo_mode);
+      if (raw.complexity_alert) setVal('complexity_alert', String(raw.complexity_alert));
+      setSelect('exclude_duplicates', raw.exclude_duplicates ? 'enabled' : 'disabled');
       // Trigger dynamic UI updates after pre-fill.
       setTimeout(function () {
         var pathEl = document.getElementById('path');
@@ -20192,6 +20331,17 @@ struct SplashTemplate {
         if (cfg.report_title) p.set('report_title', cfg.report_title);
         p.set('generate_html', cfg.generate_html !== false ? 'on' : 'off');
         if (cfg.generate_pdf) p.set('generate_pdf', 'on');
+        if (cfg.continuation_line_policy) p.set('continuation_line_policy', cfg.continuation_line_policy);
+        if (cfg.blank_in_block_comment_policy) p.set('blank_in_block_comment_policy', cfg.blank_in_block_comment_policy);
+        p.set('count_compiler_directives', cfg.count_compiler_directives === false ? 'disabled' : 'enabled');
+        p.set('style_analysis_enabled', cfg.style_analysis_enabled === false ? 'disabled' : 'enabled');
+        if (cfg.style_col_threshold) p.set('style_col_threshold', String(cfg.style_col_threshold));
+        if (cfg.style_score_threshold) p.set('style_score_threshold', String(cfg.style_score_threshold));
+        if (cfg.style_lang_scope) p.set('style_lang_scope', cfg.style_lang_scope);
+        if (cfg.coverage_file) p.set('coverage_file', cfg.coverage_file);
+        if (cfg.cocomo_mode) p.set('cocomo_mode', cfg.cocomo_mode);
+        if (cfg.complexity_alert) p.set('complexity_alert', String(cfg.complexity_alert));
+        if (cfg.exclude_duplicates) p.set('exclude_duplicates', 'enabled');
         return p;
       }
 
@@ -29329,6 +29479,32 @@ mod form_config_tests {
     #[test]
     fn style_threshold_absent_leaves_default() {
         assert_eq!(apply(&blank_form()).analysis.style_col_threshold, 80);
+    }
+
+    // ── style_score_threshold ──
+
+    #[test]
+    fn style_score_threshold_zero_when_absent() {
+        assert_eq!(apply(&blank_form()).analysis.style_score_threshold, 0);
+    }
+
+    #[test]
+    fn style_score_threshold_set_to_valid_value() {
+        let mut form = blank_form();
+        form.style_score_threshold = Some("70".to_string());
+        assert_eq!(apply(&form).analysis.style_score_threshold, 70);
+    }
+
+    #[test]
+    fn style_score_threshold_clamps_to_100_when_over() {
+        // t.min(100) must cap any value > 100 (e.g. from a crafted POST body).
+        let mut form = blank_form();
+        form.style_score_threshold = Some("200".to_string());
+        assert_eq!(
+            apply(&form).analysis.style_score_threshold,
+            100,
+            "style_score_threshold must be clamped to 100 when the submitted value exceeds it"
+        );
     }
 
     // ── coverage_file ──
