@@ -981,6 +981,12 @@ struct SymbolPatterns {
     /// Line prefixes that indicate a test suite / fixture / group declaration
     /// (`TEST_GROUP`, `BOOST_AUTO_TEST_SUITE`, [`TestClass`], [`TestFixture`], etc.).
     test_suites: &'static [&'static str],
+    /// Type-keyword prefixes (e.g. `"int "`, `"const "`) that classify a line as a
+    /// variable declaration when the line ALSO satisfies the complement of the
+    /// `functions_prefix_paren` condition: either no `(` is present, or a `=` appears
+    /// before the first `(`.  Used for C/C++ where both functions and variables are
+    /// led by the same return / value type keywords; the paren guard splits them.
+    variables_prefix_no_paren: &'static [&'static str],
 }
 
 impl SymbolPatterns {
@@ -994,6 +1000,7 @@ impl SymbolPatterns {
             tests: &[],
             assertions: &[],
             test_suites: &[],
+            variables_prefix_no_paren: &[],
         }
     }
 }
@@ -1017,6 +1024,7 @@ const SP_SOLIDITY: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 // Protocol Buffers: `message`/`service`/`enum` declarations are the structural units;
@@ -1030,6 +1038,7 @@ const SP_PROTOBUF: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 // ── Pass 2 symbol patterns (legacy + embedded / HDL) ──────────────────────────
@@ -1042,6 +1051,7 @@ const SP_ADA: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_VHDL: SymbolPatterns = SymbolPatterns {
@@ -1053,6 +1063,7 @@ const SP_VHDL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_VERILOG: SymbolPatterns = SymbolPatterns {
@@ -1064,6 +1075,7 @@ const SP_VERILOG: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_TCL: SymbolPatterns = SymbolPatterns {
@@ -1075,6 +1087,7 @@ const SP_TCL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_PASCAL: SymbolPatterns = SymbolPatterns {
@@ -1086,6 +1099,7 @@ const SP_PASCAL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_VB: SymbolPatterns = SymbolPatterns {
@@ -1104,6 +1118,7 @@ const SP_VB: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_LISP: SymbolPatterns = SymbolPatterns {
@@ -1115,6 +1130,7 @@ const SP_LISP: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 // ── Pass 3 symbol patterns (scientific / infra / systems / graphics) ──────────
@@ -1127,6 +1143,7 @@ const SP_FORTRAN: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_CRYSTAL: SymbolPatterns = SymbolPatterns {
@@ -1138,6 +1155,7 @@ const SP_CRYSTAL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_D: SymbolPatterns = SymbolPatterns {
@@ -1149,6 +1167,7 @@ const SP_D: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_CMAKE: SymbolPatterns = SymbolPatterns {
@@ -1160,6 +1179,7 @@ const SP_CMAKE: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_ELM: SymbolPatterns = SymbolPatterns {
@@ -1171,6 +1191,7 @@ const SP_ELM: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_AWK: SymbolPatterns = SymbolPatterns {
@@ -1182,6 +1203,7 @@ const SP_AWK: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_RUST: SymbolPatterns = SymbolPatterns {
@@ -1238,6 +1260,7 @@ const SP_RUST: SymbolPatterns = SymbolPatterns {
         "assert_ok!(",
     ],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_PYTHON: SymbolPatterns = SymbolPatterns {
@@ -1261,6 +1284,7 @@ const SP_PYTHON: SymbolPatterns = SymbolPatterns {
         "self.assertAlmostEqual(",
     ],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_JS: SymbolPatterns = SymbolPatterns {
@@ -1293,6 +1317,7 @@ const SP_JS: SymbolPatterns = SymbolPatterns {
     ],
     assertions: &["expect("],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_TS: SymbolPatterns = SymbolPatterns {
@@ -1335,6 +1360,7 @@ const SP_TS: SymbolPatterns = SymbolPatterns {
     ],
     assertions: &["expect("],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_GO: SymbolPatterns = SymbolPatterns {
@@ -1347,6 +1373,7 @@ const SP_GO: SymbolPatterns = SymbolPatterns {
     tests: &["func Test", "func Benchmark", "func Fuzz"],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_JAVA: SymbolPatterns = SymbolPatterns {
@@ -1394,6 +1421,7 @@ const SP_JAVA: SymbolPatterns = SymbolPatterns {
         "assertLinesMatch(",
     ],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_CSHARP: SymbolPatterns = SymbolPatterns {
@@ -1453,6 +1481,7 @@ const SP_CSHARP: SymbolPatterns = SymbolPatterns {
         "Assert.IsInstanceOfType(",
     ],
     test_suites: &["[TestClass]", "[TestFixture]", "[SetUpFixture]"],
+    variables_prefix_no_paren: &[],
 };
 
 // GTest, Catch2/doctest, Boost.Test, Unity, Check, CMocka, CppUTest patterns for C and C++.
@@ -1608,6 +1637,22 @@ const SP_C: SymbolPatterns = SymbolPatterns {
     tests: TEST_PATTERNS_C_CPP,
     assertions: ASSERT_PATTERNS_C_CPP,
     test_suites: SUITE_PATTERNS_C_CPP,
+    // Same type keywords as functions_prefix_paren; the complement paren guard (no unguarded `(`
+    // in the line) distinguishes `int x;` / `int x = 5;` (variable) from `int foo()` (function).
+    variables_prefix_no_paren: &[
+        "void ",
+        "int ",
+        "char ",
+        "float ",
+        "double ",
+        "long ",
+        "unsigned ",
+        "size_t ",
+        "static ",
+        "inline ",
+        "const ",
+        "extern ",
+    ],
 };
 
 const SP_CPP: SymbolPatterns = SymbolPatterns {
@@ -1642,6 +1687,24 @@ const SP_CPP: SymbolPatterns = SymbolPatterns {
     tests: TEST_PATTERNS_C_CPP,
     assertions: ASSERT_PATTERNS_C_CPP,
     test_suites: SUITE_PATTERNS_C_CPP,
+    // Mirror of functions_prefix_paren; complement paren guard splits variables from functions.
+    variables_prefix_no_paren: &[
+        "void ",
+        "bool ",
+        "int ",
+        "char ",
+        "float ",
+        "double ",
+        "long ",
+        "unsigned ",
+        "size_t ",
+        "auto ",
+        "static ",
+        "inline ",
+        "constexpr ",
+        "const ",
+        "extern ",
+    ],
 };
 
 const SP_SHELL: SymbolPatterns = SymbolPatterns {
@@ -1653,6 +1716,7 @@ const SP_SHELL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
@@ -1665,6 +1729,7 @@ const SP_POWERSHELL: SymbolPatterns = SymbolPatterns {
     tests: &["Describe ", "It ", "Context "],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
@@ -1718,6 +1783,7 @@ const SP_KOTLIN: SymbolPatterns = SymbolPatterns {
         "shouldThrow(",
     ],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_SWIFT: SymbolPatterns = SymbolPatterns {
@@ -1775,6 +1841,7 @@ const SP_SWIFT: SymbolPatterns = SymbolPatterns {
         "#expect(",
     ],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_RUBY: SymbolPatterns = SymbolPatterns {
@@ -1787,6 +1854,7 @@ const SP_RUBY: SymbolPatterns = SymbolPatterns {
     tests: &["it ", "it(", "describe ", "context ", "test "],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_SCALA: SymbolPatterns = SymbolPatterns {
@@ -1806,6 +1874,7 @@ const SP_SCALA: SymbolPatterns = SymbolPatterns {
     tests: &["test(", "it(", "describe("],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_PHP: SymbolPatterns = SymbolPatterns {
@@ -1847,6 +1916,7 @@ const SP_PHP: SymbolPatterns = SymbolPatterns {
     ],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
@@ -1866,6 +1936,7 @@ const SP_ELIXIR: SymbolPatterns = SymbolPatterns {
     tests: &["test ", "describe "],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_ERLANG: SymbolPatterns = SymbolPatterns {
@@ -1877,6 +1948,7 @@ const SP_ERLANG: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_FSHARP: SymbolPatterns = SymbolPatterns {
@@ -1895,6 +1967,7 @@ const SP_FSHARP: SymbolPatterns = SymbolPatterns {
     tests: &["[<Test>]", "[<Fact>]", "[<Theory>]", "[<TestCase("],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_GROOVY: SymbolPatterns = SymbolPatterns {
@@ -1907,6 +1980,7 @@ const SP_GROOVY: SymbolPatterns = SymbolPatterns {
     tests: &["def \"", "@Test", "given:", "when:", "then:", "expect:"],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_HASKELL: SymbolPatterns = SymbolPatterns {
@@ -1918,6 +1992,7 @@ const SP_HASKELL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_LUA: SymbolPatterns = SymbolPatterns {
@@ -1930,6 +2005,7 @@ const SP_LUA: SymbolPatterns = SymbolPatterns {
     tests: &["it(", "describe(", "pending("],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_NIM: SymbolPatterns = SymbolPatterns {
@@ -1950,6 +2026,7 @@ const SP_NIM: SymbolPatterns = SymbolPatterns {
     tests: &["test "],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
@@ -1973,6 +2050,7 @@ const SP_OBJECTIVEC: SymbolPatterns = SymbolPatterns {
         "XCTAssertNoThrow(",
     ],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_OCAML: SymbolPatterns = SymbolPatterns {
@@ -1984,6 +2062,7 @@ const SP_OCAML: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_PERL: SymbolPatterns = SymbolPatterns {
@@ -1995,6 +2074,7 @@ const SP_PERL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
@@ -2012,6 +2092,7 @@ const SP_CLOJURE: SymbolPatterns = SymbolPatterns {
     tests: &["(deftest ", "(testing "],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_JULIA: SymbolPatterns = SymbolPatterns {
@@ -2029,6 +2110,7 @@ const SP_JULIA: SymbolPatterns = SymbolPatterns {
     tests: &["@test ", "@testset "],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_DART: SymbolPatterns = SymbolPatterns {
@@ -2041,6 +2123,7 @@ const SP_DART: SymbolPatterns = SymbolPatterns {
     tests: &["test(", "testWidgets(", "group("],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_R: SymbolPatterns = SymbolPatterns {
@@ -2053,6 +2136,7 @@ const SP_R: SymbolPatterns = SymbolPatterns {
     tests: &["test_that(", "it(", "describe(", "expect_"],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_SQL: SymbolPatterns = SymbolPatterns {
@@ -2080,6 +2164,7 @@ const SP_SQL: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
@@ -2091,6 +2176,7 @@ const SP_ASSEMBLY: SymbolPatterns = SymbolPatterns {
     tests: &[],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 const SP_ZIG: SymbolPatterns = SymbolPatterns {
@@ -2109,6 +2195,7 @@ const SP_ZIG: SymbolPatterns = SymbolPatterns {
     tests: &["test \"", "test{"],
     assertions: &[],
     test_suites: &[],
+    variables_prefix_no_paren: &[],
 };
 
 /// Static (non-heap) language scanning parameters.  All fields are `'static` so this struct
@@ -3196,10 +3283,27 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     } else {
         0
     };
+    // Complement of `functions_prefix_paren`: same type keywords, but triggered when
+    // there is no unguarded `(` on the line (i.e. not a function definition).
+    let var_pnp: u64 = if !patterns.variables_prefix_no_paren.is_empty()
+        && hit(patterns.variables_prefix_no_paren) != 0
+    {
+        if let Some(pp) = trimmed.find('(') {
+            if trimmed[..pp].contains('=') {
+                1
+            } else {
+                0
+            }
+        } else {
+            1
+        }
+    } else {
+        0
+    };
     (
         fn_hit,
         class_hit,
-        hit(patterns.variables),
+        hit(patterns.variables) | var_pnp,
         hit(patterns.imports),
         test_hit,
         hit(patterns.assertions),
