@@ -989,6 +989,17 @@ struct PdfCtx<'a> {
     clippy::suboptimal_flops,
     clippy::too_many_lines
 )]
+fn runtime_mode_display(mode: &str) -> &str {
+    match mode {
+        "serve" => "Web UI",
+        "analyze" => "CLI",
+        "git-scan" => "Git Scan",
+        "git-compare" => "Git Compare",
+        "watch" => "Watch",
+        other => other,
+    }
+}
+
 fn pdf_render_page1_header(
     ctx: &PdfCtx<'_>,
     run: &AnalysisRun,
@@ -1067,13 +1078,11 @@ fn pdf_render_page1_header(
         if !git_parts.is_empty() {
             ctx.layer
                 .set_fill_color(Color::Rgb(Rgb::new(0.35, 0.45, 0.35, None)));
-            ctx.layer.use_text(
-                pdf_trunc(&git_parts.join("  |  "), 70),
-                7.5,
-                Mm(ctx.w / 2.0),
-                Mm(title_text_y),
-                ctx.font_reg,
-            );
+            let git_str = pdf_trunc(&git_parts.join("  \u{00B7}  "), 70);
+            // Right-align: approximate char width at 7.5pt (~0.81 mm/char), clamp to centre min.
+            let git_x = (ctx.w - ctx.margin - git_str.len() as f32 * 0.81).max(ctx.w / 2.0);
+            ctx.layer
+                .use_text(git_str, 7.5, Mm(git_x), Mm(title_text_y), ctx.font_reg);
         }
     }
     let roots_text_y = title_text_y - 5.0;
@@ -1098,21 +1107,20 @@ fn pdf_render_page1_header(
             .ci_name
             .as_deref()
             .unwrap_or(run.environment.initiator_username.as_str());
+        let mode_label = runtime_mode_display(&run.environment.runtime_mode);
         let env_str = format!(
-            "OS: {} {}  |  User: {}  |  Host: {}  |  Mode: {}",
+            "OS: {} / {}  \u{00B7}  User: {}  \u{00B7}  Host: {}  \u{00B7}  Source: {}",
             pdf_safe_str(&run.environment.operating_system),
             pdf_safe_str(&run.environment.architecture),
             pdf_safe_str(initiator),
             pdf_safe_str(&run.environment.initiator_hostname),
-            pdf_safe_str(&run.environment.runtime_mode),
+            mode_label,
         );
-        ctx.layer.use_text(
-            pdf_trunc(&env_str, 100),
-            6.5,
-            Mm(ctx.w / 2.0),
-            Mm(roots_text_y),
-            ctx.font_reg,
-        );
+        let env_trunc = pdf_trunc(&env_str, 100);
+        // Right-align: approximate char width at 6.5pt (~0.70 mm/char), clamp to centre min.
+        let env_x = (ctx.w - ctx.margin - env_trunc.len() as f32 * 0.70).max(ctx.w / 2.0);
+        ctx.layer
+            .use_text(env_trunc, 6.5, Mm(env_x), Mm(roots_text_y), ctx.font_reg);
     }
     roots_text_y
 }
@@ -3113,7 +3121,7 @@ struct WarningOpportunityRow {
       --warn-text: #9a6d00;
       --danger-bg: #fdebec;
       --danger-text: #cc4b4b;
-      --info-bg: #eef3ff;
+      --info-bg: #f2f6ff;
       --info-text: #4467d8;
     }
     {% if let Some(hex) = accent_hex %}
@@ -3143,7 +3151,7 @@ struct WarningOpportunityRow {
       --warn-text: #f3cb75;
       --danger-bg: #3d1f1f;
       --danger-text: #ff9f9f;
-      --info-bg: #1c2847;
+      --info-bg: #202e55;
       --info-text: #a9c1ff;
     }
     * { box-sizing: border-box; }
@@ -3343,10 +3351,9 @@ struct WarningOpportunityRow {
     #per-file-table td.mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #per-file-table tbody tr:hover td:first-child { background: rgba(255,247,238,0.6); }
     body.dark-theme #per-file-table tbody tr:hover td:first-child { background: rgba(255,255,255,0.03); }
-    /* Language breakdown: fixed layout keeps every column at its declared width */
-    #lang-breakdown-table { table-layout: fixed; width: 100%; }
-    #lang-breakdown-table th:first-child { width: 18%; }
-    #lang-breakdown-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
+    /* Language breakdown: auto layout with resizable columns — headers size to content */
+    #lang-breakdown-table { width: 100%; min-width: 760px; }
+    #lang-breakdown-table th, #lang-breakdown-table td { padding: 8px 6px; font-size: 13px; }
     /* Skipped table: extend truncation to all cells, not just the first column */
     #skipped-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
     /* Support opportunities table: fixed layout so Category/Count columns don't grow */
@@ -3431,14 +3438,17 @@ struct WarningOpportunityRow {
     .warning-console-actions { display:flex; gap:10px; flex-wrap:wrap; margin-top: 12px; }
     .warning-console.hidden { display:none; }
     @media (max-width: 1200px) {
-      .summary-grid, .warning-grid { grid-template-columns: 1fr 1fr; }
+      .warning-grid { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 960px) {
       .top-nav-inner { grid-template-columns: 1fr; }
       .nav-project-slot, .nav-status { justify-content:flex-start; }
-      .summary-grid, .warning-grid, .report-stack { grid-template-columns: 1fr; }
+      .warning-grid, .report-stack { grid-template-columns: 1fr; }
       .hero-top { flex-direction: column; }
       .search { min-width: 100%; width: 100%; }
+    }
+    @media (max-width: 640px) {
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     /* ── Report header / footer identification banner ─────────────────── */
     .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: center; height: 27px; padding: 0 16px; position: fixed; top: 0; left: 0; right: 0; z-index: 32; }
@@ -3703,10 +3713,10 @@ struct WarningOpportunityRow {
     .config-pre { margin: 0; background: #16120f; color: #d4f0d0; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; overflow: auto; resize: vertical; max-height: 320px; min-height: 100px; white-space: pre; }
     body.dark-theme .config-pre { background: #0e0c0a; color: #b8f0b8; }
     .code-block-toolbar { display:flex; justify-content:flex-end; margin-bottom:6px; }
-    .code-copy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 4px 12px; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s ease; }
-    .code-copy-btn:hover { background: var(--line); }
-    body.dark-theme .code-copy-btn { background: #1e1a16; border-color: rgba(255,255,255,0.18); color: #d4f0d0; }
-    body.dark-theme .code-copy-btn:hover { background: rgba(255,255,255,0.12); }
+    .code-copy-btn { display:inline-flex; align-items:center; gap:5px; background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--muted); border-radius: 8px; padding: 5px 12px; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease; white-space: nowrap; }
+    .code-copy-btn:hover { background: rgba(184,93,51,0.08); color: var(--oxide-2); border-color: rgba(184,93,51,0.30); }
+    body.dark-theme .code-copy-btn { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.18); color: rgba(255,255,255,0.75); }
+    body.dark-theme .code-copy-btn:hover { background: rgba(211,122,76,0.15); border-color: rgba(211,122,76,0.40); color: var(--oxide); }
 
 
     .page {
@@ -3842,7 +3852,7 @@ struct WarningOpportunityRow {
     .style-score-fill{position:absolute;left:0;top:0;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--oxide),var(--oxide-2));}
     .style-badge{display:inline-block;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700;background:var(--surface-3);color:var(--oxide);border:1px solid var(--line);text-decoration:none;transition:background .15s,transform .15s,box-shadow .15s;}
     a.style-badge:hover{background:var(--oxide);color:#fff !important;transform:translateY(-1px);box-shadow:0 3px 10px rgba(77,44,20,.24);}
-    .style-heuristic-note{background:var(--info-bg);color:var(--info-text);border-radius:8px;padding:8px 14px;font-size:11px;font-weight:600;margin-top:12px;}
+    .style-heuristic-note{display:flex;align-items:flex-start;gap:10px;background:var(--info-bg);color:var(--info-text);border-radius:10px;padding:11px 14px;font-size:13px;line-height:1.5;margin-top:14px;border:1px solid rgba(68,103,216,0.18);}
     .style-lang-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
     .style-lang-tab{padding:4px 12px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:11px;font-weight:700;cursor:pointer;color:var(--text);transition:background .15s;}
     .style-lang-tab:hover{background:var(--surface-2);}
@@ -3854,7 +3864,7 @@ struct WarningOpportunityRow {
     body.dark-theme .style-guide-track{background:var(--surface-3);}
     body.dark-theme .style-chip{background:var(--surface-2);}
     body.dark-theme .style-file-table th{background:var(--surface-3);}
-    body.dark-theme .style-heuristic-note{background:var(--info-bg);color:var(--info-text);}
+    body.dark-theme .style-heuristic-note{border-color:rgba(100,130,255,0.22);}
     body.dark-theme .style-lang-tab{background:var(--surface-2);color:var(--text);}
     body.dark-theme .style-lang-tab.active{background:var(--oxide);color:#fff;}
     body.dark-theme .style-sig-chip{background:var(--surface-3);color:var(--muted);}
@@ -4364,7 +4374,8 @@ struct WarningOpportunityRow {
             <div class="pill-row"><span class="pill info">{{ style_lang_count }} language group(s) &#xB7; Lexical heuristics</span></div>
           </div>
           <div class="style-heuristic-note">
-            &#x2139;&#xFE0F; Scores are lexical approximations based on indentation, line length, brace placement, and language-specific signals &#x2014; not a full parse. Use as a directional signal.
+            <span class="info-callout-icon">&#x2139;&#xFE0F;</span>
+            <span>Scores are lexical approximations based on indentation, line length, brace placement, and language-specific signals &#x2014; not a full parse. Use as a directional signal.</span>
           </div>
           <!-- Summary chips -->
           <div class="style-metrics-strip">
@@ -4517,45 +4528,48 @@ struct WarningOpportunityRow {
 
       <section class="panel stack">
         <div>
-          <div class="toolbar"><div class="toolbar-left"><h2>Language breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button></div>
+          <div class="toolbar"><div class="toolbar-left"><h2>Language Breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button></div>
           <div id="report-lang-overview" style="margin:0 0 16px;"></div>
           <div class="table-shell">
-            <table id="lang-breakdown-table" data-sort-table>
+            <table id="lang-breakdown-table" data-sort-table class="table-resizable">
+              <colgroup>
+                <col><col><col><col><col><col><col><col><col><col><col><col><col><col>
+              </colgroup>
               <thead>
                 <tr>
-                  <th data-sort-type="text">Language</th>
-                  <th data-sort-type="number">Files</th>
-                  <th data-sort-type="number">Physical</th>
-                  <th data-sort-type="number">Code</th>
-                  <th data-sort-type="number">Comments</th>
-                  <th data-sort-type="number">Blank</th>
-                  <th data-sort-type="number">Mixed separate</th>
-                  <th data-sort-type="number">Functions</th>
-                  <th data-sort-type="number">Classes</th>
-                  <th data-sort-type="number">Variables</th>
-                  <th data-sort-type="number">Imports</th>
-                  <th data-sort-type="number">Tests</th>
-                  <th data-sort-type="number">Assertions</th>
-                  <th data-sort-type="number">Suites</th>
+                  <th data-sort-type="text">Language<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Files<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Physical<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Code<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Comments<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Blank<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Mixed<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Functions<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Classes<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Variables<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Imports<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Tests<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Assertions<div class="col-resize-handle"></div></th>
+                  <th data-sort-type="number" class="num-col">Suites<div class="col-resize-handle"></div></th>
                 </tr>
               </thead>
               <tbody>
                 {% for row in language_rows %}
                 <tr>
                   <td title="{{ row.language }}">{{ row.language }}</td>
-                  <td>{{ row.files }}</td>
-                  <td>{{ row.total_physical_lines }}</td>
-                  <td>{{ row.code_lines }}</td>
-                  <td>{{ row.comment_lines }}</td>
-                  <td>{{ row.blank_lines }}</td>
-                  <td>{{ row.mixed_lines_separate }}</td>
-                  <td>{{ row.functions }}</td>
-                  <td>{{ row.classes }}</td>
-                  <td>{{ row.variables }}</td>
-                  <td>{{ row.imports }}</td>
-                  <td>{{ row.test_count }}</td>
-                  <td>{{ row.test_assertion_count }}</td>
-                  <td>{{ row.test_suite_count }}</td>
+                  <td class="num-col">{{ row.files }}</td>
+                  <td class="num-col">{{ row.total_physical_lines }}</td>
+                  <td class="num-col">{{ row.code_lines }}</td>
+                  <td class="num-col">{{ row.comment_lines }}</td>
+                  <td class="num-col">{{ row.blank_lines }}</td>
+                  <td class="num-col">{{ row.mixed_lines_separate }}</td>
+                  <td class="num-col">{{ row.functions }}</td>
+                  <td class="num-col">{{ row.classes }}</td>
+                  <td class="num-col">{{ row.variables }}</td>
+                  <td class="num-col">{{ row.imports }}</td>
+                  <td class="num-col">{{ row.test_count }}</td>
+                  <td class="num-col">{{ row.test_assertion_count }}</td>
+                  <td class="num-col">{{ row.test_suite_count }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -4751,8 +4765,8 @@ struct WarningOpportunityRow {
             <summary style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
               <span>Effective configuration</span>
               <span class="config-actions" style="display:flex;gap:8px;">
-                <button type="button" class="header-button" data-copy-config>Copy</button>
-                <button type="button" class="header-button" data-download-config>Download</button>
+                <button type="button" class="export-btn" data-copy-config>Copy</button>
+                <button type="button" class="export-btn" data-download-config>Download</button>
               </span>
             </summary>
             <div>
@@ -4923,12 +4937,15 @@ struct WarningOpportunityRow {
 
       document.querySelectorAll('[data-sort-table]').forEach(function (table) {
         var headers = Array.prototype.slice.call(table.querySelectorAll('th'));
+        var allMarkers = [];
         headers.forEach(function (th, idx) {
           var direction = 1;
           var marker = document.createElement('span');
           marker.className = 'sort-indicator';
           marker.textContent = ' ↕';
+          th.style.cursor = 'pointer';
           th.appendChild(marker);
+          allMarkers.push(marker);
           th.addEventListener('click', function (e) {
             if (e.target.closest && e.target.closest('.col-resize-handle')) return;
             var tbody = table.tBodies[0];
@@ -4941,30 +4958,32 @@ struct WarningOpportunityRow {
               return 0;
             });
             rows.forEach(function (row) { tbody.appendChild(row); });
+            allMarkers.forEach(function(m) { m.textContent = ' ↕'; });
             direction = direction * -1;
+            marker.textContent = direction === -1 ? ' ↑' : ' ↓';
             table.dispatchEvent(new CustomEvent('sloc-sorted'));
           });
         });
       });
 
-      // ── Column resize for per-file-table ─────────────────────────────────────
+      // ── Column resize for all table-resizable tables ──────────────────────────
       (function() {
-        var table = document.getElementById('per-file-table');
-        if (!table) return;
-        var cols = Array.prototype.slice.call(table.querySelectorAll('col'));
-        var ths = Array.prototype.slice.call(table.querySelectorAll('thead th'));
-        ths.forEach(function(th, i) {
-          var handle = th.querySelector('.col-resize-handle');
-          if (!handle || !cols[i]) return;
-          var startX, startW;
-          handle.addEventListener('mousedown', function(e) {
-            e.stopPropagation(); e.preventDefault();
-            startX = e.clientX; startW = cols[i].offsetWidth || th.offsetWidth;
-            handle.classList.add('dragging');
-            function onMove(e) { cols[i].style.width = Math.max(40, startW + e.clientX - startX) + 'px'; }
-            function onUp() { handle.classList.remove('dragging'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
+        document.querySelectorAll('.table-resizable').forEach(function(table) {
+          var cols = Array.prototype.slice.call(table.querySelectorAll('col'));
+          var ths = Array.prototype.slice.call(table.querySelectorAll('thead th'));
+          ths.forEach(function(th, i) {
+            var handle = th.querySelector('.col-resize-handle');
+            if (!handle || !cols[i]) return;
+            var startX, startW;
+            handle.addEventListener('mousedown', function(e) {
+              e.stopPropagation(); e.preventDefault();
+              startX = e.clientX; startW = cols[i].offsetWidth || th.offsetWidth;
+              handle.classList.add('dragging');
+              function onMove(e) { cols[i].style.width = Math.max(40, startW + e.clientX - startX) + 'px'; }
+              function onUp() { handle.classList.remove('dragging'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
+              document.addEventListener('mousemove', onMove);
+              document.addEventListener('mouseup', onUp);
+            });
           });
         });
       })();
@@ -5274,6 +5293,7 @@ struct WarningOpportunityRow {
         if (big) big.textContent = pct.toFixed(1) + '%';
         if (exact) exact.textContent = '';
       }
+      (function(){var g=document.querySelector('.summary-grid');if(!g)return;var n=g.querySelectorAll('.metric').length;if(!n)return;function upd(){if(window.innerWidth>=640){g.style.gridTemplateColumns='repeat('+Math.ceil(n/2)+',minmax(0,1fr))';}else{g.style.gridTemplateColumns='';}}upd();window.addEventListener('resize',upd);})();
       (function(){var ov=document.getElementById('rpt-loading-overlay');if(ov){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},450);}})();
     })();
     // ── Info chip interactivity ───────────────────────────────────────────────
@@ -5691,9 +5711,9 @@ struct WarningOpportunityRow {
           +'<text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
         bs+='<g data-kind="blank" style="cursor:pointer;">'
-          +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
-          +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
-          +'<text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+          +'<rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -5923,7 +5943,7 @@ struct WarningOpportunityRow {
           var ttBl=cLT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
           s+='<g data-kind="code" style="cursor:pointer;"><rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/><rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+CX+'"'+ttC+'/><text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text></g>';
           s+='<g data-kind="comment" style="cursor:pointer;"><rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/><rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+CG+'"'+ttCm+'/><text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text></g>';
-          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
+          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
           s+='</svg>';
           el.innerHTML=s;
           wireMixLegend(el.querySelector('svg'));
@@ -6060,11 +6080,14 @@ struct WarningOpportunityRow {
               labels: data.map(function(d){return d.name;}),
               datasets: [{ label: Y_LABELS[yKey]||yKey,
                 data: data.map(function(d){return d[yKey]||0;}),
-                backgroundColor: col, borderRadius: 3 }]
+                backgroundColor: col, hoverBackgroundColor: col === OX ? '#d97020' : col,
+                borderRadius: 3 }]
             },
             options: {
               indexAxis: 'y', responsive: true, maintainAspectRatio: false,
               animation: { duration: 500, easing: 'easeOutQuart' },
+              transitions: { active: { animation: { duration: 180, easing: 'easeOutQuart' } } },
+              layout: { padding: { right: 64 } },
               scales: {
                 x: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
                      title: { display: true, text: Y_LABELS[yKey]||yKey, color: c.text } },
@@ -6088,7 +6111,8 @@ struct WarningOpportunityRow {
                   }
                 }
               }
-            }
+            },
+            plugins: [makeDlPlugin(function(v){ return fmt(v||0); }, 'end')]
           });
           ALL_CHARTS.push(subChart);
         }
@@ -6097,47 +6121,89 @@ struct WarningOpportunityRow {
         renderSubmodule();
       })();
 
-      // ── Submodule composition: stacked-bar (code / comments / blank) ─────────
+      // ── Submodule composition: stacked horizontal bar (Chart.js) ─────────────
+      var subCompChart = null;
+      // Plugin: draw value label inside each visible segment of a stacked horizontal bar.
+      var segLabelPlugin = {
+        afterDatasetsDraw: function(chart) {
+          var ctx = chart.ctx, nDs = chart.data.datasets.length;
+          var tc = clr().text;
+          for (var di = 0; di < nDs; di++) {
+            var meta = chart.getDatasetMeta(di);
+            if (meta.hidden) continue;
+            meta.data.forEach(function(el, idx) {
+              var v = chart.data.datasets[di].data[idx] || 0;
+              if (!v) return;
+              var w = Math.abs(el.x - el.base);
+              if (w < 28) return; // too narrow to show label
+              ctx.save();
+              ctx.font = '600 10px Inter,ui-sans-serif,sans-serif';
+              ctx.fillStyle = di === 0 ? '#fff' : (di === 1 ? '#fff' : '#555');
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(fmt(v), el.base + w / 2, el.y);
+              ctx.restore();
+            });
+          }
+        }
+      };
       (function() {
         var el = document.getElementById('submodule-donut');
         if (!el || !SUB_D || !SUB_D.length) return;
-        var FONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
-        function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-        var data = SUB_D.slice().sort(function(a,b){return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));}).slice(0,15);
-        var maxT = Math.max.apply(null, data.map(function(d){return (d.code||0)+(d.comment||0)+(d.blank||0);})) || 1;
-        // Match Breakdown chart height so both panels grow at the same rate.
-        var wrapH = Math.max(150, Math.min(540, data.length * 25 + 36));
-        var bH = Math.max(18, Math.min(62, Math.round((wrapH - 38) / data.length * 0.72)));
-        var LW = 84;
-        el.style.minHeight = wrapH + 'px';
-        el.style.display = 'flex';
-        el.style.flexDirection = 'column';
-        el.style.justifyContent = 'center';
-        var s = '<div style="width:100%;font-family:'+FONT+';padding:4px 0;">';
-        data.forEach(function(d,i){
-          var tot2 = (d.code||0)+(d.comment||0)+(d.blank||0);
-          var pct = Math.round(tot2/maxT*1000)/10;
-          var name = d.name.length > 12 ? d.name.slice(0,11)+'…' : d.name;
-          var ttPct = Math.round(tot2/maxT*100);
-          s += '<div style="display:flex;align-items:center;margin-bottom:'+(i<data.length-1?'5':'0')+'px;">';
-          s += '<span style="width:'+LW+'px;flex-shrink:0;text-align:right;padding-right:7px;font-size:11px;color:#43342d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(d.name)+'">'+esc(name)+'</span>';
-          s += '<div style="flex:1;">';
-          s += '<div style="width:'+pct+'%;height:'+bH+'px;display:flex;border-radius:3px;overflow:hidden;min-width:2px;">';
-          if((d.code||0)>0) s += '<div style="flex:'+(d.code||0)+';background:'+OX+';" data-ttl="'+esc(d.name)+' — Code" data-ttv="'+fmt(d.code||0)+' lines ('+ttPct+'% of largest)"></div>';
-          if((d.comment||0)>0) s += '<div style="flex:'+(d.comment||0)+';background:'+GN+';" data-ttl="'+esc(d.name)+' — Comments" data-ttv="'+fmt(d.comment||0)+' lines"></div>';
-          if((d.blank||0)>0) s += '<div style="flex:'+(d.blank||0)+';background:'+GY+';" data-ttl="'+esc(d.name)+' — Blank" data-ttv="'+fmt(d.blank||0)+' lines"></div>';
-          s += '</div>';
-          s += '</div>';
-          s += '<span style="width:44px;flex-shrink:0;padding-left:5px;font-size:10px;color:#7b675b;font-variant-numeric:tabular-nums;">'+fmt(tot2)+'</span>';
-          s += '</div>';
+        var data = SUB_D.slice().sort(function(a,b){
+          return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));
+        }).slice(0, 15);
+        var h = Math.max(150, Math.min(540, data.length * 40 + 90));
+        el.style.height = h + 'px';
+        el.style.position = 'relative';
+        var cv = document.createElement('canvas');
+        cv.id = 'canvas-sub-comp';
+        el.innerHTML = '';
+        el.appendChild(cv);
+        var c = clr();
+        subCompChart = new Chart(cv, {
+          type: 'bar',
+          data: {
+            labels: data.map(function(d){ return d.name; }),
+            datasets: [
+              { label: 'Code',     data: data.map(function(d){ return d.code||0; }),    backgroundColor: OX, hoverBackgroundColor: '#d97020', borderRadius: 0, borderSkipped: false },
+              { label: 'Comments', data: data.map(function(d){ return d.comment||0; }), backgroundColor: GN, hoverBackgroundColor: '#3a8a5e', borderRadius: 0, borderSkipped: false },
+              { label: 'Blank',    data: data.map(function(d){ return d.blank||0; }),   backgroundColor: GY, hoverBackgroundColor: '#999',    borderRadius: 0, borderSkipped: false }
+            ]
+          },
+          options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            animation: { duration: 500, easing: 'easeOutQuart' },
+            transitions: { active: { animation: { duration: 180, easing: 'easeOutQuart' } } },
+            layout: { padding: { right: 56 } },
+            scales: {
+              x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){ return fmt(v); } } },
+              y: { stacked: true, grid: { display: false }, ticks: { color: c.text } }
+            },
+            plugins: {
+              legend: {
+                position: 'bottom',
+                labels: { color: c.text, usePointStyle: true, pointStyle: 'rect', font: { size: 11, weight: '700' }, padding: 16 }
+              },
+              tooltip: {
+                mode: 'index',
+                callbacks: {
+                  title: function(items){ return items.length ? items[0].label : ''; },
+                  label: function(ctx){
+                    var v = ctx.parsed.x || 0;
+                    return '  ' + ctx.dataset.label + ': ' + Number(v).toLocaleString();
+                  },
+                  footer: function(items){
+                    var tot = items.reduce(function(s,i){ return s + (i.parsed.x||0); }, 0);
+                    return 'Total: ' + Number(tot).toLocaleString();
+                  }
+                }
+              }
+            }
+          },
+          plugins: [makeStackedEndPlugin(function(v){ return fmt(v); }), segLabelPlugin]
         });
-        s += '<div style="display:flex;align-items:center;gap:14px;margin-top:10px;padding-left:'+(LW+1)+'px;font-size:11px;font-weight:700;color:#43342d;">';
-        s += '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:9px;height:9px;background:'+OX+';border-radius:1px;flex-shrink:0;"></span>Code</span>';
-        s += '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:9px;height:9px;background:'+GN+';border-radius:1px;flex-shrink:0;"></span>Comments</span>';
-        s += '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:9px;height:9px;background:'+GY+';border-radius:1px;flex-shrink:0;"></span>Blank</span>';
-        s += '</div>';
-        s += '</div>';
-        el.innerHTML = s;
+        ALL_CHARTS.push(subCompChart);
       })();
 
       // ── Semantic Metrics ─────────────────────────────────────────────────────
@@ -6555,65 +6621,146 @@ struct WarningOpportunityRow {
           });
         })();
 
-        // Submodule Breakdown
+        // Submodule Breakdown — Full View with live Y Axis + Sort controls
         (function(){
           var btn = document.getElementById('sub-expand-btn');
           if(!btn || !SUB_D || !SUB_D.length) return;
           btn.addEventListener('click', function(){
             var subYSel = document.getElementById('sub-y-axis');
             var subSortSel = document.getElementById('sub-sort');
-            var yKey = subYSel ? subYSel.value : 'code';
-            var sortMode = subSortSel ? subSortSel.value : 'desc';
-            var data = SUB_D.slice();
-            if(sortMode==='desc') data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
-            else if(sortMode==='asc') data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
-            else data.sort(function(a,b){return a.name.localeCompare(b.name);});
-            data = data.slice(0, 30);
+            var initY = subYSel ? subYSel.value : 'code';
+            var initSort = subSortSel ? subSortSel.value : 'desc';
             var Y_LABELS = { code:'Code Lines', comment:'Comment Lines', blank:'Blank Lines', physical:'Physical Lines', files:'Files' };
             var SUB_COLS = { code:OX, comment:GN, blank:GY, physical:'#4472C4', files:'#805099' };
-            var h = Math.min(Math.max(672, data.length * 36 + 96), Math.max(400, Math.floor(window.innerHeight * 0.82) - 130));
-            var subMetricLabels = { code:'Code Lines', comment:'Comment Lines', blank:'Blank Lines', physical:'Physical Lines', files:'Files' };
-            var subSortLabels = { desc:'Value ↓', asc:'Value ↑', name:'Name A→Z' };
-            var subLabel = (subMetricLabels[yKey]||yKey) + ' · ' + (subSortLabels[sortMode]||sortMode);
-            var canvas = makeOverlay('Submodule Breakdown — Full View', h, subLabel);
+            var SUB_HCOLS = { code:'#d97020', comment:'#3a8a5e', blank:'#999', physical:'#5a8ad8', files:'#9a68b3' };
+            var n = Math.min(SUB_D.length, 30);
+            var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
+            var modalH = Math.min(Math.max(480, n * 36 + 96), maxH);
+            var ctrlHtml = '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Y Axis:'
+              + '<select class="chart-select" id="sub-modal-y">'
+              + '<option value="code">Code Lines</option>'
+              + '<option value="comment">Comment Lines</option>'
+              + '<option value="blank">Blank Lines</option>'
+              + '<option value="physical">Physical Lines</option>'
+              + '<option value="files">File Count</option>'
+              + '</select></label>'
+              + '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Sort:'
+              + '<select class="chart-select" id="sub-modal-sort">'
+              + '<option value="desc">Value ↓</option>'
+              + '<option value="asc">Value ↑</option>'
+              + '<option value="name">Name A→Z</option>'
+              + '</select></label>';
+            var canvas = makeOverlay('Submodule Breakdown — Full View', modalH, null, ctrlHtml);
             if(!canvas) return;
-            var c = clr();
-            new Chart(canvas, {
-              type: 'bar',
-              data: {
-                labels: data.map(function(d){return d.name;}),
-                datasets: [{ label: Y_LABELS[yKey]||yKey, data: data.map(function(d){return d[yKey]||0;}),
-                  backgroundColor: SUB_COLS[yKey]||OX, borderRadius: 3 }]
-              },
-              options: {
-                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-                layout: { padding: { right: 64 } },
-                scales: {
-                  x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}}, title:{display:true, text:Y_LABELS[yKey]||yKey, color:c.text} },
-                  y: { grid:{display:false}, ticks:{color:c.text} }
+            var modalY = document.getElementById('sub-modal-y');
+            var modalSort = document.getElementById('sub-modal-sort');
+            if(modalY) modalY.value = initY;
+            if(modalSort) modalSort.value = initSort;
+            var subModalChart = null;
+            function renderSubModal(yKey, sortMode) {
+              if(subModalChart) { subModalChart.destroy(); subModalChart = null; }
+              var data = SUB_D.slice();
+              if(sortMode==='desc') data.sort(function(a,b){return (b[yKey]||0)-(a[yKey]||0);});
+              else if(sortMode==='asc') data.sort(function(a,b){return (a[yKey]||0)-(b[yKey]||0);});
+              else data.sort(function(a,b){return a.name.localeCompare(b.name);});
+              data = data.slice(0, 30);
+              var c = clr(), col = SUB_COLS[yKey]||OX, hcol = SUB_HCOLS[yKey]||'#d97020';
+              subModalChart = new Chart(canvas, {
+                type: 'bar',
+                data: {
+                  labels: data.map(function(d){return d.name;}),
+                  datasets: [{ label: Y_LABELS[yKey]||yKey,
+                    data: data.map(function(d){return d[yKey]||0;}),
+                    backgroundColor: col, hoverBackgroundColor: hcol, borderRadius: 3 }]
                 },
-                plugins: { legend:{display:false} }
-              },
-              plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'end')]
-            });
+                options: {
+                  indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                  layout: { padding: { right: 72 } },
+                  scales: {
+                    x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}},
+                         title:{display:true, text:Y_LABELS[yKey]||yKey, color:c.text} },
+                    y: { grid:{display:false}, ticks:{color:c.text} }
+                  },
+                  plugins: {
+                    legend:{display:false},
+                    tooltip: { callbacks: {
+                      title: function(items){return items.length?items[0].label:'';},
+                      label: function(ctx){
+                        var d = data[ctx.dataIndex]||{};
+                        return ['  Code: '+Number(d.code||0).toLocaleString(),
+                                '  Comments: '+Number(d.comment||0).toLocaleString(),
+                                '  Blanks: '+Number(d.blank||0).toLocaleString(),
+                                '  Files: '+fmt(d.files||0)];
+                      }
+                    }}
+                  }
+                },
+                plugins: [makeDlPlugin(function(v){return fmt(v||0);}, 'end')]
+              });
+            }
+            renderSubModal(initY, initSort);
+            if(modalY) modalY.addEventListener('change', function(){ renderSubModal(this.value, modalSort ? modalSort.value : 'desc'); });
+            if(modalSort) modalSort.addEventListener('change', function(){ renderSubModal(modalY ? modalY.value : 'code', this.value); });
           });
         })();
 
-        // Submodule Composition (SVG-based — clone and display)
+        // Submodule Composition — Full View (Chart.js with sort control)
         (function(){
           var btn = document.getElementById('sub-comp-expand-btn');
-          if(!btn) return;
+          if(!btn || !SUB_D || !SUB_D.length) return;
           btn.addEventListener('click', function(){
-            var src = document.getElementById('submodule-donut');
-            if(!src) return;
-            var overlay = document.createElement('div');
-            overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal"><button class="chart-modal-close" aria-label="Close">&times;</button><span class="chart-modal-title">Submodule Composition — Full View</span><span class="chart-modal-subtitle">Code vs comments vs blank per submodule</span><div id="sub-comp-modal-wrap" style="width:100%;overflow:hidden;"></div></div>';
-            document.body.appendChild(overlay);
-            overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
-            overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
-            var wrap = document.getElementById('sub-comp-modal-wrap');
-            if(wrap) { wrap.innerHTML = src.innerHTML; }
+            var n = Math.min(SUB_D.length, 20);
+            var maxH = Math.max(400, Math.floor(window.innerHeight * 0.82) - 130);
+            var modalH = Math.min(Math.max(400, n * 40 + 90), maxH);
+            var ctrlHtml = '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Sort:'
+              + '<select class="chart-select" id="sub-comp-modal-sort">'
+              + '<option value="desc">Total Lines ↓</option>'
+              + '<option value="asc">Total Lines ↑</option>'
+              + '<option value="name">Name A→Z</option>'
+              + '</select></label>';
+            var canvas = makeOverlay('Submodule Composition — Full View', modalH, null, ctrlHtml);
+            if(!canvas) return;
+            var modalSort = document.getElementById('sub-comp-modal-sort');
+            var scModalChart = null;
+            function renderSCModal(sortMode) {
+              if(scModalChart) { scModalChart.destroy(); scModalChart = null; }
+              var data = SUB_D.slice();
+              if(sortMode==='asc') data.sort(function(a,b){return ((a.code||0)+(a.comment||0)+(a.blank||0))-((b.code||0)+(b.comment||0)+(b.blank||0));});
+              else if(sortMode==='name') data.sort(function(a,b){return a.name.localeCompare(b.name);});
+              else data.sort(function(a,b){return ((b.code||0)+(b.comment||0)+(b.blank||0))-((a.code||0)+(a.comment||0)+(a.blank||0));});
+              data = data.slice(0, 20);
+              var c = clr();
+              scModalChart = new Chart(canvas, {
+                type: 'bar',
+                data: {
+                  labels: data.map(function(d){ return d.name; }),
+                  datasets: [
+                    { label:'Code',     data:data.map(function(d){return d.code||0;}),    backgroundColor:OX, hoverBackgroundColor:'#d97020', borderRadius:0, borderSkipped:false },
+                    { label:'Comments', data:data.map(function(d){return d.comment||0;}), backgroundColor:GN, hoverBackgroundColor:'#3a8a5e', borderRadius:0, borderSkipped:false },
+                    { label:'Blank',    data:data.map(function(d){return d.blank||0;}),   backgroundColor:GY, hoverBackgroundColor:'#999',    borderRadius:0, borderSkipped:false }
+                  ]
+                },
+                options: {
+                  indexAxis:'y', responsive:true, maintainAspectRatio:false,
+                  layout:{ padding:{ right:72 } },
+                  scales: {
+                    x:{ stacked:true, grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}} },
+                    y:{ stacked:true, grid:{display:false}, ticks:{color:c.text} }
+                  },
+                  plugins: {
+                    legend:{ position:'bottom', labels:{color:c.text, usePointStyle:true, pointStyle:'rect', font:{size:11,weight:'700'}, padding:16} },
+                    tooltip:{ mode:'index', callbacks:{
+                      title:function(items){return items.length?items[0].label:'';},
+                      label:function(ctx){return '  '+ctx.dataset.label+': '+Number(ctx.parsed.x||0).toLocaleString();},
+                      footer:function(items){var t=items.reduce(function(s,i){return s+(i.parsed.x||0);},0);return 'Total: '+Number(t).toLocaleString();}
+                    }}
+                  }
+                },
+                plugins: [makeStackedEndPlugin(function(v){return fmt(v);}), segLabelPlugin]
+              });
+            }
+            renderSCModal('desc');
+            if(modalSort) modalSort.addEventListener('change', function(){ renderSCModal(this.value); });
           });
         })();
 

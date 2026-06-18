@@ -361,11 +361,12 @@ jobs:
             --clobber \
             --repo "$REPO"
 
-  # ── Commit signed Windows binary to dist/ for air-gapped Windows installs ──
-  # Requires DIST_PUSH_TOKEN secret: a PAT with "Contents: Read and write" scope
-  # from an account that has the "bypass branch protection" privilege on main.
-  # Without the secret the job is skipped (continue-on-error); the binary is
-  # still available as a GitHub release asset so users are not blocked.
+  # ── Open a PR to commit the Windows binary to dist/ ─────────────────────
+  # Main is a protected branch (PRs + "Quality gates" check required), so a
+  # direct push is rejected.  peter-evans/create-pull-request pushes to a new
+  # unprotected branch and opens the PR in one atomic step using GITHUB_TOKEN
+  # — no extra secret needed.  The PR can be reviewed and merged normally;
+  # auto-merge is enabled so it merges as soon as Quality gates passes.
   commit-dist-windows:
     name: Commit Windows binary to dist/
     needs: upload-release-assets
@@ -373,57 +374,50 @@ jobs:
     continue-on-error: true
     permissions:
       contents: write
+      pull-requests: write
     steps:
-      - name: Check for dist-push token
-        id: token_check
-        shell: bash
-        run: |
-          if [ -n "$DIST_PUSH_TOKEN" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::DIST_PUSH_TOKEN not set — skipping dist/ commit. Binary is available as a release asset."
-          fi
-        env:
-          DIST_PUSH_TOKEN: ${{ secrets.DIST_PUSH_TOKEN }}
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
-        if: steps.token_check.outputs.available == 'true'
         with:
           ref: main
-          token: ${{ secrets.DIST_PUSH_TOKEN }}
 
       - name: Download Windows bundle
-        if: steps.token_check.outputs.available == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: oxide-sloc-windows-x64.zip
           path: dist/
 
-      - name: Commit and push to main
-        if: steps.token_check.outputs.available == 'true'
+      - name: Resolve release tag
+        id: tag
         env:
           GH_EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
           WORKFLOW_RUN_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase --autostash origin main
-          git add -f dist/oxide-sloc-windows-x64.zip
-          if git diff --cached --quiet; then
-            echo "dist/ Windows unchanged — nothing to commit."
-          else
-            TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
-            git commit -m "chore: update dist Windows binary (${TAG})"
-            git push origin HEAD:main
-          fi
+          TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-  # ── Commit Linux binary to dist/ for air-gapped RHEL installs ────────────
+      - name: Open PR with updated Windows binary
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e  # v7.0.8
+        with:
+          token: ${{ github.token }}
+          branch: dist/update-windows-${{ github.run_id }}
+          base: main
+          add-paths: dist/oxide-sloc-windows-x64.zip
+          commit-message: "chore: update dist Windows binary (${{ steps.tag.outputs.tag }})"
+          title: "chore: update dist Windows binary (${{ steps.tag.outputs.tag }})"
+          body: |
+            Automated dist update from workflow run ${{ github.run_id }}.
+
+            Updates `dist/oxide-sloc-windows-x64.zip` for release ${{ steps.tag.outputs.tag }}.
+            This PR was opened automatically because main is a protected branch.
+          labels: "automated,dist"
+          delete-branch: true
+
+  # ── Open a PR to commit the Linux binary to dist/ ────────────────────────
   # Mirrors commit-dist-windows.  With dist/oxide-sloc-linux-x86_64.tar.gz
   # present, install.sh step 2b skips the bundled Rust toolchain entirely.
-  # Serialized after commit-dist-windows to avoid concurrent push conflicts.
+  # Serialized after commit-dist-windows to avoid any merge-ordering issues.
   commit-dist-linux:
     name: Commit Linux binary to dist/
     needs: commit-dist-windows
@@ -431,49 +425,42 @@ jobs:
     continue-on-error: true
     permissions:
       contents: write
+      pull-requests: write
     steps:
-      - name: Check for dist-push token
-        id: token_check
-        shell: bash
-        run: |
-          if [ -n "$DIST_PUSH_TOKEN" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::DIST_PUSH_TOKEN not set — skipping dist/ commit. Binary is available as a release asset."
-          fi
-        env:
-          DIST_PUSH_TOKEN: ${{ secrets.DIST_PUSH_TOKEN }}
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
-        if: steps.token_check.outputs.available == 'true'
         with:
           ref: main
-          token: ${{ secrets.DIST_PUSH_TOKEN }}
 
       - name: Download Linux bundle
-        if: steps.token_check.outputs.available == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: oxide-sloc-linux-x86_64.tar.gz
           path: dist/
 
-      - name: Commit and push to main
-        if: steps.token_check.outputs.available == 'true'
+      - name: Resolve release tag
+        id: tag
         env:
           GH_EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
           WORKFLOW_RUN_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase --autostash origin main
-          git add -f dist/oxide-sloc-linux-x86_64.tar.gz
-          if git diff --cached --quiet; then
-            echo "dist/ Linux unchanged — nothing to commit."
-          else
-            TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
-            git commit -m "chore: update dist Linux binary (${TAG})"
-            git push origin HEAD:main
-          fi
+          TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR with updated Linux binary
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e  # v7.0.8
+        with:
+          token: ${{ github.token }}
+          branch: dist/update-linux-${{ github.run_id }}
+          base: main
+          add-paths: dist/oxide-sloc-linux-x86_64.tar.gz
+          commit-message: "chore: update dist Linux binary (${{ steps.tag.outputs.tag }})"
+          title: "chore: update dist Linux binary (${{ steps.tag.outputs.tag }})"
+          body: |
+            Automated dist update from workflow run ${{ github.run_id }}.
+
+            Updates `dist/oxide-sloc-linux-x86_64.tar.gz` for release ${{ steps.tag.outputs.tag }}.
+            This PR was opened automatically because main is a protected branch.
+          labels: "automated,dist"
+          delete-branch: true
