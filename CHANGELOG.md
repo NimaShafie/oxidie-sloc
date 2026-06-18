@@ -10,6 +10,83 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.72] — 2026-06-17
+
+### Added
+
+- **C/C++ variable detection** (`crates/sloc-languages/src/lib.rs`): New
+  `variables_prefix_no_paren` field on `SymbolPatterns` enables lexical
+  variable-declaration detection in C and C++. Lines that start with a type
+  keyword (`int`, `char`, `float`, `const`, `static`, `constexpr`, etc.) and
+  either contain no `(` or have a `=` before the first `(` are now classified as
+  variable declarations, distinguishing them from function definitions.
+
+### Changed
+
+- **Language Breakdown table** (`crates/sloc-report/src/lib.rs`): Switched from
+  `table-layout: fixed` (which squeezed the Language column) to auto layout with
+  `min-width: 760px`. All 14 columns now include a `<div class="col-resize-handle">`
+  drag handle and are fully resizable via the shared `.table-resizable` resize
+  driver, which previously only applied to the per-file table.
+
+- **Submodule Composition chart** (`crates/sloc-report/src/lib.rs`): Replaced the
+  custom hand-built SVG bar chart with a proper Chart.js stacked horizontal bar.
+  Value labels are rendered inside each segment (hidden when the segment is too
+  narrow). Both the inline panel and the Full View modal now use Chart.js, with
+  the modal adding a Sort control (Total Lines ↓ / ↑ / Name A→Z).
+
+- **Submodule Breakdown Full View modal** (`crates/sloc-report/src/lib.rs`): The
+  expand overlay now includes live Y Axis and Sort `<select>` controls that
+  re-render the chart on change without reopening the modal. Hover tooltips show
+  all four dimensions (Code / Comments / Blanks / Files) regardless of the active
+  Y axis.
+
+- **PDF header** (`crates/sloc-report/src/lib.rs`): Git branch/commit metadata
+  line now right-aligns instead of being centre-anchored. Separator changed from
+  ` | ` to ` · `. The environment line field label changed from `Mode:` to
+  `Source:` and the raw `runtime_mode` string is now mapped through
+  `runtime_mode_display()` (e.g. `serve` → `Web UI`, `analyze` → `CLI`).
+
+- **Sort indicators** (`crates/sloc-report/src/lib.rs`): All sort-indicator
+  markers across every `data-sort-table` table now reset to ` ↕` when a
+  different column is clicked; the active column shows ` ↑` or ` ↓`. Column
+  headers get `cursor: pointer` explicitly.
+
+- **Copy / Download config buttons** (`crates/sloc-report/src/lib.rs`): Buttons
+  switched from `.header-button` to the shared `.export-btn` / `.code-copy-btn`
+  style — inline-flex with gap, hover accent colour, and matching dark-theme
+  colours.
+
+- **Style heuristic note banner** (`crates/sloc-report/src/lib.rs`): Converted
+  from a single-line badge to a flex row with an icon `<span>` and a text
+  `<span>`, with improved padding, border radius, and a subtle border.
+
+- **Summary grid responsive layout** (`crates/sloc-report/src/lib.rs`,
+  `crates/sloc-web/src/lib.rs`): Removed the hard-coded `1200px → 4-col`
+  breakpoint. A small JS snippet now reads the actual chip count and sets
+  `grid-template-columns: repeat(ceil(n/2), 1fr)` above 640 px, so the strip
+  always fills one or two rows regardless of how many chips are present.
+
+- **SVG legend x-offset** (`crates/sloc-report/src/lib.rs`,
+  `crates/sloc-web/src/lib.rs`): The "Blanks" legend entry x position was
+  corrected from `LW+152` to `LW+138` so it no longer overlaps the "Comments"
+  entry in the language-overview bar-chart SVG (both report and web pages).
+
+- **CI dist-commit jobs** (`.github/workflows/update-dist.yml`): Both
+  `commit-dist-windows` and `commit-dist-linux` now use
+  `peter-evans/create-pull-request` (v7.0.8) instead of a direct `git push` to
+  `main`. Because `main` requires PRs + the Quality Gates check, the direct push
+  was rejected on every release. The new approach pushes to a temporary branch
+  and opens a PR that auto-merges once the check passes; no `DIST_PUSH_TOKEN`
+  secret is needed.
+
+- **Web page minor CSS** (`crates/sloc-web/src/lib.rs`): `.wb-stats-title` font
+  size increased from 9 px to 10 px; `.scope-legend-row` switched to
+  `flex-wrap: nowrap` with reduced padding for tighter layout; step/quick-scan
+  divider margins normalised to 12 px top and bottom.
+
+---
+
 ## [1.5.71] — 2026-06-16
 
 ### Fixed
