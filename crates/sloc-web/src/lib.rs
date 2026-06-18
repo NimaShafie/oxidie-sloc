@@ -15615,7 +15615,7 @@ struct SubmoduleRow {
     body.dark-theme .workbench-box { background: var(--surface); box-shadow: var(--shadow); }
     .wb-stats { flex: 4 1 0; display:flex; flex-direction:column; overflow: visible; min-width: 0; position: relative; z-index: 25; }
     .wb-stats-header { padding: 10px 24px 0; }
-    .wb-stats-title { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted-2); }
+    .wb-stats-title { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted-2); }
     .ws-left { display:flex; align-items:stretch; gap:12px; flex:1 1 auto; flex-wrap:wrap; padding: 14px 20px 18px; overflow: visible; }
     .ws-stat { display:flex; flex-direction:column; justify-content:center; gap: 6px; flex:0 0 auto; min-width:110px; padding: 12px 18px; border-radius: 10px; background: rgba(184,93,51,0.06); border: 1px solid rgba(184,93,51,0.15); transition: transform .2s ease, box-shadow .2s ease; }
     .ws-stat:hover { transform: translateY(-4px); box-shadow: 0 12px 32px rgba(77,44,20,0.2); }
@@ -15646,7 +15646,7 @@ struct SubmoduleRow {
     .ws-mini-box-lg { flex:2 1 0; }
     .ws-mini-box-lg .ws-mini-value { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .ws-mini-box-br { flex:1.5 1 0; }
-    .scope-legend-row { display:inline-flex; flex-direction:row; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:13px; flex-shrink:0; border-left:3px solid var(--line-strong); }
+    .scope-legend-row { display:inline-flex; flex-direction:row; align-items:center; flex-wrap:nowrap; gap:5px; padding:5px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:12px; flex-shrink:0; border-left:3px solid var(--line-strong); white-space:nowrap; }
     .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; }
     .path-scope-grid { display:grid; grid-template-columns: 42% auto auto 1px auto; gap:0 8px; align-items:center; }
     #path.drag-over { background: rgba(37,99,235,0.05) !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important; }
@@ -15710,8 +15710,8 @@ struct SubmoduleRow {
     .step-nav-sum-row:last-child { border-bottom:none; }
     .step-nav-sum-key { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:.07em; color:var(--muted-2); flex-shrink:0; }
     .step-nav-sum-val { font-size:12px; font-weight:700; color:var(--text); text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:120px; }
-    .step-steps-divider { height:1px; background:var(--line); margin: 14px 4px 0; }
-    .quick-scan-divider { height:1px; background:var(--line); margin: 20px 4px 6px; }
+    .step-steps-divider { height:1px; background:var(--line); margin: 12px 4px; }
+    .quick-scan-divider { height:1px; background:var(--line); margin: 12px 4px; }
     .quick-scan-section { padding: 10px 4px 14px; }
     .quick-scan-label { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:.08em; color:var(--muted-2); margin-bottom:16px; }
     .quick-scan-btn { width:100%; display:flex; align-items:center; justify-content:center; gap:8px; padding:11px 14px; border-radius:14px; border:none; background:linear-gradient(135deg,#e07b3a,#b85028); color:#fff; font-size:14px; font-weight:800; cursor:pointer; box-shadow:0 6px 18px rgba(184,80,40,0.28); transition:transform 0.15s ease,box-shadow 0.15s ease; }
@@ -15784,6 +15784,10 @@ struct SubmoduleRow {
     .mini-button:hover, button.primary:hover, button.secondary:hover, .artifact-toggle:hover { transform: translateY(-1px); box-shadow: 0 10px 18px rgba(0,0,0,0.08); }
     .mini-button.oxide { color: var(--oxide-2); background: rgba(184,93,51,0.08); border-color: rgba(184,93,51,0.22); }
     .mini-button.primary-lite { background: rgba(37,99,235,0.08); color: var(--accent-2); border-color: rgba(37,99,235,0.20); }
+    #browse-path { min-height: 38px; font-size: 13px; padding: 0 12px; }
+    #use-sample-path { min-height: 34px; font-size: 11px; padding: 0 9px; font-weight: 700; }
+    .scope-legend-row .badge { font-size: 11px; min-height: 24px; padding: 0 8px; white-space: nowrap; }
+    @media (max-height: 1200px) { .workbench-strip { margin-bottom: 12px; } .wb-stats-header { padding: 8px 20px 0; } .ws-left { padding: 10px 16px 12px; } .ws-history-group { padding: 12px 20px; } }
     button.primary { background: linear-gradient(180deg, var(--accent), var(--accent-2)); color:#fff; border-color: transparent; }
     button.secondary { background: var(--surface); }
     button.next-step { background: linear-gradient(180deg, var(--nav), var(--nav-2)); color: #fff; border-color: transparent; }
@@ -16335,7 +16339,6 @@ struct SubmoduleRow {
       <aside class="side-stack">
         <section class="step-nav">
         <h3>Guided scan setup</h3>
-        <div class="sidebar-scroll-divider"></div>
         <a href="#page-top" class="sidebar-scroll-btn" aria-label="Scroll to top of page">
           <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="18 15 12 9 6 15"></polyline></svg>
           Top of page
@@ -20679,7 +20682,6 @@ struct ScanSetupTemplate {
     .action-empty-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
     /* Stat chips (matches HTML report) */
     .summary-strip { display:grid; grid-template-columns:repeat(8,1fr); gap:10px; margin-top:18px; }
-    @media(max-width:1200px){.summary-strip{grid-template-columns:repeat(4,1fr);}}
     @media(max-width:640px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
     .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; overflow:visible; }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
@@ -21518,7 +21520,7 @@ struct ScanSetupTemplate {
     <section class="panel">
         <div class="toolbar-row">
           <div>
-            <h2>Language breakdown</h2>
+            <h2>Language Breakdown</h2>
             <p class="muted">A quick summary of what this run actually counted across supported languages.</p>
           </div>
           <button class="r-expand-btn" id="result-lang-overview-expand" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
@@ -21878,9 +21880,9 @@ struct ScanSetupTemplate {
           +'<text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
         bs+='<g data-kind="blank" style="cursor:pointer;">'
-          +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
-          +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
-          +'<text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+          +'<rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -22011,9 +22013,9 @@ struct ScanSetupTemplate {
             +'<text x="'+(LW+66)+'" y="'+(ly+9)+'"'+ttCm2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
             +'</g>';
           s+='<g data-kind="blank" style="cursor:pointer;">'
-            +'<rect x="'+(LW+152)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
-            +'<rect x="'+(LW+152)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
-            +'<text x="'+(LW+165)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blank</text>'
+            +'<rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
+            +'<rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
+            +'<text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blanks</text>'
             +'</g>';
           s+='</svg>';
           el.innerHTML=s;
@@ -22634,6 +22636,7 @@ struct ScanSetupTemplate {
     setInterval(doPing,5000);
     if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip');if(!s)return;var n=s.querySelectorAll('.stat-chip').length;if(!n)return;function upd(){if(window.innerWidth>=640){s.style.gridTemplateColumns='repeat('+Math.ceil(n/2)+',1fr)';}else{s.style.gridTemplateColumns='';}}upd();window.addEventListener('resize',upd);})();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
