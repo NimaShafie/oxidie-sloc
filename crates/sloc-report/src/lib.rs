@@ -1079,8 +1079,8 @@ fn pdf_render_page1_header(
             ctx.layer
                 .set_fill_color(Color::Rgb(Rgb::new(0.35, 0.45, 0.35, None)));
             let git_str = pdf_trunc(&git_parts.join("  \u{00B7}  "), 70);
-            // Right-align: approximate char width at 7.5pt (~0.81 mm/char), clamp to centre min.
-            let git_x = (ctx.w - ctx.margin - git_str.len() as f32 * 0.81).max(ctx.w / 2.0);
+            // Right-align: full advance at 7.5pt Helvetica (~1.45 mm/char avg) + 3 mm safety.
+            let git_x = (ctx.w - ctx.margin - 3.0 - git_str.len() as f32 * 1.45).max(ctx.w / 2.0);
             ctx.layer
                 .use_text(git_str, 7.5, Mm(git_x), Mm(title_text_y), ctx.font_reg);
         }
@@ -1117,8 +1117,8 @@ fn pdf_render_page1_header(
             mode_label,
         );
         let env_trunc = pdf_trunc(&env_str, 100);
-        // Right-align: approximate char width at 6.5pt (~0.70 mm/char), clamp to centre min.
-        let env_x = (ctx.w - ctx.margin - env_trunc.len() as f32 * 0.70).max(ctx.w / 2.0);
+        // Right-align: full advance at 6.5pt Helvetica (~1.26 mm/char avg) + 3 mm safety.
+        let env_x = (ctx.w - ctx.margin - 3.0 - env_trunc.len() as f32 * 1.26).max(ctx.w / 2.0);
         ctx.layer
             .use_text(env_trunc, 6.5, Mm(env_x), Mm(roots_text_y), ctx.font_reg);
     }
@@ -1474,6 +1474,389 @@ fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
         "LINE CHANGE SUMMARY",
         &lcs_rows,
     );
+}
+
+/// Render a dedicated "TESTS & COVERAGE" page. Always called — shows a "No code coverage
+/// detected" note when no LCOV/Cobertura data is present, or a full metrics block + per-file
+/// table when coverage data exists.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
+fn pdf_render_tests_coverage_page(
+    doc: &printpdf::PdfDocumentReference,
+    font_reg: &printpdf::IndirectFontRef,
+    font_bold: &printpdf::IndirectFontRef,
+    run: &AnalysisRun,
+    w: f32,
+    h: f32,
+    margin: f32,
+    footer_h: f32,
+    title: &str,
+    version: &str,
+) {
+    use printpdf::{Color, Mm, Rgb};
+
+    let has_cov = run.summary_totals.coverage_lines_found > 0;
+    let has_fn_cov = run.summary_totals.coverage_functions_found > 0;
+    let has_br_cov = run.summary_totals.coverage_branches_found > 0;
+
+    let (tc_page, tc_layer_idx) = doc.add_page(Mm(w), Mm(h), "Tests & Coverage");
+    let layer = doc.get_page(tc_page).get_layer(tc_layer_idx);
+
+    let row_h: f32 = 5.5;
+    let tbl_hdr_h: f32 = 6.0;
+    let ctx = PdfCtx {
+        layer: &layer,
+        font_reg,
+        font_bold,
+        w,
+        margin,
+        row_h,
+        tbl_hdr_h,
+    };
+
+    // ── Mini header bar ──────────────────────────────────────────────────────
+    let hdr_h: f32 = 8.0;
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        h - hdr_h,
+        w,
+        hdr_h,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer
+        .use_text("oxide-sloc", 9.0, Mm(margin), Mm(h - 5.5), ctx.font_bold);
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    ctx.layer.use_text(
+        pdf_trunc(&pdf_safe_str(title), 55),
+        7.5,
+        Mm(46.0),
+        Mm(h - 5.5),
+        ctx.font_reg,
+    );
+
+    // ── Section title ────────────────────────────────────────────────────────
+    let mut y = h - hdr_h - 7.0;
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
+    ctx.layer
+        .use_text("TESTS & COVERAGE", 9.5, Mm(margin), Mm(y), ctx.font_bold);
+
+    // ── Summary stat boxes (4 across) ───────────────────────────────────────
+    y -= 2.0;
+    let gap: f32 = 4.0;
+    let box_h: f32 = 16.0;
+    let box_w = (w - 2.0 * margin - 3.0 * gap) / 4.0;
+
+    let boxes: [(&str, String); 4] = [
+        (
+            "Test Functions",
+            pdf_fmt_full(run.summary_totals.test_count),
+        ),
+        (
+            "Test Assertions",
+            pdf_fmt_full(run.summary_totals.test_assertion_count),
+        ),
+        (
+            "Test Suites",
+            pdf_fmt_full(run.summary_totals.test_suite_count),
+        ),
+        (
+            "Line Coverage",
+            if has_cov {
+                let pct = run.summary_totals.coverage_lines_hit as f64
+                    / run.summary_totals.coverage_lines_found as f64
+                    * 100.0;
+                format!("{pct:.1}%")
+            } else {
+                "\u{2014}".to_string()
+            },
+        ),
+    ];
+    for (i, (label, val)) in boxes.iter().enumerate() {
+        let bx = margin + i as f32 * (box_w + gap);
+        let by = y - box_h;
+        pdf_fill_rect(
+            ctx.layer,
+            bx,
+            by,
+            box_w,
+            box_h,
+            Rgb::new(0.97, 0.96, 0.94, None),
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.60, 0.40, 0.22, None)));
+        ctx.layer.use_text(
+            val.as_str(),
+            10.0,
+            Mm(bx + 3.0),
+            Mm(by + 8.0),
+            ctx.font_bold,
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.50, 0.44, 0.40, None)));
+        ctx.layer
+            .use_text(*label, 6.0, Mm(bx + 3.0), Mm(by + 2.5), ctx.font_reg);
+    }
+    y -= box_h + 5.0;
+
+    // ── Coverage gauges (line, fn, branch) ──────────────────────────────────
+    if has_cov {
+        let gauges: &[(&str, u64, u64)] = &[
+            (
+                "Line Coverage",
+                run.summary_totals.coverage_lines_hit,
+                run.summary_totals.coverage_lines_found,
+            ),
+            (
+                "Function Coverage",
+                run.summary_totals.coverage_functions_hit,
+                run.summary_totals.coverage_functions_found,
+            ),
+            (
+                "Branch Coverage",
+                run.summary_totals.coverage_branches_hit,
+                run.summary_totals.coverage_branches_found,
+            ),
+        ];
+        let visible: Vec<_> = gauges.iter().filter(|(_, _, found)| *found > 0).collect();
+        let count = visible.len() as f32;
+        let gauge_w = if count > 0.0 {
+            (w - 2.0 * margin - (count - 1.0) * gap) / count
+        } else {
+            0.0
+        };
+        for (gi, (label, hit, found)) in visible.iter().enumerate() {
+            let gx = margin + gi as f32 * (gauge_w + gap);
+            let pct = *hit as f64 / *found as f64 * 100.0;
+            let pct_str = format!("{pct:.1}%");
+            let bar_fill = (gauge_w - 6.0) * (pct as f32 / 100.0);
+            let gy = y - 14.0;
+            pdf_fill_rect(
+                ctx.layer,
+                gx,
+                gy,
+                gauge_w,
+                14.0,
+                Rgb::new(0.975, 0.965, 0.95, None),
+            );
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
+            ctx.layer
+                .use_text(*label, 6.0, Mm(gx + 2.0), Mm(gy + 9.5), ctx.font_bold);
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(0.20, 0.55, 0.35, None)));
+            ctx.layer
+                .use_text(&pct_str, 8.0, Mm(gx + 2.0), Mm(gy + 4.5), ctx.font_bold);
+            // gauge track (light)
+            pdf_fill_rect(
+                ctx.layer,
+                gx + 3.0,
+                gy + 1.5,
+                gauge_w - 6.0,
+                2.5,
+                Rgb::new(0.86, 0.84, 0.80, None),
+            );
+            // gauge fill (green)
+            if bar_fill > 0.0 {
+                pdf_fill_rect(
+                    ctx.layer,
+                    gx + 3.0,
+                    gy + 1.5,
+                    bar_fill,
+                    2.5,
+                    Rgb::new(0.20, 0.55, 0.35, None),
+                );
+            }
+        }
+        if !visible.is_empty() {
+            y -= 14.0 + 5.0;
+        }
+
+        // ── Per-file coverage table ──────────────────────────────────────────
+        let cov_files: Vec<_> = run
+            .per_file_records
+            .iter()
+            .filter(|r| r.coverage.is_some())
+            .collect();
+
+        if !cov_files.is_empty() {
+            // Table header
+            let col_file = w - 2.0 * margin - 44.0;
+            let col_lp = 22.0;
+            let col_fp = if has_fn_cov { 22.0 } else { 0.0 };
+            let col_bp = if has_br_cov { 22.0 } else { 0.0 };
+            // Section sub-header
+            y -= 3.0;
+            pdf_fill_rect(
+                ctx.layer,
+                margin,
+                y - tbl_hdr_h,
+                w - 2.0 * margin,
+                tbl_hdr_h,
+                Rgb::new(0.098, 0.11, 0.15, None),
+            );
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+            ctx.layer.use_text(
+                "PER-FILE COVERAGE",
+                7.0,
+                Mm(margin + 2.0),
+                Mm(y - tbl_hdr_h + 1.5),
+                ctx.font_bold,
+            );
+            // Column labels
+            let col_hdrs_y = y - tbl_hdr_h;
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(0.6, 0.6, 0.6, None)));
+            let hdr_x2 = margin + col_file;
+            ctx.layer.use_text(
+                "Line%",
+                5.5,
+                Mm(hdr_x2 + 2.0),
+                Mm(col_hdrs_y - 3.5),
+                ctx.font_bold,
+            );
+            if has_fn_cov {
+                ctx.layer.use_text(
+                    "Fn%",
+                    5.5,
+                    Mm(hdr_x2 + col_lp + 2.0),
+                    Mm(col_hdrs_y - 3.5),
+                    ctx.font_bold,
+                );
+            }
+            if has_br_cov {
+                ctx.layer.use_text(
+                    "Br%",
+                    5.5,
+                    Mm(hdr_x2 + col_lp + col_fp + 2.0),
+                    Mm(col_hdrs_y - 3.5),
+                    ctx.font_bold,
+                );
+            }
+            y = col_hdrs_y - row_h;
+
+            for (ri, file) in cov_files.iter().enumerate() {
+                if y < footer_h + row_h {
+                    break; // don't overflow footer
+                }
+                let cov = file.coverage.as_ref().unwrap();
+                let bg = if ri % 2 == 0 {
+                    Rgb::new(0.975, 0.965, 0.95, None)
+                } else {
+                    Rgb::new(1.0, 1.0, 1.0, None)
+                };
+                let ry = y - row_h;
+                pdf_fill_rect(ctx.layer, margin, ry, w - 2.0 * margin, row_h, bg);
+                ctx.layer
+                    .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+                let fname = pdf_trunc(
+                    &pdf_safe_str(
+                        std::path::Path::new(&file.relative_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&file.relative_path),
+                    ),
+                    52,
+                );
+                ctx.layer
+                    .use_text(&fname, 5.5, Mm(margin + 2.0), Mm(ry + 1.5), ctx.font_reg);
+                let line_pct = format!("{:.1}%", cov.line_pct());
+                ctx.layer
+                    .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.42, 0.25, None)));
+                ctx.layer.use_text(
+                    &line_pct,
+                    5.5,
+                    Mm(hdr_x2 + 2.0),
+                    Mm(ry + 1.5),
+                    ctx.font_bold,
+                );
+                if has_fn_cov && cov.functions_found > 0 {
+                    let fp = format!("{:.1}%", cov.function_pct());
+                    ctx.layer
+                        .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.42, 0.25, None)));
+                    ctx.layer.use_text(
+                        &fp,
+                        5.5,
+                        Mm(hdr_x2 + col_lp + 2.0),
+                        Mm(ry + 1.5),
+                        ctx.font_bold,
+                    );
+                }
+                if has_br_cov && cov.branches_found > 0 {
+                    let bp = format!("{:.1}%", cov.branch_pct());
+                    ctx.layer
+                        .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.42, 0.25, None)));
+                    ctx.layer.use_text(
+                        &bp,
+                        5.5,
+                        Mm(hdr_x2 + col_lp + col_fp + 2.0),
+                        Mm(ry + 1.5),
+                        ctx.font_bold,
+                    );
+                }
+                y -= row_h;
+            }
+            let _ = col_bp; // suppress unused warning when no branch coverage
+        }
+    } else {
+        // ── No coverage detected ─────────────────────────────────────────────
+        y -= 4.0;
+        let box_h2: f32 = 14.0;
+        pdf_fill_rect(
+            ctx.layer,
+            margin,
+            y - box_h2,
+            w - 2.0 * margin,
+            box_h2,
+            Rgb::new(0.96, 0.95, 0.93, None),
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.40, 0.37, None)));
+        ctx.layer.use_text(
+            "No code coverage data detected.",
+            7.5,
+            Mm(margin + 4.0),
+            Mm(y - box_h2 + 9.0),
+            ctx.font_bold,
+        );
+        ctx.layer.use_text(
+            "Re-run with --lcov-path <coverage.info> to see per-file line, function, \
+             and branch coverage.",
+            6.5,
+            Mm(margin + 4.0),
+            Mm(y - box_h2 + 3.5),
+            ctx.font_reg,
+        );
+    }
+
+    // ── Footer ───────────────────────────────────────────────────────────────
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        0.0,
+        w,
+        footer_h,
+        Rgb::new(0.93, 0.91, 0.87, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    ctx.layer.use_text(
+        format!("oxide-sloc v{version}  \u{00b7}  AGPL-3.0-or-later"),
+        6.5,
+        Mm(margin),
+        Mm(3.0),
+        ctx.font_reg,
+    );
+    let _ = (has_fn_cov, has_br_cov);
 }
 
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
@@ -2306,6 +2689,11 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         None
     };
 
+    // Tests & Coverage page — always rendered (shows "no coverage" note when no data present).
+    pdf_render_tests_coverage_page(
+        &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, &title, version,
+    );
+
     if !run.per_file_records.is_empty() {
         pdf_render_per_file_pages(
             &doc,
@@ -2736,6 +3124,15 @@ fn file_row_view(file: &FileRecord) -> FileRow {
             .filter(|c| c.functions_found > 0)
             .map(|c| format!("{:.1}", c.function_pct()))
             .unwrap_or_default(),
+        branch_cov_pct: file
+            .coverage
+            .as_ref()
+            .filter(|c| c.branches_found > 0)
+            .map(|c| format!("{:.1}", c.branch_pct()))
+            .unwrap_or_default(),
+        cov_lines_detail: file.coverage.as_ref().map_or_else(String::new, |c| {
+            format!("{}/{}", c.lines_hit, c.lines_found)
+        }),
         status: format!("{:?}", file.status),
         status_class: format!("{:?}", file.status).to_ascii_lowercase(),
         warnings: if file.warnings.is_empty() {
@@ -3062,6 +3459,10 @@ struct FileRow {
     line_cov_pct: String,
     /// Function coverage percentage — empty string when no coverage data.
     fn_cov_pct: String,
+    /// Branch coverage percentage — empty string when no branch coverage data.
+    branch_cov_pct: String,
+    /// Lines hit out of lines found, e.g. "142/156" — empty string when no coverage data.
+    cov_lines_detail: String,
     status: String,
     status_class: String,
     warnings: String,
@@ -3857,10 +4258,26 @@ struct WarningOpportunityRow {
     .style-lang-tab{padding:4px 12px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:11px;font-weight:700;cursor:pointer;color:var(--text);transition:background .15s;}
     .style-lang-tab:hover{background:var(--surface-2);}
     .style-lang-tab.active{background:var(--oxide);color:#fff;border-color:var(--oxide);}
-    .style-sig-chip{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line);margin-right:3px;}
+    .style-sig-chip{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line);margin-right:3px;cursor:default;}
     .style-row-warn td{background:rgba(178,48,48,0.06)!important;}
     .style-row-warn td:first-child{border-left:3px solid #b23030;}
-    .style-sig-more{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:transparent;color:var(--oxide);border:1px solid var(--oxide);margin-right:3px;font-weight:700;cursor:default;}
+    .style-sig-more{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;background:transparent;color:var(--oxide);border:1px solid var(--oxide);margin-right:3px;font-weight:700;cursor:pointer;transition:background .15s,color .15s;}
+    .style-sig-more:hover{background:var(--oxide);color:#fff;}
+    .style-sig-info-btn{background:none;border:none;cursor:pointer;font-size:13px;color:var(--muted);padding:0 2px;line-height:1;vertical-align:middle;transition:color .15s;margin-left:4px;}
+    .style-sig-info-btn:hover{color:var(--oxide);}
+    .style-sig-pop{position:fixed;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 14px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:9999;min-width:200px;max-width:300px;font-size:12px;line-height:1.6;}
+    .style-sig-pop-title{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;}
+    .style-sig-pop-row{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);}
+    .style-sig-pop-row:last-child{border-bottom:none;}
+    .style-sig-pop-key{color:var(--muted);font-weight:700;white-space:nowrap;flex-shrink:0;}
+    .style-sig-pop-val{color:var(--text);}
+    .style-sig-info-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:10000;display:flex;align-items:center;justify-content:center;}
+    .style-sig-info-modal{background:var(--bg);border-radius:14px;padding:22px 26px;max-width:500px;width:92%;box-shadow:0 12px 40px rgba(0,0,0,.2);position:relative;max-height:80vh;overflow-y:auto;}
+    .style-sig-info-close{position:absolute;top:12px;right:16px;background:none;border:none;cursor:pointer;font-size:20px;color:var(--muted);line-height:1;}
+    .style-sig-info-close:hover{color:var(--text);}
+    .style-sig-info-grid{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin-top:14px;font-size:13px;}
+    .style-sig-info-name{color:var(--oxide);font-weight:700;padding:2px 0;}
+    .style-sig-info-desc{color:var(--text);padding:2px 0;}
     body.dark-theme .style-guide-track{background:var(--surface-3);}
     body.dark-theme .style-chip{background:var(--surface-2);}
     body.dark-theme .style-file-table th{background:var(--surface-3);}
@@ -3868,6 +4285,8 @@ struct WarningOpportunityRow {
     body.dark-theme .style-lang-tab{background:var(--surface-2);color:var(--text);}
     body.dark-theme .style-lang-tab.active{background:var(--oxide);color:#fff;}
     body.dark-theme .style-sig-chip{background:var(--surface-3);color:var(--muted);}
+    body.dark-theme .style-sig-pop{background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.4);}
+    body.dark-theme .style-sig-info-modal{background:var(--surface);}
 </style>
 <script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
 </head>
@@ -4064,7 +4483,7 @@ struct WarningOpportunityRow {
             <div class="delta-card-lbl">Lines removed</div>
             <div class="delta-card-tip">Code lines removed since {{ prev_scan_label }}</div>
           </div>
-          <div class="delta-card-inline">
+          <div class="delta-card-inline" data-raw="{{ delta_unmodified_lines }}">
             <div class="delta-card-val">{{ delta_unmodified_lines }}</div>
             <div class="delta-card-lbl">Unmodified lines</div>
             <div class="delta-card-tip">Code lines unchanged since {{ prev_scan_label }}</div>
@@ -4355,10 +4774,44 @@ struct WarningOpportunityRow {
               </tbody>
             </table>
           </div>
-          {% if !has_coverage_data %}
+          {% if has_coverage_data %}
+          <div class="table-shell" style="margin-top:16px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <h3 style="margin:0;font-size:14px;font-weight:800;color:var(--text);">Per-File Coverage</h3>
+              <span class="pill good" style="font-size:10px;">{{ file_rows.len() }} files with data</span>
+            </div>
+            <table data-sort-table style="min-width:560px;">
+              <thead>
+                <tr>
+                  <th data-sort-type="text">File</th>
+                  <th data-sort-type="number">Line Cov %</th>
+                  <th data-sort-type="text">Lines Hit / Found</th>
+                  {% if has_fn_coverage %}<th data-sort-type="number">Fn Cov %</th>{% endif %}
+                  {% if has_branch_coverage %}<th data-sort-type="number">Branch Cov %</th>{% endif %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in file_rows %}
+                {% if !row.line_cov_pct.is_empty() %}
+                <tr>
+                  <td class="mono" style="font-size:11px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.relative_path }}">{{ row.relative_path }}</td>
+                  <td class="num-col">{{ row.line_cov_pct }}%</td>
+                  <td class="num-col" style="font-size:11px;color:var(--muted);">{{ row.cov_lines_detail }}</td>
+                  {% if has_fn_coverage %}<td class="num-col">{% if !row.fn_cov_pct.is_empty() %}{{ row.fn_cov_pct }}%{% else %}&mdash;{% endif %}</td>{% endif %}
+                  {% if has_branch_coverage %}<td class="num-col">{% if !row.branch_cov_pct.is_empty() %}{{ row.branch_cov_pct }}%{% else %}&mdash;{% endif %}</td>{% endif %}
+                </tr>
+                {% endif %}
+                {% endfor %}
+                {% if file_rows.is_empty() %}
+                <tr class="empty-state-row"><td colspan="5">No per-file coverage data available</td></tr>
+                {% endif %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
           <div class="info-callout">
             <span class="info-callout-icon">&#x2139;&#xFE0F;</span>
-            <span>No LCOV coverage data provided. Re-run with <code>--lcov-path coverage.info</code> to see line, function, and branch coverage here.</span>
+            <span>No code coverage detected. Re-run with <code>--lcov-path coverage.info</code> to see line, function, and branch coverage here.</span>
           </div>
           {% endif %}
         </div>
@@ -4424,7 +4877,7 @@ struct WarningOpportunityRow {
                     <th data-sort-key="indent" style="width:12%;" title="Dominant indentation style detected: Tabs, 2-Space, 4-Space, 8-Space, Mixed, or Unknown. Click to sort.">Indent <span class="style-sort-ind">&#9662;</span></th>
                     <th data-sort-key="guide" style="width:20%;" title="Style guide with the highest lexical-adherence score for this file. Click a badge to open the official guide documentation. Click header to sort.">Best Match Guide <span class="style-sort-ind">&#9662;</span></th>
                     <th data-sort-key="score" style="width:10%;" title="Adherence score (0-100%) for the best-matching style guide. Higher = closer match to that guide's conventions. Lexical heuristic only — not a full parse. Click to sort.">Score <span class="style-sort-ind">&#9662;</span></th>
-                    <th style="width:13%;" title="Language-specific style signals detected in this file (e.g. quote style, indentation, naming conventions). Hover a row's cell to see the full signal list as a tooltip.">Signals</th>
+                    <th style="width:13%;" title="Language-specific style signals detected in this file. Hover a chip for its signal name. Click …N more to expand. Click ⓘ for a full glossary.">Signals <button type="button" class="style-sig-info-btn" id="sig-info-btn" aria-label="Signal glossary" title="Click to see all signal types explained">&#8505;</button></th>
                   </tr>
                 </thead>
                 <tbody id="style-file-tbody">
@@ -5706,14 +6159,14 @@ struct WarningOpportunityRow {
           +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
           +'</g>';
         bs+='<g data-kind="comment" style="cursor:pointer;">'
-          +'<rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/>'
-          +'<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
-          +'<text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
+          +'<rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm+'/>'
+          +'<rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
+          +'<text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
         bs+='<g data-kind="blank" style="cursor:pointer;">'
-          +'<rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
-          +'<rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
-          +'<text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+          +'<rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -5750,7 +6203,7 @@ struct WarningOpportunityRow {
           if (isHist) return;
           var r = getData();
           var c = clr();
-          if (wrap) wrap.style.height = Math.max(90, Math.min(432, r.sorted.length * 29 + 36)) + 'px';
+          if (wrap) wrap.style.height = Math.max(200, Math.min(432, r.sorted.length * 29 + 60)) + 'px';
           if (projChart) {
             projChart.data.labels = r.sorted.map(function(d){return d[r.lKey];});
             projChart.data.datasets[0].data = r.sorted.map(function(d){return d[r.yKey]||0;});
@@ -5942,8 +6395,8 @@ struct WarningOpportunityRow {
           var ttCm=cLT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
           var ttBl=cLT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
           s+='<g data-kind="code" style="cursor:pointer;"><rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/><rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+CX+'"'+ttC+'/><text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text></g>';
-          s+='<g data-kind="comment" style="cursor:pointer;"><rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/><rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+CG+'"'+ttCm+'/><text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text></g>';
-          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
+          s+='<g data-kind="comment" style="cursor:pointer;"><rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm+'/><rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+CG+'"'+ttCm+'/><text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text></g>';
+          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
           s+='</svg>';
           el.innerHTML=s;
           wireMixLegend(el.querySelector('svg'));
@@ -5982,7 +6435,7 @@ struct WarningOpportunityRow {
           options: {
             responsive: true, maintainAspectRatio: false,
             animation: { duration: 500, easing: 'easeOutQuart' },
-            layout: { padding: { top: 18 } },
+            layout: { padding: { top: 36 } },
             scales: {
               x: { grid: { color: c.grid }, ticks: { color: c.text },
                    title: { display: true, text: 'Files Analyzed', color: c.text } },
@@ -6036,9 +6489,21 @@ struct WarningOpportunityRow {
               }
             }
           },
-          plugins: [makeDlPlugin(function(raw, di) {
-            return SCAT_D[di] ? SCAT_D[di].lang : '';
-          }, 'bubble')]
+          plugins: [(function(){return{afterDatasetsDraw:function(chart){
+            var ctx=chart.ctx,tc=clr().text;
+            chart.data.datasets.forEach(function(ds,di){
+              var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
+              meta.data.forEach(function(el){
+                var r=(el.options&&el.options.radius)?el.options.radius:10;
+                ctx.save();ctx.textAlign='center';ctx.fillStyle=tc;
+                ctx.font='700 11px Inter,ui-sans-serif,sans-serif';ctx.textBaseline='bottom';
+                ctx.fillText(d.lang,el.x,el.y-r-14);
+                ctx.font='600 11px Inter,ui-sans-serif,sans-serif';
+                ctx.fillText(fmt(d.code),el.x,el.y-r-2);
+                ctx.restore();
+              });
+            });
+          }};})()]
         });
         ALL_CHARTS.push(chart);
       })();
@@ -6065,7 +6530,7 @@ struct WarningOpportunityRow {
           data = data.slice(0, 30);
           var c = clr();
           var col = SUB_COLS[yKey] || OX;
-          if (wrap) wrap.style.height = Math.max(90, Math.min(540, data.length * 25 + 36)) + 'px';
+          if (wrap) wrap.style.height = Math.max(200, Math.min(540, data.length * 28 + 60)) + 'px';
           if (subChart) {
             subChart.data.labels = data.map(function(d){return d.name;});
             subChart.data.datasets[0].data = data.map(function(d){return d[yKey]||0;});
@@ -6534,6 +6999,7 @@ struct WarningOpportunityRow {
               },
               options: {
                 responsive: true, maintainAspectRatio: false,
+                layout: { padding: { top: 36 } },
                 scales: {
                   x: { grid: { color: c.grid }, ticks: { color: c.text }, title: { display: true, text: 'Files Analyzed', color: c.text } },
                   y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text } }
@@ -6546,9 +7012,21 @@ struct WarningOpportunityRow {
                   }}
                 }
               },
-              plugins: [makeDlPlugin(function(raw, di) {
-                return SCAT_D[di] ? SCAT_D[di].lang : '';
-              }, 'bubble')]
+              plugins: [(function(){return{afterDatasetsDraw:function(chart){
+                var ctx=chart.ctx,tc=clr().text;
+                chart.data.datasets.forEach(function(ds,di){
+                  var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
+                  meta.data.forEach(function(el){
+                    var r=(el.options&&el.options.radius)?el.options.radius:10;
+                    ctx.save();ctx.textAlign='center';ctx.fillStyle=tc;
+                    ctx.font='700 11px Inter,ui-sans-serif,sans-serif';ctx.textBaseline='bottom';
+                    ctx.fillText(d.lang,el.x,el.y-r-14);
+                    ctx.font='600 11px Inter,ui-sans-serif,sans-serif';
+                    ctx.fillText(fmt(d.code),el.x,el.y-r-2);
+                    ctx.restore();
+                  });
+                });
+              }};})()]
             });
           });
         })();
@@ -7099,6 +7577,15 @@ struct WarningOpportunityRow {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
+  <script nonce="{{ nonce }}">
+  (function(){
+    // Format delta card unmodified-lines value with comma separators
+    Array.prototype.slice.call(document.querySelectorAll('.delta-card-inline[data-raw] .delta-card-val')).forEach(function(el){
+      var raw=parseInt(el.parentNode.getAttribute('data-raw'),10);
+      if(!isNaN(raw))el.textContent=raw.toLocaleString();
+    });
+  }());
+  </script>
   {% if has_style_data %}
   <script nonce="{{ nonce }}">
   (function(){
@@ -7262,9 +7749,41 @@ struct WarningOpportunityRow {
       var html='';
       var visible=sigs.slice(0,2);
       var rest=sigs.slice(2);
-      visible.forEach(function(s){html+='<span class="style-sig-chip">'+escH(s.v)+'</span>';});
-      if(rest.length){html+='<span class="style-sig-more" title="'+escH(allTip)+'">'+'\u22EF'+' '+rest.length+' more</span>';}
+      visible.forEach(function(s){html+='<span class="style-sig-chip" title="'+escH(s.k+': '+s.v)+'">'+escH(s.v)+'</span>';});
+      if(rest.length){
+        var encSigs=escH(JSON.stringify(sigs));
+        html+='<button type="button" class="style-sig-more" data-sigs="'+encSigs+'" onclick="showSigPop(this,event)" title="\u22EF '+rest.length+' more \u2014 click to expand">\u22EF '+rest.length+' more</button>';
+      }
       return html;
+    }
+    var _sigPop=null;
+    function showSigPop(btn,ev){
+      ev.stopPropagation();
+      if(_sigPop){var prev=_sigPop;_sigPop=null;prev.remove();if(btn._ownPop===prev)return;}
+      var sigs;try{sigs=JSON.parse(btn.getAttribute('data-sigs'));}catch(e){return;}
+      var pop=document.createElement('div');
+      pop.className='style-sig-pop';
+      pop.setAttribute('role','tooltip');
+      var inner='<div class="style-sig-pop-title">All Signals</div>';
+      sigs.forEach(function(s){
+        inner+='<div class="style-sig-pop-row"><span class="style-sig-pop-key">'+escH(s.k)+':</span><span class="style-sig-pop-val">'+escH(s.v)+'</span></div>';
+      });
+      pop.innerHTML=inner;
+      document.body.appendChild(pop);
+      _sigPop=pop;
+      btn._ownPop=pop;
+      var r=btn.getBoundingClientRect();
+      var pw=pop.offsetWidth||220;
+      var left=r.left;
+      if(left+pw>window.innerWidth-8)left=window.innerWidth-pw-8;
+      if(left<8)left=8;
+      var top=r.bottom+6;
+      if(top+(pop.offsetHeight||120)>window.innerHeight-8)top=r.top-(pop.offsetHeight||120)-6;
+      pop.style.left=left+'px';
+      pop.style.top=top+'px';
+      function dismiss(e){if(!pop.contains(e.target)){pop.remove();if(_sigPop===pop)_sigPop=null;document.removeEventListener('click',dismiss);document.removeEventListener('keydown',dismissKey);}}
+      function dismissKey(e){if(e.key==='Escape'){pop.remove();if(_sigPop===pop)_sigPop=null;document.removeEventListener('click',dismiss);document.removeEventListener('keydown',dismissKey);}}
+      setTimeout(function(){document.addEventListener('click',dismiss);document.addEventListener('keydown',dismissKey);},0);
     }
     var sftRows=[];
     var sftFilteredRows=[];
@@ -7408,7 +7927,38 @@ struct WarningOpportunityRow {
         sftJumpInput.addEventListener('keydown',function(e){if(e.key==='Enter')sftJump();});
       }
     }
-    function init(){initTabs();initStyleTable();}
+    function initSigInfoBtn(){
+      var btn=document.getElementById('sig-info-btn');
+      if(!btn)return;
+      btn.addEventListener('click',function(){
+        var overlay=document.createElement('div');
+        overlay.className='style-sig-info-overlay';
+        var GLOSSARY=[
+          ['Quote Style','Dominant string quote character used in the file (single quotes, double quotes, or mixed)'],
+          ['Indentation','Leading-whitespace style detected: Tabs, 2-Space, 4-Space, 8-Space, or Mixed'],
+          ['Brace Style','Opening brace placement: K\u0026R / Attach (same line as statement) or Allman (own line)'],
+          ['Semicolons','Whether statement-ending semicolons are present (JS/TS). \u201cNone detected\u201d means ASI-style.'],
+          ['Variable Declarations','Preferred declaration keyword: const/let vs var (JS), short := vs var (Go)'],
+          ['Function Naming','Dominant function naming convention: snake_case or CamelCase'],
+          ['Type Hints','Whether Python PEP 484 type annotations (:Type, ->Type) are used in the file'],
+          ['Wildcard Imports','Presence of import * wildcard import statements (Java/Kotlin)'],
+          ['Pointer Style','Pointer/reference alignment in C/C++: *var (name-attached) or Type* (type-attached)'],
+          ['Arrow Functions','Count of arrow function => expressions detected in JS/TS files'],
+          ['Max Line Length','Character length of the longest line found in the file'],
+          ['Error Handling','Presence of Go-style if err != nil error-checking patterns'],
+          ['Type Inference','Whether the C# var keyword is used for implicit type inference'],
+          ['Frozen String Literal','Whether the # frozen_string_literal: true pragma is present (Ruby)'],
+          ['Space Before Paren','Spacing convention before opening parentheses in control structures (C/C++)'],
+          ['Include Guard','Whether #pragma once is used as a header include guard (C/C++)']
+        ];
+        var rows='';
+        GLOSSARY.forEach(function(g){rows+='<span class="style-sig-info-name">'+escH(g[0])+'</span><span class="style-sig-info-desc">'+escH(g[1])+'</span>';});
+        overlay.innerHTML='<div class="style-sig-info-modal" role="dialog" aria-modal="true" aria-label="Signal glossary"><button type="button" class="style-sig-info-close" aria-label="Close">\u00D7</button><h3 style="margin:0 0 6px;font-size:17px;">Signal Glossary</h3><p style="color:var(--muted);font-size:13px;margin:0 0 2px;">Lexical signals detected per file. Values reflect dominant patterns in the source text.</p><div class="style-sig-info-grid">'+rows+'</div></div>';
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click',function(e){if(e.target===overlay||e.target.classList.contains('style-sig-info-close')){overlay.remove();}});
+      });
+    }
+    function init(){initTabs();initStyleTable();initSigInfoBtn();}
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
