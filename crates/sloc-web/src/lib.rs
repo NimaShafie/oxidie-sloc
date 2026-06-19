@@ -5467,6 +5467,45 @@ fn render_result_page(
         cocomo_mode_label,
         cocomo_mode_tooltip,
         complexity_alert,
+        has_coverage_data: run.summary_totals.coverage_lines_found > 0,
+        cov_line_pct: if run.summary_totals.coverage_lines_found > 0 {
+            format!(
+                "{:.1}",
+                run.summary_totals.coverage_lines_hit as f64
+                    / run.summary_totals.coverage_lines_found as f64
+                    * 100.0
+            )
+        } else {
+            String::new()
+        },
+        cov_fn_pct: if run.summary_totals.coverage_functions_found > 0 {
+            format!(
+                "{:.1}",
+                run.summary_totals.coverage_functions_hit as f64
+                    / run.summary_totals.coverage_functions_found as f64
+                    * 100.0
+            )
+        } else {
+            String::new()
+        },
+        cov_branch_pct: if run.summary_totals.coverage_branches_found > 0 {
+            format!(
+                "{:.1}",
+                run.summary_totals.coverage_branches_hit as f64
+                    / run.summary_totals.coverage_branches_found as f64
+                    * 100.0
+            )
+        } else {
+            String::new()
+        },
+        cov_lines_summary: if run.summary_totals.coverage_lines_found > 0 {
+            format!(
+                "{} / {}",
+                run.summary_totals.coverage_lines_hit, run.summary_totals.coverage_lines_found
+            )
+        } else {
+            String::new()
+        },
     };
 
     Html(
@@ -14098,6 +14137,45 @@ fn generate_offline_index(
             .to_string()
         }),
         complexity_alert: 0,
+        has_coverage_data: run.summary_totals.coverage_lines_found > 0,
+        cov_line_pct: if run.summary_totals.coverage_lines_found > 0 {
+            format!(
+                "{:.1}",
+                run.summary_totals.coverage_lines_hit as f64
+                    / run.summary_totals.coverage_lines_found as f64
+                    * 100.0
+            )
+        } else {
+            String::new()
+        },
+        cov_fn_pct: if run.summary_totals.coverage_functions_found > 0 {
+            format!(
+                "{:.1}",
+                run.summary_totals.coverage_functions_hit as f64
+                    / run.summary_totals.coverage_functions_found as f64
+                    * 100.0
+            )
+        } else {
+            String::new()
+        },
+        cov_branch_pct: if run.summary_totals.coverage_branches_found > 0 {
+            format!(
+                "{:.1}",
+                run.summary_totals.coverage_branches_hit as f64
+                    / run.summary_totals.coverage_branches_found as f64
+                    * 100.0
+            )
+        } else {
+            String::new()
+        },
+        cov_lines_summary: if run.summary_totals.coverage_lines_found > 0 {
+            format!(
+                "{} / {}",
+                run.summary_totals.coverage_lines_hit, run.summary_totals.coverage_lines_found
+            )
+        } else {
+            String::new()
+        },
     };
 
     if let Ok(html) = template.render() {
@@ -15648,7 +15726,7 @@ struct SubmoduleRow {
     .ws-mini-box-br { flex:1.5 1 0; }
     .scope-legend-row { display:inline-flex; flex-direction:row; align-items:center; flex-wrap:nowrap; gap:5px; padding:5px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:12px; flex-shrink:0; border-left:3px solid var(--line-strong); white-space:nowrap; }
     .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; }
-    .path-scope-grid { display:grid; grid-template-columns: 42% auto auto 1px auto; gap:0 8px; align-items:center; }
+    .path-scope-grid { display:grid; grid-template-columns: calc(42% - 10px) auto auto 1px auto; gap:0 8px; align-items:center; }
     #path.drag-over { background: rgba(37,99,235,0.05) !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important; }
     .path-scope-grid > input[type=text] { width:100%; min-width:0; }
     .git-source-banner { display:flex; align-items:center; gap:10px; padding:10px 14px; background:linear-gradient(135deg,rgba(124,58,237,0.07),rgba(99,40,217,0.05)); border:1.5px solid rgba(124,58,237,0.22); border-radius:9px; margin-bottom:12px; font-size:13px; color:var(--text); flex-wrap:wrap; }
@@ -15697,7 +15775,7 @@ struct SubmoduleRow {
     .side-stack { display:grid; gap: 16px; align-items:start; align-self: start; position: sticky; top: 73px; max-height: calc(100vh - 90px); overflow-y: auto; width: 244px; max-width: 244px; scrollbar-width: none; }
     .side-stack::-webkit-scrollbar { display: none; }
     .step-nav { padding: 20px 16px; }
-    .step-nav h3 { margin: 6px 4px 20px; font-size: 16px; font-weight: 850; letter-spacing: -0.01em; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+    .step-nav h3 { margin: 6px 4px 14px; font-size: 16px; font-weight: 850; letter-spacing: -0.01em; }
     .step-button { width:100%; display:flex; align-items:center; gap:10px; border:none; background:transparent; border-radius: 12px; padding: 11px 8px; color: var(--text); cursor:pointer; text-align:left; font-size:13px; font-weight:700; white-space:nowrap; transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease; animation: stepEntrance 0.3s ease both; }
     .step-button:hover { background: var(--surface-2); }
     .step-button.active { background: rgba(37,99,235,0.09); box-shadow: inset 0 0 0 1px rgba(37,99,235,0.18); color: var(--accent-2); }
@@ -15731,7 +15809,7 @@ struct SubmoduleRow {
     .step-button.done .step-num { background:rgba(34,197,94,0.16); color:#16a34a; }
     .sidebar-kbd-hint { margin:14px 4px 0; font-size:10px; color:var(--muted-2); line-height:1.55; text-align:center; display:flex; align-items:center; justify-content:center; gap:4px; }
     .sidebar-kbd-key { display:inline-flex; align-items:center; justify-content:center; padding:1px 5px; border-radius:4px; background:var(--surface-3); border:1px solid var(--line); font-size:9px; font-weight:700; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; line-height:1; }
-    .sidebar-scroll-divider { height:1px; background:var(--line); margin: 12px 4px; }
+    .sidebar-scroll-divider { height:1px; background:var(--line-strong); margin: 12px 4px; }
     .sidebar-scroll-btn { display:flex; align-items:center; justify-content:center; gap:5px; width:100%; padding:7px 10px; border-radius:9px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); font-size:11px; font-weight:700; text-decoration:none; cursor:pointer; transition:background 0.15s ease,border-color 0.15s ease,color 0.15s ease; }
     .sidebar-scroll-btn:hover { background:var(--surface-3); border-color:var(--line-strong); color:var(--text); text-decoration:none; }
     .sidebar-scroll-btn svg { width:12px; height:12px; stroke:currentColor; fill:none; stroke-width:2.5; flex-shrink:0; }
@@ -15785,7 +15863,7 @@ struct SubmoduleRow {
     .mini-button.oxide { color: var(--oxide-2); background: rgba(184,93,51,0.08); border-color: rgba(184,93,51,0.22); }
     .mini-button.primary-lite { background: rgba(37,99,235,0.08); color: var(--accent-2); border-color: rgba(37,99,235,0.20); }
     #browse-path { min-height: 38px; font-size: 13px; padding: 0 12px; }
-    #use-sample-path { min-height: 34px; font-size: 11px; padding: 0 9px; font-weight: 700; }
+    #use-sample-path { min-height: 38px; font-size: 12px; padding: 0 8px; }
     .scope-legend-row .badge { font-size: 11px; min-height: 24px; padding: 0 8px; white-space: nowrap; }
     @media (max-height: 1200px) { .workbench-strip { margin-bottom: 12px; } .wb-stats-header { padding: 8px 20px 0; } .ws-left { padding: 10px 16px 12px; } .ws-history-group { padding: 12px 20px; } }
     button.primary { background: linear-gradient(180deg, var(--accent), var(--accent-2)); color:#fff; border-color: transparent; }
@@ -20580,8 +20658,8 @@ struct ScanSetupTemplate {
     .delta-chip { font-size:12px; font-weight:700; padding:2px 8px; border-radius:999px; }
     .delta-chip.pos { background:var(--pos-bg); color:var(--pos); }
     .delta-chip.neg { background:var(--neg-bg); color:var(--neg); }
-    .delta-cards-inline { display:flex; flex-wrap:wrap; gap:8px; flex:1 1 auto; align-items:center; justify-content:center; }
-    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; min-width:92px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
+    .delta-cards-inline { display:grid; grid-template-columns:repeat(7,1fr); gap:8px; flex:1 1 auto; }
+    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
     .delta-card-inline:hover { transform:translateY(-3px); box-shadow:0 8px 20px rgba(77,44,20,0.18); z-index:10; }
     .delta-card-val { font-size:16px; font-weight:800; }
     .delta-card-val.pos { color:#1e7e34; }
@@ -20691,7 +20769,7 @@ struct ScanSetupTemplate {
     .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
-    .cocomo-box { background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:20px 22px; }
+    .cocomo-box { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:20px 22px; }
     .cocomo-box-head { display:flex; align-items:center; gap:10px; margin-bottom:16px; padding-bottom:14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
     .cocomo-box-title { font-size:18px; font-weight:750; color:var(--text); letter-spacing:-0.01em; }
     .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
@@ -21099,7 +21177,7 @@ struct ScanSetupTemplate {
               <div class="delta-card-lbl">lines removed</div>
               <div class="delta-card-tip">Code lines removed since the previous scan</div>
             </div>
-            <div class="delta-card-inline">
+            <div class="delta-card-inline" data-raw="{% if let Some(v) = delta_unmodified_lines %}{{ v }}{% endif %}">
               <div class="delta-card-val">{% if let Some(v) = delta_unmodified_lines %}{{ v }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">unmodified lines</div>
               <div class="delta-card-tip">Code lines unchanged since the previous scan</div>
@@ -21516,6 +21594,57 @@ struct ScanSetupTemplate {
     </div>
     {% endif %}
 
+    <!-- ── Tests & Coverage brief summary ────────────────────────────────── -->
+    <div class="cocomo-box" style="margin-top:24px;">
+      <div class="cocomo-box-head">
+        <span class="cocomo-box-title">Tests &amp; Coverage</span>
+        {% if has_coverage_data %}
+        <span class="cocomo-mode-pill-wrap" style="margin-left:10px;">
+          <span class="cocomo-mode-pill" style="background:rgba(34,197,94,0.14);color:#16a34a;">Coverage data present</span>
+        </span>
+        {% endif %}
+      </div>
+      <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
+        <div class="stat-chip">
+          <div class="stat-chip-val" data-fmt="{{ test_count }}">{{ test_count }}</div>
+          <div class="stat-chip-label">Test Functions</div>
+          <div class="stat-chip-tip">Lexically detected test case / function definitions</div>
+        </div>
+        <div class="stat-chip">
+          {% if has_coverage_data %}
+          <div class="stat-chip-val" style="color:#16a34a;">{{ cov_line_pct }}%</div>
+          {% else %}
+          <div class="stat-chip-val" style="color:var(--muted);">&mdash;</div>
+          {% endif %}
+          <div class="stat-chip-label">Line Coverage</div>
+          <div class="stat-chip-tip">Overall line coverage from LCOV / Cobertura / JaCoCo data</div>
+        </div>
+        <div class="stat-chip">
+          {% if !cov_fn_pct.is_empty() %}
+          <div class="stat-chip-val" style="color:#16a34a;">{{ cov_fn_pct }}%</div>
+          {% else %}
+          <div class="stat-chip-val" style="color:var(--muted);">&mdash;</div>
+          {% endif %}
+          <div class="stat-chip-label">Fn Coverage</div>
+          <div class="stat-chip-tip">Overall function coverage — requires function-level LCOV data</div>
+        </div>
+        <div class="stat-chip">
+          {% if !cov_branch_pct.is_empty() %}
+          <div class="stat-chip-val" style="color:#16a34a;">{{ cov_branch_pct }}%</div>
+          {% else %}
+          <div class="stat-chip-val" style="color:var(--muted);">&mdash;</div>
+          {% endif %}
+          <div class="stat-chip-label">Branch Coverage</div>
+          <div class="stat-chip-tip">Overall branch coverage — requires branch-level LCOV data</div>
+        </div>
+      </div>
+      {% if has_coverage_data %}
+      <div class="cocomo-box-note">Lines instrumented: <strong>{{ cov_lines_summary }}</strong> &nbsp;&middot;&nbsp; Open the full HTML report for a per-file breakdown.</div>
+      {% else %}
+      <div class="cocomo-box-note">No code coverage detected. Re-run with <code>--lcov-path &lt;coverage.info&gt;</code> to populate this section.</div>
+      {% endif %}
+    </div>
+
     <div class="section-pair">
     <section class="panel">
         <div class="toolbar-row">
@@ -21739,6 +21868,13 @@ struct ScanSetupTemplate {
             setTimeout(function(){chip.classList.remove('chip-copied-flash');},900);
           });
         });
+        // Format delta card values with data-raw using comma-separated full numbers
+        Array.prototype.slice.call(document.querySelectorAll('.delta-cards-inline .delta-card-inline[data-raw]')).forEach(function(card){
+          var raw=parseInt(card.getAttribute('data-raw'),10);
+          if(isNaN(raw))return;
+          var valEl=card.querySelector('.delta-card-val');
+          if(valEl)valEl.textContent=raw.toLocaleString();
+        });
       })();
 
       // ── Shared tooltip for all result-page charts ─────────────────────────
@@ -21875,14 +22011,14 @@ struct ScanSetupTemplate {
           +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
           +'</g>';
         bs+='<g data-kind="comment" style="cursor:pointer;">'
-          +'<rect x="'+(LW+54)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm+'/>'
-          +'<rect x="'+(LW+54)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
-          +'<text x="'+(LW+67)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
+          +'<rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm+'/>'
+          +'<rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
+          +'<text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
         bs+='<g data-kind="blank" style="cursor:pointer;">'
-          +'<rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
-          +'<rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
-          +'<text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+          +'<rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -22008,14 +22144,14 @@ struct ScanSetupTemplate {
             +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>'
             +'</g>';
           s+='<g data-kind="comment" style="cursor:pointer;">'
-            +'<rect x="'+(LW+53)+'" y="'+(ly-3)+'" width="90" height="16" fill="transparent"'+ttCm2+'/>'
-            +'<rect x="'+(LW+53)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm2+'/>'
-            +'<text x="'+(LW+66)+'" y="'+(ly+9)+'"'+ttCm2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
+            +'<rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm2+'/>'
+            +'<rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm2+'/>'
+            +'<text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
             +'</g>';
           s+='<g data-kind="blank" style="cursor:pointer;">'
-            +'<rect x="'+(LW+138)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
-            +'<rect x="'+(LW+138)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
-            +'<text x="'+(LW+151)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blanks</text>'
+            +'<rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
+            +'<rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
+            +'<text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blanks</text>'
             +'</g>';
           s+='</svg>';
           el.innerHTML=s;
@@ -22044,7 +22180,7 @@ struct ScanSetupTemplate {
         // ── Scatter: Files vs Code Lines (bubble = physical lines) ─────────────
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
-          var H=hOvr||224,PL=52,PB=36,PT=12,PR=14;
+          var H=hOvr||224,PL=52,PB=36,PT=26,PR=14;
           var W=Math.max(320,el.offsetWidth||480);
           var cW=W-PL-PR,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
@@ -22065,7 +22201,7 @@ struct ScanSetupTemplate {
             var cx2=PL+d.files/maxF*cW,cy2=PT+cH-d.code/maxC*cH;
             var r=Math.max(4,Math.sqrt(d.physical/maxP)*18);
             s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';
-            if(r>6)s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.9" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+            if(r>6){s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-13)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="currentColor" opacity="0.9" style="pointer-events:none;">'+esc(d.lang)+'</text>';s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="8" fill="currentColor" opacity="0.85" style="pointer-events:none;">'+fmt(d.code)+'</text>';}
           });
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7">Files</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
@@ -22284,23 +22420,28 @@ struct ScanSetupTemplate {
           else if(sort==='asc')subs.sort(function(a,b){return(a[key]||0)-(b[key]||0);});
           else subs.sort(function(a,b){return(a.name||'').localeCompare(b.name||'');});
           var data=[overall].concat(subs);
-          var rowH=32,bH=22,sepH=subs.length>0?14:0;
-          var SH=shOvr||Math.max(80,data.length*rowH+sepH+16);
+          var sepH=subs.length>0?14:0;
+          var naturalH=data.length*32+sepH+16;
+          var SH=shOvr||Math.max(100,naturalH);
           var svgW=Math.max(320,el.offsetWidth||480);
           var LW=116,BW=Math.max(200,svgW-LW-54);
           var maxV=Math.max.apply(null,data.map(function(d){return d[key]||0;}))||1;
           var OVERALL_COL='#6b7280';
+          var topPad=4,botPad=8;
+          var rowSlot=Math.floor((SH-topPad-botPad-sepH)/data.length);
+          var bH=Math.min(22,Math.max(10,Math.floor(rowSlot*0.65)));
           var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
-          var yOff=4;
+          var yOff=topPad;
           data.forEach(function(d,i){
-            var v=d[key]||0,bw=v/maxV*BW,y=yOff;
+            var v=d[key]||0,bw=v/maxV*BW;
+            var y=yOff+Math.floor((rowSlot-bH)/2);
             var col=d.isOverall?OVERALL_COL:COLS[(i-1)%COLS.length];
             var label=d.name||d.path||'?';
-            s+='<text x="'+(LW-5)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor"'+(d.isOverall?' font-weight="700"':'')+'>'+esc(label)+'</text>';
+            s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor"'+(d.isOverall?' font-weight="700"':'')+'>'+esc(label)+'</text>';
             if(bw>0.5)s+='<rect'+tt(label,fmt(v))+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+col+'" rx="3"/>';
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
-            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+fmt(v)+'</text>';
-            yOff+=rowH;
+            s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+fmt(v)+'</text>';
+            yOff+=rowSlot;
             if(d.isOverall&&subs.length>0){
               yOff+=sepH;
             }
@@ -22772,6 +22913,16 @@ struct ResultTemplate {
     cocomo_mode_tooltip: String,
     /// Per-file complexity alert threshold. 0 = off (no highlighting).
     complexity_alert: u32,
+    /// Whether any file has coverage data attached.
+    has_coverage_data: bool,
+    /// Overall line coverage percentage string, e.g. "87.3" — empty if no data.
+    cov_line_pct: String,
+    /// Overall function coverage percentage string — empty if no data.
+    cov_fn_pct: String,
+    /// Overall branch coverage percentage string — empty if no branch data.
+    cov_branch_pct: String,
+    /// Lines hit / lines found summary, e.g. "1 247 / 1 432" — empty if no data.
+    cov_lines_summary: String,
 }
 
 #[derive(Template)]
