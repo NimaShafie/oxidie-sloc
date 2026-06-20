@@ -1064,28 +1064,8 @@ fn pdf_render_page1_header(
         Mm(title_text_y),
         ctx.font_bold,
     );
-    {
-        let mut git_parts: Vec<String> = vec![];
-        if let Some(ref b) = run.git_branch {
-            git_parts.push(format!("Branch: {}", pdf_safe_str(b)));
-        }
-        if let Some(ref c) = run.git_commit_short {
-            git_parts.push(format!("Commit: {}", pdf_safe_str(c)));
-        }
-        if let Some(ref t) = run.git_nearest_tag {
-            git_parts.push(format!("Tag: {}", pdf_safe_str(t)));
-        }
-        if !git_parts.is_empty() {
-            ctx.layer
-                .set_fill_color(Color::Rgb(Rgb::new(0.35, 0.45, 0.35, None)));
-            let git_str = pdf_trunc(&git_parts.join("  \u{00B7}  "), 70);
-            // Right-align: full advance at 7.5pt Helvetica (~1.45 mm/char avg) + 3 mm safety.
-            let git_x = (ctx.w - ctx.margin - 3.0 - git_str.len() as f32 * 1.45).max(ctx.w / 2.0);
-            ctx.layer
-                .use_text(git_str, 7.5, Mm(git_x), Mm(title_text_y), ctx.font_reg);
-        }
-    }
     let roots_text_y = title_text_y - 5.0;
+    // ── Left side: project path ──────────────────────────────────────────────
     let roots: String = run
         .input_roots
         .iter()
@@ -1101,7 +1081,20 @@ fn pdf_render_page1_header(
         Mm(roots_text_y),
         ctx.font_reg,
     );
+    // ── Right side: git + environment metadata in a grouped box ─────────────
     {
+        let mut git_parts: Vec<String> = vec![];
+        if let Some(ref b) = run.git_branch {
+            git_parts.push(format!("Branch: {}", pdf_safe_str(b)));
+        }
+        if let Some(ref c) = run.git_commit_short {
+            git_parts.push(format!("Commit: {}", pdf_safe_str(c)));
+        }
+        if let Some(ref t) = run.git_nearest_tag {
+            git_parts.push(format!("Tag: {}", pdf_safe_str(t)));
+        }
+        let git_str = pdf_trunc(&git_parts.join("  \u{00B7}  "), 70);
+
         let initiator = run
             .environment
             .ci_name
@@ -1117,10 +1110,65 @@ fn pdf_render_page1_header(
             mode_label,
         );
         let env_trunc = pdf_trunc(&env_str, 100);
-        // Right-align: full advance at 6.5pt Helvetica (~1.26 mm/char avg) + 3 mm safety.
-        let env_x = (ctx.w - ctx.margin - 3.0 - env_trunc.len() as f32 * 1.26).max(ctx.w / 2.0);
+
+        // Shared right anchor — 6 mm from margin so the longest token never clips.
+        let right_anchor = ctx.w - ctx.margin - 6.0;
+        // Width estimates from Helvetica metrics: 7.5 pt avg advance ~1.15 mm/char (55 mm / 48 ch);
+        // 6.5 pt avg advance ~1.00 mm/char (73 mm / 74 ch). Both end at the same right_anchor.
+        let git_w = git_str.len() as f32 * 1.15;
+        let env_w = env_trunc.len() as f32 * 1.00;
+        let max_w = git_w.max(env_w);
+
+        // Background pill with 0.6 mm simulated border for visual grouping.
+        let pad_h: f32 = 3.5;
+        let pad_v: f32 = 1.8;
+        let box_left = (right_anchor - max_w - pad_h).max(ctx.w / 2.0 - pad_h);
+        let box_right = right_anchor + pad_h;
+        let box_bw = box_right - box_left;
+        let box_bot = roots_text_y - pad_v;
+        let box_top = title_text_y + pad_v + 1.5;
+        let box_bh = box_top - box_bot;
+        pdf_fill_rect(
+            ctx.layer,
+            box_left - 0.6,
+            box_bot - 0.6,
+            box_bw + 1.2,
+            box_bh + 1.2,
+            Rgb::new(0.80, 0.75, 0.68, None),
+        );
+        pdf_fill_rect(
+            ctx.layer,
+            box_left,
+            box_bot,
+            box_bw,
+            box_bh,
+            Rgb::new(0.97, 0.95, 0.92, None),
+        );
+
+        // Git line — right-aligned to shared anchor, dark-green bold
+        if !git_str.is_empty() {
+            let git_x = (right_anchor - git_w).max(box_left + 2.0);
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(0.25, 0.42, 0.25, None)));
+            ctx.layer.use_text(
+                git_str.as_str(),
+                7.5,
+                Mm(git_x),
+                Mm(title_text_y),
+                ctx.font_bold,
+            );
+        }
+        // Env line — same right anchor so "Source: …" right-edge aligns with "Tag: …" above
+        let env_x = (right_anchor - env_w).max(box_left + 2.0);
         ctx.layer
-            .use_text(env_trunc, 6.5, Mm(env_x), Mm(roots_text_y), ctx.font_reg);
+            .set_fill_color(Color::Rgb(Rgb::new(0.38, 0.38, 0.38, None)));
+        ctx.layer.use_text(
+            env_trunc.as_str(),
+            6.5,
+            Mm(env_x),
+            Mm(roots_text_y),
+            ctx.font_reg,
+        );
     }
     roots_text_y
 }
@@ -1476,111 +1524,72 @@ fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
     );
 }
 
-/// Render a dedicated "TESTS & COVERAGE" page. Always called — shows a "No code coverage
-/// detected" note when no LCOV/Cobertura data is present, or a full metrics block + per-file
-/// table when coverage data exists.
+/// Render Tests & Coverage content **inline** on an existing page, starting at `y_start`.
+/// Does NOT create a new page, draw a mini-header, or draw a footer — those are the caller's
+/// responsibility. Returns the Y position immediately below the last rendered element.
 #[allow(
     clippy::cast_precision_loss,
     clippy::suboptimal_flops,
-    clippy::too_many_lines,
-    clippy::too_many_arguments
+    clippy::too_many_lines
 )]
-fn pdf_render_tests_coverage_page(
-    doc: &printpdf::PdfDocumentReference,
-    font_reg: &printpdf::IndirectFontRef,
-    font_bold: &printpdf::IndirectFontRef,
-    run: &AnalysisRun,
-    w: f32,
-    h: f32,
-    margin: f32,
-    footer_h: f32,
-    title: &str,
-    version: &str,
-) {
+fn pdf_render_tc_inline(ctx: &PdfCtx<'_>, run: &AnalysisRun, y_start: f32, footer_h: f32) -> f32 {
     use printpdf::{Color, Mm, Rgb};
 
     let has_cov = run.summary_totals.coverage_lines_found > 0;
     let has_fn_cov = run.summary_totals.coverage_functions_found > 0;
     let has_br_cov = run.summary_totals.coverage_branches_found > 0;
+    let gap: f32 = 4.0;
+    let row_h = ctx.row_h;
+    let tbl_hdr_h = ctx.tbl_hdr_h;
+    let margin = ctx.margin;
+    let w = ctx.w;
+    let tbl_w = w - 2.0 * margin;
 
-    let (tc_page, tc_layer_idx) = doc.add_page(Mm(w), Mm(h), "Tests & Coverage");
-    let layer = doc.get_page(tc_page).get_layer(tc_layer_idx);
-
-    let row_h: f32 = 5.5;
-    let tbl_hdr_h: f32 = 6.0;
-    let ctx = PdfCtx {
-        layer: &layer,
-        font_reg,
-        font_bold,
-        w,
-        margin,
-        row_h,
-        tbl_hdr_h,
-    };
-
-    // ── Mini header bar ──────────────────────────────────────────────────────
-    let hdr_h: f32 = 8.0;
+    // ── TESTS & COVERAGE section title bar ──────────────────────────────────
+    let mut y = y_start;
     pdf_fill_rect(
         ctx.layer,
-        0.0,
-        h - hdr_h,
-        w,
-        hdr_h,
+        margin,
+        y - tbl_hdr_h,
+        tbl_w,
+        tbl_hdr_h,
         Rgb::new(0.098, 0.11, 0.15, None),
     );
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer
-        .use_text("oxide-sloc", 9.0, Mm(margin), Mm(h - 5.5), ctx.font_bold);
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
     ctx.layer.use_text(
-        pdf_trunc(&pdf_safe_str(title), 55),
-        7.5,
-        Mm(46.0),
-        Mm(h - 5.5),
-        ctx.font_reg,
+        "TESTS & COVERAGE",
+        7.0,
+        Mm(margin + 2.0),
+        Mm(y - tbl_hdr_h + 1.5),
+        ctx.font_bold,
     );
-
-    // ── Section title ────────────────────────────────────────────────────────
-    let mut y = h - hdr_h - 7.0;
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
-    ctx.layer
-        .use_text("TESTS & COVERAGE", 9.5, Mm(margin), Mm(y), ctx.font_bold);
+    y -= tbl_hdr_h + 4.0;
 
     // ── Summary stat boxes (4 across) ───────────────────────────────────────
-    y -= 2.0;
-    let gap: f32 = 4.0;
-    let box_h: f32 = 16.0;
+    let box_h: f32 = 15.0;
     let box_w = (w - 2.0 * margin - 3.0 * gap) / 4.0;
-
-    let boxes: [(&str, String); 4] = [
-        (
-            "Test Functions",
-            pdf_fmt_full(run.summary_totals.test_count),
-        ),
-        (
-            "Test Assertions",
-            pdf_fmt_full(run.summary_totals.test_assertion_count),
-        ),
-        (
-            "Test Suites",
-            pdf_fmt_full(run.summary_totals.test_suite_count),
-        ),
-        (
-            "Line Coverage",
-            if has_cov {
-                let pct = run.summary_totals.coverage_lines_hit as f64
-                    / run.summary_totals.coverage_lines_found as f64
-                    * 100.0;
-                format!("{pct:.1}%")
-            } else {
-                "\u{2014}".to_string()
-            },
-        ),
+    let line_cov_str = if has_cov {
+        let pct = run.summary_totals.coverage_lines_hit as f64
+            / run.summary_totals.coverage_lines_found as f64
+            * 100.0;
+        format!("{pct:.1}%")
+    } else {
+        "\u{2014}".to_string()
+    };
+    let box_vals: [String; 4] = [
+        pdf_fmt_full(run.summary_totals.test_count),
+        pdf_fmt_full(run.summary_totals.test_assertion_count),
+        pdf_fmt_full(run.summary_totals.test_suite_count),
+        line_cov_str,
     ];
-    for (i, (label, val)) in boxes.iter().enumerate() {
+    let box_labels: [&str; 4] = [
+        "Test Functions",
+        "Test Assertions",
+        "Test Suites",
+        "Line Coverage",
+    ];
+    for (i, (label, val)) in box_labels.iter().zip(box_vals.iter()).enumerate() {
         let bx = margin + i as f32 * (box_w + gap);
         let by = y - box_h;
         pdf_fill_rect(
@@ -1593,19 +1602,131 @@ fn pdf_render_tests_coverage_page(
         );
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.60, 0.40, 0.22, None)));
-        ctx.layer.use_text(
-            val.as_str(),
-            10.0,
-            Mm(bx + 3.0),
-            Mm(by + 8.0),
-            ctx.font_bold,
-        );
+        ctx.layer
+            .use_text(val.as_str(), 9.5, Mm(bx + 3.0), Mm(by + 7.5), ctx.font_bold);
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.50, 0.44, 0.40, None)));
         ctx.layer
-            .use_text(*label, 6.0, Mm(bx + 3.0), Mm(by + 2.5), ctx.font_reg);
+            .use_text(*label, 5.5, Mm(bx + 3.0), Mm(by + 2.0), ctx.font_reg);
     }
-    y -= box_h + 5.0;
+    y -= box_h + 4.0;
+
+    // ── SUBMODULES table — full page width, proportional columns ────────────
+    let subs = &run.submodule_summaries;
+    if !subs.is_empty() {
+        let col_name = tbl_w * 0.40;
+        let rem = tbl_w - col_name;
+        let col_files = rem * 0.15;
+        let col_code = rem * 0.20;
+        let col_tests = rem * 0.20;
+        let col_assert = rem * 0.20;
+        let col_cov = rem - col_files - col_code - col_tests - col_assert;
+
+        let cx_files = margin + col_name;
+        let cx_code = cx_files + col_files;
+        let cx_tests = cx_code + col_code;
+        let cx_assert = cx_tests + col_tests;
+        let cx_cov = cx_assert + col_assert;
+
+        pdf_fill_rect(
+            ctx.layer,
+            margin,
+            y - tbl_hdr_h,
+            tbl_w,
+            tbl_hdr_h,
+            Rgb::new(0.098, 0.11, 0.15, None),
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+        ctx.layer.use_text(
+            "SUBMODULES",
+            7.0,
+            Mm(margin + 2.0),
+            Mm(y - tbl_hdr_h + 1.5),
+            ctx.font_bold,
+        );
+        y -= tbl_hdr_h;
+
+        pdf_fill_rect(
+            ctx.layer,
+            margin,
+            y - row_h,
+            tbl_w,
+            row_h,
+            Rgb::new(0.25, 0.27, 0.32, None),
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.88, 0.88, 0.88, None)));
+        for (lbl, x) in &[
+            ("Submodule", margin + 2.0),
+            ("Files", cx_files + 2.0),
+            ("Code Lines", cx_code + 2.0),
+            ("Test Functions", cx_tests + 2.0),
+            ("Assertions", cx_assert + 2.0),
+            ("Line Coverage %", cx_cov + 2.0),
+        ] {
+            ctx.layer
+                .use_text(*lbl, 5.5, Mm(*x), Mm(y - row_h + 1.5), ctx.font_bold);
+        }
+        y -= row_h;
+
+        for (ri, sub) in subs.iter().enumerate() {
+            if y < footer_h + row_h {
+                break;
+            }
+            let sub_tests: u64 = sub.language_summaries.iter().map(|l| l.test_count).sum();
+            let sub_assert: u64 = sub
+                .language_summaries
+                .iter()
+                .map(|l| l.test_assertion_count)
+                .sum();
+            let sub_cov_hit: u64 = sub
+                .language_summaries
+                .iter()
+                .map(|l| l.coverage_lines_hit)
+                .sum();
+            let sub_cov_found: u64 = sub
+                .language_summaries
+                .iter()
+                .map(|l| l.coverage_lines_found)
+                .sum();
+            let sub_cov_str = if sub_cov_found > 0 {
+                format!("{:.1}%", sub_cov_hit as f64 / sub_cov_found as f64 * 100.0)
+            } else {
+                "\u{2014}".to_string()
+            };
+
+            let bg = if ri % 2 == 0 {
+                Rgb::new(0.975, 0.965, 0.95, None)
+            } else {
+                Rgb::new(1.0, 1.0, 1.0, None)
+            };
+            let ry = y - row_h;
+            pdf_fill_rect(ctx.layer, margin, ry, tbl_w, row_h, bg);
+            ctx.layer
+                .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+            ctx.layer.use_text(
+                pdf_trunc(&pdf_safe_str(&sub.name), 40),
+                5.5,
+                Mm(margin + 2.0),
+                Mm(ry + 1.5),
+                ctx.font_bold,
+            );
+            for (val, x) in &[
+                (pdf_fmt_full(sub.files_analyzed), cx_files + 2.0),
+                (pdf_fmt_full(sub.code_lines), cx_code + 2.0),
+                (pdf_fmt_full(sub_tests), cx_tests + 2.0),
+                (pdf_fmt_full(sub_assert), cx_assert + 2.0),
+                (sub_cov_str, cx_cov + 2.0),
+            ] {
+                ctx.layer
+                    .use_text(val.as_str(), 5.5, Mm(*x), Mm(ry + 1.5), ctx.font_reg);
+            }
+            y -= row_h;
+        }
+        y -= 3.0;
+        let _ = col_cov;
+    }
 
     // ── Coverage gauges (line, fn, branch) ──────────────────────────────────
     if has_cov {
@@ -1628,6 +1749,7 @@ fn pdf_render_tests_coverage_page(
         ];
         let visible: Vec<_> = gauges.iter().filter(|(_, _, found)| *found > 0).collect();
         let count = visible.len() as f32;
+        let gauge_h: f32 = 14.0;
         let gauge_w = if count > 0.0 {
             (w - 2.0 * margin - (count - 1.0) * gap) / count
         } else {
@@ -1638,13 +1760,13 @@ fn pdf_render_tests_coverage_page(
             let pct = *hit as f64 / *found as f64 * 100.0;
             let pct_str = format!("{pct:.1}%");
             let bar_fill = (gauge_w - 6.0) * (pct as f32 / 100.0);
-            let gy = y - 14.0;
+            let gy = y - gauge_h;
             pdf_fill_rect(
                 ctx.layer,
                 gx,
                 gy,
                 gauge_w,
-                14.0,
+                gauge_h,
                 Rgb::new(0.975, 0.965, 0.95, None),
             );
             ctx.layer
@@ -1655,7 +1777,6 @@ fn pdf_render_tests_coverage_page(
                 .set_fill_color(Color::Rgb(Rgb::new(0.20, 0.55, 0.35, None)));
             ctx.layer
                 .use_text(&pct_str, 8.0, Mm(gx + 2.0), Mm(gy + 4.5), ctx.font_bold);
-            // gauge track (light)
             pdf_fill_rect(
                 ctx.layer,
                 gx + 3.0,
@@ -1664,7 +1785,6 @@ fn pdf_render_tests_coverage_page(
                 2.5,
                 Rgb::new(0.86, 0.84, 0.80, None),
             );
-            // gauge fill (green)
             if bar_fill > 0.0 {
                 pdf_fill_rect(
                     ctx.layer,
@@ -1677,23 +1797,20 @@ fn pdf_render_tests_coverage_page(
             }
         }
         if !visible.is_empty() {
-            y -= 14.0 + 5.0;
+            y -= gauge_h + 5.0;
         }
 
-        // ── Per-file coverage table ──────────────────────────────────────────
         let cov_files: Vec<_> = run
             .per_file_records
             .iter()
             .filter(|r| r.coverage.is_some())
             .collect();
-
         if !cov_files.is_empty() {
-            // Table header
-            let col_file = w - 2.0 * margin - 44.0;
-            let col_lp = 22.0;
-            let col_fp = if has_fn_cov { 22.0 } else { 0.0 };
-            let col_bp = if has_br_cov { 22.0 } else { 0.0 };
-            // Section sub-header
+            let col_fp: f32 = if has_fn_cov { 22.0 } else { 0.0 };
+            let col_bp: f32 = if has_br_cov { 22.0 } else { 0.0 };
+            let col_file_w = w - 2.0 * margin - 22.0 - col_fp - col_bp;
+            let hdr_x2 = margin + col_file_w;
+
             y -= 3.0;
             pdf_fill_rect(
                 ctx.layer,
@@ -1712,11 +1829,9 @@ fn pdf_render_tests_coverage_page(
                 Mm(y - tbl_hdr_h + 1.5),
                 ctx.font_bold,
             );
-            // Column labels
             let col_hdrs_y = y - tbl_hdr_h;
             ctx.layer
-                .set_fill_color(Color::Rgb(Rgb::new(0.6, 0.6, 0.6, None)));
-            let hdr_x2 = margin + col_file;
+                .set_fill_color(Color::Rgb(Rgb::new(0.55, 0.55, 0.55, None)));
             ctx.layer.use_text(
                 "Line%",
                 5.5,
@@ -1728,7 +1843,7 @@ fn pdf_render_tests_coverage_page(
                 ctx.layer.use_text(
                     "Fn%",
                     5.5,
-                    Mm(hdr_x2 + col_lp + 2.0),
+                    Mm(hdr_x2 + 22.0 + 2.0),
                     Mm(col_hdrs_y - 3.5),
                     ctx.font_bold,
                 );
@@ -1737,7 +1852,7 @@ fn pdf_render_tests_coverage_page(
                 ctx.layer.use_text(
                     "Br%",
                     5.5,
-                    Mm(hdr_x2 + col_lp + col_fp + 2.0),
+                    Mm(hdr_x2 + 22.0 + col_fp + 2.0),
                     Mm(col_hdrs_y - 3.5),
                     ctx.font_bold,
                 );
@@ -1746,7 +1861,7 @@ fn pdf_render_tests_coverage_page(
 
             for (ri, file) in cov_files.iter().enumerate() {
                 if y < footer_h + row_h {
-                    break; // don't overflow footer
+                    break;
                 }
                 let cov = file.coverage.as_ref().unwrap();
                 let bg = if ri % 2 == 0 {
@@ -1769,76 +1884,124 @@ fn pdf_render_tests_coverage_page(
                 );
                 ctx.layer
                     .use_text(&fname, 5.5, Mm(margin + 2.0), Mm(ry + 1.5), ctx.font_reg);
-                let line_pct = format!("{:.1}%", cov.line_pct());
                 ctx.layer
                     .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.42, 0.25, None)));
                 ctx.layer.use_text(
-                    &line_pct,
+                    format!("{:.1}%", cov.line_pct()),
                     5.5,
                     Mm(hdr_x2 + 2.0),
                     Mm(ry + 1.5),
                     ctx.font_bold,
                 );
                 if has_fn_cov && cov.functions_found > 0 {
-                    let fp = format!("{:.1}%", cov.function_pct());
-                    ctx.layer
-                        .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.42, 0.25, None)));
                     ctx.layer.use_text(
-                        &fp,
+                        format!("{:.1}%", cov.function_pct()),
                         5.5,
-                        Mm(hdr_x2 + col_lp + 2.0),
+                        Mm(hdr_x2 + 22.0 + 2.0),
                         Mm(ry + 1.5),
                         ctx.font_bold,
                     );
                 }
                 if has_br_cov && cov.branches_found > 0 {
-                    let bp = format!("{:.1}%", cov.branch_pct());
-                    ctx.layer
-                        .set_fill_color(Color::Rgb(Rgb::new(0.10, 0.42, 0.25, None)));
                     ctx.layer.use_text(
-                        &bp,
+                        format!("{:.1}%", cov.branch_pct()),
                         5.5,
-                        Mm(hdr_x2 + col_lp + col_fp + 2.0),
+                        Mm(hdr_x2 + 22.0 + col_fp + 2.0),
                         Mm(ry + 1.5),
                         ctx.font_bold,
                     );
                 }
                 y -= row_h;
             }
-            let _ = col_bp; // suppress unused warning when no branch coverage
+            let _ = col_bp;
         }
     } else {
-        // ── No coverage detected ─────────────────────────────────────────────
-        y -= 4.0;
-        let box_h2: f32 = 14.0;
+        let note_h: f32 = 12.0;
         pdf_fill_rect(
             ctx.layer,
             margin,
-            y - box_h2,
+            y - note_h,
             w - 2.0 * margin,
-            box_h2,
+            note_h,
             Rgb::new(0.96, 0.95, 0.93, None),
         );
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.40, 0.37, None)));
         ctx.layer.use_text(
             "No code coverage data detected.",
-            7.5,
+            7.0,
             Mm(margin + 4.0),
-            Mm(y - box_h2 + 9.0),
+            Mm(y - note_h + 7.0),
             ctx.font_bold,
         );
         ctx.layer.use_text(
-            "Re-run with --lcov-path <coverage.info> to see per-file line, function, \
-             and branch coverage.",
-            6.5,
-            Mm(margin + 4.0),
-            Mm(y - box_h2 + 3.5),
-            ctx.font_reg,
+            "Re-run with --lcov-path <file.info> to see per-file line, function, and branch coverage.",
+            6.0, Mm(margin + 4.0), Mm(y - note_h + 2.5), ctx.font_reg,
         );
+        y -= note_h;
     }
 
-    // ── Footer ───────────────────────────────────────────────────────────────
+    let _ = (has_fn_cov, has_br_cov);
+    y
+}
+
+/// Create a dedicated "Tests & Coverage" page, render its content inline, and return the
+/// `(page, layer, y_bottom)` tuple so `pdf_render_per_file_pages` can continue on this page.
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+fn pdf_render_tests_coverage_page(
+    doc: &printpdf::PdfDocumentReference,
+    font_reg: &printpdf::IndirectFontRef,
+    font_bold: &printpdf::IndirectFontRef,
+    run: &AnalysisRun,
+    w: f32,
+    h: f32,
+    margin: f32,
+    footer_h: f32,
+    title: &str,
+    version: &str,
+) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
+    use printpdf::{Color, Mm, Rgb};
+    const HDR_H: f32 = 8.0;
+
+    let (tc_page, tc_layer_idx) = doc.add_page(Mm(w), Mm(h), "Tests & Coverage");
+    let layer = doc.get_page(tc_page).get_layer(tc_layer_idx);
+    let ctx = PdfCtx {
+        layer: &layer,
+        font_reg,
+        font_bold,
+        w,
+        margin,
+        row_h: 5.5,
+        tbl_hdr_h: 6.0,
+    };
+
+    // Mini header bar
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        h - HDR_H,
+        w,
+        HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer
+        .use_text("oxide-sloc", 9.0, Mm(margin), Mm(h - 5.5), ctx.font_bold);
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    ctx.layer.use_text(
+        pdf_trunc(&pdf_safe_str(title), 55),
+        7.5,
+        Mm(46.0),
+        Mm(h - 5.5),
+        ctx.font_reg,
+    );
+
+    // T&C content inline
+    let tc_bottom = pdf_render_tc_inline(&ctx, run, h - HDR_H - 4.0, footer_h);
+
+    // Footer
     pdf_fill_rect(
         ctx.layer,
         0.0,
@@ -1856,7 +2019,8 @@ fn pdf_render_tests_coverage_page(
         Mm(3.0),
         ctx.font_reg,
     );
-    let _ = (has_fn_cov, has_br_cov);
+
+    (tc_page, tc_layer_idx, tc_bottom - 3.0)
 }
 
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
@@ -2155,48 +2319,47 @@ fn pdf_render_per_file_pages(
             banner,
         );
 
-        // Sub-bar — rendered on every page including the continuation page.
+        // Sub-bar — dark navy, matching TESTS & COVERAGE / SUBMODULES section headers.
         pdf_fill_rect(
             &pf_layer,
-            0.0,
+            margin,
             sub_top,
-            w,
+            w - 2.0 * margin,
             PDF_PERFILE_SUB_H,
-            Rgb::new(0.94, 0.93, 0.91, None),
+            Rgb::new(0.098, 0.11, 0.15, None),
+        );
+        pf_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+        pf_layer.use_text(
+            "PER-FILE DETAIL",
+            7.0,
+            Mm(margin + 2.0),
+            Mm(sub_top + 1.5),
+            font_bold,
         );
         if use_continuation {
-            // The COCOMO page header doesn't say "Per-File Detail", so label this section
-            // clearly on the left and push context (title + count + timestamp) to the right.
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.098, 0.11, 0.15, None)));
-            pf_layer.use_text(
-                "PER-FILE DETAIL",
-                7.5,
-                Mm(margin),
-                Mm(sub_top + 1.0),
-                font_bold,
-            );
+            // On the continuation page show the project context on the right.
             let right = format!(
                 "{}  |  {} files  |  {ts}",
                 pdf_trunc(title, 30),
                 total_files
             );
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
-            let right_x = (w - margin - right.len() as f32 * 1.15).max(margin + 80.0);
-            pf_layer.use_text(right, 5.5, Mm(right_x), Mm(sub_top + 1.0), font_reg);
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+            let right_x = (w - margin - right.len() as f32 * 1.05).max(margin + 80.0);
+            pf_layer.use_text(right, 5.5, Mm(right_x), Mm(sub_top + 1.5), font_reg);
         } else {
-            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.3, 0.3, 0.3, None)));
+            pf_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
             pf_layer.use_text(
-                pdf_trunc(title, 55),
-                6.5,
-                Mm(margin),
-                Mm(sub_top + 1.0),
+                pdf_trunc(title, 45),
+                5.5,
+                Mm(margin + 60.0),
+                Mm(sub_top + 1.5),
                 font_reg,
             );
             pf_layer.use_text(
                 format!("{total_files} files  |  {ts}"),
-                6.5,
-                Mm(w - 80.0),
-                Mm(sub_top + 1.0),
+                5.5,
+                Mm(w - margin - 55.0),
+                Mm(sub_top + 1.5),
                 font_reg,
             );
         }
@@ -2665,8 +2828,9 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             &font_reg,
         );
         let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
-        // Footer on COCOMO page; if per-file records exist the per-file renderer re-draws
-        // this area with its richer footer (adds Run ID on the right), which is fine.
+        // Render T&C inline on the same page immediately after COCOMO — no blank gap.
+        let tc_bottom = pdf_render_tc_inline(&c2_ctx, run, cocomo_bottom - 4.0, FOOTER_H);
+        // Footer (per-file renderer will overdraw with its richer version if it starts here).
         pdf_fill_rect(
             &c2_layer,
             0.0,
@@ -2683,18 +2847,18 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             PdfMm(3.0),
             &font_reg,
         );
-        // Leave 3 mm of breathing room below the COCOMO note before the per-file sub-bar.
-        Some((c2_page, c2_layer_idx, cocomo_bottom - 3.0))
+        // Pass the Y below T&C content so per-file can continue on this page without a gap.
+        Some((c2_page, c2_layer_idx, tc_bottom - 3.0))
     } else {
-        None
+        // No COCOMO on its own page — create a dedicated T&C page and start per-file from it.
+        let (tc_page, tc_layer, tc_y) = pdf_render_tests_coverage_page(
+            &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, &title, version,
+        );
+        Some((tc_page, tc_layer, tc_y))
     };
 
-    // Tests & Coverage page — always rendered (shows "no coverage" note when no data present).
-    pdf_render_tests_coverage_page(
-        &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, &title, version,
-    );
-
     if !run.per_file_records.is_empty() {
+        // Per-file continues on the same page as T&C (or COCOMO+T&C) — no blank page between.
         pdf_render_per_file_pages(
             &doc,
             &font_reg,
@@ -4287,6 +4451,12 @@ struct WarningOpportunityRow {
     body.dark-theme .style-sig-chip{background:var(--surface-3);color:var(--muted);}
     body.dark-theme .style-sig-pop{background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.4);}
     body.dark-theme .style-sig-info-modal{background:var(--surface);}
+    .style-chip-tip{position:fixed;background:rgba(28,18,8,0.93);color:#f0ebe4;padding:9px 13px;border-radius:9px;font-size:12px;line-height:1.65;pointer-events:none;z-index:9998;opacity:0;transition:opacity .1s;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;min-width:160px;max-width:300px;}
+    .style-chip-tip.visible{opacity:1;}
+    .style-chip-tip-hd{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(240,235,228,.5);margin-bottom:5px;}
+    .style-chip-tip-row{display:flex;gap:8px;align-items:baseline;}
+    .style-chip-tip-k{color:#e07b3a;font-weight:700;white-space:nowrap;flex-shrink:0;}
+    .style-chip-tip-v{color:#f0ebe4;}
 </style>
 <script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
 </head>
@@ -4463,13 +4633,13 @@ struct WarningOpportunityRow {
             {% endif %}
           </div>
           <div class="prev-scan-summary">
-            Code before: <b>{{ prev_code_lines }}</b>
+            Code before: <b data-raw="{{ prev_code_lines }}">{{ prev_code_lines }}</b>
             &nbsp;&rarr;&nbsp;
-            Code now: <b>{{ run.summary_totals.code_lines }}</b>
+            Code now: <b data-raw="{{ run.summary_totals.code_lines }}">{{ run.summary_totals.code_lines }}</b>
             &nbsp;&#xb7;&nbsp;
-            <span class="{% if delta_code_added > 0 %}delta-up{% else %}delta-neutral-text{% endif %}">+{{ delta_code_added }} added</span>
+            <span class="{% if delta_code_added > 0 %}delta-up{% else %}delta-neutral-text{% endif %}">+<span data-raw="{{ delta_code_added }}">{{ delta_code_added }}</span> added</span>
             &nbsp;
-            <span class="{% if delta_code_removed > 0 %}delta-down{% else %}delta-neutral-text{% endif %}">&minus;{{ delta_code_removed }} removed</span>
+            <span class="{% if delta_code_removed > 0 %}delta-down{% else %}delta-neutral-text{% endif %}">&minus;<span data-raw="{{ delta_code_removed }}">{{ delta_code_removed }}</span> removed</span>
           </div>
         </div>
         <div class="delta-card-row">
@@ -4877,7 +5047,7 @@ struct WarningOpportunityRow {
                     <th data-sort-key="indent" style="width:12%;" title="Dominant indentation style detected: Tabs, 2-Space, 4-Space, 8-Space, Mixed, or Unknown. Click to sort.">Indent <span class="style-sort-ind">&#9662;</span></th>
                     <th data-sort-key="guide" style="width:20%;" title="Style guide with the highest lexical-adherence score for this file. Click a badge to open the official guide documentation. Click header to sort.">Best Match Guide <span class="style-sort-ind">&#9662;</span></th>
                     <th data-sort-key="score" style="width:10%;" title="Adherence score (0-100%) for the best-matching style guide. Higher = closer match to that guide's conventions. Lexical heuristic only — not a full parse. Click to sort.">Score <span class="style-sort-ind">&#9662;</span></th>
-                    <th style="width:13%;" title="Language-specific style signals detected in this file. Hover a chip for its signal name. Click …N more to expand. Click ⓘ for a full glossary.">Signals <button type="button" class="style-sig-info-btn" id="sig-info-btn" aria-label="Signal glossary" title="Click to see all signal types explained">&#8505;</button></th>
+                    <th style="width:13%;" title="Hover a row to see all signals — signal name and detected value.">Signals</th>
                   </tr>
                 </thead>
                 <tbody id="style-file-tbody">
@@ -6092,7 +6262,7 @@ struct WarningOpportunityRow {
         // Donut — height matches the stacked-bar chart so both panels align
         var rHb_d=28;
         var DH=Math.max(220,D.length*rHb_d+32);
-        var cx=100,cy=Math.round(DH/2),Ro=88,Ri=48,legX=204,DW=360;
+        var cx=100,cy=Math.round(DH/2),Ro=88,Ri=48,legX=208,DW=395;
         var legCount=D.length;
         var legSpacing=Math.max(12,Math.min(22,Math.floor((DH-30)/Math.max(legCount,1))));
         var legYStart=Math.round((DH-legCount*legSpacing)/2);
@@ -6110,6 +6280,7 @@ struct WarningOpportunityRow {
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
             ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(PALETTE[i%PALETTE.length])+'" stroke="white" stroke-width="2"/>';
+            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=PALETTE[i%PALETTE.length],cx2=Math.max(8,Math.min(legX-12,cx+(Ro+20)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+20)*Math.sin(mAng)));ds+='<line x1="'+px(cx+Ro*Math.cos(mAng))+'" y1="'+px(cy+Ro*Math.sin(mAng))+'" x2="'+px(cx2)+'" y2="'+px(cy2)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
             ang+=sw;
           });
         }
@@ -6124,6 +6295,7 @@ struct WarningOpportunityRow {
           ds+='<rect x="'+legX+'" y="'+(ly-2)+'" width="'+(DW-legX)+'" height="'+(legSpacing||14)+'" fill="transparent"/>';
           ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(PALETTE[i%PALETTE.length])+'"/>';
           ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(11,legSpacing-2)+'" fill="#43342d">'+esc(d.lang)+'</text>';
+          ds+='<text x="'+(legX+100)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(10,legSpacing-3)+'" font-weight="700" fill="#7b675b">'+fmt(d.code)+' ('+pctL+'%)</text>';
           ds+='</g>';
         });
         ds+='</svg>';
@@ -6135,13 +6307,14 @@ struct WarningOpportunityRow {
           var y=6+i*rHb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+          var lmid=y+bH/2+4;
           bs+='<g class="lang-bar-row">';
           bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+bH+'" fill="transparent"/>';
-          bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
-          if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
-          if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          bs+='<text x="'+px(LW+phys/maxT*BW+5)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
         var ly=SH-14;
@@ -6153,20 +6326,21 @@ struct WarningOpportunityRow {
         var ttC=legTT('Code lines',fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)');
         var ttCm=legTT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
         var ttBl=legTT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
+        var legSt=LW+Math.max(0,Math.round((BW-194)/2));
         bs+='<g data-kind="code" style="cursor:pointer;">'
-          +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/>'
-          +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC+'/>'
-          +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
+          +'<rect x="'+legSt+'" y="'+(ly-3)+'" width="50" height="16" fill="transparent"'+ttC+'/>'
+          +'<rect x="'+legSt+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC+'/>'
+          +'<text x="'+(legSt+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
           +'</g>';
         bs+='<g data-kind="comment" style="cursor:pointer;">'
-          +'<rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm+'/>'
-          +'<rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
-          +'<text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
+          +'<rect x="'+(legSt+58)+'" y="'+(ly-3)+'" width="82" height="16" fill="transparent"'+ttCm+'/>'
+          +'<rect x="'+(legSt+58)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
+          +'<text x="'+(legSt+71)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
         bs+='<g data-kind="blank" style="cursor:pointer;">'
-          +'<rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
-          +'<rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
-          +'<text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+          +'<rect x="'+(legSt+145)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(legSt+145)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(legSt+158)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -6319,6 +6493,7 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                  animation: { duration: 500, easing: 'easeOutQuart' },
                   layout: { padding: { right: 64 } },
                   scales: {
                     x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}},
@@ -6371,32 +6546,35 @@ struct WarningOpportunityRow {
               var t2=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
               var cW=(d.code||0)/t2*BW,cmW=(d.comments||0)/t2*BW,blW=(d.blanks||0)/t2*BW;
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
-              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
-              if(cW>0.5)s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';x+=cW;
-              if(cmW>0.5)s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';x+=cmW;
-              if(blW>0.5)s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';
-              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+Math.round((d.code||0)/t2*100)+'%</text>';
+              var lmid=y+Math.floor(bH/2)+4;
+              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
+              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=28)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=28)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=28)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+Math.round((d.code||0)/t2*100)+'%</text>';
             });
           } else {
             var maxT=Math.max.apply(null,cData.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);})) || 1;
             cData.forEach(function(d,i){
               var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
-              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
-              if(cW>0.5)s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';x+=cW;
-              if(cmW>0.5)s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';x+=cmW;
-              if(blW>0.5)s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';
+              var lmid=y+Math.floor(bH/2)+4;
+              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
+              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=28)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=28)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=28)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var phys=d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0);
-              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
             });
           }
           var ly=SH-legendH+4;
           var ttC=cLT('Code lines',fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)');
           var ttCm=cLT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
           var ttBl=cLT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
-          s+='<g data-kind="code" style="cursor:pointer;"><rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/><rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+CX+'"'+ttC+'/><text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text></g>';
-          s+='<g data-kind="comment" style="cursor:pointer;"><rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm+'/><rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+CG+'"'+ttCm+'/><text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text></g>';
-          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
+          var legSt=LW+Math.max(0,Math.round((BW-194)/2));
+          s+='<g data-kind="code" style="cursor:pointer;"><rect x="'+legSt+'" y="'+(ly-3)+'" width="50" height="16" fill="transparent"'+ttC+'/><rect x="'+legSt+'" y="'+ly+'" width="9" height="9" fill="'+CX+'"'+ttC+'/><text x="'+(legSt+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text></g>';
+          s+='<g data-kind="comment" style="cursor:pointer;"><rect x="'+(legSt+58)+'" y="'+(ly-3)+'" width="82" height="16" fill="transparent"'+ttCm+'/><rect x="'+(legSt+58)+'" y="'+ly+'" width="9" height="9" fill="'+CG+'"'+ttCm+'/><text x="'+(legSt+71)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text></g>';
+          s+='<g data-kind="blank" style="cursor:pointer;"><rect x="'+(legSt+145)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/><rect x="'+(legSt+145)+'" y="'+ly+'" width="9" height="9" fill="'+CB+'"'+ttBl+'/><text x="'+(legSt+158)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text></g>';
           s+='</svg>';
           el.innerHTML=s;
           wireMixLegend(el.querySelector('svg'));
@@ -6435,9 +6613,11 @@ struct WarningOpportunityRow {
           options: {
             responsive: true, maintainAspectRatio: false,
             animation: { duration: 500, easing: 'easeOutQuart' },
-            layout: { padding: { top: 36 } },
+            layout: { padding: { top: 60, right: 25 } },
             scales: {
-              x: { grid: { color: c.grid }, ticks: { color: c.text },
+              x: { type: 'logarithmic', min: 0.8,
+                   grid: { color: c.grid },
+                   ticks: { color: c.text, maxTicksLimit: 6, callback: function(v){ return fmt(v); } },
                    title: { display: true, text: 'Files Analyzed', color: c.text } },
               y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
                    title: { display: true, text: 'Code Lines', color: c.text } }
@@ -6490,16 +6670,21 @@ struct WarningOpportunityRow {
             }
           },
           plugins: [(function(){return{afterDatasetsDraw:function(chart){
-            var ctx=chart.ctx,tc=clr().text;
+            var ctx=chart.ctx,tc=clr().text,ca=chart.chartArea;
             chart.data.datasets.forEach(function(ds,di){
               var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
               meta.data.forEach(function(el){
                 var r=(el.options&&el.options.radius)?el.options.radius:10;
-                ctx.save();ctx.textAlign='center';ctx.fillStyle=tc;
-                ctx.font='700 11px Inter,ui-sans-serif,sans-serif';ctx.textBaseline='bottom';
-                ctx.fillText(d.lang,el.x,el.y-r-14);
-                ctx.font='600 11px Inter,ui-sans-serif,sans-serif';
-                ctx.fillText(fmt(d.code),el.x,el.y-r-2);
+                var codeStr=fmt(d.code);
+                // render in layout.padding.top space — clamp only to canvas top, not chartArea.top
+                var ty2=Math.max(14,el.y-r-3);
+                var ty1=Math.max(1,ty2-16);
+                // label always centred directly on bubble — padding.right gives room at the edge
+                ctx.save();ctx.fillStyle=tc;ctx.textBaseline='bottom';ctx.textAlign='center';
+                ctx.font='800 13px Inter,ui-sans-serif,sans-serif';
+                ctx.fillText(d.lang,el.x,ty1);
+                ctx.font='700 12px Inter,ui-sans-serif,sans-serif';
+                ctx.fillText(codeStr,el.x,ty2);
                 ctx.restore();
               });
             });
@@ -6769,15 +6954,19 @@ struct WarningOpportunityRow {
               var data = SEM_D.slice().sort(function(a,b){return (b[key]||0)-(a[key]||0);});
               var c = clr();
               var col = SEM_COLS[key] || OX;
+              var hcol = SEM_HCOLS[key] || '#d97020';
               semModalChart = new Chart(modalCanvas, {
                 type: 'bar',
                 data: {
                   labels: data.map(function(d){return d.lang;}),
                   datasets: [{ label: SEM_LABELS[key]||key, data: data.map(function(d){return d[key]||0;}),
-                    backgroundColor: col, borderRadius: 4 }]
+                    backgroundColor: col, hoverBackgroundColor: hcol,
+                    borderRadius: 4, borderWidth: 0, hoverBorderWidth: 0 }]
                 },
                 options: {
                   responsive: true, maintainAspectRatio: false,
+                  animation: { duration: 500, easing: 'easeOutQuart' },
+                  transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
                   layout: { padding: { top: 18 } },
                   scales: {
                     x: { grid: { display: false }, ticks: { color: c.text } },
@@ -6785,7 +6974,13 @@ struct WarningOpportunityRow {
                   },
                   plugins: { legend: { display: false }, tooltip: { callbacks: {
                     title: function(items){return items.length?items[0].label:'';},
-                    label: function(ctx){ return '  '+(SEM_LABELS[key]||key)+': '+Number(ctx.parsed.y).toLocaleString(); }
+                    label: function(ctx){
+                      var d = data[ctx.dataIndex] || {};
+                      var lines = ['  '+(SEM_LABELS[key]||key)+': '+Number(ctx.parsed.y).toLocaleString()];
+                      var others = Object.keys(SEM_LABELS).filter(function(k){ return k !== key && (d[k]||0) > 0; });
+                      others.forEach(function(k){ lines.push('  '+SEM_LABELS[k]+': '+Number(d[k]||0).toLocaleString()); });
+                      return lines;
+                    }
                   }}}
                 },
                 plugins: [makeDlPlugin(function(v) { return fmt(v || 0); }, 'top')]
@@ -6993,36 +7188,74 @@ struct WarningOpportunityRow {
                     label: d.lang,
                     data: [{ x: d.files, y: d.code, r: Math.max(5, Math.round(Math.sqrt(d.physical/maxP)*20)) }],
                     backgroundColor: PALETTE[i % PALETTE.length] + 'b8',
-                    borderColor: PALETTE[i % PALETTE.length], borderWidth: 1
+                    borderColor: PALETTE[i % PALETTE.length], borderWidth: 1,
+                    hoverBorderWidth: 2
                   };
                 })
               },
               options: {
                 responsive: true, maintainAspectRatio: false,
-                layout: { padding: { top: 36 } },
+                animation: { duration: 500, easing: 'easeOutQuart' },
+                layout: { padding: { top: 60, right: 25 } },
                 scales: {
-                  x: { grid: { color: c.grid }, ticks: { color: c.text }, title: { display: true, text: 'Files Analyzed', color: c.text } },
+                  x: { type: 'logarithmic', min: 0.8, grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 6, callback: function(v){ return fmt(v); } }, title: { display: true, text: 'Files Analyzed', color: c.text } },
                   y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text } }
                 },
                 plugins: {
-                  legend: { position: 'right', labels: { color: c.text } },
+                  legend: {
+                    position: 'right', labels: { color: c.text },
+                    onHover: function(e, item, leg) {
+                      var ch = leg.chart, idx = item.datasetIndex;
+                      ch.data.datasets.forEach(function(ds, i) {
+                        var base = PALETTE[i % PALETTE.length];
+                        ds.backgroundColor = i === idx ? base + 'b8' : base + '20';
+                        ds.borderColor = i === idx ? base : base + '30';
+                      });
+                      ch.update('none');
+                      var tt = document.getElementById('r-tt');
+                      if (tt && e && e.native) {
+                        var d = SCAT_D[idx];
+                        tt.innerHTML = '<strong>' + item.text + '</strong><br>'
+                          + fmt(d.files) + ' files · ' + fmt(d.code) + ' code lines';
+                        var nx = e.native.clientX + 16, ny = e.native.clientY - 12;
+                        if (nx + 240 > window.innerWidth - 8) nx = e.native.clientX - 240 - 8;
+                        tt.style.left = nx + 'px'; tt.style.top = ny + 'px'; tt.style.display = 'block';
+                      }
+                    },
+                    onLeave: function(e, item, leg) {
+                      var ch = leg.chart;
+                      ch.data.datasets.forEach(function(ds, i) {
+                        var base = PALETTE[i % PALETTE.length];
+                        ds.backgroundColor = base + 'b8';
+                        ds.borderColor = base;
+                      });
+                      ch.update('none');
+                      var tt = document.getElementById('r-tt'); if (tt) tt.style.display = 'none';
+                    }
+                  },
                   tooltip: { callbacks: {
                     title: function(items){ return items.length ? items[0].dataset.label : ''; },
-                    label: function(ctx){ var d = SCAT_D[ctx.datasetIndex]; return ['  Files: '+fmt(d.files), '  Code: '+Number(d.code).toLocaleString()]; }
+                    label: function(ctx){
+                      var d = SCAT_D[ctx.datasetIndex];
+                      return ['  Files analyzed: '+fmt(d.files), '  Code lines: '+Number(d.code).toLocaleString(), '  Physical lines: '+Number(d.physical).toLocaleString()];
+                    }
                   }}
                 }
               },
               plugins: [(function(){return{afterDatasetsDraw:function(chart){
-                var ctx=chart.ctx,tc=clr().text;
+                var ctx=chart.ctx,tc=clr().text,ca=chart.chartArea;
                 chart.data.datasets.forEach(function(ds,di){
                   var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
                   meta.data.forEach(function(el){
                     var r=(el.options&&el.options.radius)?el.options.radius:10;
-                    ctx.save();ctx.textAlign='center';ctx.fillStyle=tc;
-                    ctx.font='700 11px Inter,ui-sans-serif,sans-serif';ctx.textBaseline='bottom';
-                    ctx.fillText(d.lang,el.x,el.y-r-14);
-                    ctx.font='600 11px Inter,ui-sans-serif,sans-serif';
-                    ctx.fillText(fmt(d.code),el.x,el.y-r-2);
+                    var codeStr=fmt(d.code);
+                    var ty2=Math.max(14,el.y-r-3);
+                    var ty1=Math.max(1,ty2-16);
+                    ctx.save();ctx.fillStyle=tc;ctx.textBaseline='bottom';ctx.textAlign='center';
+                    ctx.font='800 13px Inter,ui-sans-serif,sans-serif';
+                    ctx.fillText(d.lang,el.x,ty1);
+                    ctx.font='700 12px Inter,ui-sans-serif,sans-serif';
+                    ctx.fillText(codeStr,el.x,ty2);
                     ctx.restore();
                   });
                 });
@@ -7055,12 +7288,22 @@ struct WarningOpportunityRow {
               },
               options: {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                animation: { duration: 500, easing: 'easeOutQuart' },
                 layout: { padding: { right: 42 } },
                 scales: {
                   x: { min:0, max:100, grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return v+'%';}} },
                   y: { grid:{display:false}, ticks:{color:c.text} }
                 },
-                plugins: { legend:{display:false}, tooltip:{callbacks:{label:function(ctx){return '  Comment %: '+ctx.parsed.x.toFixed(1)+'%';}}} }
+                plugins: { legend:{display:false}, tooltip:{callbacks:{
+                  title:function(items){return items.length?items[0].label:'';},
+                  label:function(ctx){
+                    var d=data[ctx.dataIndex]||{};
+                    var sig=(d.code||0)+(d.comments||0);
+                    return ['  Comment ratio: '+ctx.parsed.x.toFixed(1)+'%',
+                            '  Comments: '+Number(d.comments||0).toLocaleString(),
+                            '  Significant lines: '+Number(sig).toLocaleString()];
+                  }
+                }}}
               },
               plugins: [makeDlPlugin(function(v) { return (v || 0) + '%'; }, 'end')]
             });
@@ -7077,16 +7320,21 @@ struct WarningOpportunityRow {
             var labels = HIST_D.map(function(d){return d.label;});
             var counts = HIST_D.map(function(d){return d.count||0;});
             var total = counts.reduce(function(a,b){return a+b;},0);
+            var fsBg = ['#2A6846','#4472C4','#C45C10','#D4A017','#B23030'];
+            var fsHv = ['#3a8a5e','#5a8ad8','#d97020','#e8b520','#cc4545'];
             var c = clr();
             new Chart(canvas, {
               type: 'bar',
               data: {
                 labels: labels,
                 datasets: [{ label: 'Files', data: counts,
-                  backgroundColor: ['#2A6846','#4472C4','#C45C10','#D4A017','#B23030'], borderRadius: 6 }]
+                  backgroundColor: fsBg, hoverBackgroundColor: fsHv,
+                  borderRadius: 6, borderWidth: 0, hoverBorderWidth: 0 }]
               },
               options: {
                 responsive: true, maintainAspectRatio: false,
+                animation: { duration: 500, easing: 'easeOutQuart' },
+                transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
                 layout: { padding: { top: 18 } },
                 scales: {
                   x: { grid:{display:false}, ticks:{color:c.text} },
@@ -7153,6 +7401,8 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                  animation: { duration: 500, easing: 'easeOutQuart' },
+                  transitions: { active: { animation: { duration: 180, easing: 'easeOutQuart' } } },
                   layout: { padding: { right: 72 } },
                   scales: {
                     x: { grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}},
@@ -7168,6 +7418,7 @@ struct WarningOpportunityRow {
                         return ['  Code: '+Number(d.code||0).toLocaleString(),
                                 '  Comments: '+Number(d.comment||0).toLocaleString(),
                                 '  Blanks: '+Number(d.blank||0).toLocaleString(),
+                                '  Physical: '+Number(d.physical||0).toLocaleString(),
                                 '  Files: '+fmt(d.files||0)];
                       }
                     }}
@@ -7220,6 +7471,8 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   indexAxis:'y', responsive:true, maintainAspectRatio:false,
+                  animation: { duration: 500, easing: 'easeOutQuart' },
+                  transitions: { active: { animation: { duration: 180, easing: 'easeOutQuart' } } },
                   layout:{ padding:{ right:72 } },
                   scales: {
                     x:{ stacked:true, grid:{color:c.grid}, ticks:{color:c.text, callback:function(v){return fmt(v);}} },
@@ -7584,6 +7837,11 @@ struct WarningOpportunityRow {
       var raw=parseInt(el.parentNode.getAttribute('data-raw'),10);
       if(!isNaN(raw))el.textContent=raw.toLocaleString();
     });
+    // Format code-before / code-now numbers in the prev-scan summary line
+    Array.prototype.slice.call(document.querySelectorAll('.prev-scan-summary [data-raw]')).forEach(function(el){
+      var raw=parseInt(el.getAttribute('data-raw'),10);
+      if(!isNaN(raw))el.textContent=raw.toLocaleString();
+    });
   }());
   </script>
   {% if has_style_data %}
@@ -7744,20 +8002,17 @@ struct WarningOpportunityRow {
       if(url){return'<a href="'+escH(url)+'" target="_blank" rel="noopener" class="style-badge" title="'+escH(tipText)+'">'+escH(guide)+'</a>';}
       return'<span class="style-badge" title="'+escH(desc)+'">'+escH(guide)+'</span>';
     }
-    function buildSigsHtml(sigs,allTip){
+    function buildSigsHtml(sigs){
       if(!sigs||!sigs.length)return'<span style="color:var(--muted);">—</span>';
       var html='';
       var visible=sigs.slice(0,2);
       var rest=sigs.slice(2);
-      visible.forEach(function(s){html+='<span class="style-sig-chip" title="'+escH(s.k+': '+s.v)+'">'+escH(s.v)+'</span>';});
-      if(rest.length){
-        var encSigs=escH(JSON.stringify(sigs));
-        html+='<button type="button" class="style-sig-more" data-sigs="'+encSigs+'" onclick="showSigPop(this,event)" title="\u22EF '+rest.length+' more \u2014 click to expand">\u22EF '+rest.length+' more</button>';
-      }
+      visible.forEach(function(s){html+='<span class="style-sig-chip">'+escH(s.v)+'</span>';});
+      if(rest.length){html+='<span style="color:var(--muted);font-size:11px;margin-left:2px;">\u22EF</span>';}
       return html;
     }
     var _sigPop=null;
-    function showSigPop(btn,ev){
+    window.showSigPop=function(btn,ev){
       ev.stopPropagation();
       if(_sigPop){var prev=_sigPop;_sigPop=null;prev.remove();if(btn._ownPop===prev)return;}
       var sigs;try{sigs=JSON.parse(btn.getAttribute('data-sigs'));}catch(e){return;}
@@ -7830,8 +8085,7 @@ struct WarningOpportunityRow {
         var barW=Math.round(f.score);
         var guide=f.guide&&f.guide!=='Unknown'?f.guide:'';
         var badge=guide?buildGuideHtml(guide):'<span style="color:var(--muted);">—</span>';
-        var allSigTip=f.signals?f.signals.map(function(s){return s.k+': '+s.v;}).join('\n'):'';
-        var sigHtml=buildSigsHtml(f.signals,allSigTip);
+                var sigHtml=buildSigsHtml(f.signals);
         var rowClass=SCORE_THRESHOLD>0&&f.score<SCORE_THRESHOLD?' class="style-row-warn"':'';
         html+='<tr'+rowClass+'>'
           +'<td title="'+escH(f.path)+'">'+escH(f.path.replace(/^.*[\/\\]/,''))+'</td>'
@@ -7839,7 +8093,7 @@ struct WarningOpportunityRow {
           +'<td>'+escH(f.indent)+'</td>'
           +'<td>'+badge+'</td>'
           +'<td><span class="style-score-bar"><span class="style-score-fill" style="width:'+barW+'%"></span></span>'+f.score+'%</td>'
-          +'<td title="'+escH(allSigTip)+'">'+sigHtml+'</td>'
+          +'<td class="sig-cell" data-sigs="'+escH(JSON.stringify(f.signals||[]))+'">'+sigHtml+'</td>'
           +'</tr>';
       });
       tbody.innerHTML=html||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No style-analysed files</td></tr>';
@@ -7874,6 +8128,51 @@ struct WarningOpportunityRow {
       sftRows=FILE_DATA.slice();
       sftFilteredRows=sftRows.slice();
       sftApplyFilter();
+      // Signal cell tooltip: follows cursor, shows all signals on row hover
+      var chipTipEl=document.createElement('div');
+      chipTipEl.className='style-chip-tip';
+      document.body.appendChild(chipTipEl);
+      var _activeSigCell=null;
+      function _showSigCellTip(cell,cx,cy){
+        var sigs;try{sigs=JSON.parse(cell.getAttribute('data-sigs'));}catch(e){return;}
+        if(!sigs||!sigs.length)return;
+        var html='<div class="style-chip-tip-hd">Signals</div>';
+        sigs.forEach(function(s){
+          html+='<div class="style-chip-tip-row"><span class="style-chip-tip-k">'+escH(s.k)+':</span><span class="style-chip-tip-v">'+escH(s.v)+'</span></div>';
+        });
+        chipTipEl.innerHTML=html;
+        chipTipEl.style.display='block';
+        chipTipEl.classList.add('visible');
+        _posSigTip(cx,cy);
+      }
+      function _posSigTip(cx,cy){
+        var tw=chipTipEl.offsetWidth||220;
+        var th=chipTipEl.offsetHeight||60;
+        var left=cx+14;
+        if(left+tw>window.innerWidth-8)left=cx-tw-10;
+        if(left<8)left=8;
+        var top=cy-th-10;
+        if(top<8)top=cy+20;
+        chipTipEl.style.left=left+'px';
+        chipTipEl.style.top=top+'px';
+      }
+      function _hideSigCellTip(){
+        chipTipEl.classList.remove('visible');
+        chipTipEl.style.display='none';
+        _activeSigCell=null;
+      }
+      var sigTbl=document.getElementById('style-file-table');
+      if(sigTbl){
+        sigTbl.addEventListener('mousemove',function(e){
+          var cell=e.target.closest?e.target.closest('.sig-cell'):null;
+          if(!cell){_hideSigCellTip();return;}
+          _activeSigCell=cell;
+          _showSigCellTip(cell,e.clientX,e.clientY);
+        });
+        sigTbl.addEventListener('mouseleave',function(){
+          _hideSigCellTip();
+        });
+      }
       // Wire up sortable column headers
       var ths=document.querySelectorAll('#style-file-table thead th[data-sort-key]');
       for(var i=0;i<ths.length;i++){(function(th){
@@ -7963,7 +8262,7 @@ struct WarningOpportunityRow {
   }());
   </script>
   {% endif %}
-  <script>
+  <script nonce="{{ nonce }}">
   (function(){
     var params=new URLSearchParams(location.search);
     if(params.get('autoprint')!=='1')return;

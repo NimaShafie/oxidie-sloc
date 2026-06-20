@@ -15724,9 +15724,9 @@ struct SubmoduleRow {
     .ws-mini-box-lg { flex:2 1 0; }
     .ws-mini-box-lg .ws-mini-value { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .ws-mini-box-br { flex:1.5 1 0; }
-    .scope-legend-row { display:inline-flex; flex-direction:row; align-items:center; flex-wrap:nowrap; gap:5px; padding:5px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:12px; flex-shrink:0; border-left:3px solid var(--line-strong); white-space:nowrap; }
-    .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; }
-    .path-scope-grid { display:grid; grid-template-columns: calc(42% - 10px) auto auto 1px auto; gap:0 8px; align-items:center; }
+    .scope-legend-row { display:flex; flex-direction:row; align-items:center; justify-content:flex-start; flex-wrap:nowrap; gap:0; padding:5px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font-size:12px; width:100%; min-width:0; border-left:3px solid var(--line-strong); white-space:nowrap; }
+    .scope-legend-label { font-weight:800; color:var(--text); white-space:nowrap; flex-shrink:0; margin-right:10px; }
+    .path-scope-grid { display:grid; grid-template-columns: calc(42% - 7px) auto auto 1px 1fr; gap:0 8px; align-items:center; }
     #path.drag-over { background: rgba(37,99,235,0.05) !important; border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important; }
     .path-scope-grid > input[type=text] { width:100%; min-width:0; }
     .git-source-banner { display:flex; align-items:center; gap:10px; padding:10px 14px; background:linear-gradient(135deg,rgba(124,58,237,0.07),rgba(99,40,217,0.05)); border:1.5px solid rgba(124,58,237,0.22); border-radius:9px; margin-bottom:12px; font-size:13px; color:var(--text); flex-wrap:wrap; }
@@ -15809,7 +15809,7 @@ struct SubmoduleRow {
     .step-button.done .step-num { background:rgba(34,197,94,0.16); color:#16a34a; }
     .sidebar-kbd-hint { margin:14px 4px 0; font-size:10px; color:var(--muted-2); line-height:1.55; text-align:center; display:flex; align-items:center; justify-content:center; gap:4px; }
     .sidebar-kbd-key { display:inline-flex; align-items:center; justify-content:center; padding:1px 5px; border-radius:4px; background:var(--surface-3); border:1px solid var(--line); font-size:9px; font-weight:700; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; line-height:1; }
-    .sidebar-scroll-divider { height:1px; background:var(--line-strong); margin: 12px 4px; }
+    .sidebar-scroll-divider { height:1px; background:var(--line); margin: 12px 4px; }
     .sidebar-scroll-btn { display:flex; align-items:center; justify-content:center; gap:5px; width:100%; padding:7px 10px; border-radius:9px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); font-size:11px; font-weight:700; text-decoration:none; cursor:pointer; transition:background 0.15s ease,border-color 0.15s ease,color 0.15s ease; }
     .sidebar-scroll-btn:hover { background:var(--surface-3); border-color:var(--line-strong); color:var(--text); text-decoration:none; }
     .sidebar-scroll-btn svg { width:12px; height:12px; stroke:currentColor; fill:none; stroke-width:2.5; flex-shrink:0; }
@@ -15862,9 +15862,10 @@ struct SubmoduleRow {
     .mini-button:hover, button.primary:hover, button.secondary:hover, .artifact-toggle:hover { transform: translateY(-1px); box-shadow: 0 10px 18px rgba(0,0,0,0.08); }
     .mini-button.oxide { color: var(--oxide-2); background: rgba(184,93,51,0.08); border-color: rgba(184,93,51,0.22); }
     .mini-button.primary-lite { background: rgba(37,99,235,0.08); color: var(--accent-2); border-color: rgba(37,99,235,0.20); }
-    #browse-path { min-height: 38px; font-size: 13px; padding: 0 12px; }
-    #use-sample-path { min-height: 38px; font-size: 12px; padding: 0 8px; }
-    .scope-legend-row .badge { font-size: 11px; min-height: 24px; padding: 0 8px; white-space: nowrap; }
+    #browse-path { min-height: 38px; font-size: 13px; padding: 0 18px; }
+    #use-sample-path { min-height: 38px; font-size: 13px; padding: 0 13px; }
+    .scope-legend-badges { display:flex; flex:1; align-items:center; justify-content:space-evenly; gap:6px; min-width:0; flex-wrap:nowrap; }
+    .scope-legend-row .badge { flex:0 0 auto; font-size: 11px; min-height: 24px; padding: 0 10px; white-space: nowrap; }
     @media (max-height: 1200px) { .workbench-strip { margin-bottom: 12px; } .wb-stats-header { padding: 8px 20px 0; } .ws-left { padding: 10px 16px 12px; } .ws-history-group { padding: 12px 20px; } }
     button.primary { background: linear-gradient(180deg, var(--accent), var(--accent-2)); color:#fff; border-color: transparent; }
     button.secondary { background: var(--surface); }
@@ -16507,9 +16508,11 @@ struct SubmoduleRow {
                     <div class="path-scope-sep"></div>
                     <div class="scope-legend-row">
                       <span class="scope-legend-label">Scope legend:</span>
-                      <span class="badge badge-scan" data-tooltip="Files with a supported language analyzer — counted in SLOC totals.">supported</span>
-                      <span class="badge badge-skip" data-tooltip="Files excluded by a policy rule such as vendor, generated, or minified detection.">skipped by policy</span>
-                      <span class="badge badge-unsupported" data-tooltip="Files outside the supported language set — listed but not counted.">unsupported</span>
+                      <span class="scope-legend-badges">
+                        <span class="badge badge-scan" data-tooltip="Files with a supported language analyzer — counted in SLOC totals.">supported</span>
+                        <span class="badge badge-skip" data-tooltip="Files excluded by a policy rule such as vendor, generated, or minified detection.">skipped by policy</span>
+                        <span class="badge badge-unsupported" data-tooltip="Files outside the supported language set — listed but not counted.">unsupported</span>
+                      </span>
                     </div>
                   </div>
                   {% if git_repo.is_empty() %}
@@ -21157,11 +21160,11 @@ struct ScanSetupTemplate {
             {% if prev_scan_count > 1 %}<span class="compare-ts">{{ prev_scan_count }} scans total</span>{% endif %}
             {% if let Some(prev_code) = prev_run_code_lines %}
             <div class="compare-banner-stats" style="margin-top:4px;">
-              <span>Code before: <strong>{{ prev_code }}</strong></span>
+              <span>Code before: <strong data-raw="{{ prev_code }}">{{ prev_code }}</strong></span>
               <span class="compare-arrow">→</span>
-              <span>Code now: <strong>{{ code_lines }}</strong></span>
-              {% if let Some(added) = delta_lines_added %}<span class="delta-chip pos">+{{ added }} added</span>{% endif %}
-              {% if let Some(removed) = delta_lines_removed %}<span class="delta-chip neg">&minus;{{ removed }} removed</span>{% endif %}
+              <span>Code now: <strong data-raw="{{ code_lines }}">{{ code_lines }}</strong></span>
+              {% if let Some(added) = delta_lines_added %}<span class="delta-chip pos">+<span data-raw="{{ added }}">{{ added }}</span> added</span>{% endif %}
+              {% if let Some(removed) = delta_lines_removed %}<span class="delta-chip neg">&minus;<span data-raw="{{ removed }}">{{ removed }}</span> removed</span>{% endif %}
             </div>
             {% endif %}
           </div>
@@ -21875,6 +21878,11 @@ struct ScanSetupTemplate {
           var valEl=card.querySelector('.delta-card-val');
           if(valEl)valEl.textContent=raw.toLocaleString();
         });
+        // Format code-before / code-now numbers in the compare banner stats line
+        Array.prototype.slice.call(document.querySelectorAll('.compare-banner-stats [data-raw]')).forEach(function(el){
+          var raw=parseInt(el.getAttribute('data-raw'),10);
+          if(!isNaN(raw))el.textContent=raw.toLocaleString();
+        });
       })();
 
       // ── Shared tooltip for all result-page charts ─────────────────────────
@@ -21943,7 +21951,7 @@ struct ScanSetupTemplate {
         var rHb_d=28;
         var DH=Math.max(220,D.length*rHb_d+32);
         var cx=100,cy=Math.round(DH/2),Ro=88,Ri=48;
-        var legX=204,DW=360;
+        var legX=208,DW=395;
         var legCount=D.length;
         var legSpacing=Math.max(12,Math.min(22,Math.floor((DH-30)/Math.max(legCount,1))));
         var legYStart=Math.round((DH-legCount*legSpacing)/2);
@@ -21961,6 +21969,7 @@ struct ScanSetupTemplate {
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
             ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
+            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=COLS[i%COLS.length],cx2=Math.max(8,Math.min(legX-12,cx+(Ro+20)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+20)*Math.sin(mAng)));ds+='<line x1="'+px(cx+Ro*Math.cos(mAng))+'" y1="'+px(cy+Ro*Math.sin(mAng))+'" x2="'+px(cx2)+'" y2="'+px(cy2)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
             ang+=sw;
           });
         }
@@ -21975,6 +21984,7 @@ struct ScanSetupTemplate {
           ds+='<rect x="'+legX+'" y="'+(ly-2)+'" width="'+(DW-legX)+'" height="'+(legSpacing||14)+'" fill="transparent"/>';
           ds+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+(COLS[i%COLS.length])+'"/>';
           ds+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(11,legSpacing-2)+'" fill="#43342d">'+esc(d.lang)+'</text>';
+          ds+='<text x="'+(legX+100)+'" y="'+(ly+10)+'" font-family="'+FONT+'" font-size="'+Math.min(10,legSpacing-3)+'" font-weight="700" fill="#7b675b">'+fmt(d.code)+' ('+pctL+'%)</text>';
           ds+='</g>';
         });
         ds+='</svg>';
@@ -21987,13 +21997,14 @@ struct ScanSetupTemplate {
           var y=6+i*rHb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
+          var lmid=y+bH/2+4;
           bs+='<g class="lang-bar-row">';
           bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+bH+'" fill="transparent"/>';
-          bs+='<text x="'+(LW-6)+'" y="'+(y+bH/2+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5)bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="0"/>';x+=cW;
-          if(cmW>0.5)bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="0"/>';x+=cmW;
-          if(blW>0.5)bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="0"/>';
-          bs+='<text x="'+(LW+BW+5)+'" y="'+(y+bH/2+4)+'" font-family="'+FONT+'" font-size="11" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="0"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="0"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="0"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          bs+='<text x="'+px(LW+phys/maxT*BW+5)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
         var ly=SH-14;
@@ -22005,20 +22016,21 @@ struct ScanSetupTemplate {
         var ttC=legTT('Code lines',fmt(totC)+' total ('+Math.round(totC/totAll*100)+'%)');
         var ttCm=legTT('Comment lines',fmt(totCm)+' total ('+Math.round(totCm/totAll*100)+'%)');
         var ttBl=legTT('Blank lines',fmt(totBl)+' total ('+Math.round(totBl/totAll*100)+'%)');
+        var legSt=LW+Math.max(0,Math.round((BW-194)/2));
         bs+='<g data-kind="code" style="cursor:pointer;">'
-          +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC+'/>'
-          +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC+'/>'
-          +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
+          +'<rect x="'+legSt+'" y="'+(ly-3)+'" width="50" height="16" fill="transparent"'+ttC+'/>'
+          +'<rect x="'+legSt+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC+'/>'
+          +'<text x="'+(legSt+13)+'" y="'+(ly+9)+'"'+ttC+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Code</text>'
           +'</g>';
         bs+='<g data-kind="comment" style="cursor:pointer;">'
-          +'<rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm+'/>'
-          +'<rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
-          +'<text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
+          +'<rect x="'+(legSt+58)+'" y="'+(ly-3)+'" width="82" height="16" fill="transparent"'+ttCm+'/>'
+          +'<rect x="'+(legSt+58)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm+'/>'
+          +'<text x="'+(legSt+71)+'" y="'+(ly+9)+'"'+ttCm+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Comments</text>'
           +'</g>';
         bs+='<g data-kind="blank" style="cursor:pointer;">'
-          +'<rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
-          +'<rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
-          +'<text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
+          +'<rect x="'+(legSt+145)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl+'/>'
+          +'<rect x="'+(legSt+145)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl+'/>'
+          +'<text x="'+(legSt+158)+'" y="'+(ly+9)+'"'+ttBl+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="#43342d">Blanks</text>'
           +'</g>';
         bs+='</svg>';
         el.innerHTML='<div class="r-lang-overview">'+
@@ -22114,44 +22126,47 @@ struct ScanSetupTemplate {
               var tot2=(d.code||0)+(d.comments||0)+(d.blanks||0)||1;
               var cW=(d.code||0)/tot2*BW,cmW=(d.comments||0)/tot2*BW,blW=(d.blanks||0)/tot2*BW;
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
-              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-              if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
-              if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
-              if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
+              var lmid=y+Math.floor(bH/2)+4;
+              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=28)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=28)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=28)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var pct=Math.round((d.code||0)/tot2*100);
-              s+='<text x="'+(LW+BW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+pct+'%</text>';
+              s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+pct+'%</text>';
             });
           } else {
             var maxT=Math.max.apply(null,LANG_D.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);}))||1;
             LANG_D.forEach(function(d,i){
               var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
-              s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-              if(cW>0.5)s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';x+=cW;
-              if(cmW>0.5)s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';x+=cmW;
-              if(blW>0.5)s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';
-              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
+              var lmid=y+Math.floor(bH/2)+4;
+              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=28)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=28)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=28)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
           var ly=SH-legendH+4;
+          var legSt2=LW+Math.max(0,Math.round((BW-194)/2));
           function legTT2(lbl,val){return ' data-ttl="'+lbl+'" data-ttv="'+val.replace(/"/g,'&quot;')+'"';}
           var ttC2=legTT2('Code lines',fmt(totC2)+' total ('+Math.round(totC2/totAll2*100)+'%)');
           var ttCm2=legTT2('Comment lines',fmt(totCm2)+' total ('+Math.round(totCm2/totAll2*100)+'%)');
           var ttBl2=legTT2('Blank lines',fmt(totBl2)+' total ('+Math.round(totBl2/totAll2*100)+'%)');
           s+='<g data-kind="code" style="cursor:pointer;">'
-            +'<rect x="'+LW+'" y="'+(ly-3)+'" width="52" height="16" fill="transparent"'+ttC2+'/>'
-            +'<rect x="'+LW+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC2+'/>'
-            +'<text x="'+(LW+13)+'" y="'+(ly+9)+'"'+ttC2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>'
+            +'<rect x="'+legSt2+'" y="'+(ly-3)+'" width="50" height="16" fill="transparent"'+ttC2+'/>'
+            +'<rect x="'+legSt2+'" y="'+ly+'" width="9" height="9" fill="'+OX+'"'+ttC2+'/>'
+            +'<text x="'+(legSt2+13)+'" y="'+(ly+9)+'"'+ttC2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Code</text>'
             +'</g>';
           s+='<g data-kind="comment" style="cursor:pointer;">'
-            +'<rect x="'+(LW+79)+'" y="'+(ly-3)+'" width="76" height="16" fill="transparent"'+ttCm2+'/>'
-            +'<rect x="'+(LW+79)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm2+'/>'
-            +'<text x="'+(LW+92)+'" y="'+(ly+9)+'"'+ttCm2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
+            +'<rect x="'+(legSt2+58)+'" y="'+(ly-3)+'" width="82" height="16" fill="transparent"'+ttCm2+'/>'
+            +'<rect x="'+(legSt2+58)+'" y="'+ly+'" width="9" height="9" fill="'+GN+'"'+ttCm2+'/>'
+            +'<text x="'+(legSt2+71)+'" y="'+(ly+9)+'"'+ttCm2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Comments</text>'
             +'</g>';
           s+='<g data-kind="blank" style="cursor:pointer;">'
-            +'<rect x="'+(LW+158)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
-            +'<rect x="'+(LW+158)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
-            +'<text x="'+(LW+171)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blanks</text>'
+            +'<rect x="'+(legSt2+145)+'" y="'+(ly-3)+'" width="55" height="16" fill="transparent"'+ttBl2+'/>'
+            +'<rect x="'+(legSt2+145)+'" y="'+ly+'" width="9" height="9" fill="'+GY+'"'+ttBl2+'/>'
+            +'<text x="'+(legSt2+158)+'" y="'+(ly+9)+'"'+ttBl2+' font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor">Blanks</text>'
             +'</g>';
           s+='</svg>';
           el.innerHTML=s;
@@ -22180,28 +22195,40 @@ struct ScanSetupTemplate {
         // ── Scatter: Files vs Code Lines (bubble = physical lines) ─────────────
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
-          var H=hOvr||224,PL=52,PB=36,PT=26,PR=14;
+          var H=hOvr||224,PL=52,PB=36,PT=44,PR=60;
           var W=Math.max(320,el.offsetWidth||480);
           var cW=W-PL-PR,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
           var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
+          // log1p scale on X to prevent outlier files-count from collapsing all others to the left
+          var logMaxF=Math.log1p(maxF);
           var s='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+          // Y grid lines (linear)
           [0,0.25,0.5,0.75,1].forEach(function(t){
             var y=PT+cH*(1-t);
             s+='<line x1="'+PL+'" y1="'+px(y)+'" x2="'+(PL+cW)+'" y2="'+px(y)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
             if(t>0)s+='<text x="'+(PL-4)+'" y="'+(px(y)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxC*t))+'</text>';
           });
+          // X grid lines (log1p scale — tick labels show actual file counts at those positions)
           [0,0.25,0.5,0.75,1].forEach(function(t){
             var x=PL+cW*t;
+            var xVal=t>0?Math.round(Math.expm1(t*logMaxF)):0;
             s+='<line x1="'+px(x)+'" y1="'+PT+'" x2="'+px(x)+'" y2="'+(PT+cH)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
-            if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxF*t))+'</text>';
+            if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(xVal)+'</text>';
           });
           SCAT_D.forEach(function(d,i){
-            var cx2=PL+d.files/maxF*cW,cy2=PT+cH-d.code/maxC*cH;
+            // X uses log1p so outlier languages (many files) don't push others to the far left
+            var cx2=PL+(logMaxF>0?Math.log1p(Math.max(1,d.files))/logMaxF:0.5)*cW;
+            var cy2=PT+cH-d.code/maxC*cH;
             var r=Math.max(4,Math.sqrt(d.physical/maxP)*18);
             s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';
-            if(r>6){s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-13)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="currentColor" opacity="0.9" style="pointer-events:none;">'+esc(d.lang)+'</text>';s+='<text x="'+px(cx2)+'" y="'+(px(cy2)-px(r)-2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="8" fill="currentColor" opacity="0.85" style="pointer-events:none;">'+fmt(d.code)+'</text>';}
+            var codeStr=fmt(d.code);
+            // Label centred directly above bubble — PR=60 gives right-edge room
+            var ty2=Math.max(14,px(cy2)-px(r)-3);
+            var ty1=Math.max(1,ty2-14);
+            s+='<text x="'+px(cx2)+'" y="'+ty1+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="800" fill="currentColor" opacity="0.92" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+            s+='<text x="'+px(cx2)+'" y="'+ty2+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor" opacity="0.88" style="pointer-events:none;">'+codeStr+'</text>';
           });
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7">Files</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
