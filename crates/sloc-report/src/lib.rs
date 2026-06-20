@@ -727,15 +727,26 @@ fn report_chart_error_if_any(tab: &headless_chrome::Tab) {
 /// Poll `window.oxSlocChartsReady` for up to 15 s so Chart.js canvases finish rendering.
 fn wait_for_charts_ready(tab: &headless_chrome::Tab) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut last_cdp_err: Option<String> = None;
     loop {
-        if let Ok(r) = tab.evaluate("!!window.oxSlocChartsReady", false) {
-            if matches!(r.value, Some(serde_json::Value::Bool(true))) {
-                report_chart_error_if_any(tab);
-                break;
+        match tab.evaluate("!!window.oxSlocChartsReady", false) {
+            Ok(r) => {
+                last_cdp_err = None;
+                if matches!(r.value, Some(serde_json::Value::Bool(true))) {
+                    report_chart_error_if_any(tab);
+                    return;
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if last_cdp_err.as_deref() != Some(&msg) {
+                    eprintln!("[oxide-sloc][pdf] CDP evaluate error (will retry): {msg}");
+                    last_cdp_err = Some(msg);
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
-            eprintln!("[oxide-sloc][pdf] chart readiness timed out — capturing anyway");
+            report_chart_error_if_any(tab);
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -832,15 +843,15 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
         .print_to_pdf(Some(PrintToPdfOptions {
             landscape: Some(true),
             print_background: Some(true),
-            scale: Some(0.82),
+            scale: Some(0.93),
             paper_width: Some(11.69), // A4 landscape width (inches)
             paper_height: Some(8.27), // A4 landscape height (inches)
             // When a banner is present widen the top/bottom margins so Chrome's
             // header/footer templates render fully without overlapping content.
-            margin_top: Some(if has_banner { 0.55 } else { 0.35 }),
-            margin_bottom: Some(if has_banner { 0.45 } else { 0.35 }),
-            margin_left: Some(0.5),
-            margin_right: Some(0.5),
+            margin_top: Some(if has_banner { 0.4 } else { 0.1 }),
+            margin_bottom: Some(if has_banner { 0.3 } else { 0.1 }),
+            margin_left: Some(0.15),
+            margin_right: Some(0.15),
             prefer_css_page_size: Some(false),
             display_header_footer: if has_banner { Some(true) } else { None },
             header_template: header_tmpl,
@@ -1111,12 +1122,12 @@ fn pdf_render_page1_header(
         );
         let env_trunc = pdf_trunc(&env_str, 100);
 
-        // Shared right anchor — 6 mm from margin so the longest token never clips.
+        // Shared right anchor — text right-edges land here; box extends pad_h mm beyond.
         let right_anchor = ctx.w - ctx.margin - 6.0;
-        // Width estimates from Helvetica metrics: 7.5 pt avg advance ~1.15 mm/char (55 mm / 48 ch);
-        // 6.5 pt avg advance ~1.00 mm/char (73 mm / 74 ch). Both end at the same right_anchor.
-        let git_w = git_str.len() as f32 * 1.15;
-        let env_w = env_trunc.len() as f32 * 1.00;
+        // Accurate widths using exact PDF Helvetica advance tables (PDF spec Appendix D).
+        // Character-count estimates are unreliable for proportional fonts — actual per-glyph widths vary 4×.
+        let git_w = helvetica_width_mm(&git_str, 7.5, true);
+        let env_w = helvetica_width_mm(&env_trunc, 6.5, false);
         let max_w = git_w.max(env_w);
 
         // Background pill with 0.6 mm simulated border for visual grouping.
@@ -2081,6 +2092,9 @@ fn per_file_row_bg(ri: usize) -> printpdf::Rgb {
 // ── Per-file page layout constants shared by the helpers below ─────────────────
 const PDF_PERFILE_HDR_H: f32 = 8.0;
 const PDF_PERFILE_SUB_H: f32 = 5.5;
+// Gap between the PER-FILE DETAIL sub-bar and the column-header row.
+// Applied on standalone per-file pages (not when sharing a page with COCOMO/T&C).
+const PDF_PERFILE_TABLE_GAP: f32 = 3.0;
 
 /// Doc/font/dims context for per-file page helpers; carries `doc` instead of `layer`
 /// because the page layer is created inside `pdf_draw_perfile_header`.
@@ -2173,7 +2187,8 @@ fn pdf_draw_perfile_header(
             layer.set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
             layer.use_text(safe, 9.0, Mm(text_x), Mm(hdr_top + 2.5), ctx.font_bold);
         }
-        (layer, hdr_top - PDF_PERFILE_SUB_H)
+        // Leave a gap between the top header bar and the PER-FILE DETAIL sub-bar.
+        (layer, hdr_top - PDF_PERFILE_TABLE_GAP - PDF_PERFILE_SUB_H)
     }
 }
 
@@ -2283,8 +2298,10 @@ fn pdf_render_per_file_pages(
         "Tests",
         "Assertions",
     ];
-    let rows_per_page = ((h - PDF_PERFILE_HDR_H - PDF_PERFILE_SUB_H - tbl_hdr_h - footer_h) / row_h)
-        .floor() as usize;
+    let rows_per_page =
+        ((h - PDF_PERFILE_HDR_H - PDF_PERFILE_SUB_H - PDF_PERFILE_TABLE_GAP - tbl_hdr_h - footer_h)
+            / row_h)
+            .floor() as usize;
     let total_files = run.per_file_records.len();
 
     // Rows that fit on the continuation page (COCOMO already occupies the top portion).
@@ -2617,7 +2634,7 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
     use printpdf::{Color, Mm, Rgb};
     const HDR_H: f32 = 5.5;
     const ROW_H: f32 = 13.0; // tall enough for label + value with comfortable padding
-    const NOTE_H: f32 = 5.0;
+    const NOTE_H: f32 = 2.0; // just enough clearance for 5.5 pt descenders below the baseline
     const GAP: f32 = 5.0; // breathing room between data row and footnote
 
     let Some(ref c) = run.cocomo else {
@@ -2829,7 +2846,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         );
         let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
         // Render T&C inline on the same page immediately after COCOMO — no blank gap.
-        let tc_bottom = pdf_render_tc_inline(&c2_ctx, run, cocomo_bottom - 4.0, FOOTER_H);
+        let tc_bottom = pdf_render_tc_inline(&c2_ctx, run, cocomo_bottom - 2.0, FOOTER_H);
         // Footer (per-file renderer will overdraw with its richer version if it starts here).
         pdf_fill_rect(
             &c2_layer,
@@ -2884,6 +2901,193 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     .map_err(|e| anyhow::anyhow!("printpdf save error: {e}"))?;
 
     Ok(())
+}
+
+/// Per-character advance widths for the PDF built-in Helvetica and Helvetica-Bold fonts
+/// (1/1000 em units, PDF spec Appendix D). Used to right-align text without a layout engine.
+fn helvetica_advance(ch: char, bold: bool) -> u32 {
+    if bold {
+        match ch {
+            ' ' => 278,
+            '!' => 333,
+            '"' => 474,
+            '#' => 556,
+            '$' => 556,
+            '%' => 889,
+            '&' => 722,
+            '\'' => 278,
+            '(' => 333,
+            ')' => 333,
+            '*' => 389,
+            '+' => 584,
+            ',' => 278,
+            '-' => 333,
+            '.' => 278,
+            '/' => 278,
+            '0'..='9' => 556,
+            ':' => 333,
+            ';' => 333,
+            '<' => 584,
+            '=' => 584,
+            '>' => 584,
+            '?' => 556,
+            '@' => 975,
+            'A' => 722,
+            'B' => 722,
+            'C' => 722,
+            'D' => 722,
+            'E' => 667,
+            'F' => 611,
+            'G' => 778,
+            'H' => 722,
+            'I' => 278,
+            'J' => 556,
+            'K' => 722,
+            'L' => 611,
+            'M' => 833,
+            'N' => 722,
+            'O' => 778,
+            'P' => 667,
+            'Q' => 778,
+            'R' => 722,
+            'S' => 667,
+            'T' => 611,
+            'U' => 722,
+            'V' => 667,
+            'W' => 944,
+            'X' => 667,
+            'Y' => 611,
+            'Z' => 611,
+            '[' => 333,
+            '\\' => 278,
+            ']' => 333,
+            '^' => 584,
+            '_' => 556,
+            '`' => 278,
+            'a' => 556,
+            'b' => 611,
+            'c' => 556,
+            'd' => 611,
+            'e' => 556,
+            'f' => 333,
+            'g' => 611,
+            'h' => 611,
+            'i' => 278,
+            'j' => 278,
+            'k' => 556,
+            'l' => 278,
+            'm' => 889,
+            'n' => 611,
+            'o' => 611,
+            'p' => 611,
+            'q' => 611,
+            'r' => 389,
+            's' => 556,
+            't' => 333,
+            'u' => 611,
+            'v' => 556,
+            'w' => 778,
+            'x' => 556,
+            'y' => 556,
+            'z' => 500,
+            '\u{00B7}' => 278, // middle dot (Latin-1 0xB7) — used as section separator
+            _ => 556,          // fallback: Helvetica-Bold average advance
+        }
+    } else {
+        match ch {
+            ' ' => 278,
+            '!' => 278,
+            '"' => 355,
+            '#' => 556,
+            '$' => 556,
+            '%' => 889,
+            '&' => 667,
+            '\'' => 222,
+            '(' => 333,
+            ')' => 333,
+            '*' => 389,
+            '+' => 584,
+            ',' => 278,
+            '-' => 333,
+            '.' => 278,
+            '/' => 278,
+            '0'..='9' => 556,
+            ':' => 278,
+            ';' => 278,
+            '<' => 584,
+            '=' => 584,
+            '>' => 584,
+            '?' => 472,
+            '@' => 1015,
+            'A' => 667,
+            'B' => 667,
+            'C' => 722,
+            'D' => 722,
+            'E' => 667,
+            'F' => 611,
+            'G' => 778,
+            'H' => 722,
+            'I' => 278,
+            'J' => 500,
+            'K' => 667,
+            'L' => 556,
+            'M' => 833,
+            'N' => 722,
+            'O' => 778,
+            'P' => 667,
+            'Q' => 778,
+            'R' => 722,
+            'S' => 667,
+            'T' => 611,
+            'U' => 722,
+            'V' => 667,
+            'W' => 944,
+            'X' => 667,
+            'Y' => 611,
+            'Z' => 611,
+            '[' => 278,
+            '\\' => 278,
+            ']' => 278,
+            '^' => 469,
+            '_' => 556,
+            '`' => 222,
+            'a' => 556,
+            'b' => 556,
+            'c' => 500,
+            'd' => 556,
+            'e' => 556,
+            'f' => 278,
+            'g' => 556,
+            'h' => 556,
+            'i' => 222,
+            'j' => 222,
+            'k' => 500,
+            'l' => 222,
+            'm' => 833,
+            'n' => 556,
+            'o' => 556,
+            'p' => 556,
+            'q' => 556,
+            'r' => 333,
+            's' => 500,
+            't' => 278,
+            'u' => 556,
+            'v' => 500,
+            'w' => 722,
+            'x' => 500,
+            'y' => 500,
+            'z' => 500,
+            '\u{00B7}' => 278, // middle dot (Latin-1 0xB7) — used as section separator
+            _ => 500,          // fallback: Helvetica average advance
+        }
+    }
+}
+
+/// Convert a string to mm given a font size (pt) and bold flag, using exact PDF Helvetica metrics.
+fn helvetica_width_mm(text: &str, pt: f32, bold: bool) -> f32 {
+    let units: u32 = text.chars().map(|ch| helvetica_advance(ch, bold)).sum();
+    // 1 unit = (pt × 25.4 mm/in ÷ 72 pt/in) / 1000
+    units as f32 * pt * (25.4 / 72.0) / 1000.0
 }
 
 fn pdf_fill_rect(
@@ -4451,12 +4655,13 @@ struct WarningOpportunityRow {
     body.dark-theme .style-sig-chip{background:var(--surface-3);color:var(--muted);}
     body.dark-theme .style-sig-pop{background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.4);}
     body.dark-theme .style-sig-info-modal{background:var(--surface);}
-    .style-chip-tip{position:fixed;background:rgba(28,18,8,0.93);color:#f0ebe4;padding:9px 13px;border-radius:9px;font-size:12px;line-height:1.65;pointer-events:none;z-index:9998;opacity:0;transition:opacity .1s;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;min-width:160px;max-width:300px;}
-    .style-chip-tip.visible{opacity:1;}
-    .style-chip-tip-hd{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(240,235,228,.5);margin-bottom:5px;}
-    .style-chip-tip-row{display:flex;gap:8px;align-items:baseline;}
-    .style-chip-tip-k{color:#e07b3a;font-weight:700;white-space:nowrap;flex-shrink:0;}
-    .style-chip-tip-v{color:#f0ebe4;}
+    .sig-tip{position:fixed;background:rgba(28,18,8,0.93);color:#f0ebe4;padding:9px 13px 15px 13px;border-radius:9px;font-size:12px;line-height:1.65;pointer-events:none;z-index:9998;opacity:0;transition:opacity .1s;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;min-width:160px;max-width:300px;}
+    .sig-tip.visible{opacity:1;}
+    .sig-tip::after{content:'';position:absolute;top:100%;left:var(--sig-tip-ax,50%);transform:translateX(-50%);border:7px solid transparent;border-top-color:rgba(28,18,8,0.93);}
+    .sig-tip-hd{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(240,235,228,.5);margin-bottom:5px;}
+    .sig-tip-row{display:flex;gap:8px;align-items:baseline;}
+    .sig-tip-k{color:#e07b3a;font-weight:700;white-space:nowrap;flex-shrink:0;}
+    .sig-tip-v{color:#f0ebe4;}
 </style>
 <script nonce="{{ nonce }}">{{ chart_js|safe }}</script>
 </head>
@@ -4491,7 +4696,7 @@ struct WarningOpportunityRow {
   {% endif %}
   <div class="top-nav">
     <div class="top-nav-inner">
-      <a class="brand" href="/" onclick="if(location.protocol==='file:'){event.preventDefault();}">
+      <a class="brand" href="/" data-local-brand="1">
         {% if let Some(uri) = custom_logo_uri %}
         <img class="brand-logo" src="{{ uri }}" alt="logo" />
         {% else %}
@@ -4538,7 +4743,7 @@ struct WarningOpportunityRow {
           <div class="section-kicker">Saved report artifact</div>
           <div style="display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;">
             <h1>{{ title }}</h1>
-            <span class="run-id-short-badge" title="Short run ID — matches the ID shown in View Reports">{{ run_id_short }}</span>
+            <span class="run-id-short-badge" title="Short run ID \u2014 matches the ID shown in View Reports">{{ run_id_short }}</span>
           </div>
         </div>
       </div>
@@ -4779,7 +4984,7 @@ struct WarningOpportunityRow {
               <button class="chart-expand-btn" id="scatter-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Each bubble is a language. X&nbsp;=&nbsp;files analyzed, Y&nbsp;=&nbsp;code lines, bubble size&nbsp;∝&nbsp;total physical lines.</p>
-            <div id="scatter-chart" class="chart-container" style="position:relative;height:324px;"><canvas id="canvas-scatter"></canvas></div>
+            <div id="scatter-chart" class="chart-container" style="position:relative;height:224px;"><canvas id="canvas-scatter"></canvas></div>
           </div>
         </section>
 
@@ -5035,7 +5240,7 @@ struct WarningOpportunityRow {
               <div class="toolbar-left">
                 <span style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);">Per-File Style Details</span>
                 <input id="sft-search" class="search" type="search" placeholder="Filter files, languages, guides..." style="margin-left:12px;" />
-                <div class="page-size-row"><label class="page-size-label">Show:</label><select id="sft-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="sft-count-label" class="page-count-label"></span></div>
+                <div class="page-size-row"><label class="page-size-label" for="sft-page-size">Show:</label><select id="sft-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="sft-count-label" class="page-count-label"></span></div>
               </div>
             </div>
             <div class="table-scroll-wrap">
@@ -5046,8 +5251,8 @@ struct WarningOpportunityRow {
                     <th data-sort-key="lang" style="width:10%;" title="Programming language detected for this file. Click to sort.">Language <span class="style-sort-ind">&#9662;</span></th>
                     <th data-sort-key="indent" style="width:12%;" title="Dominant indentation style detected: Tabs, 2-Space, 4-Space, 8-Space, Mixed, or Unknown. Click to sort.">Indent <span class="style-sort-ind">&#9662;</span></th>
                     <th data-sort-key="guide" style="width:20%;" title="Style guide with the highest lexical-adherence score for this file. Click a badge to open the official guide documentation. Click header to sort.">Best Match Guide <span class="style-sort-ind">&#9662;</span></th>
-                    <th data-sort-key="score" style="width:10%;" title="Adherence score (0-100%) for the best-matching style guide. Higher = closer match to that guide's conventions. Lexical heuristic only — not a full parse. Click to sort.">Score <span class="style-sort-ind">&#9662;</span></th>
-                    <th style="width:13%;" title="Hover a row to see all signals — signal name and detected value.">Signals</th>
+                    <th data-sort-key="score" style="width:10%;" title="Adherence score (0-100%) for the best-matching style guide. Higher = closer match to that guide's conventions. Lexical heuristic only \u2014 not a full parse. Click to sort.">Score <span class="style-sort-ind">&#9662;</span></th>
+                    <th style="width:13%;" title="Hover a row to see all signals \u2014 signal name and detected value.">Signals</th>
                   </tr>
                 </thead>
                 <tbody id="style-file-tbody">
@@ -5202,7 +5407,7 @@ struct WarningOpportunityRow {
       </section>
 
       <section class="panel stack">
-        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input id="per-file-search" class="search" type="search" placeholder="Filter files, languages, status, warnings..." /><div class="page-size-row"><label class="page-size-label">Show:</label><select id="per-file-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="per-file-count-label" class="page-count-label"></span></div></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" data-reset-table title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" data-export-csv>&#8595; CSV</button><button class="export-btn" data-export-xls>&#8595; Excel</button></div></div></div>
+        <div class="toolbar"><div class="toolbar-left"><h2>Per-file detail</h2><input id="per-file-search" class="search" type="search" placeholder="Filter files, languages, status, warnings..." /><div class="page-size-row"><label class="page-size-label" for="per-file-page-size">Show:</label><select id="per-file-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="per-file-count-label" class="page-count-label"></span></div></div><div class="pill-row"><span class="pill good">Counts shown as analyzed by the selected policy</span><div class="export-group"><button class="export-btn" data-reset-table title="Reset scroll and column layout">&#8635; Reset</button><button class="export-btn" data-export-csv>&#8595; CSV</button><button class="export-btn" data-export-xls>&#8595; Excel</button></div></div></div>
         <div class="table-shell table-shell-clip">
         <div id="per-file-shell">
           <table id="per-file-table" data-sort-table class="table-resizable">
@@ -5263,7 +5468,7 @@ struct WarningOpportunityRow {
       </section>
 
       <section class="panel stack">
-        <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input id="skipped-search" class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." /><div class="page-size-row"><label class="page-size-label">Show:</label><select id="skipped-page-size" class="page-size-select"><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="skipped-count-label" class="page-count-label"></span></div></div><div class="export-group"><button class="export-btn" id="skipped-export-csv">&#8595; CSV</button><button class="export-btn" id="skipped-export-xls">&#8595; Excel</button></div></div>
+        <div class="toolbar"><div class="toolbar-left"><h2>Skipped files</h2><input id="skipped-search" class="search" type="search" placeholder="Filter skipped files, reasons, warnings..." /><div class="page-size-row"><label class="page-size-label" for="skipped-page-size">Show:</label><select id="skipped-page-size" class="page-size-select"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="all">All</option></select><span id="skipped-count-label" class="page-count-label"></span></div></div><div class="export-group"><button class="export-btn" id="skipped-export-csv">&#8595; CSV</button><button class="export-btn" id="skipped-export-xls">&#8595; Excel</button></div></div>
         <div class="table-shell table-shell-clip" style="margin-top:6px;">
         <div id="skipped-shell">
           <table id="skipped-table" data-sort-table class="table-resizable">
@@ -5385,14 +5590,12 @@ struct WarningOpportunityRow {
 
         <div>
           <details open>
-            <summary style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-              <span>Effective configuration</span>
-              <span class="config-actions" style="display:flex;gap:8px;">
+            <summary>Effective configuration</summary>
+            <div>
+              <div style="display:flex;gap:8px;margin-bottom:10px;">
                 <button type="button" class="export-btn" data-copy-config>Copy</button>
                 <button type="button" class="export-btn" data-download-config>Download</button>
-              </span>
-            </summary>
-            <div>
+              </div>
               <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">The merged, fully-resolved configuration snapshot used for this scan — includes all CLI overrides applied on top of the base config file. Use this to replay the exact run or verify what settings were active.</p>
               <div class="config-pre-wrap">
                 <div class="code-block-toolbar">
@@ -5409,11 +5612,15 @@ struct WarningOpportunityRow {
 
   <div id="r-tt" aria-hidden="true"></div>
   <script nonce="{{ nonce }}">
-    // Hide "View PDF" button when the report is opened as a local file (not from web server)
+    // Hide "View PDF" button and block brand-link navigation when opened as a local file
     (function () {
       var pdfBtn = document.getElementById('nav-view-pdf-btn');
       if (pdfBtn && window.location.protocol === 'file:') {
         pdfBtn.style.display = 'none';
+      }
+      var brand = document.querySelector('a[data-local-brand]');
+      if (brand && window.location.protocol === 'file:') {
+        brand.addEventListener('click', function (e) { e.preventDefault(); });
       }
     })();
 
@@ -5565,7 +5772,7 @@ struct WarningOpportunityRow {
           var direction = 1;
           var marker = document.createElement('span');
           marker.className = 'sort-indicator';
-          marker.textContent = ' ↕';
+          marker.textContent = ' \u2195';
           th.style.cursor = 'pointer';
           th.appendChild(marker);
           allMarkers.push(marker);
@@ -5581,9 +5788,9 @@ struct WarningOpportunityRow {
               return 0;
             });
             rows.forEach(function (row) { tbody.appendChild(row); });
-            allMarkers.forEach(function(m) { m.textContent = ' ↕'; });
+            allMarkers.forEach(function(m) { m.textContent = ' \u2195'; });
             direction = direction * -1;
-            marker.textContent = direction === -1 ? ' ↑' : ' ↓';
+            marker.textContent = direction === -1 ? ' \u2191' : ' \u2193';
             table.dispatchEvent(new CustomEvent('sloc-sorted'));
           });
         });
@@ -5682,7 +5889,7 @@ struct WarningOpportunityRow {
             } else if (ps === Infinity) {
               pageInfo.textContent = 'All ' + total.toLocaleString() + ' files';
             } else {
-              pageInfo.textContent = (start + 1) + '–' + end + ' of ' + total.toLocaleString() + ' files';
+              pageInfo.textContent = (start + 1) + '\u2013' + end + ' of ' + total.toLocaleString() + ' files';
             }
           }
           if (countLabel) {
@@ -5762,7 +5969,7 @@ struct WarningOpportunityRow {
         var totalAll = tbody.rows.length;
 
         function getPageSize() {
-          var v = pageSizeSelect ? pageSizeSelect.value : '20';
+          var v = pageSizeSelect ? pageSizeSelect.value : '10';
           return v === 'all' ? Infinity : parseInt(v, 10);
         }
 
@@ -5792,7 +5999,7 @@ struct WarningOpportunityRow {
             } else if (ps === Infinity) {
               pageInfo.textContent = 'All ' + total.toLocaleString() + ' files';
             } else {
-              pageInfo.textContent = (start + 1) + '–' + end + ' of ' + total.toLocaleString() + ' files';
+              pageInfo.textContent = (start + 1) + '\u2013' + end + ' of ' + total.toLocaleString() + ' files';
             }
           }
           if (countLabel) {
@@ -5963,7 +6170,7 @@ struct WarningOpportunityRow {
       function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}
       function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}
       var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
-      // Style indices: 0=normal 1=col-header(orange-fill/white-bold) 2=number(#,##0/right) 3=section(cream-fill/orange-bold) 4=bold-label
+      // Style indices: 0=normal 1=col-header(orange-fill/white-bold) 2=number(#,##0/right) 3=section(cream-fill/orange-bold) 4=bold-label 5=number(#,##0/left) 6=text(@)
       var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'">'
         +'<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0"/></numFmts>'
         +'<fonts count="3">'
@@ -5979,17 +6186,20 @@ struct WarningOpportunityRow {
         +'</fills>'
         +'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
         +'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        +'<cellXfs count="5">'
+        +'<cellXfs count="7">'
           +'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
           +'<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
           +'<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="right"/></xf>'
           +'<xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
           +'<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+          +'<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf>'
+          +'<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
         +'</cellXfs>'
         +'<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         +'</styleSheet>';
-      var wsXmls=[];
-      sheets.forEach(function(sh){
+      var wsXmls=[],tableCounter=0,tableXmls={},wsRelsXmls={};
+      function colNm(n){var s='';while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s;}
+      sheets.forEach(function(sh,sheetIdx){
         var rx='<row r="1">';
         sh.hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});
         rx+='</row>';
@@ -6023,13 +6233,33 @@ struct WarningOpportunityRow {
           sh.colWidths.forEach(function(w,i){cw+='<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+w+'" customWidth="1"/>';});
           cw+='</cols>';
         }
-        wsXmls.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'">'
+        var tblParts='';
+        if(!sh.isKv&&sh.hdrs.length>0&&sh.rows.length>0){
+          tableCounter++;
+          var tc=tableCounter,colCount=sh.hdrs.length,rowCount=sh.rows.length+1;
+          var tRef='A1:'+colNm(colCount)+rowCount;
+          tableXmls['xl/tables/table'+tc+'.xml']='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            +'<table xmlns="'+sns+'" id="'+tc+'" name="Table'+tc+'" displayName="Table'+tc+'" ref="'+tRef+'" totalsRowShown="0">'
+            +'<autoFilter ref="'+tRef+'"/>'
+            +'<tableColumns count="'+colCount+'">'
+            +sh.hdrs.map(function(h,i){return'<tableColumn id="'+(i+1)+'" name="'+xe(h)+'"/>';}).join('')
+            +'</tableColumns>'
+            +'<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>'
+            +'</table>';
+          wsRelsXmls['xl/worksheets/_rels/sheet'+(sheetIdx+1)+'.xml.rels']='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            +'<Relationships xmlns="'+pns+'relationships">'
+            +'<Relationship Id="rId1" Type="'+ons+'relationships/table" Target="../tables/table'+tc+'.xml"/>'
+            +'</Relationships>';
+          tblParts='<tableParts count="1"><tablePart r:id="rId1"/></tableParts>';
+        }
+        wsXmls.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'" xmlns:r="'+ons+'relationships">'
           +'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
-          +'<sheetFormatPr defaultRowHeight="15"/>'+cw+'<sheetData>'+rx+'</sheetData></worksheet>');
+          +'<sheetFormatPr defaultRowHeight="15"/>'+cw+'<sheetData>'+rx+'</sheetData>'+tblParts+'</worksheet>');
       });
       var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';
       var ctOver=sheets.map(function(_,i){return'<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}).join('');
-      var ctXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+ctOver+'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>';
+      var ctTable=Object.keys(tableXmls).map(function(k){return'<Override PartName="/'+k+'" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>';}).join('');
+      var ctXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+ctOver+ctTable+'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>';
       var wbSh=sheets.map(function(sh,i){return'<sheet name="'+xe(sh.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}).join('');
       var wbXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets>'+wbSh+'</sheets></workbook>';
       var wbR=sheets.map(function(_,i){return'<Relationship Id="rId'+(i+1)+'" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}).join('');
@@ -6039,6 +6269,8 @@ struct WarningOpportunityRow {
       var F={'[Content_Types].xml':ctXml,'_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':wbXml,'xl/_rels/workbook.xml.rels':wbRXml,'xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml};
       var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml'];
       sheets.forEach(function(_,i){var k='xl/worksheets/sheet'+(i+1)+'.xml';F[k]=wsXmls[i];order.push(k);});
+      Object.keys(wsRelsXmls).forEach(function(k){F[k]=wsRelsXmls[k];order.push(k);});
+      Object.keys(tableXmls).forEach(function(k){F[k]=tableXmls[k];order.push(k);});
       var zparts=[],zcds=[],zoff=0,znf=0;
       order.forEach(function(name){var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);zoff+=entry.length;znf++;});
       var cdSz=zcds.reduce(function(a,c){return a+c.length;},0);
@@ -6070,7 +6302,7 @@ struct WarningOpportunityRow {
       var fname='report_'+_titleSlug+(_commitSlug?'_'+_commitSlug:'')+'.xlsx';
       function sec(v){return[{_sec:true,v:v}];}
       function B(v){return{v:v,s:4};}
-      function N(v){return{v:typeof v==='number'?v:Number(v),s:2};}
+      function N(v){return{v:typeof v==='number'?v:Number(v),s:5};}
       var dens=_SLOC_META.physicalLines>0?(_SLOC_META.codeLines/_SLOC_META.physicalLines*100).toFixed(1)+'%':'0%';
       var sumRows=[
         sec('RUN INFORMATION'),
@@ -6095,7 +6327,7 @@ struct WarningOpportunityRow {
         [B('Variables'),N(_SLOC_META.variables),'Best-effort count of variable and constant declarations'],
         [B('Imports'),N(_SLOC_META.imports),'Best-effort count of import, include, module-use statements'],
         [B('Tests'),N(_SLOC_META.tests),'Best-effort count of test cases (GTest, PyTest, JUnit, etc.)'],
-        [B('Code Density'),dens,'Percentage of physical lines that contain executable source code'],
+        [B('Code Density'),{v:dens,s:6},'Percentage of physical lines that contain executable source code'],
         [B('Tool Version'),'oxide-sloc '+_SLOC_META.toolVersion,''],
       ];
       var langHdrs=['Language','Files','Physical Lines','Code Lines','Comments','Blank Lines','Mixed','Functions','Classes','Variables','Imports','Tests','Assertions','Suites'];
@@ -6122,10 +6354,23 @@ struct WarningOpportunityRow {
         if(tds.length<3)return;
         skRows.push([tds[0].textContent.trim(),tds[1].textContent.trim(),tds[2].textContent.trim()]);
       });
+      var covHdrs=['Language','Files','Physical Lines','Code Lines','Code Density','Functions','Classes','Variables','Imports','Tests','Assertions','Test Suites'];
+      var covRows=[];
+      document.querySelectorAll('#lang-breakdown-table tbody tr').forEach(function(tr){
+        var tds=tr.querySelectorAll('td');
+        if(tds.length<4)return;
+        var phys=Number(tds[2].textContent.trim())||0;
+        var code=Number(tds[3].textContent.trim())||0;
+        var densStr=phys>0?(code/phys*100).toFixed(1)+'%':'0%';
+        var row=[tds[0].textContent.trim(),Number(tds[1].textContent.trim())||0,phys,code,{v:densStr,s:6}];
+        for(var i=7;i<Math.min(tds.length,14);i++){var v=tds[i].textContent.trim();row.push(v!==''&&!isNaN(Number(v))?Number(v):v);}
+        covRows.push(row);
+      });
       slocXlsMulti(fname,[
-        {name:'Summary',hdrs:['Field / Metric','Value','Description'],rows:sumRows,colWidths:[22,45,55]},
+        {name:'Summary',hdrs:['Field / Metric','Value','Description'],rows:sumRows,colWidths:[22,45,55],isKv:true},
         {name:'Language Breakdown',hdrs:langHdrs,rows:langRows,colWidths:[16,8,14,12,12,12,8,10,10,10,10,8,10,8]},
         {name:'Per-File Detail',hdrs:pfHdrs,rows:pfRows,colWidths:[50,12,12,12,12,10,8,10,10,10,10,8,10,8]},
+        {name:'Code Coverage',hdrs:covHdrs,rows:covRows,colWidths:[18,7,14,12,13,11,10,10,10,8,11,12]},
         {name:'Skipped Files',hdrs:skHdrs,rows:skRows,colWidths:[60,25,50]}
       ]);
     };
@@ -6155,6 +6400,10 @@ struct WarningOpportunityRow {
                      '#D0743C','#5BA8A0','#8B3A8B','#3D7A3D','#AA5500','#005599'];
       var OX = '#C45C10', GN = '#2A6846', GY = '#BBBBBB';
       var ALL_CHARTS = [];
+      function hexAlpha(hex, a) {
+        var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+        return 'rgba('+r+','+g+','+b+','+a+')';
+      }
 
       function fmt(n) {
         var v = Number(n), a = Math.abs(v);
@@ -6351,6 +6600,16 @@ struct WarningOpportunityRow {
         wireMixLegend(el.querySelectorAll('svg')[1]);
       })();
 
+      // Shared cursor helper: pointer over data elements, default elsewhere.
+      // Added to options.onHover on every Chart.js instance.
+      // Legend items handled separately via legend.onHover / legend.onLeave.
+      function chartCursor(e, els) {
+        var t = e.native && e.native.target;
+        if (t) t.style.cursor = els.length ? 'pointer' : 'default';
+      }
+      function legendCursorOn(e) { var t=e.native&&e.native.target; if(t)t.style.cursor='pointer'; }
+      function legendCursorOff(e){ var t=e.native&&e.native.target; if(t)t.style.cursor='default'; }
+
       // ── Project Overview bar ─────────────────────────────────────────────────
       var projChart = null;
       (function() {
@@ -6397,6 +6656,7 @@ struct WarningOpportunityRow {
             },
             options: {
               indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+              onHover: chartCursor,
               animation: { duration: 500, easing: 'easeOutQuart' },
               layout: { padding: { right: 64 } },
               scales: {
@@ -6436,7 +6696,7 @@ struct WarningOpportunityRow {
             overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;">'
               + '<button class="chart-modal-close" aria-label="Close">&times;</button>'
               + '<div class="chart-modal-header">'
-              + '<span class="chart-modal-title">Project Overview — Full View</span>'
+              + '<span class="chart-modal-title">Project Overview \u2014 Full View</span>'
               + '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Y Axis:'
               + '<select id="ov-modal-y" class="chart-select">'
               + '<option value="code">Code Lines</option>'
@@ -6493,6 +6753,7 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                  onHover: chartCursor,
                   animation: { duration: 500, easing: 'easeOutQuart' },
                   layout: { padding: { right: 64 } },
                   scales: {
@@ -6612,44 +6873,43 @@ struct WarningOpportunityRow {
           },
           options: {
             responsive: true, maintainAspectRatio: false,
+            onHover: chartCursor,
             animation: { duration: 500, easing: 'easeOutQuart' },
-            layout: { padding: { top: 60, right: 25 } },
+            layout: { padding: { top: 44, right: 25 } },
             scales: {
               x: { type: 'logarithmic', min: 0.8,
                    grid: { color: c.grid },
-                   ticks: { color: c.text, maxTicksLimit: 6, callback: function(v){ return fmt(v); } },
-                   title: { display: true, text: 'Files Analyzed', color: c.text } },
-              y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} },
-                   title: { display: true, text: 'Code Lines', color: c.text } }
+                   ticks: { color: c.text, font: { size: 11 }, maxTicksLimit: 6, callback: function(v){ return fmt(v); } },
+                   title: { display: true, text: 'Files Analyzed', color: c.text, font: { size: 11 } } },
+              y: { grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, callback: function(v){return fmt(v);} },
+                   title: { display: true, text: 'Code Lines', color: c.text, font: { size: 11 } } }
             },
             plugins: {
               legend: {
-                position: 'right', labels: { color: c.text },
+                position: 'right', labels: { color: c.text, font: { size: 12 }, boxWidth: 24, boxHeight: 12 },
                 onHover: function(e, item, leg) {
+                  legendCursorOn(e);
                   var chart = leg.chart, idx = item.datasetIndex;
                   chart.data.datasets.forEach(function(ds, i) {
                     var base = PALETTE[i % PALETTE.length];
                     ds.backgroundColor = i === idx ? base + 'b8' : base + '20';
                     ds.borderColor = i === idx ? base : base + '30';
                   });
-                  chart.update('none');
-                  var tt = document.getElementById('r-tt');
-                  if (tt && e && e.native) {
-                    var d = SCAT_D[idx];
-                    tt.innerHTML = '<strong>' + item.text + '</strong><br>'
-                      + fmt(d.files) + ' files &nbsp;·&nbsp; ' + fmt(d.code) + ' code lines';
-                    var nx = e.native.clientX + 16, ny = e.native.clientY - 12;
-                    if (nx + 240 > window.innerWidth - 8) nx = e.native.clientX - 240 - 8;
-                    tt.style.left = nx + 'px'; tt.style.top = ny + 'px'; tt.style.display = 'block';
-                  }
+                  chart.setActiveElements([{ datasetIndex: idx, index: 0 }]);
+                  chart.tooltip.setActiveElements([{ datasetIndex: idx, index: 0 }], { x: 0, y: 0 });
+                  chart.update();
+                  var tt = document.getElementById('r-tt'); if (tt) tt.style.display = 'none';
                 },
                 onLeave: function(e, item, leg) {
+                  legendCursorOff(e);
                   var chart = leg.chart;
                   chart.data.datasets.forEach(function(ds, i) {
                     var base = PALETTE[i % PALETTE.length];
                     ds.backgroundColor = base + 'b8';
                     ds.borderColor = base;
                   });
+                  chart.setActiveElements([]);
+                  chart.tooltip.setActiveElements([], {});
                   chart.update('none');
                   var tt = document.getElementById('r-tt'); if (tt) tt.style.display = 'none';
                 }
@@ -6678,12 +6938,12 @@ struct WarningOpportunityRow {
                 var codeStr=fmt(d.code);
                 // render in layout.padding.top space — clamp only to canvas top, not chartArea.top
                 var ty2=Math.max(14,el.y-r-3);
-                var ty1=Math.max(1,ty2-16);
+                var ty1=Math.max(1,ty2-14);
                 // label always centred directly on bubble — padding.right gives room at the edge
                 ctx.save();ctx.fillStyle=tc;ctx.textBaseline='bottom';ctx.textAlign='center';
-                ctx.font='800 13px Inter,ui-sans-serif,sans-serif';
+                ctx.font='800 11px Inter,ui-sans-serif,sans-serif';
                 ctx.fillText(d.lang,el.x,ty1);
-                ctx.font='700 12px Inter,ui-sans-serif,sans-serif';
+                ctx.font='700 10px Inter,ui-sans-serif,sans-serif';
                 ctx.fillText(codeStr,el.x,ty2);
                 ctx.restore();
               });
@@ -6694,6 +6954,82 @@ struct WarningOpportunityRow {
       })();
 
       // ── Submodule breakdown ──────────────────────────────────────────────────
+      // Plugin: dim non-hovered rows to create a spotlight "pop" effect on bar hover.
+      var rowDimPlugin = {
+        afterDraw: function(chart) {
+          var active = chart.getActiveElements();
+          if (!active.length) return;
+          var activeIdx = active[0].index;
+          var ctx = chart.ctx, ca = chart.chartArea;
+          var dark = document.body.classList.contains('dark-theme');
+          var dimColor = dark ? 'rgba(18,12,8,0.58)' : 'rgba(245,239,232,0.65)';
+          var nDs = chart.data.datasets.length;
+          var lastMeta = chart.getDatasetMeta(nDs - 1);
+          chart.data.labels.forEach(function(_, idx) {
+            if (idx === activeIdx) return;
+            var bar = lastMeta.data[idx]; if (!bar) return;
+            try {
+              var props = bar.getProps(['y','height'], false);
+              var bh = Math.abs(props.height || 0);
+              ctx.save();
+              ctx.fillStyle = dimColor;
+              ctx.fillRect(ca.left, props.y - bh/2, ca.right - ca.left + 80, bh);
+              ctx.restore();
+            } catch(e) {}
+          });
+        }
+      };
+      // Plugin: spotlight + scaleY(1.22) jump for single-dataset horizontal bars.
+      // Dims non-active rows and redraws the active bar enlarged with a drop-shadow.
+      var barJumpPlugin = {
+        afterDraw: function(chart) {
+          var active = chart.getActiveElements();
+          if (!active.length) return;
+          var activeIdx = active[0].index;
+          var ctx = chart.ctx, ca = chart.chartArea;
+          var dark = document.body.classList.contains('dark-theme');
+          var dimColor = dark ? 'rgba(18,12,8,0.58)' : 'rgba(245,239,232,0.65)';
+          var nDs = chart.data.datasets.length;
+          var lastMeta = chart.getDatasetMeta(nDs - 1);
+          // Dim non-active rows
+          chart.data.labels.forEach(function(_, idx) {
+            if (idx === activeIdx) return;
+            var bar = lastMeta.data[idx]; if (!bar) return;
+            try {
+              var p = bar.getProps(['y','height'], false);
+              var bh = Math.abs(p.height || 0);
+              ctx.save();
+              ctx.fillStyle = dimColor;
+              ctx.fillRect(ca.left, p.y - bh/2, ca.right - ca.left + 80, bh);
+              ctx.restore();
+            } catch(e) {}
+          });
+          // Redraw active bar enlarged (scaleY 1.22) + drop-shadow to simulate a "pop"
+          chart.data.datasets.forEach(function(ds, di) {
+            var meta = chart.getDatasetMeta(di);
+            if (meta.hidden) return;
+            var bar = meta.data[activeIdx]; if (!bar) return;
+            try {
+              var p = bar.getProps(['x','y','base','height'], false);
+              var bh = Math.abs(p.height || 0);
+              if (!bh) return;
+              var grow = Math.max(4, Math.round(bh * 0.22));
+              var x0 = Math.min(p.x, p.base || 0);
+              var w = Math.abs(p.x - (p.base || 0));
+              if (w < 1) return;
+              var bg = ds.hoverBackgroundColor || ds.backgroundColor || OX;
+              ctx.save();
+              ctx.shadowColor = 'rgba(0,0,0,0.22)';
+              ctx.shadowBlur = 8;
+              ctx.shadowOffsetX = 0;
+              ctx.shadowOffsetY = 3;
+              ctx.fillStyle = bg;
+              ctx.fillRect(x0, p.y - 1 - (bh + grow) / 2, w, bh + grow);
+              ctx.restore();
+            } catch(e) {}
+          });
+        }
+      };
       var subChart = null;
       (function() {
         if (!SUB_D || !SUB_D.length) return;
@@ -6762,7 +7098,7 @@ struct WarningOpportunityRow {
                 }
               }
             },
-            plugins: [makeDlPlugin(function(v){ return fmt(v||0); }, 'end')]
+            plugins: [makeDlPlugin(function(v){ return fmt(v||0); }, 'end'), barJumpPlugin]
           });
           ALL_CHARTS.push(subChart);
         }
@@ -6823,6 +7159,7 @@ struct WarningOpportunityRow {
           },
           options: {
             indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            onHover: chartCursor,
             animation: { duration: 500, easing: 'easeOutQuart' },
             transitions: { active: { animation: { duration: 180, easing: 'easeOutQuart' } } },
             layout: { padding: { right: 56 } },
@@ -6833,7 +7170,32 @@ struct WarningOpportunityRow {
             plugins: {
               legend: {
                 position: 'bottom',
-                labels: { color: c.text, usePointStyle: true, pointStyle: 'rect', font: { size: 11, weight: '700' }, padding: 16 }
+                labels: { color: c.text, usePointStyle: true, pointStyle: 'rect', font: { size: 11, weight: '700' }, padding: 16 },
+                onHover: function(e, item, leg) {
+                  legendCursorOn(e);
+                  var ch = leg.chart, di = item.datasetIndex;
+                  var orig = [OX, GN, GY], hov = ['#d97020','#3a8a5e','#999'];
+                  ch.data.datasets.forEach(function(ds, i) {
+                    ds.backgroundColor = i===di ? orig[i] : hexAlpha(orig[i], 0.15);
+                    ds.hoverBackgroundColor = i===di ? hov[i] : hexAlpha(orig[i], 0.15);
+                  });
+                  // show tooltip on first bar row with all datasets (index mode)
+                  var n = ch.data.datasets.length, ae = [];
+                  for (var ii = 0; ii < n; ii++) { ae.push({ datasetIndex: ii, index: 0 }); }
+                  var fp = ch.getDatasetMeta(di).data[0];
+                  ch.setActiveElements([{ datasetIndex: di, index: 0 }]);
+                  ch.tooltip.setActiveElements(ae, fp ? { x: fp.x, y: fp.y } : { x: 0, y: 0 });
+                  ch.update();
+                },
+                onLeave: function(e, item, leg) {
+                  legendCursorOff(e);
+                  var ch = leg.chart;
+                  var orig = [OX, GN, GY], hov = ['#d97020','#3a8a5e','#999'];
+                  ch.data.datasets.forEach(function(ds, i) { ds.backgroundColor = orig[i]; ds.hoverBackgroundColor = hov[i]; });
+                  ch.setActiveElements([]);
+                  ch.tooltip.setActiveElements([], {});
+                  ch.update('none');
+                }
               },
               tooltip: {
                 mode: 'index',
@@ -6851,7 +7213,7 @@ struct WarningOpportunityRow {
               }
             }
           },
-          plugins: [makeStackedEndPlugin(function(v){ return fmt(v); }), segLabelPlugin]
+          plugins: [makeStackedEndPlugin(function(v){ return fmt(v); }), segLabelPlugin, rowDimPlugin]
         });
         ALL_CHARTS.push(subCompChart);
       })();
@@ -6892,6 +7254,7 @@ struct WarningOpportunityRow {
             },
             options: {
               responsive: true, maintainAspectRatio: false,
+              onHover: chartCursor,
               animation: { duration: 500, easing: 'easeOutQuart' },
               transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
               layout: { padding: { top: 18 } },
@@ -6938,7 +7301,7 @@ struct WarningOpportunityRow {
               + '<option value="variables">Variables</option>'
               + '<option value="imports">Imports</option>'
               + '<option value="tests">Tests</option>';
-            var hdr = '<div class="chart-modal-header"><span class="chart-modal-title">Semantic Metrics — Full View</span>'
+            var hdr = '<div class="chart-modal-header"><span class="chart-modal-title">Semantic Metrics \u2014 Full View</span>'
               + '<select class="chart-select" id="sem-modal-metric">' + semOptHtml + '</select></div>';
             overlay.innerHTML = '<div class="chart-modal" style="max-width:1320px;"><button class="chart-modal-close" aria-label="Close">&times;</button>' + hdr + '<div style="position:relative;height:' + modalH + 'px;width:100%;"><canvas id="canvas-semantic-modal"></canvas></div></div>';
             document.body.appendChild(overlay);
@@ -6965,6 +7328,7 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   responsive: true, maintainAspectRatio: false,
+                  onHover: chartCursor,
                   animation: { duration: 500, easing: 'easeOutQuart' },
                   transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
                   layout: { padding: { top: 18 } },
@@ -7021,6 +7385,7 @@ struct WarningOpportunityRow {
           },
           options: {
             indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            onHover: chartCursor,
             animation: { duration: 500, easing: 'easeOutQuart' },
             layout: { padding: { right: 42 } },
             scales: {
@@ -7074,6 +7439,7 @@ struct WarningOpportunityRow {
           },
           options: {
             responsive: true, maintainAspectRatio: false,
+            onHover: chartCursor,
             animation: { duration: 500, easing: 'easeOutQuart' },
             transitions: { active: { animation: { duration: 200, easing: 'easeOutQuart' } } },
             layout: { padding: { top: 18 } },
@@ -7127,7 +7493,7 @@ struct WarningOpportunityRow {
               + '<option value="absolute">Absolute Lines</option>'
               + '<option value="pct">100% Normalized</option>'
               + '</select>';
-            var canvas = makeOverlay('Language Composition — Full View', undefined, null, ctrlHtml);
+            var canvas = makeOverlay('Language Composition \u2014 Full View', undefined, null, ctrlHtml);
             if(!canvas) return;
             var modalMode = document.getElementById('comp-modal-mode');
             if(modalMode) modalMode.value = compMode;
@@ -7176,7 +7542,7 @@ struct WarningOpportunityRow {
           var btn = document.getElementById('scatter-expand-btn');
           if(!btn || !SCAT_D || !SCAT_D.length) return;
           btn.addEventListener('click', function(){
-            var canvas = makeOverlay('File Count vs SLOC — Full View', undefined, 'File count vs SLOC per language');
+            var canvas = makeOverlay('File Count vs SLOC \u2014 Full View', undefined, 'File count vs SLOC per language');
             if(!canvas) return;
             var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
             var c = clr();
@@ -7195,40 +7561,39 @@ struct WarningOpportunityRow {
               },
               options: {
                 responsive: true, maintainAspectRatio: false,
+                onHover: chartCursor,
                 animation: { duration: 500, easing: 'easeOutQuart' },
-                layout: { padding: { top: 60, right: 25 } },
+                layout: { padding: { top: 44, right: 25 } },
                 scales: {
-                  x: { type: 'logarithmic', min: 0.8, grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 6, callback: function(v){ return fmt(v); } }, title: { display: true, text: 'Files Analyzed', color: c.text } },
-                  y: { grid: { color: c.grid }, ticks: { color: c.text, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text } }
+                  x: { type: 'logarithmic', min: 0.8, grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, maxTicksLimit: 6, callback: function(v){ return fmt(v); } }, title: { display: true, text: 'Files Analyzed', color: c.text, font: { size: 11 } } },
+                  y: { grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text, font: { size: 11 } } }
                 },
                 plugins: {
                   legend: {
-                    position: 'right', labels: { color: c.text },
+                    position: 'right', labels: { color: c.text, font: { size: 12 }, boxWidth: 24, boxHeight: 12 },
                     onHover: function(e, item, leg) {
+                      legendCursorOn(e);
                       var ch = leg.chart, idx = item.datasetIndex;
                       ch.data.datasets.forEach(function(ds, i) {
                         var base = PALETTE[i % PALETTE.length];
                         ds.backgroundColor = i === idx ? base + 'b8' : base + '20';
                         ds.borderColor = i === idx ? base : base + '30';
                       });
-                      ch.update('none');
-                      var tt = document.getElementById('r-tt');
-                      if (tt && e && e.native) {
-                        var d = SCAT_D[idx];
-                        tt.innerHTML = '<strong>' + item.text + '</strong><br>'
-                          + fmt(d.files) + ' files · ' + fmt(d.code) + ' code lines';
-                        var nx = e.native.clientX + 16, ny = e.native.clientY - 12;
-                        if (nx + 240 > window.innerWidth - 8) nx = e.native.clientX - 240 - 8;
-                        tt.style.left = nx + 'px'; tt.style.top = ny + 'px'; tt.style.display = 'block';
-                      }
+                      ch.setActiveElements([{ datasetIndex: idx, index: 0 }]);
+                      ch.tooltip.setActiveElements([{ datasetIndex: idx, index: 0 }], { x: 0, y: 0 });
+                      ch.update();
+                      var tt = document.getElementById('r-tt'); if (tt) tt.style.display = 'none';
                     },
                     onLeave: function(e, item, leg) {
+                      legendCursorOff(e);
                       var ch = leg.chart;
                       ch.data.datasets.forEach(function(ds, i) {
                         var base = PALETTE[i % PALETTE.length];
                         ds.backgroundColor = base + 'b8';
                         ds.borderColor = base;
                       });
+                      ch.setActiveElements([]);
+                      ch.tooltip.setActiveElements([], {});
                       ch.update('none');
                       var tt = document.getElementById('r-tt'); if (tt) tt.style.display = 'none';
                     }
@@ -7250,11 +7615,11 @@ struct WarningOpportunityRow {
                     var r=(el.options&&el.options.radius)?el.options.radius:10;
                     var codeStr=fmt(d.code);
                     var ty2=Math.max(14,el.y-r-3);
-                    var ty1=Math.max(1,ty2-16);
+                    var ty1=Math.max(1,ty2-14);
                     ctx.save();ctx.fillStyle=tc;ctx.textBaseline='bottom';ctx.textAlign='center';
-                    ctx.font='800 13px Inter,ui-sans-serif,sans-serif';
+                    ctx.font='800 11px Inter,ui-sans-serif,sans-serif';
                     ctx.fillText(d.lang,el.x,ty1);
-                    ctx.font='700 12px Inter,ui-sans-serif,sans-serif';
+                    ctx.font='700 10px Inter,ui-sans-serif,sans-serif';
                     ctx.fillText(codeStr,el.x,ty2);
                     ctx.restore();
                   });
@@ -7275,7 +7640,7 @@ struct WarningOpportunityRow {
               return db-da;
             });
             var h = Math.min(Math.max(672, data.length * 46 + 96), Math.max(400, Math.floor(window.innerHeight * 0.82) - 130));
-            var canvas = makeOverlay('Comment Density — Full View', h, 'Comment ratio per language');
+            var canvas = makeOverlay('Comment Density \u2014 Full View', h, 'Comment ratio per language');
             if(!canvas) return;
             var densities = data.map(function(d){ var sig=(d.code||0)+(d.comments||0); return sig>0?Math.round((d.comments||0)/sig*1000)/10:0; });
             var c = clr();
@@ -7315,7 +7680,7 @@ struct WarningOpportunityRow {
           var btn = document.getElementById('filesize-expand-btn');
           if(!btn || !HIST_D || !HIST_D.length) return;
           btn.addEventListener('click', function(){
-            var canvas = makeOverlay('File Size Distribution — Full View', undefined, 'File count per SLOC bucket');
+            var canvas = makeOverlay('File Size Distribution \u2014 Full View', undefined, 'File count per SLOC bucket');
             if(!canvas) return;
             var labels = HIST_D.map(function(d){return d.label;});
             var counts = HIST_D.map(function(d){return d.count||0;});
@@ -7372,11 +7737,11 @@ struct WarningOpportunityRow {
               + '</select></label>'
               + '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Sort:'
               + '<select class="chart-select" id="sub-modal-sort">'
-              + '<option value="desc">Value ↓</option>'
-              + '<option value="asc">Value ↑</option>'
-              + '<option value="name">Name A→Z</option>'
+              + '<option value="desc">Value \u2193</option>'
+              + '<option value="asc">Value \u2191</option>'
+              + '<option value="name">Name A\u2192Z</option>'
               + '</select></label>';
-            var canvas = makeOverlay('Submodule Breakdown — Full View', modalH, null, ctrlHtml);
+            var canvas = makeOverlay('Submodule Breakdown \u2014 Full View', modalH, null, ctrlHtml);
             if(!canvas) return;
             var modalY = document.getElementById('sub-modal-y');
             var modalSort = document.getElementById('sub-modal-sort');
@@ -7424,7 +7789,7 @@ struct WarningOpportunityRow {
                     }}
                   }
                 },
-                plugins: [makeDlPlugin(function(v){return fmt(v||0);}, 'end')]
+                plugins: [makeDlPlugin(function(v){return fmt(v||0);}, 'end'), barJumpPlugin]
               });
             }
             renderSubModal(initY, initSort);
@@ -7443,11 +7808,11 @@ struct WarningOpportunityRow {
             var modalH = Math.min(Math.max(400, n * 40 + 90), maxH);
             var ctrlHtml = '<label style="font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;flex-shrink:0;">Sort:'
               + '<select class="chart-select" id="sub-comp-modal-sort">'
-              + '<option value="desc">Total Lines ↓</option>'
-              + '<option value="asc">Total Lines ↑</option>'
-              + '<option value="name">Name A→Z</option>'
+              + '<option value="desc">Total Lines \u2193</option>'
+              + '<option value="asc">Total Lines \u2191</option>'
+              + '<option value="name">Name A\u2192Z</option>'
               + '</select></label>';
-            var canvas = makeOverlay('Submodule Composition — Full View', modalH, null, ctrlHtml);
+            var canvas = makeOverlay('Submodule Composition \u2014 Full View', modalH, null, ctrlHtml);
             if(!canvas) return;
             var modalSort = document.getElementById('sub-comp-modal-sort');
             var scModalChart = null;
@@ -7471,6 +7836,7 @@ struct WarningOpportunityRow {
                 },
                 options: {
                   indexAxis:'y', responsive:true, maintainAspectRatio:false,
+                  onHover: chartCursor,
                   animation: { duration: 500, easing: 'easeOutQuart' },
                   transitions: { active: { animation: { duration: 180, easing: 'easeOutQuart' } } },
                   layout:{ padding:{ right:72 } },
@@ -7479,7 +7845,10 @@ struct WarningOpportunityRow {
                     y:{ stacked:true, grid:{display:false}, ticks:{color:c.text} }
                   },
                   plugins: {
-                    legend:{ position:'bottom', labels:{color:c.text, usePointStyle:true, pointStyle:'rect', font:{size:11,weight:'700'}, padding:16} },
+                    legend:{ position:'bottom', labels:{color:c.text, usePointStyle:true, pointStyle:'rect', font:{size:11,weight:'700'}, padding:16},
+                      onHover:function(e,item,leg){ legendCursorOn(e); var ch=leg.chart,di=item.datasetIndex; var orig=[OX,GN,GY],hov=['#d97020','#3a8a5e','#999']; ch.data.datasets.forEach(function(ds,i){ ds.backgroundColor=i===di?orig[i]:hexAlpha(orig[i],0.15); ds.hoverBackgroundColor=i===di?hov[i]:hexAlpha(orig[i],0.15); }); var n=ch.data.datasets.length,ae=[]; for(var ii=0;ii<n;ii++){ae.push({datasetIndex:ii,index:0});} var fp=ch.getDatasetMeta(di).data[0]; ch.setActiveElements([{datasetIndex:di,index:0}]); ch.tooltip.setActiveElements(ae,fp?{x:fp.x,y:fp.y}:{x:0,y:0}); ch.update(); },
+                      onLeave:function(e,item,leg){ legendCursorOff(e); var ch=leg.chart; var orig=[OX,GN,GY],hov=['#d97020','#3a8a5e','#999']; ch.data.datasets.forEach(function(ds,i){ ds.backgroundColor=orig[i]; ds.hoverBackgroundColor=hov[i]; }); ch.setActiveElements([]); ch.tooltip.setActiveElements([],{}); ch.update('none'); }
+                    },
                     tooltip:{ mode:'index', callbacks:{
                       title:function(items){return items.length?items[0].label:'';},
                       label:function(ctx){return '  '+ctx.dataset.label+': '+Number(ctx.parsed.x||0).toLocaleString();},
@@ -7487,7 +7856,7 @@ struct WarningOpportunityRow {
                     }}
                   }
                 },
-                plugins: [makeStackedEndPlugin(function(v){return fmt(v);}), segLabelPlugin]
+                plugins: [makeStackedEndPlugin(function(v){return fmt(v);}), segLabelPlugin, rowDimPlugin]
               });
             }
             renderSCModal('desc');
@@ -7504,7 +7873,7 @@ struct WarningOpportunityRow {
             if(!src) return;
             var overlay = document.createElement('div');
             overlay.className = 'chart-modal-overlay';
-            overlay.innerHTML = '<div class="chart-modal" style="max-width:1600px;"><button class="chart-modal-close" aria-label="Close">&times;</button><div class="chart-modal-header"><span class="chart-modal-title">Language Breakdown — Full View</span></div><div id="lang-overview-modal-wrap" style="width:100%;"></div></div>';
+            overlay.innerHTML = '<div class="chart-modal" style="max-width:1600px;"><button class="chart-modal-close" aria-label="Close">&times;</button><div class="chart-modal-header"><span class="chart-modal-title">Language Breakdown \u2014 Full View</span></div><div id="lang-overview-modal-wrap" style="width:100%;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.chart-modal-close').addEventListener('click', function(){ document.body.removeChild(overlay); });
             overlay.addEventListener('click', function(e){ if(e.target===overlay) document.body.removeChild(overlay); });
@@ -7694,7 +8063,7 @@ struct WarningOpportunityRow {
             },
             plugins: { legend:{position:'right', labels:{color:tc, boxWidth:12}} }
           }, 900, 260);
-          pgScat.grid.appendChild(mkPanel('Files × Code Lines (bubble size ∝ physical lines)', scatPng));
+          pgScat.grid.appendChild(mkPanel('Files \u00d7 Code Lines (bubble size \u221d physical lines)', scatPng));
           root.appendChild(pgScat.group);
         }
 
@@ -7759,11 +8128,9 @@ struct WarningOpportunityRow {
     window.oxSlocChartsReady = true;
     } catch(e) { window.oxSlocChartError = String(e); window.oxSlocChartsReady = true; }
     }); // end requestAnimationFrame
-    // Safety net: if rAF never fires (some headless configurations throttle it),
-    // mark ready after page load so the PDF capture does not wait the full 15 s.
-    window.addEventListener('load', function() {
-      setTimeout(function() { if (!window.oxSlocChartsReady) window.oxSlocChartsReady = true; }, 2000);
-    });
+    // Safety net: if rAF never fires (headless browsers throttle it), mark ready
+    // unconditionally so the PDF capture does not wait the full 15 s.
+    setTimeout(function() { if (!window.oxSlocChartsReady) window.oxSlocChartsReady = true; }, 3000);
     // ── SVG tooltip delegation ───────────────────────────────────────────────
     (function(){
       var tt = document.getElementById('r-tt');
@@ -7959,7 +8326,7 @@ struct WarningOpportunityRow {
         // Hover tooltip showing guide name + score + description
         var tip=document.createElement('div');tip.className='style-bar-tip';
         var desc=GUIDE_DESC[d.guide]||'';
-        tip.textContent=d.guide+': '+d.score+'%'+(desc?' · '+desc:'');
+        tip.textContent=d.guide+': '+d.score+'%'+(desc?' \u00b7 '+desc:'');
         var lbl=document.createElement('div');lbl.className='style-guide-label';
         lbl.textContent=d.guide;
         if(isTop)lbl.style.color='var(--oxide)';
@@ -7995,15 +8362,15 @@ struct WarningOpportunityRow {
       renderBars(activeLang);
     }
     function buildGuideHtml(guide){
-      if(!guide||guide==='—'||guide==='Unknown')return'<span style="color:var(--muted);">—</span>';
+      if(!guide||guide==='\u2014'||guide==='Unknown')return'<span style="color:var(--muted);">\u2014</span>';
       var url=GUIDE_URLS[guide];
       var desc=GUIDE_DESC[guide]||'';
-      var tipText='Open official '+guide+' documentation'+(desc?' · '+desc:'');
-      if(url){return'<a href="'+escH(url)+'" target="_blank" rel="noopener" class="style-badge" title="'+escH(tipText)+'">'+escH(guide)+'</a>';}
-      return'<span class="style-badge" title="'+escH(desc)+'">'+escH(guide)+'</span>';
+      var tipText='Open official '+guide+' documentation'+(desc?' \u00b7 '+desc:'');
+      if(url){return'<a href="'+escH(url)+'" target="_blank" rel="noopener" class="style-badge">'+escH(guide)+'</a>';}
+      return'<span class="style-badge">'+escH(guide)+'</span>';
     }
     function buildSigsHtml(sigs){
-      if(!sigs||!sigs.length)return'<span style="color:var(--muted);">—</span>';
+      if(!sigs||!sigs.length)return'<span style="color:var(--muted);">\u2014</span>';
       var html='';
       var visible=sigs.slice(0,2);
       var rest=sigs.slice(2);
@@ -8084,14 +8451,14 @@ struct WarningOpportunityRow {
       page.forEach(function(f){
         var barW=Math.round(f.score);
         var guide=f.guide&&f.guide!=='Unknown'?f.guide:'';
-        var badge=guide?buildGuideHtml(guide):'<span style="color:var(--muted);">—</span>';
+        var badge=guide?buildGuideHtml(guide):'<span style="color:var(--muted);">\u2014</span>';
                 var sigHtml=buildSigsHtml(f.signals);
         var rowClass=SCORE_THRESHOLD>0&&f.score<SCORE_THRESHOLD?' class="style-row-warn"':'';
         html+='<tr'+rowClass+'>'
           +'<td title="'+escH(f.path)+'">'+escH(f.path.replace(/^.*[\/\\]/,''))+'</td>'
           +'<td>'+escH(f.lang)+'</td>'
           +'<td>'+escH(f.indent)+'</td>'
-          +'<td>'+badge+'</td>'
+          +'<td class="guide-cell" data-gtip="'+(guide?(escH(guide)+(GUIDE_DESC[guide]?' \u00b7 '+escH(GUIDE_DESC[guide]):'')):'')+'">' +badge+'</td>'
           +'<td><span class="style-score-bar"><span class="style-score-fill" style="width:'+barW+'%"></span></span>'+f.score+'%</td>'
           +'<td class="sig-cell" data-sigs="'+escH(JSON.stringify(f.signals||[]))+'">'+sigHtml+'</td>'
           +'</tr>';
@@ -8108,7 +8475,7 @@ struct WarningOpportunityRow {
       if(pageInfo){
         if(total===0){pageInfo.textContent='No results';}
         else if(ps===Infinity){pageInfo.textContent='All '+total.toLocaleString()+' files';}
-        else{pageInfo.textContent=(start+1)+'–'+end+' of '+total.toLocaleString()+' files';}
+        else{pageInfo.textContent=(start+1)+'\u2013'+end+' of '+total.toLocaleString()+' files';}
       }
       if(countLabel){countLabel.textContent=(total<totalAll&&total>0)?'('+total.toLocaleString()+' matching)':'';}
       var edgeOff=ps===Infinity;
@@ -8128,49 +8495,65 @@ struct WarningOpportunityRow {
       sftRows=FILE_DATA.slice();
       sftFilteredRows=sftRows.slice();
       sftApplyFilter();
-      // Signal cell tooltip: follows cursor, shows all signals on row hover
+      // Signal & guide cell tooltip (appears above hovered cell, arrow points down)
       var chipTipEl=document.createElement('div');
-      chipTipEl.className='style-chip-tip';
+      chipTipEl.className='sig-tip';
       document.body.appendChild(chipTipEl);
-      var _activeSigCell=null;
-      function _showSigCellTip(cell,cx,cy){
-        var sigs;try{sigs=JSON.parse(cell.getAttribute('data-sigs'));}catch(e){return;}
-        if(!sigs||!sigs.length)return;
-        var html='<div class="style-chip-tip-hd">Signals</div>';
-        sigs.forEach(function(s){
-          html+='<div class="style-chip-tip-row"><span class="style-chip-tip-k">'+escH(s.k)+':</span><span class="style-chip-tip-v">'+escH(s.v)+'</span></div>';
-        });
+      function _showSigTip(html,cell){
         chipTipEl.innerHTML=html;
         chipTipEl.style.display='block';
-        chipTipEl.classList.add('visible');
-        _posSigTip(cx,cy);
-      }
-      function _posSigTip(cx,cy){
+        var r=cell.getBoundingClientRect();
         var tw=chipTipEl.offsetWidth||220;
-        var th=chipTipEl.offsetHeight||60;
-        var left=cx+14;
-        if(left+tw>window.innerWidth-8)left=cx-tw-10;
+        var th=chipTipEl.offsetHeight||80;
+        var cx=r.left+r.width/2;
+        var left=cx-tw/2;
         if(left<8)left=8;
-        var top=cy-th-10;
-        if(top<8)top=cy+20;
+        if(left+tw>window.innerWidth-8)left=window.innerWidth-tw-8;
+        var arrowPct=Math.round((cx-left)/tw*100);
+        if(arrowPct<10)arrowPct=10;
+        if(arrowPct>90)arrowPct=90;
+        chipTipEl.style.setProperty('--sig-tip-ax',arrowPct+'%');
+        var top=r.top-th-12;
+        if(top<8)top=r.bottom+8;
         chipTipEl.style.left=left+'px';
         chipTipEl.style.top=top+'px';
+        chipTipEl.classList.add('visible');
       }
-      function _hideSigCellTip(){
+      function _hideSigTip(){
         chipTipEl.classList.remove('visible');
         chipTipEl.style.display='none';
-        _activeSigCell=null;
+      }
+      function _buildSigHtml(cell){
+        var sigs;try{sigs=JSON.parse(cell.getAttribute('data-sigs'));}catch(ex){return null;}
+        if(!sigs||!sigs.length)return null;
+        var html='<div class="sig-tip-hd">Signals</div>';
+        sigs.forEach(function(s){
+          html+='<div class="sig-tip-row"><span class="sig-tip-k">'+escH(s.k)+':</span><span class="sig-tip-v">'+escH(s.v)+'</span></div>';
+        });
+        return html;
+      }
+      function _buildGuideHtml(cell){
+        var tip=cell.getAttribute('data-gtip')||'';
+        if(!tip)return null;
+        var parts=tip.split(' \u00b7 ',2);
+        var html='<div class="sig-tip-hd">'+escH(parts[0])+'</div>';
+        if(parts[1])html+='<div class="sig-tip-v" style="font-size:11px;">'+escH(parts[1])+'</div>';
+        return html;
       }
       var sigTbl=document.getElementById('style-file-table');
       if(sigTbl){
-        sigTbl.addEventListener('mousemove',function(e){
-          var cell=e.target.closest?e.target.closest('.sig-cell'):null;
-          if(!cell){_hideSigCellTip();return;}
-          _activeSigCell=cell;
-          _showSigCellTip(cell,e.clientX,e.clientY);
+        sigTbl.addEventListener('mouseover',function(e){
+          var sc=e.target.closest?e.target.closest('.sig-cell'):null;
+          var gc=e.target.closest?e.target.closest('.guide-cell'):null;
+          if(sc){var h=_buildSigHtml(sc);if(h)_showSigTip(h,sc);return;}
+          if(gc){var h=_buildGuideHtml(gc);if(h){var badge=gc.querySelector('.style-badge')||gc;_showSigTip(h,badge);}return;}
+          _hideSigTip();
         });
         sigTbl.addEventListener('mouseleave',function(){
-          _hideSigCellTip();
+          _hideSigTip();
+        });
+        sigTbl.addEventListener('mouseout',function(e){
+          if(!e.relatedTarget||!sigTbl.contains(e.relatedTarget))_hideSigTip();
         });
       }
       // Wire up sortable column headers
@@ -8269,8 +8652,8 @@ struct WarningOpportunityRow {
     var overlay=document.createElement('div');
     overlay.id='autoprint-overlay';
     overlay.style.cssText='position:fixed;inset:0;z-index:99999;background:var(--bg,#fff);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
-    overlay.innerHTML='<div style="font-size:20px;font-weight:800;color:var(--text,#1a1a1a);">Preparing PDF…</div>'
-      +'<div style="font-size:13px;color:var(--muted,#666);">Use your browser’s print dialog → <strong>Save as PDF</strong>.</div>'
+    overlay.innerHTML='<div style="font-size:20px;font-weight:800;color:var(--text,#1a1a1a);">Preparing PDF\u2026</div>'
+      +'<div style="font-size:13px;color:var(--muted,#666);">Use your browser\u2019s print dialog \u2192 <strong>Save as PDF</strong>.</div>'
       +'<div style="width:200px;height:4px;border-radius:2px;background:rgba(0,0,0,0.1);overflow:hidden;">'
       +'<div id="autoprint-bar" style="height:100%;width:0%;background:#e07b3a;transition:width 1.5s ease;border-radius:2px;"></div></div>';
     document.body.appendChild(overlay);
