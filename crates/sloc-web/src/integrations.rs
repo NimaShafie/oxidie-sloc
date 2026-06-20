@@ -435,20 +435,20 @@ use super::{AppState, CspNonce};
           + '<div class="empty-rich-title">No schedules configured yet</div>'
           + '<div class="empty-rich-desc">Add a webhook or polling schedule below to automatically trigger SLOC scans whenever code is pushed to your repository.</div>'
           + '<div class="empty-rich-tips">'
-          + '<div class="empty-rich-tip"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span><strong>Webhook</strong> — GitHub, GitLab, or Bitbucket sends a push event and a scan triggers instantly.</span></div>'
-          + '<div class="empty-rich-tip"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span><strong>Polling</strong> — OxideSLOC checks the branch on a fixed interval and scans when a new commit appears.</span></div>'
+          + '<div class="empty-rich-tip"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span><strong>Webhook</strong> \u2014 GitHub, GitLab, or Bitbucket sends a push event and a scan triggers instantly.</span></div>'
+          + '<div class="empty-rich-tip"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span><strong>Polling</strong> \u2014 OxideSLOC checks the branch on a fixed interval and scans when a new commit appears.</span></div>'
           + '</div>'
           + '</div>';
         return;
       }
       el.innerHTML = list.map(function (s) {
         var badge = s.kind === 'webhook' ? '<span class="sched-badge badge-webhook">Webhook</span>' : '<span class="sched-badge badge-poll">Poll</span>';
-        var extra = s.interval_secs ? ' · every ' + s.interval_secs + 's' : (s.provider && s.provider !== 'any' ? ' · ' + esc(s.provider) : '');
+        var extra = s.interval_secs ? ' \u00b7 every ' + s.interval_secs + 's' : (s.provider && s.provider !== 'any' ? ' \u00b7 ' + esc(s.provider) : '');
         var secret = s.webhook_secret ? '<div>Secret: <span class="sched-secret">' + esc(s.webhook_secret) + '</span></div>' : '';
         var last = s.last_scan_at ? 'Last scanned: ' + new Date(s.last_scan_at).toLocaleString() : 'Not yet scanned';
         return '<div class="sched-item">'
           + '<div class="sched-header">' + badge + '<span class="sched-label">' + esc(s.label) + '</span></div>'
-          + '<div class="sched-meta"><div>' + esc(s.repo_url) + ' · <strong>' + esc(s.branch) + '</strong>' + extra + '</div>' + secret + '<div>' + last + '</div></div>'
+          + '<div class="sched-meta"><div>' + esc(s.repo_url) + ' \u00b7 <strong>' + esc(s.branch) + '</strong>' + extra + '</div>' + secret + '<div>' + last + '</div></div>'
           + '<div class="sched-actions"><button class="btn btn-danger btn-sm" data-action="delete-schedule" data-id="' + esc(s.id) + '" type="button">Remove</button></div>'
           + '</div>';
       }).join('');
@@ -476,7 +476,7 @@ use super::{AppState, CspNonce};
         : 'Your Confluence username. Leave blank if authenticating with a PAT.';
       var tc = document.getElementById('tipCredential');
       if (tc) tc.textContent = cloud
-        ? 'Your Atlassian API token. Create one at id.atlassian.com → Security → API tokens. Leave blank to keep the saved token.'
+        ? 'Your Atlassian API token. Create one at id.atlassian.com \u2192 Security \u2192 API tokens. Leave blank to keep the saved token.'
         : 'Your Confluence password or PAT. Leave blank to keep the saved value.';
     }
     document.querySelectorAll('input[name=tier]').forEach(function(r) { r.addEventListener('change', onTierChange); });
@@ -499,7 +499,7 @@ use super::{AppState, CspNonce};
       document.getElementById('fSpaceKey').value = d.space_key || '';
       document.getElementById('fParentId').value = d.parent_page_id || '';
       if (d.api_token_set) {
-        document.getElementById('fCredential').placeholder = '••••••••  (saved — leave blank to keep)';
+        document.getElementById('fCredential').placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022  (saved \u2014 leave blank to keep)';
       }
       return d;
     }
@@ -535,7 +535,7 @@ use super::{AppState, CspNonce};
     async function testConfluenceConnection() {
       var btn = document.getElementById('testBtn');
       btn.disabled = true;
-      showStatus('connStatus', 'Testing…', true);
+      showStatus('connStatus', 'Testing\u2026', true);
       var r = await fetch('/api/confluence/test', { method: 'POST' });
       var d = await r.json();
       if (d.ok) showStatus('connStatus', 'Connection successful!', true);
@@ -560,7 +560,7 @@ use super::{AppState, CspNonce};
       el.innerHTML = list.map(function(s) {
         var checked = (savedAutoPost && savedAutoPost[s.id]) ? 'checked' : '';
         return '<div class="sched-auto-row">'
-          + '<span class="sched-auto-label">' + esc(s.label) + ' <small style="font-weight:400;color:var(--muted);">· ' + esc(s.branch) + '</small></span>'
+          + '<span class="sched-auto-label">' + esc(s.label) + ' <small style="font-weight:400;color:var(--muted);">\u00b7 ' + esc(s.branch) + '</small></span>'
           + '<label class="toggle-switch"><input type="checkbox" data-sched-id="' + esc(s.id) + '" ' + checked + '><span class="toggle-slider"></span></label></div>';
       }).join('');
     }
@@ -590,7 +590,7 @@ use super::{AppState, CspNonce};
     async function manualPost() {
       var btn = document.getElementById('manualPostBtn');
       btn.disabled = true;
-      showStatus('manualStatus', 'Posting to Confluence…', true);
+      showStatus('manualStatus', 'Posting to Confluence\u2026', true);
       var body = {
         run_id: document.getElementById('mRunId').value.trim(),
         page_title: document.getElementById('mPageTitle').value.trim() || 'OxideSLOC Report',
@@ -616,7 +616,7 @@ use super::{AppState, CspNonce};
         var orig = btn.textContent;
         btn.textContent = 'Copied!';
         setTimeout(function() { btn.textContent = orig; }, 2000);
-      } catch(e) { showStatus('manualStatus', 'Clipboard write failed — check browser permissions.', false); }
+      } catch(e) { showStatus('manualStatus', 'Clipboard write failed \u2014 check browser permissions.', false); }
     }
 
     // ── Background effects ────────────────────────────────────────────────────

@@ -507,7 +507,7 @@ pub struct CompareRefsQuery {
 
         // Bitbucket Cloud browse URL
         if (lower.includes('bitbucket.org') && lower.includes('/src/')) {
-          return '<b>Bitbucket Cloud browse URL.</b> The <code>/src/…</code> suffix was stripped. If the fetch failed, check that the repository is public or that your git credentials are configured.';
+          return '<b>Bitbucket Cloud browse URL.</b> The <code>/src/\u2026</code> suffix was stripped. If the fetch failed, check that the repository is public or that your git credentials are configured.';
         }
 
         // GitLab browse URL
@@ -546,7 +546,7 @@ pub struct CompareRefsQuery {
 
       function buildErrorTableHtml(errMsg, inputUrl) {
         var hints = getErrorHints(errMsg, inputUrl);
-        var short = errMsg.length > 400 ? errMsg.slice(0, 397) + '…' : errMsg;
+        var short = errMsg.length > 400 ? errMsg.slice(0, 397) + '\u2026' : errMsg;
         return '<tr><td colspan="6"><div class="fetch-error-state">'
           + '<div class="fetch-error-icon-wrap"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>'
           + '<div class="fetch-error-title">Repository fetch failed</div>'
@@ -570,7 +570,7 @@ pub struct CompareRefsQuery {
         if (topbar) topbar.classList.remove('visible');
         document.getElementById('refPanel').classList.remove('panel-hidden');
         // Short summary near the input as well
-        var brief = errMsg.length > 100 ? errMsg.slice(0, 97) + '…' : errMsg;
+        var brief = errMsg.length > 100 ? errMsg.slice(0, 97) + '\u2026' : errMsg;
         showStatus(brief, false);
       }
 
@@ -586,10 +586,10 @@ pub struct CompareRefsQuery {
 
         var elapsed = 0;
         var loadingMsg = document.querySelector('#loadingPanel .loading-info');
-        var baseText = ' Fetching repository…';
+        var baseText = ' Fetching repository\u2026';
         var timer = setInterval(function () {
           elapsed++;
-          var hint = elapsed >= 10 ? ' (first fetch may take 15–30s)' : '';
+          var hint = elapsed >= 10 ? ' (first fetch may take 15\u201330s)' : '';
           if (loadingMsg) loadingMsg.lastChild.textContent = baseText + ' ' + elapsed + 's' + hint;
         }, 1000);
 
@@ -704,13 +704,13 @@ pub struct CompareRefsQuery {
         var totalPages = Math.ceil(total / size);
         var from = start + 1;
         var html = '<div class="pag-bar">';
-        html += '<span class="pag-info">Showing ' + from + '–' + end + ' of ' + total + '</span>';
+        html += '<span class="pag-info">Showing ' + from + '\u2013' + end + ' of ' + total + '</span>';
         html += '<div class="pag-size-wrap">Per page: <select class="pag-size-select" data-tab="' + tab + '">' + pagSizeOptions(size) + '</select></div>';
         html += '<div class="pag-nav">';
         html += '<button class="pag-btn" data-tab="' + tab + '" data-page="' + (page - 1) + '"' + (page <= 1 ? ' disabled' : '') + '>&#8592; Prev</button>';
         pageRange(page, totalPages).forEach(function (p) {
-          if (p === '…') {
-            html += '<span class="pag-ellipsis">…</span>';
+          if (p === '\u2026') {
+            html += '<span class="pag-ellipsis">\u2026</span>';
           } else {
             html += '<button class="pag-btn' + (p === page ? ' active' : '') + '" data-tab="' + tab + '" data-page="' + p + '">' + p + '</button>';
           }
@@ -733,12 +733,12 @@ pub struct CompareRefsQuery {
           return arr;
         }
         if (current <= 4) {
-          return [1, 2, 3, 4, 5, '…', total];
+          return [1, 2, 3, 4, 5, '\u2026', total];
         }
         if (current >= total - 3) {
-          return [1, '…', total - 4, total - 3, total - 2, total - 1, total];
+          return [1, '\u2026', total - 4, total - 3, total - 2, total - 1, total];
         }
-        return [1, '…', current - 1, current, current + 1, '…', total];
+        return [1, '\u2026', current - 1, current, current + 1, '\u2026', total];
       }
 
       function setTabCount(id, n) {
@@ -759,8 +759,8 @@ pub struct CompareRefsQuery {
         }
         var bar = document.getElementById('compareBar');
         bar.style.display = (compareA || compareB) ? 'flex' : 'none';
-        document.getElementById('compareA').textContent = compareA ? short(compareA) : '—';
-        document.getElementById('compareB').textContent = compareB ? short(compareB) : '—';
+        document.getElementById('compareA').textContent = compareA ? short(compareA) : '\u2014';
+        document.getElementById('compareB').textContent = compareB ? short(compareB) : '\u2014';
       }
 
       function clearCompare() {
@@ -769,7 +769,7 @@ pub struct CompareRefsQuery {
         document.getElementById('compareBar').style.display = 'none';
       }
 
-      function short(r) { return r.length > 12 ? r.slice(0, 8) + '…' : r; }
+      function short(r) { return r.length > 12 ? r.slice(0, 8) + '\u2026' : r; }
 
       function scanRef(refName) {
         if (!currentRepo) return;
@@ -779,7 +779,7 @@ pub struct CompareRefsQuery {
 
       async function runCompare() {
         if (!compareA || !compareB) { showStatus('Select exactly two refs.', false); return; }
-        showStatus('Scanning both refs…', true);
+        showStatus('Scanning both refs\u2026', true);
         var r = await fetch('/api/git/compare-refs?' + new URLSearchParams({ repo: currentRepo, baseline_ref: compareA, current_ref: compareB }));
         var data = await r.json();
         if (r.ok && data.compare_url) { window.location.href = data.compare_url; }
