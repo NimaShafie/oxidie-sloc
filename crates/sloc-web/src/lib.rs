@@ -3367,6 +3367,29 @@ fn find_matching_run_json(candidates: &[PathBuf], run_id: &str) -> Option<PathBu
         .cloned()
 }
 
+/// Return the best folder hint for the relocate page.
+/// When the JSON file lives in a named subfolder (json/, html/, pdf/, excel/)
+/// point at the parent — the actual top-level output directory — so the user
+/// selects the root folder rather than the subfolder.
+fn output_folder_hint(json_path: &std::path::Path) -> String {
+    let direct_parent = match json_path.parent() {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let parent_name = direct_parent
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if matches!(parent_name, "json" | "html" | "pdf" | "excel") {
+        direct_parent
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| direct_parent.display().to_string())
+    } else {
+        direct_parent.display().to_string()
+    }
+}
+
 async fn update_run_file_paths(
     state: &AppState,
     run_id: &str,
@@ -3374,17 +3397,33 @@ async fn update_run_file_paths(
     html_path: Option<PathBuf>,
     pdf_path: Option<PathBuf>,
 ) {
-    let mut reg = state.registry.lock().await;
-    if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
-        entry.json_path = Some(json_path);
-        if let Some(hp) = html_path {
-            entry.html_path = Some(hp);
+    {
+        let mut reg = state.registry.lock().await;
+        if let Some(entry) = reg.entries.iter_mut().find(|e| e.run_id == run_id) {
+            entry.json_path = Some(json_path.clone());
+            if let Some(ref hp) = html_path {
+                entry.html_path = Some(hp.clone());
+            }
+            if let Some(ref pp) = pdf_path {
+                entry.pdf_path = Some(pp.clone());
+            }
         }
-        if let Some(pp) = pdf_path {
-            entry.pdf_path = Some(pp);
+        let _ = reg.save(&state.registry_path);
+    }
+    // Also patch the in-memory artifacts map so the result page picks up the
+    // new paths without requiring a server restart.
+    {
+        let mut map = state.artifacts.lock().await;
+        if let Some(arts) = map.get_mut(run_id) {
+            arts.json_path = Some(json_path);
+            if let Some(hp) = html_path {
+                arts.html_path = Some(hp);
+            }
+            if let Some(pp) = pdf_path {
+                arts.pdf_path = Some(pp);
+            }
         }
     }
-    let _ = reg.save(&state.registry_path);
 }
 
 fn missing_scan_relocate_response(
@@ -3412,6 +3451,19 @@ fn missing_scan_relocate_response(
 // ── Watched-directory helpers ─────────────────────────────────────────────────
 
 /// Collect `result*.json` candidates from `folder` and one level of subdirectories.
+fn find_file_by_ext(dir: &Path, ext: &str) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        })
+}
+
 fn collect_result_json_candidates(folder: &std::path::Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(j) = find_result_json_in_dir(folder) {
@@ -3421,8 +3473,16 @@ fn collect_result_json_candidates(folder: &std::path::Path) -> Vec<PathBuf> {
         for entry in dir_entries.flatten() {
             let sub = entry.path();
             if sub.is_dir() {
+                // Legacy flat structure: <scan_dir>/result*.json
                 if let Some(j) = find_result_json_in_dir(&sub) {
                     candidates.push(j);
+                }
+                // Structured output: <scan_dir>/json/result*.json
+                let json_sub = sub.join("json");
+                if json_sub.is_dir() {
+                    if let Some(j) = find_result_json_in_dir(&json_sub) {
+                        candidates.push(j);
+                    }
                 }
             }
         }
@@ -3448,12 +3508,26 @@ fn is_dir_already_registered(reg: &ScanRegistry, parent: &std::path::Path) -> bo
 }
 
 fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
-    let parent = json_path.parent()?.to_path_buf();
-    let html_path = fs::read_dir(&parent).ok().and_then(|rd| {
-        rd.flatten()
-            .map(|e| e.path())
-            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
-    });
+    let json_dir = json_path.parent()?.to_path_buf();
+    // If the JSON lives inside a directory named "json", the scan root is its parent
+    // and other artifacts live in sibling subdirectories (html/, pdf/, excel/).
+    let (html_path, pdf_path, csv_path, xlsx_path) =
+        if json_dir.file_name().and_then(|n| n.to_str()) == Some("json") {
+            let scan_root = json_dir.parent()?;
+            let html = find_html_report_in_dir(&scan_root.join("html"))
+                .or_else(|| find_html_report_in_dir(scan_root));
+            let pdf = find_file_by_ext(&scan_root.join("pdf"), "pdf");
+            let csv = find_file_by_ext(&scan_root.join("excel"), "csv");
+            let xlsx = find_file_by_ext(&scan_root.join("excel"), "xlsx");
+            (html, pdf, csv, xlsx)
+        } else {
+            let html = fs::read_dir(&json_dir).ok().and_then(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.extension().and_then(|e| e.to_str()) == Some("html"))
+            });
+            (html, None, None, None)
+        };
     let run = read_json(&json_path).ok()?;
     let project_label = run.input_roots.first().map_or_else(
         || "Unknown Project".to_string(),
@@ -3466,9 +3540,9 @@ fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
         input_roots: run.input_roots.clone(),
         json_path: Some(json_path),
         html_path,
-        pdf_path: None,
-        csv_path: None,
-        xlsx_path: None,
+        pdf_path,
+        csv_path,
+        xlsx_path,
         summary: ScanSummarySnapshot {
             files_analyzed: run.summary_totals.files_analyzed,
             files_skipped: run.summary_totals.files_skipped,
@@ -3652,14 +3726,13 @@ async fn refresh_watched_dirs_handler(
     let mut total = 0usize;
     {
         let mut reg = state.registry.lock().await;
+        reg.prune_stale();
         for dir in &dirs {
             if dir.is_dir() {
                 total += scan_folder_into_registry(dir, &mut reg);
             }
         }
-        if total > 0 {
-            let _ = reg.save(&state.registry_path);
-        }
+        let _ = reg.save(&state.registry_path);
     }
     let dest = if total > 0 {
         format!("{}?linked={total}", safe_redirect(&form.redirect_to))
@@ -5003,10 +5076,7 @@ async fn async_run_result_handler(
     };
 
     let Ok(run) = read_json(&json_path) else {
-        let folder_hint = json_path
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let folder_hint = output_folder_hint(&json_path);
         let redirect_url = format!("/runs/result/{run_id}");
         return missing_scan_relocate_response(
             &format!(
@@ -6236,7 +6306,7 @@ async fn resolve_artifact_set(
         "pdf" | "html" | "json" | "csv" | "xlsx" | "scan-config"
     ) {
         format!(
-            " The URL format appears to be reversed — \
+            " The URL format appears to be reversed \u{2014} \
              the server expects /runs/{run_id}/{{run_id}}, not /runs/{{run_id}}/{run_id}. \
              Use the View Reports page to navigate to your scan."
         )
@@ -6769,6 +6839,12 @@ struct HistoryEntryRow {
     code_lines: u64,
     comment_lines: u64,
     blank_lines: u64,
+    total_physical_lines: u64,
+    functions: u64,
+    classes: u64,
+    variables: u64,
+    imports: u64,
+    test_count: u64,
     git_branch: String,
     git_commit: String,
     has_html: bool,
@@ -6913,6 +6989,12 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                 code_lines: e.summary.code_lines,
                 comment_lines: e.summary.comment_lines,
                 blank_lines: e.summary.blank_lines,
+                total_physical_lines: e.summary.total_physical_lines,
+                functions: e.summary.functions,
+                classes: e.summary.classes,
+                variables: e.summary.variables,
+                imports: e.summary.imports,
+                test_count: e.summary.test_count,
                 git_branch: e.git_branch.clone().unwrap_or_default(),
                 git_commit: e.git_commit.clone().unwrap_or_default(),
                 has_html: e.html_path.as_ref().is_some_and(|p| p.exists()),
@@ -7144,10 +7226,7 @@ fn load_scan_for_compare(
                 "Could not load {scan_label} scan data.\n\nExpected path: {}\n\nError: {e}",
                 json_path.display()
             );
-            let folder_hint = json_path
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
+            let folder_hint = output_folder_hint(json_path);
             Err(missing_scan_relocate_response(
                 &msg,
                 run_id,
@@ -9185,6 +9264,7 @@ fn multi_compare_page(
     .site-footer a{{color:var(--muted);}}
     body.pdf-mode .top-nav,body.pdf-mode .background-watermarks,body.pdf-mode #code-particles,body.pdf-mode .export-group,body.pdf-mode .btn-back,body.pdf-mode .chart-toolbar,body.pdf-mode .filter-tabs-row,body.pdf-mode .filter-tabs,body.pdf-mode .pagination,body.pdf-mode select.per-page,body.pdf-mode .submod-scope-bar,body.pdf-mode .settings-modal,body.pdf-mode .site-footer{{display:none!important;}}
     body.pdf-mode{{background:#fff!important;}}
+    body.pdf-mode .page{{padding:4px 6px 4px!important;}}
     .mc-modal-overlay{{position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,0.52);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .18s ease;}}
     .mc-modal-overlay.open{{opacity:1;pointer-events:auto;}}
     .mc-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;box-shadow:0 24px 64px rgba(0,0,0,0.28);max-width:1000px;width:94%;max-height:86vh;overflow-y:auto;position:relative;}}
@@ -9534,7 +9614,7 @@ fn multi_compare_page(
         var hasTag=p.tags&&p.tags.length>0;
         // Permanent Y-value label above the dot
         parts.push('<text x="'+cx.toFixed(1)+'" y="'+(cy-11).toFixed(1)+'" text-anchor="middle" font-size="11" font-weight="600" fill="'+textColor+'">'+fmt(pts[i])+'</text>');
-        parts.push('<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+(hasTag?5.5:4)+'" fill="'+(hasTag?'#6f9bff':dotColor)+'" stroke="'+(dark?'#241a12':'#fbf7f2')+'" stroke-width="1.5" style="cursor:pointer" onclick="window.location=\'/runs/report.html/'+p.run_id+'\'"/>');
+        parts.push('<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+(hasTag?5.5:4)+'" fill="'+(hasTag?'#6f9bff':dotColor)+'" stroke="'+(dark?'#241a12':'#fbf7f2')+'" stroke-width="1.5" style="cursor:pointer" data-run-id="'+p.run_id+'"/>');
         var xanchor=i===0?'start':i===N-1?'end':'middle';
         // X-axis label at 2× the original size (18 px)
         parts.push('<text x="'+cx.toFixed(1)+'" y="'+(H-pad.b+22)+'" text-anchor="'+xanchor+'" font-size="18" fill="'+textColor+'" font-family="ui-monospace,monospace">'+escHtml(lbl)+'</text>');
@@ -9542,6 +9622,7 @@ fn multi_compare_page(
       parts.push('<text x="'+(pad.l+plotW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-size="10" fill="'+textColor+'">'+escHtml(metricLabel[metric]||metric)+'</text>');
       svg.setAttribute('viewBox','0 0 '+W+' '+H);
       svg.innerHTML=parts.join('');
+      svg.addEventListener('click',function(e){{var c=e.target.closest('circle[data-run-id]');if(c)window.location='/runs/html/'+c.getAttribute('data-run-id');}});
       // ── Interactive hover: vertical crosshair + tooltip ───────────────────
       svg.onmousemove=function(e){{
         var rect=svg.getBoundingClientRect();
@@ -9633,7 +9714,7 @@ fn multi_compare_page(
       tbody.innerHTML=rows.join('');
 
       var info=document.getElementById('pg-info');
-      if(info)info.textContent='Showing '+(total?start+1:0)+'–'+end+' of '+total+' files';
+      if(info)info.textContent='Showing '+(total?start+1:0)+'\u2013'+end+' of '+total+' files';
       renderPgBtns(totalPages);
     }}
 
@@ -10029,7 +10110,7 @@ fn multi_compare_page(
         langs.forEach(function(l,i){{
           var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
           c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
-          c3+='<rect'+btt(l,'Net delta: '+vStr+' • '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
+          c3+='<rect'+btt(l,'Net delta: '+vStr+' \u2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
           if(bw>=48){{c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
           else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
           c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
@@ -10044,14 +10125,14 @@ fn multi_compare_page(
       var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
       var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang4=-Math.PI/2;
       if(segs.length===1){{
-        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
+        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files \u2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
         c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface-2)"/>';
       }} else {{
         segs.forEach(function(s){{
           var sw=Math.min(s.v/tot4*2*Math.PI,2*Math.PI-0.001),a2=ang4+sw;
           var x1=cx4+Ro*Math.cos(ang4),y1=cy4+Ro*Math.sin(ang4),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang4),yi2=cy4+Ri*Math.sin(ang4);
-          c4+='<path'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          c4+='<path'+btt(s.l,fmt2(s.v)+' files \u2022 '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
           ang4+=sw;
         }});
       }}
@@ -10059,8 +10140,8 @@ fn multi_compare_page(
       c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
       segs.forEach(function(s,i){{
         var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
-        c4+='<rect'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt2(s.v)+'</text>';
+        c4+='<rect'+btt(s.l,fmt2(s.v)+' files \u2022 '+px(s.v/tot4*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
+        c4+='<text'+btt(s.l,fmt2(s.v)+' files \u2022 '+px(s.v/tot4*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt2(s.v)+'</text>';
       }});
       c4+='</svg>';
       // Inject charts
@@ -11337,7 +11418,7 @@ async fn trend_report_handler(
         x+='<c:axId val="5"/><c:axId val="6"/></c:lineChart>';
         x+='<c:catAx><c:axId val="5"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="6"/></c:catAx>';
         x+='<c:valAx><c:axId val="6"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:tickLblPos val="nextTo"/><c:crossAx val="5"/><c:crossBetween val="between"/></c:valAx>';
-        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Focus View — change N1 to switch metric</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
+        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Focus View \u2014 change N1 to switch metric</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
         return x;
       }}
       var hasChart=!!(chartRows&&chartRows.length);
@@ -11549,7 +11630,7 @@ async fn trend_report_handler(
       modal.innerHTML=''
         +'<div style="background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:36px 44px;max-width:580px;width:95%;box-shadow:0 24px 64px rgba(0,0,0,0.38);">'
         +'<div style="font-size:19px;font-weight:800;margin-bottom:6px;">Retention Policy</div>'
-        +'<p style="font-size:13px;color:var(--muted);margin:0 0 22px;">Automatically clean up old scan runs on a schedule. Both rules apply when set — a run is deleted if it exceeds the age limit <em>or</em> falls outside the count limit.</p>'
+        +'<p style="font-size:13px;color:var(--muted);margin:0 0 22px;">Automatically clean up old scan runs on a schedule. Both rules apply when set \u2014 a run is deleted if it exceeds the age limit <em>or</em> falls outside the count limit.</p>'
         +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:22px;">'
         +'<input type="checkbox" id="rp-enabled" style="width:16px;height:16px;cursor:pointer;accent-color:var(--oxide);">'
         +'<label for="rp-enabled" style="font-size:14px;font-weight:700;cursor:pointer;">Enable auto-cleanup</label>'
@@ -11578,7 +11659,7 @@ async fn trend_report_handler(
         +'<option value="168">Every week</option>'
         +'</select>'
         +'</div>'
-        +'<div id="rp-last-run" style="padding:10px 14px;border-radius:8px;background:var(--surface-2);font-size:12px;color:var(--muted);margin-bottom:20px;">—</div>'
+        +'<div id="rp-last-run" style="padding:10px 14px;border-radius:8px;background:var(--surface-2);font-size:12px;color:var(--muted);margin-bottom:20px;">\u2014</div>'
         +'<div id="rp-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:18px;"></div>'
         +'<div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">'
         +'<button class="button secondary" id="rp-close-btn" type="button">Close</button>'
@@ -11736,7 +11817,7 @@ async fn trend_report_handler(
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
-  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} \u2014 Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
 </body>
 </html>"##,
     );
@@ -12262,10 +12343,10 @@ async fn test_metrics_handler(
     // Build the watched-dirs bar HTML. In Network Server mode show a locked notice instead
     // of interactive controls — folder watching is managed by the host administrator.
     let watched_dirs_html: String = if state.server_mode {
-        r#"<div class="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips"><span class="watched-none">Network Server mode — watched folder settings can only be modified by the host administrator.</span></div></div></div>"#.to_string()
+        r#"<div class="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips"><span class="watched-none">Network Server mode \u2014 watched folder settings can only be modified by the host administrator.</span></div></div></div>"#.to_string()
     } else {
         let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
-            r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
+            r#"<span class="watched-none">No folders watched \u2014 click Choose to add one</span>"#
                 .to_string()
         } else {
             watched_dirs_list
@@ -12649,7 +12730,7 @@ async fn test_metrics_handler(
           <button class="cov-tab" data-tier="mid">Moderate (50–79%)</button>
           <button class="cov-tab" data-tier="high">High (≥80%)</button>
         </div>
-        <input type="search" id="cov-file-search" class="cov-file-search" placeholder="Filter by filename…">
+        <input type="search" id="cov-file-search" class="cov-file-search" placeholder="Filter by filename\u2026">
       </div>
       <div style="overflow-x:auto;">
         <table class="data-table" id="cov-file-table">
@@ -12970,7 +13051,20 @@ async fn test_metrics_handler(
         options: {{
           responsive: true, maintainAspectRatio: false, cutout: '62%',
           plugins: {{
-            legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }} }},
+            legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }},
+              onHover: function(e, item, leg) {{
+                var ch = leg.chart;
+                ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
+                ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
+                ch.update();
+              }},
+              onLeave: function(e, item, leg) {{
+                var ch = leg.chart;
+                ch.setActiveElements([]);
+                ch.tooltip.setActiveElements([], {{}});
+                ch.update('none');
+              }}
+            }},
             tooltip: {{ callbacks: {{ label: function(ctx) {{
               var v = ctx.parsed, pct = totalF > 0 ? (v / totalF * 100).toFixed(1) : '0';
               return ' ' + fmtFull(v) + ' files (' + pct + '%)';
@@ -13036,13 +13130,26 @@ async fn test_metrics_handler(
         tierChart = new Chart(tierCanvas, {{
           type: 'doughnut',
           data: {{
-            labels: ['High (≥80%)', 'Moderate (50–79%)', 'Low (<50%)'],
+            labels: ['High (\u226580%)', 'Moderate (50\u201379%)', 'Low (<50%)'],
             datasets: [{{ data: [tiers.high || 0, tiers.mid || 0, tiers.low || 0], backgroundColor: ['#2A6846', '#D4A017', '#B23030'], borderWidth: 2, borderColor: isDark() ? '#1e1e1e' : '#f5efe8' }}]
           }},
           options: {{
             responsive: true, maintainAspectRatio: false, cutout: '62%',
             plugins: {{
-              legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }} }},
+              legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }},
+                onHover: function(e, item, leg) {{
+                  var ch = leg.chart;
+                  ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
+                  ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
+                  ch.update();
+                }},
+                onLeave: function(e, item, leg) {{
+                  var ch = leg.chart;
+                  ch.setActiveElements([]);
+                  ch.tooltip.setActiveElements([], {{}});
+                  ch.update('none');
+                }}
+              }},
               tooltip: {{ callbacks: {{ label: function(ctx) {{
                 var v = ctx.parsed, pct = total > 0 ? (v / total * 100).toFixed(1) : '0';
                 return ' ' + v + ' file' + (v !== 1 ? 's' : '') + ' (' + pct + '%)';
@@ -13112,7 +13219,7 @@ async fn test_metrics_handler(
       if (count) count.textContent = shown + ' of ' + filtered.length + ' file' + (filtered.length !== 1 ? 's' : '') + (filtered.length > 500 ? ' (showing first 500)' : '');
       tbody.innerHTML = filtered.slice(0, 500).map(function(f) {{
         var fnCol = f.fn_pct < 0
-          ? '<td class="num" style="color:var(--muted);font-size:11px;">—</td><td class="num" style="color:var(--muted);font-size:11px;">—</td>'
+          ? '<td class="num" style="color:var(--muted);font-size:11px;">\u2014</td><td class="num" style="color:var(--muted);font-size:11px;">\u2014</td>'
           : '<td class="num">' + pctBadge(f.fn_pct) + '</td><td class="num" style="color:var(--muted);font-size:11px;">' + f.fhit + ' / ' + f.ffound + '</td>';
         return '<tr>' +
           '<td class="cov-file-path" title="' + f.rel.replace(/"/g, '&quot;') + '">' + f.rel + '</td>' +
@@ -13274,7 +13381,7 @@ async fn test_metrics_handler(
         if (!D || !D.length) return;
         var top15 = D.slice(0, 15);
         var h = Math.max(320, top15.length * 36 + 80);
-        var canvas = makeTmOverlay('Test Definitions by Language — Full View', top15.length + ' languages', h);
+        var canvas = makeTmOverlay('Test Definitions by Language \u2014 Full View', top15.length + ' languages', h);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'bar',
@@ -13304,7 +13411,7 @@ async fn test_metrics_handler(
         if (!D || !D.length) return;
         var topD = D.slice().sort(function(a,b){{ return b.density - a.density; }}).slice(0, 15);
         var h = Math.max(320, topD.length * 36 + 80);
-        var canvas = makeTmOverlay('Test Density (per 1 000 code lines) — Full View', topD.length + ' languages', h);
+        var canvas = makeTmOverlay('Test Density (per 1\u202f000 code lines) \u2014 Full View', topD.length + ' languages', h);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'bar',
@@ -13332,7 +13439,7 @@ async fn test_metrics_handler(
       btn.addEventListener('click', function() {{
         var pts = currentTrendPts;
         if (!pts || !pts.length) return;
-        var canvas = makeTmOverlay('Test Count Trend — Full View', pts.length + ' scan' + (pts.length !== 1 ? 's' : ''), 420);
+        var canvas = makeTmOverlay('Test Count Trend \u2014 Full View', pts.length + ' scan' + (pts.length !== 1 ? 's' : ''), 420);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'line',
@@ -13370,7 +13477,7 @@ async fn test_metrics_handler(
         var top15 = D.filter(function(d){{ return d.assertions > 0; }}).slice(0, 15);
         if (!top15.length) return;
         var h = Math.max(320, top15.length * 36 + 80);
-        var canvas = makeTmOverlay('Assertions by Language — Full View', top15.length + ' languages', h);
+        var canvas = makeTmOverlay('Assertions by Language \u2014 Full View', top15.length + ' languages', h);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'bar',
@@ -13401,7 +13508,7 @@ async fn test_metrics_handler(
         var top15 = D.filter(function(d){{ return d.suites > 0; }}).slice(0, 15);
         if (!top15.length) return;
         var h = Math.max(320, top15.length * 36 + 80);
-        var canvas = makeTmOverlay('Test Suites by Language — Full View', top15.length + ' languages', h);
+        var canvas = makeTmOverlay('Test Suites by Language \u2014 Full View', top15.length + ' languages', h);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'bar',
@@ -13471,7 +13578,7 @@ async fn test_metrics_handler(
     applyScope();
   }})();
   </script>
-  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} \u2014 Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
 </body>
 </html>"#,
     );
@@ -15032,7 +15139,7 @@ fn build_preview_html(
         let status_label = row.kind.label();
         let lang_attr = row.language.unwrap_or("");
         let toggle_html = if row.is_dir {
-            r#"<button type="button" class="tree-toggle" aria-label="Toggle folder">▾</button>"#
+            r#"<button type="button" class="tree-toggle" aria-label="Toggle folder">\u25be</button>"#
                 .to_string()
         } else {
             r#"<span class="tree-bullet">•</span>"#.to_string()
@@ -16385,7 +16492,7 @@ struct SubmoduleRow {
           <div class="ws-divider"></div>
           <div class="ws-stat ws-stat-clamp" data-wb-tip="Directory path of the project currently selected or most recently analyzed."><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
           <div class="ws-divider"></div>
-          <div class="ws-stat ws-stat-output" data-wb-tip="Folder where scan artifacts — JSON, HTML, and PDF reports — are written after each completed scan.">
+          <div class="ws-stat ws-stat-output" data-wb-tip="Folder where scan artifacts \u2014 JSON, HTML, and PDF reports \u2014 are written after each completed scan.">
             <span class="ws-label">Output</span>
             <span class="ws-value">
               <button type="button" class="ws-path-link open-folder-button" id="ws-output-link" data-folder="" title="Click to open in file explorer">
@@ -16422,8 +16529,7 @@ struct SubmoduleRow {
           <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="18 15 12 9 6 15"></polyline></svg>
           Top of page
         </a>
-        <div class="sidebar-scroll-divider"></div>
-        <button type="button" class="step-button active" data-step-target="1"><span class="step-num">1</span><span>Select project</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+        <button type="button" class="step-button active" style="margin-top:10px;" data-step-target="1"><span class="step-num">1</span><span>Select project</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
         <button type="button" class="step-button" data-step-target="2"><span class="step-num">2</span><span>Counting rules</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
         <button type="button" class="step-button" data-step-target="3"><span class="step-num">3</span><span>Outputs and reports</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
         <button type="button" class="step-button" data-step-target="4"><span class="step-num">4</span><span>Review and run</span><svg class="step-check" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
@@ -16509,9 +16615,9 @@ struct SubmoduleRow {
                     <div class="scope-legend-row">
                       <span class="scope-legend-label">Scope legend:</span>
                       <span class="scope-legend-badges">
-                        <span class="badge badge-scan" data-tooltip="Files with a supported language analyzer — counted in SLOC totals.">supported</span>
+                        <span class="badge badge-scan" data-tooltip="Files with a supported language analyzer \u2014 counted in SLOC totals.">supported</span>
                         <span class="badge badge-skip" data-tooltip="Files excluded by a policy rule such as vendor, generated, or minified detection.">skipped by policy</span>
-                        <span class="badge badge-unsupported" data-tooltip="Files outside the supported language set — listed but not counted.">unsupported</span>
+                        <span class="badge badge-unsupported" data-tooltip="Files outside the supported language set \u2014 listed but not counted.">unsupported</span>
                       </span>
                     </div>
                   </div>
@@ -16834,7 +16940,7 @@ int main() { … }   ← code
                     </select>
                   </div>
                   <div class="explainer-card prominent" style="margin:0;">
-                    <div class="advanced-rule-description"><strong>Purpose:</strong> Controls whether lexical style-guide heuristics run at all.<br /><strong>Enable</strong> — every supported file is scored against its language's style guides and the results appear in the report (default).<br /><strong>Disable</strong> — style scoring is skipped entirely; useful for very large repos where you only need SLOC counts.</div>
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Controls whether lexical style-guide heuristics run at all.<br /><strong>Enable</strong> \u2014 every supported file is scored against its language's style guides and the results appear in the report (default).<br /><strong>Disable</strong> \u2014 style scoring is skipped entirely; useful for very large repos where you only need SLOC counts.</div>
                     <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_analysis_enabled = true   (default)
 # style_analysis_enabled = false  (skip, faster scan)
 # Disabling removes the Code Style section from the report.</div>
@@ -17227,11 +17333,11 @@ int main() { … }   ← code
           var val = includeGlobsInput.value.trim();
           if (!val) {
             badge.className = "include-scope-badge scope-all";
-            badge.innerHTML = iconCheck + "All files eligible — no include filter active";
+            badge.innerHTML = iconCheck + "All files eligible \u2014 no include filter active";
           } else {
             var count = val.split(/[\n,]+/).filter(function(s) { return s.trim(); }).length;
             badge.className = "include-scope-badge scope-narrow";
-            badge.innerHTML = iconFilter + "Scoped to " + count + " pattern" + (count === 1 ? "" : "s") + " — only matching files will be included";
+            badge.innerHTML = iconFilter + "Scoped to " + count + " pattern" + (count === 1 ? "" : "s") + " \u2014 only matching files will be included";
           }
         }
         includeGlobsInput.addEventListener("input", update);
@@ -17281,10 +17387,10 @@ int main() { … }   ← code
           if (el) el.classList.add("hidden");
         });
         var cancelBtn = document.getElementById("lc-cancel-btn");
-        if (cancelBtn) { cancelBtn.style.display = ""; cancelBtn.disabled = false; cancelBtn.textContent = "✕ Cancel scan"; }
+        if (cancelBtn) { cancelBtn.style.display = ""; cancelBtn.disabled = false; cancelBtn.textContent = "\u2715 Cancel scan"; }
         var el = document.getElementById("lc-elapsed"); if (el) el.textContent = "0s";
         var ph = document.getElementById("lc-phase"); if (ph) ph.textContent = "Starting";
-        var sd = document.getElementById("lc-stage-desc"); if (sd) sd.textContent = "Initializing language analyzers and loading configuration…";
+        var sd = document.getElementById("lc-stage-desc"); if (sd) sd.textContent = "Initializing language analyzers and loading configuration\u2026";
         for (var ri=1;ri<=4;ri++){var rs=document.getElementById("lc-step-"+ri);if(!rs)continue;rs.classList.remove("active","done");if(ri===1)rs.classList.add("active");}
         var rsc=document.getElementById("lc-speed-card");if(rsc)rsc.classList.add("hidden");
         var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "";
@@ -17323,7 +17429,7 @@ int main() { … }   ← code
         var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
         var elapsed0 = document.getElementById("lc-elapsed"); if (elapsed0) elapsed0.textContent = "0s";
         var phase0   = document.getElementById("lc-phase");   if (phase0)   phase0.textContent   = "Starting";
-        var sd0 = document.getElementById("lc-stage-desc"); if (sd0) sd0.textContent = "Initializing language analyzers and loading configuration…";
+        var sd0 = document.getElementById("lc-stage-desc"); if (sd0) sd0.textContent = "Initializing language analyzers and loading configuration\u2026";
         for (var si=1;si<=4;si++){var ss=document.getElementById("lc-step-"+si);if(!ss)continue;ss.classList.remove("active","done");if(si===1)ss.classList.add("active");}
         var sc0=document.getElementById("lc-speed-card");if(sc0)sc0.classList.add("hidden");
 
@@ -17341,18 +17447,18 @@ int main() { … }   ← code
         function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
 
         var PHASE_DESC = {
-          'Starting': 'Initializing language analyzers and loading configuration…',
-          'Scanning files': 'Walking the directory tree, applying scope filters, and reading file bytes…',
-          'Running': 'Running the lexical state machine across all discovered source files…',
-          'Writing reports': 'Rendering the HTML report and saving JSON artifacts to disk…',
-          'Done': 'Analysis complete — loading your results…',
+          'Starting': 'Initializing language analyzers and loading configuration\u2026',
+          'Scanning files': 'Walking the directory tree, applying scope filters, and reading file bytes\u2026',
+          'Running': 'Running the lexical state machine across all discovered source files\u2026',
+          'Writing reports': 'Rendering the HTML report and saving JSON artifacts to disk\u2026',
+          'Done': 'Analysis complete \u2014 loading your results\u2026',
           'Failed': 'Analysis encountered an error. Check the path and permissions, then try again.'
         };
         var PHASE_STEP = {'Starting':1,'Scanning files':1,'Running':2,'Writing reports':3,'Done':4};
         function lcSetPhase(txt) {
           var el = document.getElementById("lc-phase"); if (el) el.textContent = txt;
           var desc = document.getElementById("lc-stage-desc");
-          if (desc) desc.textContent = PHASE_DESC[txt] || (txt + '…');
+          if (desc) desc.textContent = PHASE_DESC[txt] || (txt + '\u2026');
           var step = PHASE_STEP[txt] || 1;
           for (var i=1;i<=4;i++){var s=document.getElementById("lc-step-"+i);if(!s)continue;s.classList.remove("active","done");if(i<step)s.classList.add("done");else if(i===step)s.classList.add("active");}
         }
@@ -17376,7 +17482,7 @@ int main() { … }   ← code
           lcCancelBtn.onclick = function() {
             if (!activeWaitId) { dismissAnalysisModal(); return; }
             lcCancelBtn.disabled = true;
-            lcCancelBtn.textContent = "Cancelling…";
+            lcCancelBtn.textContent = "Cancelling\u2026";
             fetch("/api/runs/" + encodeURIComponent(activeWaitId) + "/cancel", { method: "POST" })
               .then(function() { lcShowCancelled(); })
               .catch(function() { lcShowCancelled(); });
@@ -17527,7 +17633,7 @@ int main() { … }   ← code
 
       var artifactPresetInfo = {
         review: {
-          description: "HTML report for in-browser review. No PDF or data exports — fast and lightweight.",
+          description: "HTML report for in-browser review. No PDF or data exports \u2014 fast and lightweight.",
           chips: ["HTML", "no PDF", "no JSON/CSV/XLSX"],
           example: "Ideal for a quick local review before sharing results."
         },
@@ -17542,7 +17648,7 @@ int main() { … }   ← code
           example: "Fastest option when you only need to open the report in a browser."
         },
         machine: {
-          description: "JSON and CSV data files only — no HTML or PDF. Designed for CI pipelines and automation.",
+          description: "JSON and CSV data files only \u2014 no HTML or PDF. Designed for CI pipelines and automation.",
           chips: ["JSON", "CSV", "no HTML", "no PDF"],
           example: "Use in CI to capture metrics without generating visual reports."
         }
@@ -17621,9 +17727,9 @@ int main() { … }   ← code
         var pathVal    = (pathInput && pathInput.value.trim()) ? inferTitleFromPath(pathInput.value) : "";
         var presetVal  = (scanPreset && scanPreset.value)    ? scanPreset.value.replace(/_/g, " ")    : "";
         var outputVal  = (artifactPreset && artifactPreset.value) ? artifactPreset.value.replace(/_/g, " ") : "";
-        if (sumPath)   sumPath.textContent   = pathVal   || "—";
-        if (sumPreset) sumPreset.textContent = presetVal || "—";
-        if (sumOutput) sumOutput.textContent = outputVal || "—";
+        if (sumPath)   sumPath.textContent   = pathVal   || "\u2014";
+        if (sumPreset) sumPreset.textContent = presetVal || "\u2014";
+        if (sumOutput) sumOutput.textContent = outputVal || "\u2014";
         if (sidebarSummary) sidebarSummary.style.display = (pathVal || presetVal || outputVal) ? "" : "none";
       }
 
@@ -17702,8 +17808,8 @@ int main() { … }   ← code
       function updatePythonDocstringUI() {
         var checked = !!pythonDocstrings.checked;
         document.getElementById("python-docstring-example").textContent = checked
-          ? 'def greet():\n    """Greet the user."""  ← comment\n    print("hi")'
-          : 'def greet():\n    """Greet the user."""  ← not counted\n    print("hi")';
+          ? 'def greet():\n    """Greet the user."""  \u2190 comment\n    print("hi")'
+          : 'def greet():\n    """Greet the user."""  \u2190 not counted\n    print("hi")';
         document.getElementById("python-docstring-live-help").textContent = checked
           ? "Enabled: docstrings contribute to comment-style totals."
           : "Disabled: docstrings are not counted as comment content.";
@@ -17783,7 +17889,7 @@ int main() { … }   ← code
 
         if (previewSummary) {
           if (GIT_MODE) {
-            previewSummary.innerHTML = '<li style="color:var(--muted-text,#888);font-style:italic;">Scope preview is not pre-computed in git-browser mode — the repository will be cloned and fully analyzed during the scan run.</li>';
+            previewSummary.innerHTML = '<li style="color:var(--muted-text,#888);font-style:italic;">Scope preview is not pre-computed in git-browser mode \u2014 the repository will be cloned and fully analyzed during the scan run.</li>';
           } else {
           var statButtons = Array.prototype.slice.call(previewPanel.querySelectorAll('.scope-stat-button'));
           var languages = Array.prototype.slice.call(previewPanel.querySelectorAll('.detected-language-chip')).map(function (node) { return node.textContent.trim(); }).filter(Boolean);
@@ -17873,7 +17979,7 @@ int main() { … }   ← code
         function updateToggleGlyph(row) {
           var toggle = row.querySelector(".tree-toggle");
           if (!toggle) return;
-          toggle.textContent = row.getAttribute("data-expanded") === "false" ? "▸" : "▾";
+          toggle.textContent = row.getAttribute("data-expanded") === "false" ? "\u25b8" : "\u25be";
         }
 
         function rowSortValue(row, key) {
@@ -17887,7 +17993,7 @@ int main() { … }   ← code
             button.classList.toggle("active", isActive);
             button.setAttribute("data-sort-order", isActive ? currentSortOrder : "none");
             if (indicator) {
-              indicator.textContent = !isActive ? "↕" : (currentSortOrder === "asc" ? "↑" : "↓");
+              indicator.textContent = !isActive ? "\u2195" : (currentSortOrder === "asc" ? "\u2191" : "\u2193");
             }
           });
         }
@@ -18161,12 +18267,12 @@ int main() { … }   ← code
         if (window._previewElapsedTimer) { clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null; }
         var myGen = ++_previewGen;
         var _prevMsgs = [
-          'Scanning directory structure…',
-          'Detecting file types…',
-          'Applying include / exclude filters…',
-          'Estimating file counts…',
-          'Building scope preview…',
-          'Almost there…'
+          'Scanning directory structure\u2026',
+          'Detecting file types\u2026',
+          'Applying include / exclude filters\u2026',
+          'Estimating file counts\u2026',
+          'Building scope preview\u2026',
+          'Almost there\u2026'
         ];
         var _prevMsgIdx = 0;
         var _prevStart = Date.now();
@@ -18178,7 +18284,7 @@ int main() { … }   ← code
           '<div class="preview-loading-elapsed" id="ple">0s elapsed</div>' +
           '</div></div>';
         var _sizeTextEl = document.getElementById('project-size-text');
-        if (_sizeTextEl) _sizeTextEl.textContent = 'Project size: Detecting…';
+        if (_sizeTextEl) _sizeTextEl.textContent = 'Project size: Detecting\u2026';
         window._previewInterval = setInterval(function() {
           if (myGen !== _previewGen) { clearInterval(window._previewInterval); window._previewInterval = null; return; }
           _prevMsgIdx = (_prevMsgIdx + 1) % _prevMsgs.length;
@@ -18214,12 +18320,12 @@ int main() { … }   ← code
               if (sizeText) sizeText.textContent = 'Original: ' + fmtBytes(us.original_bytes) +
                 ' \xb7 Compressed: ' + fmtBytes(us.compressed_bytes);
               if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(us.original_bytes) +
-                ' — Compressed archive size: ' + fmtBytes(us.compressed_bytes);
+                ' \u2014 Compressed archive size: ' + fmtBytes(us.compressed_bytes);
             } else if (sizeText && projectSize) {
               sizeText.textContent = 'Project size: ' + projectSize;
               if (sizeBtn) sizeBtn.title = 'Total disk size of the selected project directory: ' + projectSize;
             } else if (sizeText) {
-              sizeText.textContent = 'Project size: —';
+              sizeText.textContent = 'Project size: \u2014';
             }
             if (zeroWarn) {
               var supportedBtn = previewPanel.querySelector('.scope-stat-button.supported .scope-stat-value');
@@ -18227,7 +18333,7 @@ int main() { … }   ← code
               var supportedCount = supportedBtn ? parseInt(supportedBtn.textContent, 10) : -1;
               var fileCount = filesBtn ? parseInt(filesBtn.textContent, 10) : -1;
               if (supportedCount === 0 && fileCount > 0) {
-                zeroWarn.textContent = '⚠ Warning: No supported source files detected—this scan will analyze 0 files. The directory may contain only binaries, archives, or unsupported file types (e.g. JSON, Markdown).';
+                zeroWarn.textContent = '\u26a0 Warning: No supported source files detected\u2014this scan will analyze 0 files. The directory may contain only binaries, archives, or unsupported file types (e.g. JSON, Markdown).';
                 zeroWarn.style.display = '';
               } else {
                 zeroWarn.style.display = 'none';
@@ -18250,9 +18356,9 @@ int main() { … }   ← code
         if (SERVER_MODE) {
           if (kind === 'output') {
             showBannerToast(
-              'Server mode: type the output path directly into the field — the path must exist on the server, not your local machine.',
+              'Server mode: type the output path directly into the field \u2014 the path must exist on the server, not your local machine.',
               false,
-              { top: true, icon: '📁' }
+              { top: true, icon: '\u{1F4C1}' }
             );
             return;
           }
@@ -18281,7 +18387,7 @@ int main() { … }   ← code
             if (kind === 'coverage') {
               var f = files[0];
               if (previewPanel && targetInput === pathInput)
-                previewPanel.innerHTML = '<div class="preview-error">Uploading coverage file…</div>';
+                previewPanel.innerHTML = '<div class="preview-error">Uploading coverage file\u2026</div>';
               fileToBase64(f).then(function (b64) {
                 return fetch('/api/upload-file', {
                   method: 'POST',
@@ -18361,10 +18467,10 @@ int main() { … }   ← code
                   var sizeBtn = document.getElementById('project-size-btn');
                   if (sizeText) {
                     sizeText.textContent = 'Original: ' + fmtBytes(sizes.original_bytes) +
-                      ' · Compressed: ' + fmtBytes(sizes.compressed_bytes);
+                      ' \u00b7 Compressed: ' + fmtBytes(sizes.compressed_bytes);
                   }
                   if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(sizes.original_bytes) +
-                    ' — Compressed archive size: ' + fmtBytes(sizes.compressed_bytes);
+                    ' \u2014 Compressed archive size: ' + fmtBytes(sizes.compressed_bytes);
                 }
                 if (targetInput === pathInput) {
                   updateReportTitleFromPath();
@@ -18381,7 +18487,7 @@ int main() { … }   ← code
               // ── Path A: tar.gz via native CompressionStream (Chrome 80+, FF 113+, Safari 16.4+)
               if (typeof CompressionStream !== 'undefined') {
                 if (previewPanel && targetInput === pathInput)
-                  previewPanel.innerHTML = '<div class="preview-error">Building archive: 0 / ' + kept.toLocaleString() + ' files…</div>';
+                  previewPanel.innerHTML = '<div class="preview-error">Building archive: 0 / ' + kept.toLocaleString() + ' files\u2026</div>';
 
                 // Build a minimal POSIX ustar tar header for a single file entry.
                 function buildUstarHeader(filePath, fileSize) {
@@ -18460,7 +18566,7 @@ int main() { … }   ← code
                       }
                       if ((i + 1) % 50 === 0 || i === uploadFiles.length - 1) {
                         if (previewPanel && targetInput === pathInput)
-                          previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i + 1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files…</div>';
+                          previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i + 1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files\u2026</div>';
                       }
                     }
                     // End-of-archive: two 512-byte zero blocks
@@ -18471,7 +18577,7 @@ int main() { … }   ← code
                     var blob = new Blob(chunks, { type: 'application/gzip' });
                     var sizeMB = (blob.size / 1048576).toFixed(1);
                     if (previewPanel && targetInput === pathInput)
-                      previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + (total !== kept ? kept.toLocaleString() + ' of ' + total.toLocaleString() + ' files' : kept.toLocaleString() + ' files') + ')…</div>';
+                      previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + (total !== kept ? kept.toLocaleString() + ' of ' + total.toLocaleString() + ' files' : kept.toLocaleString() + ' files') + ')\u2026</div>';
 
                     var resp = await fetch('/api/upload-tarball', {
                       method: 'POST',
@@ -18500,12 +18606,12 @@ int main() { … }   ← code
                 for (var b = 0; b < uploadFiles.length; b += BATCH) batches.push(uploadFiles.slice(b, b + BATCH));
                 var totalBatches = batches.length;
                 if (previewPanel && targetInput === pathInput)
-                  previewPanel.innerHTML = '<div class="preview-error">Uploading ' + kept.toLocaleString() + ' code file' + (kept === 1 ? '' : 's') + (total !== kept ? ' of ' + total.toLocaleString() + ' total' : '') + '…</div>';
+                  previewPanel.innerHTML = '<div class="preview-error">Uploading ' + kept.toLocaleString() + ' code file' + (kept === 1 ? '' : 's') + (total !== kept ? ' of ' + total.toLocaleString() + ' total' : '') + '\u2026</div>';
 
                 function sendBatch(idx, currentUploadId, lastTmpPath) {
                   if (idx >= totalBatches) { applyUploadResult(lastTmpPath); return; }
                   if (previewPanel && targetInput === pathInput && totalBatches > 1)
-                    previewPanel.innerHTML = '<div class="preview-error">Uploading batch ' + (idx + 1) + ' of ' + totalBatches + '…</div>';
+                    previewPanel.innerHTML = '<div class="preview-error">Uploading batch ' + (idx + 1) + ' of ' + totalBatches + '\u2026</div>';
                   Promise.all(batches[idx].map(function (file) {
                     return fileToBase64(file).then(function (b64) {
                       return { path: file.webkitRelativePath || file.name, content: b64 };
@@ -18687,7 +18793,7 @@ int main() { … }   ← code
           if (!dirEntry) { showBannerToast('Drop a project folder (not individual files).', true); return; }
           var btn = browsePath;
           if (btn) btn.disabled = true;
-          if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Reading folder contents…</div>';
+          if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Reading folder contents\u2026</div>';
 
           readDirRecursively(dirEntry, dirEntry.name).then(async function(allEntries) {
             var total = allEntries.length;
@@ -18711,9 +18817,9 @@ int main() { … }   ← code
                 var sizeText = document.getElementById('project-size-text');
                 var sizeBtn = document.getElementById('project-size-btn');
                 if (sizeText) sizeText.textContent = 'Original: ' + fmtBytes(sizes.original_bytes) +
-                  ' · Compressed: ' + fmtBytes(sizes.compressed_bytes);
+                  ' \u00b7 Compressed: ' + fmtBytes(sizes.compressed_bytes);
                 if (sizeBtn) sizeBtn.title = 'Original project size: ' + fmtBytes(sizes.original_bytes) +
-                  ' — Compressed archive size: ' + fmtBytes(sizes.compressed_bytes);
+                  ' \u2014 Compressed archive size: ' + fmtBytes(sizes.compressed_bytes);
               }
               updateReportTitleFromPath();
               autoSetOutputDir(tmpPath);
@@ -18725,12 +18831,12 @@ int main() { … }   ← code
             }
 
             if (typeof CompressionStream === 'undefined') {
-              showBannerToast('Your browser lacks CompressionStream. Use the “Upload” button instead.', true);
+              showBannerToast('Your browser lacks CompressionStream. Use the \u201cUpload\u201d button instead.', true);
               if (btn) btn.disabled = false; return;
             }
 
             try {
-              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Building archive: 0 / ' + kept.toLocaleString() + ' files…</div>';
+              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Building archive: 0 / ' + kept.toLocaleString() + ' files\u2026</div>';
               var BLOCK = 512;
               var cs = new CompressionStream('gzip');
               var wtr = cs.writable.getWriter();
@@ -18760,7 +18866,7 @@ int main() { … }   ← code
                 await wtr.write(buildHdr(ce.path, data.length));
                 if (data.length > 0) { var padded = Math.ceil(data.length / BLOCK) * BLOCK; var blk = new Uint8Array(padded); blk.set(data); await wtr.write(blk); }
                 if ((i + 1) % 50 === 0 || i === codeEntries.length - 1)
-                  if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i+1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files…</div>';
+                  if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Building archive: ' + (i+1).toLocaleString() + ' / ' + kept.toLocaleString() + ' files\u2026</div>';
               }
               await wtr.write(new Uint8Array(BLOCK * 2));
               await wtr.close();
@@ -18768,7 +18874,7 @@ int main() { … }   ← code
 
               var blob = new Blob(chunks, { type: 'application/gzip' });
               var sizeMB = (blob.size / 1048576).toFixed(1);
-              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + kept.toLocaleString() + ' files)…</div>';
+              if (previewPanel) previewPanel.innerHTML = '<div class="preview-error">Uploading compressed archive (' + sizeMB + ' MB, ' + kept.toLocaleString() + ' files)\u2026</div>';
               var resp = await fetch('/api/upload-tarball', { method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body: blob });
               var d = await resp.json();
               if (d && d.tmp_path) {
@@ -18803,7 +18909,7 @@ int main() { … }   ← code
         var icons = { scanning: ICON_SCAN, found: ICON_OK, hint: ICON_WARN, none: ICON_NONE };
         var html = '<div class="cov-scan-inner"><div class="cov-scan-icon">' + (icons[state] || "") + '</div><div class="cov-scan-body">';
         if (state === "scanning") {
-          html += '<div class="cov-scan-title">Scanning project for coverage files…</div>';
+          html += '<div class="cov-scan-title">Scanning project for coverage files\u2026</div>';
         } else if (state === "found") {
           var tb = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
           html += '<div class="cov-scan-title">Coverage file auto-detected! ' + tb + '</div>';
@@ -18815,7 +18921,7 @@ int main() { … }   ← code
           html += '<div class="cov-scan-sub">Generate a report with your test framework\'s coverage tool, then browse to the output file. Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML</div>';
         } else if (state === "none") {
           html += '<div class="cov-scan-title">No coverage files detected in this project</div>';
-          html += '<div class="cov-scan-sub">Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML</div>';
+          html += '<div class="cov-scan-sub">Supported: LCOV\u00a0.info &middot; Cobertura\u00a0XML &middot; JaCoCo\u00a0XML</div>';
         }
         html += '</div></div>';
         covScanStatus.innerHTML = html;
@@ -18948,9 +19054,9 @@ int main() { … }   ← code
 
       function fetchProjectHistory(projectPath) {
         if (!projectPath || !projectPath.trim()) {
-          if (wsScanCount) wsScanCount.textContent = "—";
-          if (wsLastScan)  wsLastScan.textContent  = "—";
-          if (wsBranch)    wsBranch.textContent    = "—";
+          if (wsScanCount) wsScanCount.textContent = "\u2014";
+          if (wsLastScan)  wsLastScan.textContent  = "\u2014";
+          if (wsBranch)    wsBranch.textContent    = "\u2014";
           if (historyBadge) historyBadge.style.display = "none";
           return;
         }
@@ -18963,17 +19069,17 @@ int main() { … }   ← code
               : "never";
             var tsStr = data.last_scan_timestamp
               ? data.last_scan_timestamp.replace(" UTC","")
-              : "—";
+              : "\u2014";
             if (wsScanCount) wsScanCount.textContent = countStr;
             if (wsLastScan)  wsLastScan.textContent  = tsStr;
-            if (wsBranch)    wsBranch.textContent    = data.last_git_branch || "—";
+            if (wsBranch)    wsBranch.textContent    = data.last_git_branch || "\u2014";
             if (data.scan_count > 0) {
               if (historyBadge) {
                 var branch = data.last_git_branch ? " on " + data.last_git_branch : "";
                 historyBadge.textContent = data.scan_count + " previous scan" +
                   (data.scan_count === 1 ? "" : "s") + " found" + branch + ". " +
-                  "Last: " + (data.last_scan_timestamp || "—") +
-                  " — " + (data.last_scan_code_lines ? (function(v){return v>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M':v>=1e4?(v/1e3).toFixed(1).replace(/\.0$/,'')+'K':Number(v).toLocaleString();})(data.last_scan_code_lines) : "?") + " code lines.";
+                  "Last: " + (data.last_scan_timestamp || "\u2014") +
+                  " \u2014 " + (data.last_scan_code_lines ? (function(v){return v>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M':v>=1e4?(v/1e3).toFixed(1).replace(/\.0$/,'')+'K':Number(v).toLocaleString();})(data.last_scan_code_lines) : "?") + " code lines.";
                 historyBadge.className = "path-history-badge found";
                 historyBadge.style.display = "";
               }
@@ -19260,7 +19366,7 @@ int main() { … }   ← code
     }
     doPing();
     setInterval(doPing,5000);
-    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');}
+    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');}
   })();
   </script>
   <span id="page-bottom" aria-hidden="true" style="display:block;height:0;"></span>
@@ -19968,7 +20074,7 @@ struct IndexTemplate {
       })();
       (function chipSlideshow() {
         var slides = [
-          [{v:'60',l:'Languages'},{v:'Rust · Go · Python',l:'and 57 more'},{v:'C · Java · TypeScript',l:'Swift · Kotlin · Zig'}],
+          [{v:'60',l:'Languages'},{v:'Rust \u00b7 Go \u00b7 Python',l:'and 57 more'},{v:'C \u00b7 Java \u00b7 TypeScript',l:'Swift \u00b7 Kotlin \u00b7 Zig'}],
           [{v:'100%',l:'Self-contained'},{v:'Zero',l:'Dependencies'},{v:'Single',l:'Binary'}],
           [{v:'HTML+PDF',l:'Exportable reports'},{v:'Light+Dark',l:'Themed'},{v:'Offline',l:'No server needed'}],
           [{v:'Webhook',l:'3 platforms'},{v:'GitHub + GitLab',l:'+ Bitbucket'},{v:'Auto-scan',l:'On every push'}],
@@ -20044,7 +20150,7 @@ struct IndexTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -20447,7 +20553,7 @@ struct SplashTemplate {
           item.innerHTML =
             '<div class="recent-item-info">' +
               '<div class="recent-item-label">' + escHtml(entry.project_label || 'Unknown project') + '</div>' +
-              '<div class="recent-item-meta">' + escHtml(entry.path || '') + ' &nbsp;·&nbsp; ' + escHtml(entry.timestamp || '') + '</div>' +
+              '<div class="recent-item-meta">' + escHtml(entry.path || '') + ' &nbsp;\u00b7&nbsp; ' + escHtml(entry.timestamp || '') + '</div>' +
             '</div>' +
             '<svg class="recent-arrow" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>';
           item.addEventListener('click', function () {
@@ -20483,12 +20589,12 @@ struct SplashTemplate {
         fileInput.addEventListener('change', function () {
           var file = fileInput.files && fileInput.files[0];
           if (!file) return;
-          if (fileName) fileName.textContent = '✓ ' + file.name;
+          if (fileName) fileName.textContent = '\u2713 ' + file.name;
           var reader = new FileReader();
           reader.onload = function (e) {
             try {
               var cfg = JSON.parse(e.target.result);
-              if (!cfg || typeof cfg !== 'object') { alert('Invalid config file — expected a JSON object.'); return; }
+              if (!cfg || typeof cfg !== 'object') { alert('Invalid config file \u2014 expected a JSON object.'); return; }
               var params = configToParams(cfg);
               window.location.href = '/scan?' + params.toString();
             } catch (err) {
@@ -22064,7 +22170,7 @@ struct ScanSetupTemplate {
           if(!src)return;
           var overlay=document.createElement('div');
           overlay.className='r-chart-modal-overlay';
-          overlay.innerHTML='<div class="r-chart-modal" style="max-width:1600px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><div class="r-modal-header"><span class="r-chart-modal-title">Language Breakdown — Full View</span></div><div id="result-lang-overview-modal-wrap" style="width:100%;"></div></div>';
+          overlay.innerHTML='<div class="r-chart-modal" style="max-width:1600px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><div class="r-modal-header"><span class="r-chart-modal-title">Language Breakdown \u2014 Full View</span></div><div id="result-lang-overview-modal-wrap" style="width:100%;"></div></div>';
           document.body.appendChild(overlay);
           overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
           overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
@@ -22193,11 +22299,23 @@ struct ScanSetupTemplate {
         });
 
         // ── Scatter: Files vs Code Lines (bubble = physical lines) ─────────────
+        function wireScatterLegend(container){
+          var svg=container&&container.querySelector('svg');
+          if(!svg)return;
+          var legGs=svg.querySelectorAll('g[data-lang]');
+          var circs=svg.querySelectorAll('circle[data-lang]');
+          if(!legGs.length)return;
+          function hl(lang){for(var i=0;i<circs.length;i++){var c=circs[i];if(c.getAttribute('data-lang')===lang){c.style.opacity='1';c.style.filter='brightness(1.18) drop-shadow(0 2px 8px rgba(0,0,0,.28))';}else{c.style.opacity='0.12';c.style.filter='none';}}
+            for(var j=0;j<legGs.length;j++){legGs[j].style.opacity=legGs[j].getAttribute('data-lang')===lang?'1':'0.38';}}
+          function rst(){for(var i=0;i<circs.length;i++){circs[i].style.opacity='';circs[i].style.filter='';}for(var j=0;j<legGs.length;j++){legGs[j].style.opacity='';}}
+          for(var k=0;k<legGs.length;k++){(function(g){g.addEventListener('mouseenter',function(){hl(g.getAttribute('data-lang'));});g.addEventListener('mouseleave',rst);})(legGs[k]);}
+        }
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
-          var H=hOvr||224,PL=52,PB=36,PT=44,PR=60;
+          var n=SCAT_D.length;
+          var legW=132,H=hOvr||224,PL=52,PB=36,PT=44,PR=8;
           var W=Math.max(320,el.offsetWidth||480);
-          var cW=W-PL-PR,cH=H-PT-PB;
+          var cW=W-PL-PR-legW,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
           var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
@@ -22208,32 +22326,47 @@ struct ScanSetupTemplate {
           [0,0.25,0.5,0.75,1].forEach(function(t){
             var y=PT+cH*(1-t);
             s+='<line x1="'+PL+'" y1="'+px(y)+'" x2="'+(PL+cW)+'" y2="'+px(y)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
-            if(t>0)s+='<text x="'+(PL-4)+'" y="'+(px(y)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(Math.round(maxC*t))+'</text>';
+            if(t>0)s+='<text x="'+(PL-4)+'" y="'+(px(y)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.72">'+fmt(Math.round(maxC*t))+'</text>';
           });
           // X grid lines (log1p scale — tick labels show actual file counts at those positions)
           [0,0.25,0.5,0.75,1].forEach(function(t){
             var x=PL+cW*t;
             var xVal=t>0?Math.round(Math.expm1(t*logMaxF)):0;
             s+='<line x1="'+px(x)+'" y1="'+PT+'" x2="'+px(x)+'" y2="'+(PT+cH)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
-            if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.65">'+fmt(xVal)+'</text>';
+            if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.72">'+fmt(xVal)+'</text>';
           });
           SCAT_D.forEach(function(d,i){
             // X uses log1p so outlier languages (many files) don't push others to the far left
             var cx2=PL+(logMaxF>0?Math.log1p(Math.max(1,d.files))/logMaxF:0.5)*cW;
             var cy2=PT+cH-d.code/maxC*cH;
             var r=Math.max(4,Math.sqrt(d.physical/maxP)*18);
-            s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';
+            s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' data-lang="'+esc(d.lang)+'" cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';
             var codeStr=fmt(d.code);
-            // Label centred directly above bubble — PR=60 gives right-edge room
+            // Label centred directly above bubble
             var ty2=Math.max(14,px(cy2)-px(r)-3);
             var ty1=Math.max(1,ty2-14);
             s+='<text x="'+px(cx2)+'" y="'+ty1+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="800" fill="currentColor" opacity="0.92" style="pointer-events:none;">'+esc(d.lang)+'</text>';
             s+='<text x="'+px(cx2)+'" y="'+ty2+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor" opacity="0.88" style="pointer-events:none;">'+codeStr+'</text>';
           });
-          s+='<text x="'+(PL+cW/2)+'" y="'+(H-3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7">Files</text>';
-          s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" fill="currentColor" opacity="0.7" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
+          s+='<text x="'+(PL+cW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75">Files Analyzed</text>';
+          s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
+          // Legend column (right side — colour-coded circle + name per language)
+          var legX=PL+cW+PR+6;
+          var legItemH=Math.min(22,Math.max(14,Math.floor(cH/n)));
+          var legTotalH=n*legItemH;
+          var legY0=PT+Math.max(0,Math.floor((cH-legTotalH)/2));
+          SCAT_D.forEach(function(d,i){
+            var col=COLS[i%COLS.length];
+            var ly=legY0+i*legItemH+Math.floor(legItemH/2);
+            s+='<g data-lang="'+esc(d.lang)+'" data-ttl="'+esc(d.lang)+'" data-ttv="'+esc(fmt(d.files)+' files · '+fmt(d.code)+' code lines')+'" style="cursor:pointer;">';
+            s+='<rect x="'+legX+'" y="'+(legY0+i*legItemH)+'" width="'+(legW-4)+'" height="'+legItemH+'" fill="transparent"/>';
+            s+='<rect x="'+legX+'" y="'+(ly-6)+'" width="24" height="12" rx="2" fill="'+col+'" opacity="0.88" style="pointer-events:none;"/>';
+            s+='<text x="'+(legX+28)+'" y="'+(ly+4)+'" font-family="'+FONT+'" font-size="12" font-weight="400" fill="currentColor" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+            s+='</g>';
+          });
           s+='</svg>';
           el.innerHTML=s;
+          wireScatterLegend(el);
         }
         renderScatterInEl(document.getElementById('r-scatter-chart'),0);
 
@@ -22278,7 +22411,7 @@ struct ScanSetupTemplate {
               +'<option value="variables"'+(key==='variables'?' selected':'')+'>Variables</option>'
               +'<option value="imports"'+(key==='imports'?' selected':'')+'>Imports</option>'
               +'<option value="tests"'+(key==='tests'?' selected':'')+'>Tests</option>';
-            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><div class="r-modal-header"><span class="r-chart-modal-title">Semantic Metrics — Full View</span><select class="r-chart-select" id="r-sem-modal-metric">'+optHtml+'</select></div><div id="r-sem-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
+            overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button><div class="r-modal-header"><span class="r-chart-modal-title">Semantic Metrics \u2014 Full View</span><select class="r-chart-select" id="r-sem-modal-metric">'+optHtml+'</select></div><div id="r-sem-modal-chart" class="r-expand-modal-chart" style="height:'+modalH+'px;width:100%;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
             overlay.addEventListener('click',function(e){if(e.target===overlay)document.body.removeChild(overlay);});
@@ -22295,7 +22428,7 @@ struct ScanSetupTemplate {
             var overlay=document.createElement('div');
             overlay.className='r-chart-modal-overlay';
             var subHtml=subtitle?'<span class="r-chart-modal-subtitle">'+subtitle+'</span>':'';
-            var hdr='<div class="r-modal-header"><span class="r-chart-modal-title">'+title+' — Full View</span>'+(ctrlHtml||'')+'</div>';
+            var hdr='<div class="r-modal-header"><span class="r-chart-modal-title">'+title+' \u2014 Full View</span>'+(ctrlHtml||'')+'</div>';
             overlay.innerHTML='<div class="r-chart-modal" style="max-width:1320px;"><button class="r-chart-modal-close" aria-label="Close">&times;</button>'+hdr+subHtml+'<div class="r-expand-modal-chart" style="width:100%;height:'+mH+'px;overflow:hidden;"></div></div>';
             document.body.appendChild(overlay);
             overlay.querySelector('.r-chart-modal-close').addEventListener('click',function(){document.body.removeChild(overlay);});
@@ -22352,9 +22485,9 @@ struct ScanSetupTemplate {
               +'</select>';
             var sortCtrl=
               '<select class="r-chart-select" id="r-sub-modal-sort">'
-              +'<option value="desc"'+(sort==='desc'?' selected':'')+'>Value ↓</option>'
-              +'<option value="asc"'+(sort==='asc'?' selected':'')+'>Value ↑</option>'
-              +'<option value="name"'+(sort==='name'?' selected':'')+'>Name A→Z</option>'
+              +'<option value="desc"'+(sort==='desc'?' selected':'')+'>Value \u2193</option>'
+              +'<option value="asc"'+(sort==='asc'?' selected':'')+'>Value \u2191</option>'
+              +'<option value="name"'+(sort==='name'?' selected':'')+'>Name A\u2192Z</option>'
               +'</select>';
             var wrap=makeExpandModal('Repository Overview',mH,null,metCtrl+sortCtrl);
             if(wrap){
@@ -22419,7 +22552,7 @@ struct ScanSetupTemplate {
             var avg=avgs[i],bw=avg/maxAvg*BW;
             var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2);
             s+='<text x="'+(LW-5)+'" y="'+(y+Math.floor(bH/2)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-            if(bw>0.5)s+='<rect'+tt(d.lang,fmt(Math.round(avg))+' avg code lines/file · '+fmt(d.files||0)+' files')+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
+            if(bw>0.5)s+='<rect'+tt(d.lang,fmt(Math.round(avg))+' avg code lines/file \u00b7 '+fmt(d.files||0)+' files')+' x="'+LW+'" y="'+y+'" width="'+px(bw)+'" height="'+bH+'" fill="'+COLS[i%COLS.length]+'" rx="3"/>';
             else s+='<rect x="'+LW+'" y="'+y+'" width="2" height="'+bH+'" fill="rgba(128,128,128,0.18)" rx="1"/>';
             s+='<text x="'+(LW+Math.max(px(bw),2)+6)+'" y="'+(y+Math.floor(bH/2)+4)+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="pointer-events:none;">'+fmt(Math.round(avg))+'</text>';
           });
@@ -22676,7 +22809,7 @@ struct ScanSetupTemplate {
       status.style.display = 'block';
       status.style.background = '#dbeafe';
       status.style.color = '#1e40af';
-      status.textContent = 'Posting to Confluence…';
+      status.textContent = 'Posting to Confluence\u2026';
       var resp = await fetch('/api/confluence/post', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -22708,7 +22841,7 @@ struct ScanSetupTemplate {
           copyBtn.textContent = 'Copied!';
           setTimeout(function() { copyBtn.textContent = orig; }, 2000);
         } catch(e) {
-          alert('Clipboard write failed — check browser permissions.');
+          alert('Clipboard write failed \u2014 check browser permissions.');
         }
       });
     }
@@ -22734,12 +22867,12 @@ struct ScanSetupTemplate {
       var status = document.getElementById('delete-run-status');
       status.style.display = 'block';
       status.style.background = '#dbeafe'; status.style.color = '#1e40af';
-      status.textContent = 'Deleting…';
+      status.textContent = 'Deleting\u2026';
       try {
         var resp = await fetch('/api/runs/{{ run_id }}', { method: 'DELETE' });
         if (resp.status === 204 || resp.ok) {
           status.style.background = '#dcfce7'; status.style.color = '#166534';
-          status.textContent = 'Deleted. Redirecting…';
+          status.textContent = 'Deleted. Redirecting\u2026';
           setTimeout(function() { window.location.href = '/view-reports'; }, 1200);
         } else {
           var d = await resp.json().catch(function(){return {};});
@@ -22763,7 +22896,7 @@ struct ScanSetupTemplate {
       bundleBtn.addEventListener('click', function() {
         bundleBtn.disabled = true;
         var orig = bundleBtn.textContent;
-        bundleBtn.textContent = 'Preparing…';
+        bundleBtn.textContent = 'Preparing\u2026';
         fetch('/api/runs/{{ run_id }}/bundle')
           .then(function(r) {
             if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -22802,7 +22935,7 @@ struct ScanSetupTemplate {
     }
     doPing();
     setInterval(doPing,5000);
-    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');}
+    if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
   <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip');if(!s)return;var n=s.querySelectorAll('.stat-chip').length;if(!n)return;function upd(){if(window.innerWidth>=640){s.style.gridTemplateColumns='repeat('+Math.ceil(n/2)+',1fr)';}else{s.style.gridTemplateColumns='';}}upd();window.addEventListener('resize',upd);})();</script>
   {% if let Some(banner) = report_header_footer %}
@@ -23571,14 +23704,14 @@ struct ScanWaitTemplate {
         var txt=pre.textContent;
         if(navigator.clipboard&&navigator.clipboard.writeText){
           navigator.clipboard.writeText(txt).then(function(){
-            copyBtn.textContent='✓ Copied!';
+            copyBtn.textContent='\u2713 Copied!';
             setTimeout(function(){copyBtn.innerHTML='<svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy to clipboard';},2000);
           });
         }else{
           var ta=document.createElement('textarea');
           ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
           document.body.appendChild(ta);ta.select();
-          try{document.execCommand('copy');copyBtn.textContent='✓ Copied!';}catch(e){}
+          try{document.execCommand('copy');copyBtn.textContent='\u2713 Copied!';}catch(e){}
           document.body.removeChild(ta);
         }
       });
@@ -24016,8 +24149,8 @@ struct ErrorTemplate {
         browseBtn.disabled=true;browseBtn.textContent='...';
         fetch('/pick-directory')
           .then(function(r){return r.ok?r.json():{cancelled:true};})
-          .then(function(d){browseBtn.disabled=false;browseBtn.textContent='Browse…';if(d&&d.selected_path&&inp){inp.value=d.selected_path;validate();}})
-          .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse…';});
+          .then(function(d){browseBtn.disabled=false;browseBtn.textContent='Browse\u2026';if(d&&d.selected_path&&inp){inp.value=d.selected_path;validate();}})
+          .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse\u2026';});
       });
     }
     if(submitBtn){
@@ -24025,7 +24158,7 @@ struct ErrorTemplate {
         var folder=inp?inp.value.trim():'';
         if(!folder){showErr('Please enter or browse to the scan output folder.');return;}
         clearErr();
-        submitBtn.disabled=true;submitBtn.textContent='Restoring…';
+        submitBtn.disabled=true;submitBtn.textContent='Restoring\u2026';
         var body=new URLSearchParams();
         body.set('file_path',folder);
         body.set('redirect_url',redirectUrl);
@@ -24117,7 +24250,7 @@ struct LocateFileTemplate {
     .scheme-label{font-size:9px;font-weight:700;color:var(--muted-2);white-space:nowrap;}
     .tz-select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;outline:none;box-sizing:border-box;}
     .tz-select:focus{border-color:var(--oxide);}
-    .page{max-width:1200px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
+    .page{max-width:1560px;margin:0 auto;padding:28px 24px 36px;position:relative;z-index:1;}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;}
     h1{margin:0 0 6px;font-size:26px;font-weight:850;letter-spacing:-0.03em;color:var(--oxide-2);}
     .panel-subtitle{font-size:13px;color:var(--muted);margin:0 0 18px;}
@@ -24210,7 +24343,7 @@ struct LocateFileTemplate {
       <div class="success-box" id="relocate-success-box">Scan restored — redirecting&hellip;</div>
       <div class="relocate-section">
         <h2>Locate Scan Output</h2>
-        <p>Select the folder that contains the scan output files (result_*.json, result_*.html, etc.).</p>
+        <p>Select the <strong>top-level</strong> scan output folder (the one named <code>project_YYYYMMDD-HHMM-&hellip;</code>). Result files will be found inside it automatically &mdash; do not navigate into a subfolder.</p>
         <div class="relocate-row">
           <input type="text" id="relocate-folder" name="folder_path"
                  value="{{ folder_hint }}"
@@ -24272,10 +24405,10 @@ struct LocateFileTemplate {
         fetch('/pick-directory?kind=reports&current='+encodeURIComponent(hint))
           .then(function(r){return r.ok?r.json():{cancelled:true};})
           .then(function(d){
-            browseBtn.disabled=false;browseBtn.textContent='Browse…';
+            browseBtn.disabled=false;browseBtn.textContent='Browse\u2026';
             if(d&&d.selected_path&&inp)inp.value=d.selected_path;
           })
-          .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse…';});
+          .catch(function(){browseBtn.disabled=false;browseBtn.textContent='Browse\u2026';});
       });
     }
     var restoreBtn=document.getElementById('restore-btn');
@@ -24286,7 +24419,7 @@ struct LocateFileTemplate {
         var inp=document.getElementById('relocate-folder');
         var folder=inp?inp.value.trim():'';
         if(!folder){if(errBox){errBox.textContent='Please enter a folder path.';errBox.classList.remove('hidden');}return;}
-        restoreBtn.disabled=true;restoreBtn.textContent='Checking…';
+        restoreBtn.disabled=true;restoreBtn.textContent='Checking\u2026';
         var body=new URLSearchParams();
         body.set('run_id','{{ run_id }}');
         body.set('redirect_url','{{ redirect_url }}');
@@ -24663,8 +24796,15 @@ struct RelocateScanTemplate {
                 data-skipped="{{ entry.files_skipped }}"
                 data-comments="{{ entry.comment_lines }}"
                 data-blank="{{ entry.blank_lines }}"
+                data-physical="{{ entry.total_physical_lines }}"
+                data-functions="{{ entry.functions }}"
+                data-classes="{{ entry.classes }}"
+                data-variables="{{ entry.variables }}"
+                data-imports="{{ entry.imports }}"
+                data-tests="{{ entry.test_count }}"
                 data-branch="{{ entry.git_branch }}"
                 data-commit="{{ entry.git_commit }}"
+                data-has-json="{{ entry.has_json }}"
                 data-html-url="/runs/html/{{ entry.run_id }}">
               <td><span class="ts-local" data-utc-ms="{{ entry.timestamp_utc_ms }}">{{ entry.timestamp }}</span></td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
@@ -24750,6 +24890,7 @@ struct RelocateScanTemplate {
         setChipVal('agg-files', first.dataset.files);
         var projects = {}; allRows.forEach(function(r){var p=r.dataset.project||'';if(p)projects[p]=true;});
         var pe=document.getElementById('agg-projects'); if(pe) pe.textContent=Object.keys(projects).filter(Boolean).length;
+        Array.prototype.forEach.call(document.querySelectorAll('#history-tbody .metric-num'), function(el) { var n = Number(el.textContent); if (!isNaN(n) && el.textContent.trim() !== '') el.textContent = n.toLocaleString(); });
       }
 
       // ── Branch filter population ──────────────────────────────────────────
@@ -24787,7 +24928,7 @@ struct RelocateScanTemplate {
           r.style.display = shown[r.dataset.run] ? '' : 'none';
         });
         var rl = document.getElementById('page-range-label');
-        if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '–' + end + ' of ' + total : 'No results';
+        if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '\u2013' + end + ' of ' + total : 'No results';
         var info = document.getElementById('pagination-info');
         if (info) info.textContent = 'Page ' + currentPage + ' of ' + totalPages;
         var btns = document.getElementById('pagination-btns');
@@ -24800,10 +24941,10 @@ struct RelocateScanTemplate {
           if (!disabled) b.addEventListener('click', function() { currentPage = pg; renderPage(); });
           return b;
         }
-        btns.appendChild(makeBtn('‹', currentPage - 1, false, currentPage === 1));
+        btns.appendChild(makeBtn('\u2039', currentPage - 1, false, currentPage === 1));
         var ws = Math.max(1, currentPage - 2), we = Math.min(totalPages, ws + 4); ws = Math.max(1, we - 4);
         for (var p = ws; p <= we; p++) btns.appendChild(makeBtn(String(p), p, p === currentPage, false));
-        btns.appendChild(makeBtn('›', currentPage + 1, false, currentPage === totalPages));
+        btns.appendChild(makeBtn('\u203a', currentPage + 1, false, currentPage === totalPages));
       }
 
       window.setPerPage = function(v) { perPage = parseInt(v, 10) || 25; currentPage = 1; renderPage(); };
@@ -24829,9 +24970,9 @@ struct RelocateScanTemplate {
           if (e.target.classList.contains('col-resize-handle')) return;
           var col = th.dataset.sortCol, type = th.dataset.sortType || 'str';
           if (sortCol === col) { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; } else { sortCol = col; sortOrder = 'asc'; }
-          sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '↕'; t.classList.remove('sort-asc', 'sort-desc'); });
+          sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
           th.classList.add('sort-' + sortOrder);
-          var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '↑' : '↓';
+          var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '\u2191' : '\u2193';
           doSort(col, type, sortOrder);
         });
       });
@@ -24863,7 +25004,7 @@ struct RelocateScanTemplate {
         var pf = document.getElementById('project-filter'); if (pf) pf.value = '';
         var bf = document.getElementById('branch-filter'); if (bf) bf.value = '';
         sortCol = null; sortOrder = 'asc';
-        sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '↕'; t.classList.remove('sort-asc', 'sort-desc'); });
+        sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
         var tbody = document.getElementById('history-tbody');
         if (tbody) {
           var rows = Array.prototype.slice.call(tbody.querySelectorAll('.history-row'));
@@ -24891,21 +25032,78 @@ struct RelocateScanTemplate {
         function u4(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
         function xe(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}
+        function colNm(n){var s='';while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s;}
         var ss=[],si={};function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}
+        var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
+        // Style 0=normal, 1=header(orange fill/white bold), 2=number(#,##0 right-aligned), 3=text(@)
+        var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'">'
+          +'<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0"/></numFmts>'
+          +'<fonts count="2">'
+            +'<font><sz val="11"/><name val="Calibri"/></font>'
+            +'<font><sz val="11"/><b/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+          +'</fonts>'
+          +'<fills count="3">'
+            +'<fill><patternFill patternType="none"/></fill>'
+            +'<fill><patternFill patternType="gray125"/></fill>'
+            +'<fill><patternFill patternType="solid"><fgColor rgb="FFC45C10"/><bgColor indexed="64"/></patternFill></fill>'
+          +'</fills>'
+          +'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+          +'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+          +'<cellXfs count="4">'
+            +'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+            +'<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+            +'<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="right"/></xf>'
+            +'<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+          +'</cellXfs>'
+          +'<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+          +'</styleSheet>';
         var rx='<row r="1">';
         hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});
         rx+='</row>';
-        rows.forEach(function(row,ri){var rn=ri+2;rx+='<row r="'+rn+'">';row.forEach(function(cell,c){var ref=colRef(c,rn),num=cell!==''&&cell!=null&&!isNaN(Number(cell))&&isFinite(Number(cell))&&/^[+\-]?\d/.test(String(cell));rx+=num?'<c r="'+ref+'"><v>'+xe(cell)+'</v></c>':'<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';});rx+='</row>';});
-        var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
-        var sh='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData>'+rx+'</sheetData></worksheet>';
+        rows.forEach(function(row,ri){
+          var rn=ri+2;rx+='<row r="'+rn+'">';
+          row.forEach(function(cell,c){
+            var ref=colRef(c,rn),sv=String(cell==null?'':cell);
+            var isNum=sv!==''&&!isNaN(Number(sv))&&isFinite(Number(sv))&&/^[+\-]?\d/.test(sv);
+            var isPct=!isNum&&/^\d+\.?\d*%$/.test(sv);
+            if(isNum){rx+='<c r="'+ref+'" s="2"><v>'+xe(sv)+'</v></c>';}
+            else if(isPct){rx+='<c r="'+ref+'" t="s" s="3"><v>'+S(sv)+'</v></c>';}
+            else{rx+='<c r="'+ref+'" t="s"><v>'+S(sv)+'</v></c>';}
+          });
+          rx+='</row>';
+        });
+        var lastCol=hdrs.length,lastRow=rows.length+1;
+        var tableRef='A1:'+colNm(lastCol)+lastRow;
+        var tableXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          +'<table xmlns="'+sns+'" id="1" name="ScanHistory" displayName="ScanHistory" ref="'+tableRef+'" totalsRowShown="0">'
+          +'<autoFilter ref="'+tableRef+'"/>'
+          +'<tableColumns count="'+lastCol+'">'
+          +hdrs.map(function(h,i){return'<tableColumn id="'+(i+1)+'" name="'+xe(h)+'"/>';}).join('')
+          +'</tableColumns>'
+          +'<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>'
+          +'</table>';
+        var wsRels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          +'<Relationships xmlns="'+pns+'relationships">'
+          +'<Relationship Id="rId1" Type="'+ons+'relationships/table" Target="../tables/table1.xml"/>'
+          +'</Relationships>';
         var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';
-        var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><b/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
-        var F={'[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
+        var sh='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'" xmlns:r="'+ons+'relationships">'
+          +'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+          +'<sheetFormatPr defaultRowHeight="15"/><sheetData>'+rx+'</sheetData>'
+          +'<tableParts count="1"><tablePart r:id="rId1"/></tableParts>'
+          +'</worksheet>';
+        var F={
+          '[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/></Types>',
           '_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
           'xl/workbook.xml':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets><sheet name="'+xe(sheet)+'" sheetId="1" r:id="rId1"/></sheets></workbook>',
           'xl/_rels/workbook.xml.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+ons+'relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
-          'xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml,'xl/worksheets/sheet1.xml':sh};
-        var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml'];
+          'xl/styles.xml':stl,
+          'xl/sharedStrings.xml':ssXml,
+          'xl/worksheets/sheet1.xml':sh,
+          'xl/worksheets/_rels/sheet1.xml.rels':wsRels,
+          'xl/tables/table1.xml':tableXml
+        };
+        var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml','xl/worksheets/sheet1.xml','xl/worksheets/_rels/sheet1.xml.rels','xl/tables/table1.xml'];
         var zparts=[],zcds=[],zoff=0,znf=0;
         order.forEach(function(name){
           var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);
@@ -24927,10 +25125,230 @@ struct RelocateScanTemplate {
         slocDownload(zout,fname,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       }
 
-      var _hh = ['Timestamp','Project','Run ID','Files Analyzed','Files Skipped','Code Lines','Comments','Blank','Branch','Commit'];
-      function getHistoryRows(){var r=[];document.querySelectorAll('#history-tbody .history-row').forEach(function(tr){r.push([tr.getAttribute('data-timestamp')||'',tr.getAttribute('data-project')||'',tr.getAttribute('data-run')||'',tr.getAttribute('data-files')||'',tr.getAttribute('data-skipped')||'',tr.getAttribute('data-code')||'',tr.getAttribute('data-comments')||'',tr.getAttribute('data-blank')||'',tr.getAttribute('data-branch')||'',tr.getAttribute('data-commit')||'']);});return r;}
+      // Multi-sheet XLSX builder for the scan-history export.
+      // Styles: 0=normal 1=col-header(orange/white bold) 2=number(right) 3=section 4=bold-label 5=number(left) 6=text(@)
+      function slocXlsxMulti(fname,sheets){
+        var enc=new TextEncoder();
+        var CT=[];for(var _n=0;_n<256;_n++){var _c=_n;for(var _k=0;_k<8;_k++)_c=_c&1?0xEDB88320^(_c>>>1):_c>>>1;CT[_n]=_c;}
+        function crc32(d){var v=0xFFFFFFFF;for(var i=0;i<d.length;i++)v=CT[(v^d[i])&0xFF]^(v>>>8);return(v^0xFFFFFFFF)>>>0;}
+        function u2(n){return[n&0xFF,(n>>8)&0xFF];}
+        function u4(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
+        function xe(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+        var ss=[],si={};function S(v){v=String(v==null?'':v);if(!(v in si)){si[v]=ss.length;ss.push(v);}return si[v];}
+        function colRef(c,r){var s='',n=c+1;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s+r;}
+        function colNm(n){var s='';while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s;}
+        var ox='http://schemas.openxmlformats.org/',pns=ox+'package/2006/',ons=ox+'officeDocument/2006/',sns=ox+'spreadsheetml/2006/main';
+        var stl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="'+sns+'">'
+          +'<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0"/></numFmts>'
+          +'<fonts count="3">'
+            +'<font><sz val="11"/><name val="Calibri"/></font>'
+            +'<font><sz val="11"/><b/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+            +'<font><sz val="11"/><b/><color rgb="FFC45C10"/><name val="Calibri"/></font>'
+          +'</fonts>'
+          +'<fills count="4">'
+            +'<fill><patternFill patternType="none"/></fill>'
+            +'<fill><patternFill patternType="gray125"/></fill>'
+            +'<fill><patternFill patternType="solid"><fgColor rgb="FFC45C10"/><bgColor indexed="64"/></patternFill></fill>'
+            +'<fill><patternFill patternType="solid"><fgColor rgb="FFFAF0E6"/><bgColor indexed="64"/></patternFill></fill>'
+          +'</fills>'
+          +'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+          +'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+          +'<cellXfs count="7">'
+            +'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+            +'<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+            +'<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="right"/></xf>'
+            +'<xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+            +'<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+            +'<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf>'
+            +'<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+          +'</cellXfs>'
+          +'<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+          +'</styleSheet>';
+        var wsXmls=[],tableCounter=0,tableXmls={},wsRelsXmls={};
+        sheets.forEach(function(sh,sheetIdx){
+          var rx='<row r="1">';
+          sh.hdrs.forEach(function(h,c){rx+='<c r="'+colRef(c,1)+'" t="s" s="1"><v>'+S(h)+'</v></c>';});
+          rx+='</row>';
+          var rn=2;
+          sh.rows.forEach(function(row){
+            if(!row||row.length===0){rx+='<row r="'+rn+'"/>';rn++;return;}
+            if(row.length===1&&row[0]&&typeof row[0]==='object'&&row[0]._sec){
+              rx+='<row r="'+rn+'">';
+              rx+='<c r="'+colRef(0,rn)+'" t="s" s="3"><v>'+S(row[0].v)+'</v></c>';
+              for(var ec=1;ec<sh.hdrs.length;ec++){rx+='<c r="'+colRef(ec,rn)+'" s="3"/>';}
+              rx+='</row>';rn++;return;
+            }
+            rx+='<row r="'+rn+'">';
+            row.forEach(function(cell,c){
+              var ref=colRef(c,rn);
+              if(cell===null||cell===undefined||cell===''){rx+='<c r="'+ref+'"/>';return;}
+              if(typeof cell==='object'&&cell!==null){
+                var cv=cell.v,cs=cell.s!=null?cell.s:0;
+                if(typeof cv==='number'){rx+='<c r="'+ref+'" s="'+cs+'"><v>'+xe(cv)+'</v></c>';}
+                else{rx+='<c r="'+ref+'" t="s" s="'+cs+'"><v>'+S(cv)+'</v></c>';}
+                return;
+              }
+              if(typeof cell==='number'){rx+='<c r="'+ref+'" s="2"><v>'+xe(cell)+'</v></c>';return;}
+              rx+='<c r="'+ref+'" t="s"><v>'+S(cell)+'</v></c>';
+            });
+            rx+='</row>';rn++;
+          });
+          var cw='';
+          if(sh.colWidths&&sh.colWidths.length>0){
+            cw='<cols>';
+            sh.colWidths.forEach(function(w,i){cw+='<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+w+'" customWidth="1"/>';});
+            cw+='</cols>';
+          }
+          var tblParts='';
+          if(!sh.isKv&&sh.hdrs.length>0&&sh.rows.length>0){
+            tableCounter++;
+            var tc=tableCounter,colCount=sh.hdrs.length,rowCount=sh.rows.length+1;
+            var tRef='A1:'+colNm(colCount)+rowCount;
+            tableXmls['xl/tables/table'+tc+'.xml']='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              +'<table xmlns="'+sns+'" id="'+tc+'" name="Table'+tc+'" displayName="Table'+tc+'" ref="'+tRef+'" totalsRowShown="0">'
+              +'<autoFilter ref="'+tRef+'"/>'
+              +'<tableColumns count="'+colCount+'">'
+              +sh.hdrs.map(function(h,i){return'<tableColumn id="'+(i+1)+'" name="'+xe(h)+'"/>';}).join('')
+              +'</tableColumns>'
+              +'<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>'
+              +'</table>';
+            wsRelsXmls['xl/worksheets/_rels/sheet'+(sheetIdx+1)+'.xml.rels']='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              +'<Relationships xmlns="'+pns+'relationships">'
+              +'<Relationship Id="rId1" Type="'+ons+'relationships/table" Target="../tables/table'+tc+'.xml"/>'
+              +'</Relationships>';
+            tblParts='<tableParts count="1"><tablePart r:id="rId1"/></tableParts>';
+          }
+          wsXmls.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+sns+'" xmlns:r="'+ons+'relationships">'
+            +'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+            +'<sheetFormatPr defaultRowHeight="15"/>'+cw+'<sheetData>'+rx+'</sheetData>'+tblParts+'</worksheet>');
+        });
+        var ssXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="'+sns+'" count="'+ss.length+'" uniqueCount="'+ss.length+'">'+ss.map(function(v){return'<si><t xml:space="preserve">'+xe(v)+'</t></si>';}).join('')+'</sst>';
+        var ctOver=sheets.map(function(_,i){return'<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}).join('');
+        var ctTable=Object.keys(tableXmls).map(function(k){return'<Override PartName="/'+k+'" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>';}).join('');
+        var ctXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="'+pns+'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+ctOver+ctTable+'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>';
+        var wbSh=sheets.map(function(sh,i){return'<sheet name="'+xe(sh.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}).join('');
+        var wbXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="'+sns+'" xmlns:r="'+ons+'relationships"><sheets>'+wbSh+'</sheets></workbook>';
+        var wbR=sheets.map(function(_,i){return'<Relationship Id="rId'+(i+1)+'" Type="'+ons+'relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}).join('');
+        wbR+='<Relationship Id="rId'+(sheets.length+1)+'" Type="'+ons+'relationships/styles" Target="styles.xml"/>'
+          +'<Relationship Id="rId'+(sheets.length+2)+'" Type="'+ons+'relationships/sharedStrings" Target="sharedStrings.xml"/>';
+        var wbRXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships">'+wbR+'</Relationships>';
+        var F={'[Content_Types].xml':ctXml,'_rels/.rels':'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="'+pns+'relationships"><Relationship Id="rId1" Type="'+ons+'relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>','xl/workbook.xml':wbXml,'xl/_rels/workbook.xml.rels':wbRXml,'xl/styles.xml':stl,'xl/sharedStrings.xml':ssXml};
+        var order=['[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/_rels/workbook.xml.rels','xl/styles.xml','xl/sharedStrings.xml'];
+        sheets.forEach(function(_,i){var k='xl/worksheets/sheet'+(i+1)+'.xml';F[k]=wsXmls[i];order.push(k);});
+        Object.keys(wsRelsXmls).forEach(function(k){F[k]=wsRelsXmls[k];order.push(k);});
+        Object.keys(tableXmls).forEach(function(k){F[k]=tableXmls[k];order.push(k);});
+        var zparts=[],zcds=[],zoff=0,znf=0;
+        order.forEach(function(name){var nb=enc.encode(name),db=enc.encode(F[name]),sz=db.length,cr=crc32(db);var lha=[0x50,0x4B,0x03,0x04,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0]);var entry=new Uint8Array(lha.length+nb.length+sz);entry.set(new Uint8Array(lha),0);entry.set(nb,lha.length);entry.set(db,lha.length+nb.length);zparts.push(entry);var cda=[0x50,0x4B,0x01,0x02,0x14,0,0x14,0,0,0,0,0,0,0,0,0].concat(u4(cr)).concat(u4(sz)).concat(u4(sz)).concat(u2(nb.length)).concat([0,0,0,0,0,0,0,0,0,0,0,0]).concat(u4(zoff));var cde=new Uint8Array(cda.length+nb.length);cde.set(new Uint8Array(cda),0);cde.set(nb,cda.length);zcds.push(cde);zoff+=entry.length;znf++;});
+        var cdSz=zcds.reduce(function(a,c){return a+c.length;},0);
+        var ea=[0x50,0x4B,0x05,0x06,0,0,0,0].concat(u2(znf)).concat(u2(znf)).concat(u4(cdSz)).concat(u4(zoff)).concat([0,0]);
+        var tot=zoff+cdSz+ea.length,zout=new Uint8Array(tot),zpos=0;
+        zparts.forEach(function(p){zout.set(p,zpos);zpos+=p.length;});
+        zcds.forEach(function(c){zout.set(c,zpos);zpos+=c.length;});
+        zout.set(new Uint8Array(ea),zpos);
+        slocDownload(zout,fname,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      }
+
+      var LANG_NAMES={'c':'C','cpp':'C++','c_sharp':'C#','go':'Go','java':'Java','java_script':'JavaScript','python':'Python','rust':'Rust','shell':'Shell','power_shell':'PowerShell','type_script':'TypeScript','assembly':'Assembly','clojure':'Clojure','css':'CSS','dart':'Dart','dockerfile':'Dockerfile','elixir':'Elixir','erlang':'Erlang','f_sharp':'F#','groovy':'Groovy','haskell':'Haskell','html':'HTML','julia':'Julia','kotlin':'Kotlin','lua':'Lua','makefile':'Makefile','nim':'Nim','objective_c':'Objective-C','ocaml':'OCaml','perl':'Perl','php':'PHP','r':'R','ruby':'Ruby','scala':'Scala','scss':'SCSS','sql':'SQL','svelte':'Svelte','swift':'Swift','vue':'Vue','xml':'XML','zig':'Zig','solidity':'Solidity','protobuf':'Protocol Buffers','hcl':'HCL/Terraform','graph_ql':'GraphQL','ada':'Ada','vhdl':'VHDL','verilog':'Verilog/SystemVerilog','tcl':'Tcl','pascal':'Pascal/Delphi','visual_basic':'Visual Basic','lisp':'Lisp/Scheme','fortran':'Fortran','nix':'Nix','crystal':'Crystal','d':'D','glsl':'GLSL/HLSL','cmake':'CMake','elm':'Elm','awk':'Awk'};
+      function langName(k){return LANG_NAMES[k]||String(k||'').replace(/_/g,' ')||'(unknown)';}
+
+      var _hh = ['Timestamp','Project','Run ID','Physical Lines','Code Lines','Comments','Blank Lines','Files Analyzed','Files Skipped','Functions','Classes','Variables','Imports','Tests','Code Density','Branch','Commit'];
+      function getHistoryRows(){
+        var r=[];
+        document.querySelectorAll('#history-tbody .history-row').forEach(function(tr){
+          var code=Number(tr.getAttribute('data-code'))||0;
+          var phys=Number(tr.getAttribute('data-physical'))||0;
+          var dens=phys>0?(code/phys*100).toFixed(1)+'%':'0%';
+          r.push([
+            tr.getAttribute('data-timestamp')||'',
+            tr.getAttribute('data-project')||'',
+            tr.getAttribute('data-run')||'',
+            tr.getAttribute('data-physical')||'',
+            tr.getAttribute('data-code')||'',
+            tr.getAttribute('data-comments')||'',
+            tr.getAttribute('data-blank')||'',
+            tr.getAttribute('data-files')||'',
+            tr.getAttribute('data-skipped')||'',
+            tr.getAttribute('data-functions')||'',
+            tr.getAttribute('data-classes')||'',
+            tr.getAttribute('data-variables')||'',
+            tr.getAttribute('data-imports')||'',
+            tr.getAttribute('data-tests')||'',
+            dens,
+            tr.getAttribute('data-branch')||'',
+            tr.getAttribute('data-commit')||''
+          ]);
+        });
+        return r;
+      }
       window.exportHistoryCsv = function(){slocCsv('scan-history.csv',_hh,getHistoryRows());};
-      window.exportHistoryXls = function(){slocXlsx('scan-history.xlsx','Scan History',_hh,getHistoryRows());};
+      window.exportHistoryXls = function(){
+        var histRows=getHistoryRows();
+        var histSheet={name:'Scan History',hdrs:_hh,rows:histRows,colWidths:[18,14,22,14,12,12,12,12,12,11,10,10,10,8,13,10,12]};
+        var jsonRow=document.querySelector('#history-tbody .history-row[data-has-json="true"]');
+        if(!jsonRow){slocXlsxMulti('scan-history.xlsx',[histSheet]);return;}
+        var runId=jsonRow.getAttribute('data-run')||'';
+        var proj=(jsonRow.getAttribute('data-project')||'Latest').substring(0,18);
+        function sn(suffix){var p=proj.substring(0,Math.max(1,29-suffix.length));return p+': '+suffix;}
+        fetch('/runs/json/'+runId)
+          .then(function(r){if(!r.ok)throw new Error('no json');return r.json();})
+          .then(function(run){
+            var tot=run.summary_totals||{};
+            var phys=Number(tot.total_physical_lines)||0,code=Number(tot.code_lines)||0;
+            var dens=phys>0?(code/phys*100).toFixed(1)+'%':'0%';
+            function B(v){return{v:v,s:4};}
+            function N(v){return{v:typeof v==='number'?v:Number(v),s:5};}
+            var sumRows=[
+              [{_sec:true,v:'RUN INFORMATION'}],
+              [B('Run ID'),(run.tool&&run.tool.run_id)||''],
+              [B('Timestamp'),(run.tool&&run.tool.timestamp_utc)||''],
+              [B('Project'),(run.effective_configuration&&run.effective_configuration.reporting&&run.effective_configuration.reporting.report_title)||proj],
+              [B('Branch'),run.git_branch||''],
+              [B('Commit'),run.git_commit_long||run.git_commit_short||''],
+              [B('OS'),(run.environment&&(run.environment.operating_system+' / '+run.environment.architecture))||''],
+              [B('Files Analyzed'),N(tot.files_analyzed)],
+              [B('Files Skipped'),N(tot.files_skipped)],
+              [],
+              [{_sec:true,v:'CODE METRICS'}],
+              [B('Physical Lines'),N(phys)],
+              [B('Code Lines'),N(code)],
+              [B('Comments'),N(tot.comment_lines)],
+              [B('Blank Lines'),N(tot.blank_lines)],
+              [B('Mixed Separate'),N(tot.mixed_lines_separate)],
+              [B('Functions'),N(tot.functions)],
+              [B('Classes / Types'),N(tot.classes)],
+              [B('Variables'),N(tot.variables)],
+              [B('Imports'),N(tot.imports)],
+              [B('Tests'),N(tot.test_count)],
+              [B('Assertions'),N(tot.test_assertion_count)],
+              [B('Test Suites'),N(tot.test_suite_count)],
+              [B('Code Density'),{v:dens,s:6}],
+              [B('Tool Version'),'oxide-sloc '+((run.tool&&run.tool.version)||'')],
+            ];
+            var langHdrs=['Language','Files','Physical Lines','Code Lines','Code Density','Comments','Blank','Functions','Classes','Variables','Imports','Tests','Assertions','Test Suites'];
+            var langRows=(run.totals_by_language||[]).map(function(l){
+              var lp=Number(l.total_physical_lines)||0,lc=Number(l.code_lines)||0;
+              var ld=lp>0?(lc/lp*100).toFixed(1)+'%':'0%';
+              return [langName(l.language),l.files||0,lp,lc,{v:ld,s:6},l.comment_lines||0,l.blank_lines||0,l.functions||0,l.classes||0,l.variables||0,l.imports||0,l.test_count||0,l.test_assertion_count||0,l.test_suite_count||0];
+            });
+            var pfHdrs=['File','Language','Physical Lines','Code Lines','Comments','Blank','Functions','Classes','Variables','Imports','Tests','Assertions','Size (bytes)'];
+            var pfRows=(run.per_file_records||[]).map(function(r){
+              var rc=r.raw_line_categories||{},ec=r.effective_counts||{};
+              return [r.relative_path,langName(r.language),rc.total_physical_lines||0,ec.code_lines||0,ec.comment_lines||0,ec.blank_lines||0,rc.functions||0,rc.classes||0,rc.variables||0,rc.imports||0,rc.test_count||0,rc.test_assertion_count||0,r.size_bytes||0];
+            });
+            var skHdrs=['File','Status','Size (bytes)'];
+            var skRows=(run.skipped_file_records||[]).map(function(r){
+              return [r.relative_path,String(r.status||'').replace(/_/g,' '),r.size_bytes||0];
+            });
+            slocXlsxMulti('scan-history.xlsx',[
+              histSheet,
+              {name:sn('Summary'),hdrs:['Field / Metric','Value'],rows:sumRows,colWidths:[22,44],isKv:true},
+              {name:sn('Languages'),hdrs:langHdrs,rows:langRows,colWidths:[16,7,14,12,13,12,10,11,10,10,10,8,11,12]},
+              {name:sn('Per-File'),hdrs:pfHdrs,rows:pfRows,colWidths:[48,12,14,12,12,10,11,10,10,10,8,11,12]},
+              {name:sn('Skipped'),hdrs:skHdrs,rows:skRows,colWidths:[52,24,12]}
+            ]);
+          })
+          .catch(function(){slocXlsxMulti('scan-history.xlsx',[histSheet]);});
+      };
 
       var csvBtn = document.getElementById('export-csv-btn');
       if (csvBtn) csvBtn.addEventListener('click', function() { window.exportHistoryCsv(); });
@@ -25023,7 +25441,7 @@ struct RelocateScanTemplate {
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
   }());
   </script>
-  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} — Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl&&lbl.textContent==='Server')lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');function setDot(ms){if(!dot)return;if(ms<100){dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}else if(ms<300){dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}else{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}function doPing(){var t0=performance.now();fetch('/healthz',{cache:'no-store'}).then(function(){var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}).catch(function(){if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}});}doPing();setInterval(doPing,5000);})();</script>
 </body>
 </html>
 "##,
@@ -25475,6 +25893,7 @@ struct HistoryTemplate {
           setChipVal('agg-code', latestRow.dataset.code);
           setChipVal('agg-files', latestRow.dataset.files);
         }
+        Array.prototype.forEach.call(document.querySelectorAll('#compare-tbody .metric-num'), function(el) { var n = Number(el.textContent); if (!isNaN(n) && el.textContent.trim() !== '') el.textContent = n.toLocaleString(); });
       })();
 
       // ── Branch filter population ──────────────────────────────────────────
@@ -25512,7 +25931,7 @@ struct HistoryTemplate {
           r.style.display = shown[r.dataset.run] ? '' : 'none';
         });
         var rl = document.getElementById('page-range-label');
-        if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '–' + end + ' of ' + total : 'No results';
+        if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '\u2013' + end + ' of ' + total : 'No results';
         var info = document.getElementById('pagination-info');
         if (info) info.textContent = 'Page ' + currentPage + ' of ' + totalPages;
         var btns = document.getElementById('pagination-btns');
@@ -25525,10 +25944,10 @@ struct HistoryTemplate {
           if (!disabled) b.addEventListener('click', function() { currentPage = pg; renderPage(); });
           return b;
         }
-        btns.appendChild(makeBtn('‹', currentPage - 1, false, currentPage === 1));
+        btns.appendChild(makeBtn('\u2039', currentPage - 1, false, currentPage === 1));
         var ws = Math.max(1, currentPage - 2), we = Math.min(totalPages, ws + 4); ws = Math.max(1, we - 4);
         for (var p = ws; p <= we; p++) btns.appendChild(makeBtn(String(p), p, p === currentPage, false));
-        btns.appendChild(makeBtn('›', currentPage + 1, false, currentPage === totalPages));
+        btns.appendChild(makeBtn('\u203a', currentPage + 1, false, currentPage === totalPages));
       }
 
       window.setPerPage = function(v) { perPage = parseInt(v, 10) || 25; currentPage = 1; renderPage(); };
@@ -25554,9 +25973,9 @@ struct HistoryTemplate {
           if (e.target.classList.contains('col-resize-handle')) return;
           var col = th.dataset.sortCol, type = th.dataset.sortType || 'str';
           if (sortCol === col) { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; } else { sortCol = col; sortOrder = 'asc'; }
-          sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '↕'; t.classList.remove('sort-asc', 'sort-desc'); });
+          sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
           th.classList.add('sort-' + sortOrder);
-          var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '↑' : '↓';
+          var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '\u2191' : '\u2193';
           doSort(col, type, sortOrder);
         });
       });
@@ -25564,7 +25983,7 @@ struct HistoryTemplate {
       // Apply default sort (timestamp desc) on initial load
       (function() {
         var tsTh = document.querySelector('#compare-thead [data-sort-col="timestamp"]');
-        if (tsTh) { tsTh.classList.add('sort-desc'); var si = tsTh.querySelector('.sort-icon'); if (si) si.textContent = '↓'; doSort('timestamp', 'str', 'desc'); }
+        if (tsTh) { tsTh.classList.add('sort-desc'); var si = tsTh.querySelector('.sort-icon'); if (si) si.textContent = '\u2193'; doSort('timestamp', 'str', 'desc'); }
       })();
 
       // ── Column resize ─────────────────────────────────────────────────────
@@ -25594,7 +26013,7 @@ struct HistoryTemplate {
         var pf = document.getElementById('project-filter'); if (pf) pf.value = '';
         var bf = document.getElementById('branch-filter'); if (bf) bf.value = '';
         sortCol = null; sortOrder = 'asc';
-        sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '↕'; t.classList.remove('sort-asc', 'sort-desc'); });
+        sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
         var tbody = document.getElementById('compare-tbody');
         if (tbody) {
           var rows = Array.prototype.slice.call(tbody.querySelectorAll('.compare-row'));
@@ -25756,13 +26175,13 @@ struct HistoryTemplate {
           return div;
         }
 
-        opts.appendChild(makeOption('all', 'Full scan', 'All files — super-repo and submodules combined'));
+        opts.appendChild(makeOption('all', 'Full scan', 'All files \u2014 super-repo and submodules combined'));
         var sep = document.createElement('span');
         sep.className = 'scope-option-sep';
         opts.appendChild(sep);
         opts.appendChild(makeOption('super', 'Super-repo only', 'Only files not belonging to any submodule'));
         subList.forEach(function(s) {
-          opts.appendChild(makeOption('sub:' + s, 'Submodule: ' + s, 'Only files belonging to submodule “' + s + '”'));
+          opts.appendChild(makeOption('sub:' + s, 'Submodule: ' + s, 'Only files belonging to submodule \u201c' + s + '\u201d'));
         });
       }
 
@@ -26107,6 +26526,7 @@ struct CompareSelectTemplate {
     .site-footer a{color:var(--muted);}
     body.pdf-mode .top-nav,body.pdf-mode .background-watermarks,body.pdf-mode #code-particles,body.pdf-mode .export-group,body.pdf-mode .btn-reset,body.pdf-mode .filter-tabs,body.pdf-mode .filter-tabs-row,body.pdf-mode .pagination,body.pdf-mode select.per-page,body.pdf-mode .settings-modal,body.pdf-mode .site-footer,body.pdf-mode .scope-bar,body.pdf-mode .submod-scope-bar{display:none!important;}
     body.pdf-mode{background:#fff!important;}
+    body.pdf-mode .page{padding:4px 6px 4px!important;}
     @media(max-width:900px){.meta-strip{grid-template-columns:1fr;}.delta-strip{grid-template-columns:repeat(2,1fr);}}
     @media(max-width:600px){.meta-strip{grid-template-columns:1fr;}.delta-strip{grid-template-columns:1fr;} th.hide-sm,td.hide-sm{display:none;}}
     .background-watermarks{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
@@ -26622,7 +27042,7 @@ struct CompareSelectTemplate {
         r.style.display = shownSet[r.dataset.origIdx] !== undefined ? '' : 'none';
       });
       var rl = document.getElementById('pg-range-label');
-      if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '–' + end + ' of ' + total + ' files' : 'No results';
+      if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '\u2013' + end + ' of ' + total + ' files' : 'No results';
       var btns = document.getElementById('pg-btns');
       if (!btns) return;
       btns.innerHTML = '';
@@ -26634,10 +27054,10 @@ struct CompareSelectTemplate {
         if (!disabled) b.addEventListener('click', function() { deltaCurrPage = pg; renderDeltaPage(); });
         return b;
       }
-      btns.appendChild(makeBtn('‹', deltaCurrPage - 1, false, deltaCurrPage === 1));
+      btns.appendChild(makeBtn('\u2039', deltaCurrPage - 1, false, deltaCurrPage === 1));
       var ws = Math.max(1, deltaCurrPage - 2), we = Math.min(totalPages, ws + 4); ws = Math.max(1, we - 4);
       for (var p = ws; p <= we; p++) btns.appendChild(makeBtn(String(p), p, p === deltaCurrPage, false));
-      btns.appendChild(makeBtn('›', deltaCurrPage + 1, false, deltaCurrPage === totalPages));
+      btns.appendChild(makeBtn('\u203a', deltaCurrPage + 1, false, deltaCurrPage === totalPages));
     }
 
     window.setDeltaPerPage = function(v) { deltaPerPage = parseInt(v, 10) || 25; deltaCurrPage = 1; renderDeltaPage(); };
@@ -26672,9 +27092,9 @@ struct CompareSelectTemplate {
         if (e.target.classList.contains('col-resize-handle')) return;
         var col = th.dataset.sortCol, type = th.dataset.sortType || 'str';
         if (sortCol === col) { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; } else { sortCol = col; sortOrder = 'asc'; }
-        sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '↕'; t.classList.remove('sort-asc', 'sort-desc'); });
+        sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
         th.classList.add('sort-' + sortOrder);
-        var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '↑' : '↓';
+        var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '\u2191' : '\u2193';
         var tbody = document.getElementById('delta-tbody');
         if (!tbody) return;
         var rows = Array.prototype.slice.call(tbody.querySelectorAll('.delta-row'));
@@ -26725,7 +27145,7 @@ struct CompareSelectTemplate {
     // ── Reset ─────────────────────────────────────────────────────────────────
     window.resetDeltaTable = function() {
       sortCol = null; sortOrder = 'asc';
-      sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '↕'; t.classList.remove('sort-asc', 'sort-desc'); });
+      sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
       var tbody = document.getElementById('delta-tbody');
       if (tbody) {
         var rows = Array.prototype.slice.call(tbody.querySelectorAll('.delta-row'));
@@ -27140,7 +27560,7 @@ struct CompareSelectTemplate {
           var col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw;
           var sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
           c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
-          c3+='<rect class="cb" x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"'+barTT(l,'Delta: '+vStr+' code lines • '+e.f+' file'+(e.f!==1?'s':''))+'/>';
+          c3+='<rect class="cb" x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"'+barTT(l,'Delta: '+vStr+' code lines \u2022 '+e.f+' file'+(e.f!==1?'s':''))+'/>';
           if(bw>=48){
             c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';
           }else{
@@ -27164,7 +27584,7 @@ struct CompareSelectTemplate {
         var x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
         var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2);
         var xi2=cx4+Ri*Math.cos(ang),yi2=cy4+Ri*Math.sin(ang);
-        c4+='<path class="cb" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"'+barTT(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+'/>';
+        c4+='<path class="cb" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"'+barTT(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+'/>';
         ang+=sw;
       });
       c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#333">'+fmt(tot)+'</text>';
@@ -27199,7 +27619,7 @@ struct CompareSelectTemplate {
         '#ox-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:#fff;border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.08);max-width:240px;white-space:nowrap;}'+
         '.cb{cursor:pointer;transition:opacity .15s,filter .15s;}.cb:hover{opacity:.72;filter:brightness(1.1);}';
       var html='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'+
-        '<title>OxideSLOC — Scan Delta Charts<\/title><style>'+css+'<\/style><\/head><body>'+
+        '<title>OxideSLOC \u2014 Scan Delta Charts<\/title><style>'+css+'<\/style><\/head><body>'+
         '<div id="ox-tt"><\/div>'+
         '<h1>OxideSLOC &mdash; Scan Delta Charts<\/h1>'+
         '<p class="sub">'+esc(proj)+'&nbsp;&middot;&nbsp;'+esc(sd.bts)+' &rarr; '+esc(sd.cts)+'<\/p>'+
@@ -27232,12 +27652,12 @@ struct CompareSelectTemplate {
       var c4h=document.getElementById('ic-c4')?document.getElementById('ic-c4').innerHTML:'';
       var ttJs='var tt=document.getElementById("ox-tt");function oxTT(e,t,v){tt.innerHTML="<strong>"+t+"<\/strong><br>"+v;tt.style.display="block";oxMT(e);}function oxMT(e){var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+"px";tt.style.top=y+"px";}function oxHT(){tt.style.display="none";}';
       var css='*{box-sizing:border-box;}body{font-family:Inter,Calibri,Arial,sans-serif;margin:0 auto;padding:20px 30px 24px;max-width:1460px;background:#F7F3EE;color:#333;}h1{color:#C45C10;font-size:21px;margin:0 0 3px;font-weight:800;}p.sub{color:#888;font-size:12px;margin:0 0 18px;}.card{background:#fff;border-radius:12px;padding:16px 20px;margin-bottom:0;box-shadow:0 1px 5px rgba(0,0,0,.08);}h2{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#AAA;margin:0 0 10px;}.leg{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;}.dot{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}svg{display:block;}.two-col{display:flex;gap:18px;margin-bottom:16px;}.two-col>.card{flex:1;min-width:0;}#ox-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:#fff;border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;max-width:240px;white-space:nowrap;}.cb{cursor:pointer;transition:opacity .15s,filter .15s;}.cb:hover{opacity:.72;filter:brightness(1.1);}';
-      return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>OxideSLOC — Scan Delta Charts<\/title><style>'+css+'<\/style><\/head><body>'+
+      return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>OxideSLOC \u2014 Scan Delta Charts<\/title><style>'+css+'<\/style><\/head><body>'+
         '<div id="ox-tt"><\/div>'+
-        '<h1>OxideSLOC — Scan Delta Charts<\/h1>'+
-        '<p class="sub">'+esc(proj)+'&nbsp;&middot;&nbsp;'+esc(sd.bts||'')+' → '+esc(sd.cts||'')+'<\/p>'+
+        '<h1>OxideSLOC \u2014 Scan Delta Charts<\/h1>'+
+        '<p class="sub">'+esc(proj)+'&nbsp;&middot;&nbsp;'+esc(sd.bts||'')+' \u2192 '+esc(sd.cts||'')+'<\/p>'+
         '<div class="two-col">'+
-        '<div class="card"><h2>Code Metrics — Baseline vs Current<\/h2>'+
+        '<div class="card"><h2>Code Metrics \u2014 Baseline vs Current<\/h2>'+
         '<div class="leg"><span><span class="dot" style="background:#93C5FD"><\/span><span style="color:#2563EB;font-weight:600">Code Lines<\/span><\/span>'+
         '<span><span class="dot" style="background:#C4B5FD"><\/span><span style="color:#7C3AED;font-weight:600">Files<\/span><\/span>'+
         '<span><span class="dot" style="background:#6EE7B7"><\/span><span style="color:#0D9488;font-weight:600">Comments<\/span><\/span><\/div>'+c1h+'<\/div>'+
@@ -27311,7 +27731,7 @@ struct CompareSelectTemplate {
         langs.forEach(function(l,i){
           var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
           c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
-          c3+='<rect'+btt(l,'Delta: '+vStr+' code lines • '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
+          c3+='<rect'+btt(l,'Delta: '+vStr+' code lines \u2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
           if(bw>=48){c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
           else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
           c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
@@ -27324,14 +27744,14 @@ struct CompareSelectTemplate {
       var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
       var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
       if(segs.length===1){
-        c4+='<circle'+btt(segs[0].l,fmt(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
+        c4+='<circle'+btt(segs[0].l,fmt(segs[0].v)+' files \u2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
         c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface)"/>';
       } else {
         segs.forEach(function(s){
           var sw=Math.min(s.v/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
           var x1=cx4+Ro*Math.cos(ang),y1=cy4+Ro*Math.sin(ang),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang),yi2=cy4+Ri*Math.sin(ang);
-          c4+='<path'+btt(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          c4+='<path'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
           ang+=sw;
         });
       }
@@ -27339,8 +27759,8 @@ struct CompareSelectTemplate {
       c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
       segs.forEach(function(s,i){
         var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
-        c4+='<rect'+btt(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt(s.v)+' files • '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+        c4+='<rect'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
+        c4+='<text'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
       });
       c4+='</svg>';
       var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=c1;addTT(e1);}
