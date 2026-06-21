@@ -843,15 +843,15 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
         .print_to_pdf(Some(PrintToPdfOptions {
             landscape: Some(true),
             print_background: Some(true),
-            scale: Some(0.93),
+            scale: Some(0.97),
             paper_width: Some(11.69), // A4 landscape width (inches)
             paper_height: Some(8.27), // A4 landscape height (inches)
             // When a banner is present widen the top/bottom margins so Chrome's
             // header/footer templates render fully without overlapping content.
-            margin_top: Some(if has_banner { 0.4 } else { 0.1 }),
-            margin_bottom: Some(if has_banner { 0.3 } else { 0.1 }),
-            margin_left: Some(0.15),
-            margin_right: Some(0.15),
+            margin_top: Some(if has_banner { 0.35 } else { 0.0 }),
+            margin_bottom: Some(if has_banner { 0.25 } else { 0.0 }),
+            margin_left: Some(0.0),
+            margin_right: Some(0.0),
             prefer_css_page_size: Some(false),
             display_header_footer: if has_banner { Some(true) } else { None },
             header_template: header_tmpl,
@@ -10289,5 +10289,83 @@ mod coverage_boost_report_tests {
         // Either a real browser exists (Ok) or not (Err); both are acceptable.
         let _ = res;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── helvetica_advance ────────────────────────────────────────────────────────
+
+    #[test]
+    fn helvetica_advance_uppercase_a_differs_by_weight() {
+        assert_eq!(helvetica_advance('A', true), 722);
+        assert_eq!(helvetica_advance('A', false), 667);
+    }
+
+    #[test]
+    fn helvetica_advance_uppercase_w_same_both_weights() {
+        assert_eq!(helvetica_advance('W', true), 944);
+        assert_eq!(helvetica_advance('W', false), 944);
+    }
+
+    #[test]
+    fn helvetica_advance_lowercase_i_differs_by_weight() {
+        assert_eq!(helvetica_advance('i', true), 278);
+        assert_eq!(helvetica_advance('i', false), 222);
+    }
+
+    #[test]
+    fn helvetica_advance_digits_are_556_both_weights() {
+        for d in '0'..='9' {
+            assert_eq!(helvetica_advance(d, true), 556, "bold digit {d}");
+            assert_eq!(helvetica_advance(d, false), 556, "regular digit {d}");
+        }
+    }
+
+    #[test]
+    fn helvetica_advance_middle_dot_is_278() {
+        assert_eq!(helvetica_advance('\u{00B7}', true), 278);
+        assert_eq!(helvetica_advance('\u{00B7}', false), 278);
+    }
+
+    #[test]
+    fn helvetica_advance_unknown_char_returns_nonzero_fallback() {
+        let bold_fb = helvetica_advance('\u{1F600}', true);
+        let reg_fb = helvetica_advance('\u{1F600}', false);
+        assert_eq!(bold_fb, 556);
+        assert_eq!(reg_fb, 500);
+    }
+
+    // ── helvetica_width_mm ───────────────────────────────────────────────────────
+
+    #[test]
+    fn helvetica_width_mm_empty_is_zero() {
+        assert_eq!(helvetica_width_mm("", 10.0, false), 0.0);
+        assert_eq!(helvetica_width_mm("", 10.0, true), 0.0);
+    }
+
+    #[test]
+    fn helvetica_width_mm_scales_linearly_with_pt_size() {
+        let w6 = helvetica_width_mm("Hello", 6.0, false);
+        let w12 = helvetica_width_mm("Hello", 12.0, false);
+        assert!(
+            (w12 - 2.0 * w6).abs() < 1e-4,
+            "width must be proportional to pt size"
+        );
+    }
+
+    #[test]
+    fn helvetica_width_mm_bold_a_wider_than_regular_a() {
+        let bold = helvetica_width_mm("A", 10.0, true);
+        let reg = helvetica_width_mm("A", 10.0, false);
+        assert!(
+            bold > reg,
+            "bold 'A' (722) must be wider than regular 'A' (667)"
+        );
+    }
+
+    #[test]
+    fn helvetica_width_mm_single_char_matches_manual_calculation() {
+        // 'A' regular advance = 667; width_mm = 667 * 10.0 * (25.4/72.0) / 1000.0
+        let expected = 667.0_f32 * 10.0 * (25.4 / 72.0) / 1000.0;
+        let got = helvetica_width_mm("A", 10.0, false);
+        assert!((got - expected).abs() < 1e-4);
     }
 }

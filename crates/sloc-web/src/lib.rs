@@ -10225,23 +10225,23 @@ fn multi_compare_page(
         var p0=N>0?POINTS[0]:null,pLast=N>0?POINTS[N-1]:null;
         var codeDelta=(p0&&pLast)?Number(pLast.code)-Number(p0.code):null;
         var css='body{{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}}'+
-          '.hdr{{background:#1a2035;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:flex-start;}}'+
+          '.hdr{{background:#1a2035;color:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:flex-start;}}'+
           '.brand{{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}}'+
           '.title{{font-size:20px;font-weight:700;margin:3px 0 2px;line-height:1.2;}}'+
           '.proj{{font-size:12px;color:#99aabb;margin-top:3px;}}'+
           '.hr{{font-size:11px;color:#8899aa;text-align:right;line-height:1.9;}}'+
-          '.body{{padding:18px 24px;}}'+
-          '.sg{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px;}}'+
-          '.sc{{border:1px solid #ddd;border-radius:8px;padding:10px 12px;}}'+
+          '.body{{padding:10px 14px;}}'+
+          '.sg{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}}'+
+          '.sc{{border:1px solid #ddd;border-radius:8px;padding:8px 10px;}}'+
           '.sv{{font-size:18px;font-weight:900;color:#c45c10;}}'+
           '.sl{{font-size:10px;font-weight:700;text-transform:uppercase;color:#888;margin-top:3px;letter-spacing:.06em;}}'+
-          '.sec{{margin-bottom:20px;}}'+
-          '.sh{{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}}'+
+          '.sec{{margin-bottom:12px;}}'+
+          '.sh{{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}}'+
           'table{{width:100%;border-collapse:collapse;font-size:11px;}}'+
-          'th{{background:#1a2035;color:#fff;padding:5px 8px;font-size:10px;font-weight:700;text-align:left;letter-spacing:.04em;white-space:nowrap;}}'+
-          'td{{border-bottom:1px solid #eee;padding:4px 8px;vertical-align:middle;}}'+
+          'th{{background:#1a2035;color:#fff;padding:4px 7px;font-size:10px;font-weight:700;text-align:left;letter-spacing:.04em;white-space:nowrap;}}'+
+          'td{{border-bottom:1px solid #eee;padding:3px 7px;vertical-align:middle;}}'+
           'tr:nth-child(even) td{{background:#faf8f6;}}'+
-          '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:7px 24px;display:flex;justify-content:space-between;margin-top:20px;}}';
+          '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:5px 14px;display:flex;justify-content:space-between;margin-top:12px;}}';
         // ── Metric Progression ────────────────────────────────────────────────
         var hasTests=POINTS.some(function(pt){{return pt.tests!=null&&Number(pt.tests)>0;}});
         var hasCov=POINTS.some(function(pt){{return pt.cov!=null;}});
@@ -25283,12 +25283,14 @@ struct RelocateScanTemplate {
       window.exportHistoryCsv = function(){slocCsv('scan-history.csv',_hh,getHistoryRows());};
       window.exportHistoryXls = function(){
         var histRows=getHistoryRows();
-        var histSheet={name:'Scan History',hdrs:_hh,rows:histRows,colWidths:[18,14,22,14,12,12,12,12,12,11,10,10,10,8,13,10,12]};
+        function toN(v){var n=Number(v);return isNaN(n)||v===''?0:n;}
+        var xlsxRows=histRows.map(function(r){return[r[0],r[1],r[2],toN(r[3]),toN(r[4]),toN(r[5]),toN(r[6]),toN(r[7]),toN(r[8]),toN(r[9]),toN(r[10]),toN(r[11]),toN(r[12]),toN(r[13]),{v:r[14],s:6},r[15],r[16]];});
+        var histSheet={name:'Scan History',hdrs:_hh,rows:xlsxRows,colWidths:[18,14,22,14,12,12,12,12,12,11,10,10,10,8,13,10,12]};
         var jsonRow=document.querySelector('#history-tbody .history-row[data-has-json="true"]');
         if(!jsonRow){slocXlsxMulti('scan-history.xlsx',[histSheet]);return;}
         var runId=jsonRow.getAttribute('data-run')||'';
         var proj=(jsonRow.getAttribute('data-project')||'Latest').substring(0,18);
-        function sn(suffix){var p=proj.substring(0,Math.max(1,29-suffix.length));return p+': '+suffix;}
+        function sn(suffix){var p=proj.substring(0,Math.max(1,28-suffix.length));return p+' - '+suffix;}
         fetch('/runs/json/'+runId)
           .then(function(r){if(!r.ok)throw new Error('no json');return r.json();})
           .then(function(run){
@@ -31850,5 +31852,141 @@ mod tests_private {
         limiter.record_auth_failure(ip);
         limiter.record_auth_failure(ip);
         assert!(limiter.is_auth_locked_out(ip));
+    }
+
+    // ── output_folder_hint ───────────────────────────────────────────────────────
+
+    #[test]
+    fn output_folder_hint_strips_json_subdir() {
+        use std::path::Path;
+        let path = Path::new("/output/scan1/json/result.json");
+        let hint = output_folder_hint(path);
+        assert!(hint.ends_with("scan1"), "expected scan root, got: {hint}");
+    }
+
+    #[test]
+    fn output_folder_hint_strips_html_subdir() {
+        use std::path::Path;
+        let path = Path::new("/output/scan1/html/report.html");
+        let hint = output_folder_hint(path);
+        assert!(hint.ends_with("scan1"), "expected scan root, got: {hint}");
+    }
+
+    #[test]
+    fn output_folder_hint_strips_pdf_subdir() {
+        use std::path::Path;
+        let path = Path::new("/output/scan1/pdf/report.pdf");
+        let hint = output_folder_hint(path);
+        assert!(hint.ends_with("scan1"), "expected scan root, got: {hint}");
+    }
+
+    #[test]
+    fn output_folder_hint_strips_excel_subdir() {
+        use std::path::Path;
+        let path = Path::new("/output/scan1/excel/report.xlsx");
+        let hint = output_folder_hint(path);
+        assert!(hint.ends_with("scan1"), "expected scan root, got: {hint}");
+    }
+
+    #[test]
+    fn output_folder_hint_flat_layout_returns_direct_parent() {
+        use std::path::Path;
+        let path = Path::new("/output/scan1/result.json");
+        let hint = output_folder_hint(path);
+        assert!(
+            hint.ends_with("scan1"),
+            "expected direct parent, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn output_folder_hint_other_subdir_name_not_stripped() {
+        use std::path::Path;
+        // "data" is not one of the named artifact subdirs — parent is kept as-is
+        let path = Path::new("/output/scan1/data/result.json");
+        let hint = output_folder_hint(path);
+        assert!(
+            hint.ends_with("data"),
+            "non-artifact subdir must not be stripped, got: {hint}"
+        );
+    }
+
+    // ── find_file_by_ext ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn find_file_by_ext_finds_matching_file() {
+        let dir = std::env::temp_dir().join("sloc_web_fbe_test");
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("report.pdf");
+        let _ = fs::write(&f, b"dummy");
+        let result = find_file_by_ext(&dir, "pdf");
+        assert!(result.is_some(), "expected to find report.pdf");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_file_by_ext_returns_none_for_missing_ext() {
+        let dir = std::env::temp_dir().join("sloc_web_fbe_test2");
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("report.json");
+        let _ = fs::write(&f, b"{}");
+        let result = find_file_by_ext(&dir, "pdf");
+        assert!(result.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_file_by_ext_returns_none_for_nonexistent_dir() {
+        let dir = std::path::Path::new("/nonexistent/dir/that/does/not/exist");
+        assert!(find_file_by_ext(dir, "json").is_none());
+    }
+
+    // ── collect_result_json_candidates ───────────────────────────────────────────
+
+    #[test]
+    fn collect_result_json_candidates_flat_root() {
+        let root = std::env::temp_dir().join("sloc_web_crjc_flat");
+        let _ = fs::create_dir_all(&root);
+        let _ = fs::write(root.join("result.json"), b"{}");
+        let candidates = collect_result_json_candidates(&root);
+        assert!(!candidates.is_empty(), "should find result.json at root");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_result_json_candidates_legacy_subdir() {
+        let root = std::env::temp_dir().join("sloc_web_crjc_legacy");
+        let sub = root.join("scanA");
+        let _ = fs::create_dir_all(&sub);
+        let _ = fs::write(sub.join("result.json"), b"{}");
+        let candidates = collect_result_json_candidates(&root);
+        assert!(
+            !candidates.is_empty(),
+            "should find result.json in legacy subdir"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_result_json_candidates_structured_json_subdir() {
+        let root = std::env::temp_dir().join("sloc_web_crjc_struct");
+        let json_sub = root.join("scanB").join("json");
+        let _ = fs::create_dir_all(&json_sub);
+        let _ = fs::write(json_sub.join("result.json"), b"{}");
+        let candidates = collect_result_json_candidates(&root);
+        assert!(
+            !candidates.is_empty(),
+            "should find result.json inside <subdir>/json/"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_result_json_candidates_empty_dir() {
+        let root = std::env::temp_dir().join("sloc_web_crjc_empty");
+        let _ = fs::create_dir_all(&root);
+        let candidates = collect_result_json_candidates(&root);
+        assert!(candidates.is_empty());
+        let _ = fs::remove_dir_all(&root);
     }
 }
