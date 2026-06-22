@@ -673,6 +673,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/metrics/latest", get(api_metrics_latest_handler))
         .route("/api/metrics/{run_id}", get(api_metrics_run_handler))
         .route("/api/metrics/history", get(api_metrics_history_handler))
+        .route("/api/metrics/churn", get(api_metrics_churn_handler))
         .route(
             "/api/metrics/submodules",
             get(api_metrics_submodules_handler),
@@ -4207,6 +4208,15 @@ fn sum_unmodified_code_lines(cmp: &sloc_core::ScanComparison) -> i64 {
     cmp.file_deltas
         .iter()
         .filter(|f| f.status == FileChangeStatus::Unchanged)
+        .map(|f| f.current_code)
+        .sum()
+}
+
+/// Sum the code lines residing in files that were modified between the two scans.
+fn sum_modified_code_lines(cmp: &sloc_core::ScanComparison) -> i64 {
+    cmp.file_deltas
+        .iter()
+        .filter(|f| f.status == FileChangeStatus::Modified)
         .map(|f| f.current_code)
         .sum()
 }
@@ -8271,6 +8281,83 @@ async fn api_metrics_history_handler(
     Json(entries).into_response()
 }
 
+/// One scan's code churn versus the previous scan of the same project.
+#[derive(Serialize)]
+struct ChurnEntry {
+    run_id: String,
+    added: i64,
+    removed: i64,
+    modified: i64,
+    unmodified: i64,
+}
+
+// GET /api/metrics/churn?root=<path>&limit=<n>
+// Returns per-scan SLOC churn (added/removed/modified/unmodified code lines) computed by
+// comparing each scan to the previous scan of the same project. Loads per-file JSON
+// artifacts, so it is intended for export-time use rather than every page load.
+async fn api_metrics_churn_handler(
+    State(state): State<AppState>,
+    Query(query): Query<MetricsHistoryQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(200).min(500);
+    let candidate_entries: Vec<sloc_core::history::RegistryEntry> = {
+        let reg = state.registry.lock().await;
+        reg.entries
+            .iter()
+            .filter(|e| {
+                query.root.as_ref().is_none_or(|root| {
+                    let resolved = resolve_input_path(root);
+                    let root_str = resolved.to_string_lossy().replace('\\', "/");
+                    e.input_roots.iter().any(|r| r == &root_str)
+                })
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    };
+    let mut by_project: std::collections::HashMap<String, Vec<sloc_core::history::RegistryEntry>> =
+        std::collections::HashMap::new();
+    for e in candidate_entries {
+        by_project
+            .entry(e.project_label.clone())
+            .or_default()
+            .push(e);
+    }
+    let mut out: Vec<ChurnEntry> = Vec::new();
+    for (_proj, mut entries) in by_project {
+        entries.sort_by_key(|e| e.timestamp_utc);
+        let mut prev_run: Option<sloc_core::AnalysisRun> = None;
+        for e in &entries {
+            let curr = e
+                .json_path
+                .as_ref()
+                .and_then(|path| sloc_core::read_json(path).ok());
+            if let (Some(prev), Some(cur)) = (prev_run.as_ref(), curr.as_ref()) {
+                let cmp = sloc_core::compute_delta(prev, cur);
+                out.push(ChurnEntry {
+                    run_id: e.run_id.clone(),
+                    added: sum_added_code_lines(&cmp),
+                    removed: sum_removed_code_lines(&cmp),
+                    modified: sum_modified_code_lines(&cmp),
+                    unmodified: sum_unmodified_code_lines(&cmp),
+                });
+            } else {
+                out.push(ChurnEntry {
+                    run_id: e.run_id.clone(),
+                    added: 0,
+                    removed: 0,
+                    modified: 0,
+                    unmodified: 0,
+                });
+            }
+            if curr.is_some() {
+                prev_run = curr;
+            }
+        }
+    }
+    Json(out).into_response()
+}
+
 // GET /api/metrics/submodules?root=<path>
 // Returns the union of distinct submodule names found across all saved scan JSON artifacts
 // for the given project root (or all roots if omitted).
@@ -10184,12 +10271,12 @@ fn multi_compare_page(
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
         c1+='<text x="'+cx+'" y="18" text-anchor="middle" font-family="'+FONT+'" font-size="13" font-weight="700" fill="'+textCol+'">'+esc(m.l)+'</text>';
-        c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" stroke="'+barBorder+'" stroke-width="1" rx="3" style="cursor:pointer;"/>';
+        c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="5" style="cursor:pointer;"/>';
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.b)+'</text>';
-        c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" stroke="'+barBorder+'" stroke-width="1" rx="3" style="cursor:pointer;"/>';
+        c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="5" style="cursor:pointer;"/>';
         c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="500" fill="'+mutedCol+'">Scan 1</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="600" fill="'+mutedCol+'">Latest</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">Scan 1</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">Latest</text>';
       }});
       c1+='</svg>';
       // Chart 2: Delta by Metric (net delta first scan to last)
@@ -10294,7 +10381,10 @@ fn multi_compare_page(
         function open(srcId,title){{
           var src=document.getElementById(srcId);if(!src)return;
           ttl.textContent=title||'';
-          body.innerHTML=src.innerHTML;
+          var card=src.closest('.ic-card');
+          var legHtml='';
+          if(card){{var leg=card.querySelector('.ic-leg');if(leg)legHtml='<div class="ic-leg" style="margin-bottom:14px;">'+leg.innerHTML+'</div>';}}
+          body.innerHTML=legHtml+src.innerHTML;
           var svg=body.querySelector('svg');
           if(svg){{svg.removeAttribute('width');svg.removeAttribute('height');svg.style.width='100%';svg.style.height='auto';svg.style.maxWidth='none';}}
           addTT(body);
@@ -10919,7 +11009,7 @@ async fn trend_report_handler(
       <div class="trend-header">
         <div class="trend-title-block">
           <h1>Trend Reports</h1>
-          <p class="muted">Plot any SLOC metric over time. Each data point is a saved scan. Select a project root, choose a metric and X-axis mode, then explore how your codebase has changed across commits, tags, or time.</p>
+          <p class="muted">Plot any SLOC metric over time. Each data point is a saved scan. Select a project root,<br>choose a metric and X-axis mode, then explore how your codebase has changed across commits, tags, or time.</p>
           <span class="chart-hint-inline">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
             Click a dot or row to view its full report &nbsp;·&nbsp; <span class="dot" style="background:#C45C10;"></span>&thinsp;regular scan &nbsp;<span class="dot" style="background:#4472C4;"></span>&thinsp;tagged / release scan
@@ -11480,14 +11570,27 @@ async fn trend_report_handler(
 
     function exportXLSX(){{
       if(!allData||!allData.length){{alert('No data to export yet.');return;}}
+      var xbtn=document.getElementById('export-xlsx-btn');
+      var xorig=xbtn?xbtn.innerHTML:'';
+      if(xbtn){{xbtn.disabled=true;xbtn.textContent='Preparing\u2026';}}
+      var root=rootSel.value;
+      var url='/api/metrics/churn?limit=500'+(root?'&root='+encodeURIComponent(root):'');
+      fetch(url).then(function(r){{return r.ok?r.json():[];}}).catch(function(){{return [];}}).then(function(churn){{
+        var cm={{}};(churn||[]).forEach(function(c){{cm[c.run_id]=c;}});
+        buildAndDownloadXLSX(cm);
+      }}).finally(function(){{if(xbtn){{xbtn.disabled=false;xbtn.innerHTML=xorig;}}}});
+    }}
+
+    function buildAndDownloadXLSX(churnMap){{
       var sorted=allData.slice().sort(function(a,b){{return b.timestamp.localeCompare(a.timestamp);}});
       // X-axis is the git commit. Dedupe by project+commit, keeping the latest scan
       // (sorted is newest-first), so a given project/commit appears at most once.
       var seenPC={{}},dedup=[];
       sorted.forEach(function(d){{var k=(d.project_label||'')+'|'+(d.commit||'');if(!seenPC[k]){{seenPC[k]=1;dedup.push(d);}}}});
-      var s1H=['Date','Project','Commit','Branch','Tags','Code Lines','Comment Lines','Blank Lines','Physical Lines','Files Analyzed','Report URL'];
+      var s1H=['Date','Project','Commit','Branch','Tags','Code Lines','Comment Lines','Blank Lines','Physical Lines','Files Analyzed','Report URL','Added','Deleted','Modified','Unmodified'];
       var s1R=dedup.map(function(d){{
-        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',(d.commit||'').substring(0,7),d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||''];
+        var c=churnMap[d.run_id]||{{}};
+        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',(d.commit||'').substring(0,7),d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||'',+(c.added)||0,+(c.removed)||0,+(c.modified)||0,+(c.unmodified)||0];
       }});
       var pm={{}};
       dedup.forEach(function(d){{var p=d.project_label||'Unknown';if(!pm[p])pm[p]=[];pm[p].push(d);}});
@@ -11519,7 +11622,7 @@ async fn trend_report_handler(
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet '+ns+'><sheetData>';
         x+='<row r="1">';
         hdr.forEach(function(h,ci){{x+='<c r="'+col2l(ci+1)+'1" t="inlineStr" s="1"><is><t>'+xe(h)+'</t></is></c>';}});
-        if(withCtrl){{x+='<c r="M1" t="inlineStr" s="1"><is><t>Selected Metric (set on Focus Chart tab)</t></is></c>';}}
+        if(withCtrl){{x+='<c r="Q1" t="inlineStr" s="1"><is><t>Selected Metric (set on Focus Chart tab)</t></is></c>';}}
         x+='</row>';
         rows.forEach(function(row,ri){{
           var rn=ri+2;
@@ -11529,7 +11632,7 @@ async fn trend_report_handler(
             if(typeof cell==='number'){{x+='<c r="'+addr+'"><v>'+cell+'</v></c>';}}
             else{{x+='<c r="'+addr+'" t="inlineStr"><is><t>'+xe(String(cell))+'</t></is></c>';}}
           }});
-          if(withCtrl){{x+="<c r=\"M"+rn+"\"><f>CHOOSE(MATCH('Focus Chart'!$B$1,{{\"Code Lines\",\"Comment Lines\",\"Blank Lines\",\"Physical Lines\"}},0),F"+rn+",G"+rn+",H"+rn+",I"+rn+")</f><v>"+Number(row[5])+"</v></c>";}}
+          if(withCtrl){{x+="<c r=\"Q"+rn+"\"><f>CHOOSE(MATCH('Focus Chart'!$B$1,{{\"Code Lines\",\"Comment Lines\",\"Blank Lines\",\"Physical Lines\",\"Added\",\"Deleted\",\"Modified\",\"Unmodified\"}},0),F"+rn+",G"+rn+",H"+rn+",I"+rn+",L"+rn+",M"+rn+",N"+rn+",O"+rn+")</f><v>"+Number(row[5])+"</v></c>";}}
           x+='</row>';
         }});
         x+='</sheetData>';
@@ -11608,7 +11711,7 @@ async fn trend_report_handler(
         x+='<c:cat><c:strRef><c:f>'+sn+'!$'+catCol+'$2:$'+catCol+'$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
         rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[catIdx]))+'</c:v></c:pt>';}});
         x+='</c:strCache></c:strRef></c:cat>';
-        x+='<c:val><c:numRef><c:f>'+sn+'!$M$2:$M$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
+        x+='<c:val><c:numRef><c:f>'+sn+'!$Q$2:$Q$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
         rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[5])+'</c:v></c:pt>';}});
         x+='</c:numCache></c:numRef></c:val><c:smooth val="0"/></c:ser>';
         x+='<c:axId val="5"/><c:axId val="6"/></c:lineChart>';
@@ -11627,7 +11730,7 @@ async fn trend_report_handler(
         x+='<c r="B1" t="inlineStr"><is><t>Code Lines</t></is></c>';
         x+='<c r="D1" t="inlineStr"><is><t>&#8592; Pick a metric from the dropdown to update the chart below</t></is></c>';
         x+='</row></sheetData>';
-        x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="B1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines"</formula1></dataValidation></dataValidations>';
+        x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="B1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines,Added,Deleted,Modified,Unmodified"</formula1></dataValidation></dataValidations>';
         if(drawRid){{x+='<drawing r:id="'+drawRid+'"/>';}}
         return x+'</worksheet>';
       }}
@@ -11818,14 +11921,21 @@ async fn trend_report_handler(
       if(btn){{btn.disabled=true;btn.textContent='Generating PDF\u2026';}}
       var css='<style>'
         +'*{{box-sizing:border-box;}}'
-        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;margin:0;padding:30px 34px;background:#fff;}}'
+        +'html,body{{margin:0;padding:0;}}'
+        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
+        +'.rep-masthead{{background:#191c26;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:15px 34px;}}'
+        +'.rep-mast-left{{display:flex;align-items:baseline;gap:14px;}}'
+        +'.rep-mast-brand{{font-size:19px;font-weight:900;letter-spacing:-.01em;}}'
+        +'.rep-mast-sub{{font-size:12.5px;color:rgba(255,255,255,0.65);font-weight:600;}}'
+        +'.rep-mast-ts{{font-size:11px;color:rgba(255,255,255,0.65);font-weight:600;}}'
+        +'.rep-body{{padding:22px 34px 0;}}'
         +'.rep-head{{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #C45C10;padding-bottom:14px;margin-bottom:18px;}}'
         +'.rep-title{{font-size:23px;font-weight:900;margin:0;color:#241813;}}'
         +'.rep-sub{{font-size:13px;color:#7b675b;margin:6px 0 0;}}'
         +'.rep-brand{{font-size:14px;font-weight:800;color:#C45C10;text-align:right;white-space:nowrap;}}'
         +'.rep-brand small{{display:block;font-weight:600;color:#7b675b;font-size:11px;margin-top:2px;}}'
         +'.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 22px;}}'
-        +'.stat-chip{{border:1px solid #e6d0bf;border-radius:12px;padding:12px 14px;position:relative;}}'
+        +'.stat-chip{{border:1px solid #e6d0bf;border-radius:12px;padding:12px 14px;position:relative;background:#fcf8f3;}}'
         +'.stat-chip-tip{{display:none!important;}}'
         +'.stat-chip-val{{font-size:20px;font-weight:900;color:#C45C10;}}'
         +'.stat-chip-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;margin-top:4px;}}'
@@ -11833,22 +11943,24 @@ async fn trend_report_handler(
         +'.stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}'
         +'.rep-chart{{text-align:center;margin:0 0 22px;}}'
         +'.rep-chart svg{{max-width:100%;height:auto;}}'
-        +'.chart-section-header{{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#C45C10;margin:18px 0 10px;}}'
+        +'.chart-section-header{{background:#191c26;color:#fff;padding:7px 13px;border-radius:4px;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 10px;}}'
         +'.filter-row{{display:none!important;}}'
         +'table{{border-collapse:collapse;width:100%;font-size:11px;}}'
         +'th,td{{border:1px solid #e6d0bf;padding:5px 8px;text-align:left;}}'
-        +'th{{background:#f5efe8;font-weight:800;}}'
+        +'th{{background:#f0e9e0;font-weight:800;}}'
         +'.sort-icon,.col-resize-handle{{display:none!important;}}'
         +'.pagination,.table-pager,.sh-pager{{display:none!important;}}'
-        +'.rep-foot{{margin-top:24px;border-top:1px solid #e6d0bf;padding-top:12px;font-size:11px;color:#7b675b;text-align:center;}}'
-        +'@media print{{body{{padding:0 12px;}}}}'
+        +'.rep-foot{{background:#191c26;color:rgba(255,255,255,0.72);margin-top:26px;padding:13px 34px;font-size:11px;font-weight:600;text-align:center;}}'
         +'</style>';
       var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Trend Report</title>'+css+'</head><body>'
+        +'<div class="rep-masthead"><div class="rep-mast-left"><span class="rep-mast-brand">oxide-sloc</span><span class="rep-mast-sub">Code Metrics Report \u00b7 Trend</span></div><div class="rep-mast-ts">Generated '+tp.date+'</div></div>'
+        +'<div class="rep-body">'
         +'<div class="rep-head"><div><h1 class="rep-title">'+tp.title+'</h1><p class="rep-sub">'+tp.sub+'</p></div>'
         +'<div class="rep-brand">OxideSLOC<small>Trend Report</small></div></div>'
         +'<div class="summary-strip">'+statsHtml+'</div>'
         +'<div class="rep-chart">'+svgStr+'</div>'
         +tableHtml
+        +'</div>'
         +'<div class="rep-foot">\u00a9 2026 OxideSLOC \u00b7 oxide-sloc v{version} \u00b7 local code metrics workbench \u00b7 AGPL-3.0-or-later \u00b7 github.com/oxide-sloc/oxide-sloc \u00b7 Generated '+tp.date+'</div>'
         +'</body></html>';
       fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-trend-report.pdf'}})}})
@@ -12904,10 +13016,10 @@ async fn test_metrics_handler(
       </div>
     </div>
     <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
-      <div class="stat-chip"><div class="stat-chip-val" id="chip-total">{total_tests}</div><div class="stat-chip-label">Test Functions</div><div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div></div>
-      <div class="stat-chip"><div class="stat-chip-val" id="chip-assertions">{total_assertions}</div><div class="stat-chip-label">Assertions</div><div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-total">{total_tests}</div><div class="stat-chip-label">Test Functions</div><div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div><div class="stat-chip-exact" id="chip-total-exact"></div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-assertions">{total_assertions}</div><div class="stat-chip-label">Assertions</div><div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div><div class="stat-chip-exact" id="chip-assertions-exact"></div></div>
       <div class="stat-chip"><div class="stat-chip-val" id="chip-suites">{total_suites}</div><div class="stat-chip-label">Test Suites</div><div class="stat-chip-tip">Test suite / fixture / group declarations (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], etc.)</div></div>
-      <div class="stat-chip"><div class="stat-chip-val" id="chip-test-files">{test_files_count} / {total_files_analyzed}</div><div class="stat-chip-label">Test Files</div><div class="stat-chip-tip">Files containing at least one test definition out of total analyzed files</div></div>
+      <div class="stat-chip"><div class="stat-chip-val" id="chip-test-files">{test_files_count} / {total_files_analyzed}</div><div class="stat-chip-label">Test Files</div><div class="stat-chip-tip">Files containing at least one test definition out of total analyzed files</div><div class="stat-chip-exact" id="chip-test-files-exact"></div></div>
     </div>
     <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
       <div class="stat-chip"><div class="stat-chip-val" id="chip-density">{workspace_density_str}</div><div class="stat-chip-label">Tests per 1K SLOC</div><div class="stat-chip-tip">Workspace-wide test density: test functions ÷ code lines × 1000</div></div>
@@ -12920,18 +13032,9 @@ async fn test_metrics_handler(
       <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;display:flex;align-items:center;justify-content:space-between;">
         <span>Visualizations</span>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="export-btn" id="tm-export-xlsx-btn" title="Download test metrics as Excel workbook (.xlsx)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export Excel
-          </button>
-          <button type="button" class="export-btn" id="tm-export-png-btn" title="Save charts as PNG image">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-            Export PNG
-          </button>
-          <button type="button" class="export-btn" id="tm-export-pdf-btn" title="Export printable PDF report">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>
-            Export PDF
-          </button>
+          <button type="button" class="export-btn" id="tm-export-xlsx-btn" title="Download test metrics as Excel workbook (.xlsx)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel</button>
+          <button type="button" class="export-btn" id="tm-export-png-btn" title="Save charts as PNG image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Export PNG</button>
+          <button type="button" class="export-btn" id="tm-export-pdf-btn" title="Export printable PDF report"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg> Export PDF</button>
         </div>
       </div>
 
@@ -13675,9 +13778,12 @@ async fn test_metrics_handler(
       var t = d.totals;
       var el;
       if ((el = document.getElementById('chip-total'))) el.textContent = fmt(t.test_count);
+      if ((el = document.getElementById('chip-total-exact'))) el.textContent = fmtFull(t.test_count);
       if ((el = document.getElementById('chip-assertions'))) el.textContent = fmt(t.assertions);
+      if ((el = document.getElementById('chip-assertions-exact'))) el.textContent = fmtFull(t.assertions);
       if ((el = document.getElementById('chip-suites'))) el.textContent = fmt(t.suites);
       if ((el = document.getElementById('chip-test-files'))) el.textContent = fmt(t.test_files) + ' / ' + fmt(t.total_files);
+      if ((el = document.getElementById('chip-test-files-exact'))) el.textContent = fmtFull(t.test_files) + ' / ' + fmtFull(t.total_files);
       if ((el = document.getElementById('chip-density'))) el.textContent = t.density_str;
       if ((el = document.getElementById('chip-most'))) el.textContent = t.most_tested;
       if ((el = document.getElementById('chip-langs'))) el.textContent = fmt(t.langs_with_tests);
@@ -13989,8 +14095,10 @@ async fn test_metrics_handler(
       var proj = sel && sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : 'All projects';
       if (!proj || proj === '__all__') proj = 'All projects';
       var now = new Date(); function p2(n) {{ return (n<10?'0':'')+n; }}
-      var dstr = now.getFullYear()+'-'+p2(now.getMonth()+1)+'-'+p2(now.getDate())+' '+p2(now.getHours())+':'+p2(now.getMinutes());
-      return {{ proj: proj, date: dstr }};
+      var dstr = now.getFullYear()+'-'+p2(now.getMonth()+1)+'-'+p2(now.getDate());
+      var tstr = p2(now.getHours())+':'+p2(now.getMinutes());
+      var slug = dstr+'_'+p2(now.getHours())+p2(now.getMinutes());
+      return {{ proj: proj, date: dstr, time: tstr, slug: slug, full: dstr+' '+tstr }};
     }}
 
     function exportTmXLSX() {{
@@ -14004,10 +14112,22 @@ async fn test_metrics_handler(
         if(!crc32.t){{crc32.t=new Uint32Array(256);for(var i=0;i<256;i++){{var c=i;for(var j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);crc32.t[i]=c;}}}}
         var c=0xFFFFFFFF;for(var i=0;i<d.length;i++)c=crc32.t[(c^d[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0;
       }}
-      function buildSheet(hdr, rows) {{
-        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>';
-        x+='<row r="1">';hdr.forEach(function(h,ci){{x+='<c r="'+col2l(ci+1)+'1" t="inlineStr" s="1"><is><t>'+xe(h)+'</t></is></c>';}});x+='</row>';
-        rows.forEach(function(row,ri){{var rn=ri+2;x+='<row r="'+rn+'">';row.forEach(function(cell,ci){{var addr=col2l(ci+1)+rn;if(typeof cell==='number'){{x+='<c r="'+addr+'"><v>'+cell+'</v></c>';}}else{{x+='<c r="'+addr+'" t="inlineStr"><is><t>'+xe(String(cell))+'</t></is></c>';}}}}); x+='</row>';}});
+      // All cells stored as inlineStr so Excel left-aligns columns consistently.
+      function cs(addr, val, bold) {{
+        return '<c r="'+addr+'" t="inlineStr"'+(bold?' s="1"':'')+"><is><t>"+xe(String(val))+'</t></is></c>';
+      }}
+      function buildSummarySheet(rows) {{
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="28" customWidth="1"/><col min="2" max="2" width="22" customWidth="1"/></cols><sheetData>';
+        x+='<row r="1">'+cs('A1','Metric',true)+cs('B1','Value',true)+'</row>';
+        rows.forEach(function(row,ri){{var rn=ri+2;x+='<row r="'+rn+'">'+cs('A'+rn,row[0],row[2])+cs('B'+rn,row[1],row[2])+'</row>';}});
+        return x+'</sheetData></worksheet>';
+      }}
+      function buildLangSheet(hdr, rows, totRow) {{
+        var cw='<cols><col min="1" max="1" width="22" customWidth="1"/><col min="2" max="7" width="15" customWidth="1"/></cols>';
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+cw+'<sheetData>';
+        x+='<row r="1">';hdr.forEach(function(h,ci){{x+=cs(col2l(ci+1)+'1',h,true);}});x+='</row>';
+        rows.forEach(function(row,ri){{var rn=ri+2;x+='<row r="'+rn+'">';row.forEach(function(cell,ci){{x+=cs(col2l(ci+1)+rn,cell,false);}});x+='</row>';}});
+        if(totRow){{var rn=rows.length+2;x+='<row r="'+rn+'">';totRow.forEach(function(cell,ci){{x+=cs(col2l(ci+1)+rn,cell,true);}});x+='</row>';}}
         return x+'</sheetData></worksheet>';
       }}
       var totTests=D.reduce(function(a,d){{return a+d.tests;}},0);
@@ -14015,12 +14135,21 @@ async fn test_metrics_handler(
       var totSuites=D.reduce(function(a,d){{return a+(d.suites||0);}},0);
       var totCode=D.reduce(function(a,d){{return a+d.code;}},0);
       var totFiles=D.reduce(function(a,d){{return a+d.files;}},0);
+      var avgDensity=totCode>0?(totTests/totCode*1000).toFixed(2):'0.00';
+      var s2R=[
+        ['Project / Scope', t.proj, false],
+        ['Export Date', t.full, false],
+        ['Test Functions', Number(totTests).toLocaleString(), false],
+        ['Assertions', Number(totAssert).toLocaleString(), false],
+        ['Test Suites', Number(totSuites).toLocaleString(), false],
+        ['Languages with Tests', String(D.length), false],
+        ['Total Code Lines', Number(totCode).toLocaleString(), false],
+        ['Average Density (per 1K)', String(avgDensity), false],
+      ];
       var s1H=['Language','Test Functions','Assertions','Test Suites','Code Lines','Files','Density (per 1K)'];
-      var s1R=D.map(function(d){{return[d.lang,d.tests,d.assertions||0,d.suites||0,d.code,d.files,d.density];}});
-      s1R.push(['TOTAL',totTests,totAssert,totSuites,totCode,totFiles,totCode>0?Math.round(totTests/totCode*10000)/10:0]);
-      var s2H=['Metric','Value'];
-      var s2R=[['Project / Scope',t.proj],['Test Functions',totTests],['Assertions',totAssert],['Test Suites',totSuites],['Languages with Tests',D.length],['Total Code Lines',totCode],['Generated',t.date]];
-      var sheets=[{{name:'Summary',headers:s2H,rows:s2R}},{{name:'Language Breakdown',headers:s1H,rows:s1R}}];
+      var s1R=D.map(function(d){{return[d.lang,Number(d.tests).toLocaleString(),Number(d.assertions||0).toLocaleString(),Number(d.suites||0).toLocaleString(),Number(d.code).toLocaleString(),Number(d.files).toLocaleString(),Number(d.density).toFixed(2)];}});
+      var totRow=['TOTAL',Number(totTests).toLocaleString(),Number(totAssert).toLocaleString(),Number(totSuites).toLocaleString(),Number(totCode).toLocaleString(),Number(totFiles).toLocaleString(),String(avgDensity)];
+      var sheets=[{{name:'Summary',xml:buildSummarySheet(s2R)}},{{name:'Language Breakdown',xml:buildLangSheet(s1H,s1R,totRow)}}];
       var styl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
       var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
       sheets.forEach(function(s,i){{ct+='<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}});
@@ -14032,21 +14161,15 @@ async fn test_metrics_handler(
       var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>';
       sheets.forEach(function(s,i){{wbx+='<sheet name="'+xe(s.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}});
       wbx+='</sheets></workbook>';
-      var files=[
-        {{name:'[Content_Types].xml',data:s2b(ct)}},
-        {{name:'_rels/.rels',data:s2b(dotrels)}},
-        {{name:'xl/workbook.xml',data:s2b(wbx)}},
-        {{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},
-        {{name:'xl/styles.xml',data:s2b(styl)}}
-      ];
-      sheets.forEach(function(s,i){{files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(buildSheet(s.headers,s.rows))}});}});
+      var files=[{{name:'[Content_Types].xml',data:s2b(ct)}},{{name:'_rels/.rels',data:s2b(dotrels)}},{{name:'xl/workbook.xml',data:s2b(wbx)}},{{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},{{name:'xl/styles.xml',data:s2b(styl)}}];
+      sheets.forEach(function(s,i){{files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(s.xml)}});}});
       var parts=[],offsets=[],total=0;
       files.forEach(function(f){{offsets.push(total);var nb=s2b(f.name),crc=crc32(f.data);var h=new DataView(new ArrayBuffer(30+nb.length));h.setUint32(0,0x04034B50,true);h.setUint16(4,20,true);h.setUint16(6,0,true);h.setUint16(8,0,true);h.setUint16(10,0,true);h.setUint16(12,0,true);h.setUint32(14,crc,true);h.setUint32(18,f.data.length,true);h.setUint32(22,f.data.length,true);h.setUint16(26,nb.length,true);h.setUint16(28,0,true);for(var i=0;i<nb.length;i++)h.setUint8(30+i,nb[i]);parts.push(new Uint8Array(h.buffer));parts.push(f.data);total+=30+nb.length+f.data.length;}});
-      var cdStart=total;
-      files.forEach(function(f,fi){{var nb=s2b(f.name),crc=crc32(f.data);var cd=new DataView(new ArrayBuffer(46+nb.length));cd.setUint32(0,0x02014B50,true);cd.setUint16(4,20,true);cd.setUint16(6,20,true);cd.setUint16(8,0,true);cd.setUint16(10,0,true);cd.setUint16(12,0,true);cd.setUint16(14,0,true);cd.setUint32(16,crc,true);cd.setUint32(20,f.data.length,true);cd.setUint32(24,f.data.length,true);cd.setUint16(28,nb.length,true);cd.setUint16(30,0,true);cd.setUint16(32,0,true);cd.setUint16(34,0,true);cd.setUint16(36,0,true);cd.setUint32(38,0,true);cd.setUint32(42,offsets[fi],true);for(var i=0;i<nb.length;i++)cd.setUint8(46+i,nb[i]);parts.push(new Uint8Array(cd.buffer));total+=46+nb.length;}});
+      var cdStart=total;files.forEach(function(f,fi){{var nb=s2b(f.name),crc=crc32(f.data);var cd=new DataView(new ArrayBuffer(46+nb.length));cd.setUint32(0,0x02014B50,true);cd.setUint16(4,20,true);cd.setUint16(6,20,true);cd.setUint16(8,0,true);cd.setUint16(10,0,true);cd.setUint16(12,0,true);cd.setUint16(14,0,true);cd.setUint32(16,crc,true);cd.setUint32(20,f.data.length,true);cd.setUint32(24,f.data.length,true);cd.setUint16(28,nb.length,true);cd.setUint16(30,0,true);cd.setUint16(32,0,true);cd.setUint16(34,0,true);cd.setUint16(36,0,true);cd.setUint32(38,0,true);cd.setUint32(42,offsets[fi],true);for(var i=0;i<nb.length;i++)cd.setUint8(46+i,nb[i]);parts.push(new Uint8Array(cd.buffer));total+=46+nb.length;}});
       var cdSz=total-cdStart;var eocd=new DataView(new ArrayBuffer(22));eocd.setUint32(0,0x06054B50,true);eocd.setUint16(4,0,true);eocd.setUint16(6,0,true);eocd.setUint16(8,files.length,true);eocd.setUint16(10,files.length,true);eocd.setUint32(12,cdSz,true);eocd.setUint32(16,cdStart,true);eocd.setUint16(20,0,true);parts.push(new Uint8Array(eocd.buffer));
       var sz=parts.reduce(function(a,p){{return a+p.length;}},0);var out=new Uint8Array(sz);var off=0;parts.forEach(function(p){{out.set(p,off);off+=p.length;}});
-      var a=document.createElement('a');a.download='oxide-sloc-test-metrics.xlsx';
+      var proj2=t.proj.replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').substring(0,30)||'all';
+      var a=document.createElement('a');a.download='oxide-sloc-test-metrics-'+proj2+'-'+t.slug+'.xlsx';
       a.href=URL.createObjectURL(new Blob([out.buffer],{{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}}));
       a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},1000);
     }}
@@ -14056,32 +14179,76 @@ async fn test_metrics_handler(
       var canvases=ids.map(function(id){{return document.getElementById(id);}}).filter(function(c){{return c&&c.width>0&&c.style.display!=='none';}});
       if(!canvases.length){{alert('No charts rendered yet. Run a scan first.');return;}}
       var t=tmExportMeta();
-      var cols=2,CW=640,CH=320,headerH=90,footerH=34,gap=10;
-      var rows=Math.ceil(canvases.length/cols);
-      var W=cols*(CW+gap),H=headerH+rows*(CH+gap)+footerH;
-      var out=document.createElement('canvas');out.width=W;out.height=H;
+      var COLW=760, GAP=16, HEADER_H=102, FOOTER_H=40, ROW_PAD=12;
+      var trendCanvas=document.getElementById('canvas-trend');
+      var hasTrend=trendCanvas&&trendCanvas.width>0&&trendCanvas.style.display!=='none';
+      var gridCanvases=canvases.filter(function(c){{return c.id!=='canvas-trend';}});
+      var TOTAL_W=COLW*2+GAP;
+      var TREND_H=hasTrend?Math.round(TOTAL_W*(trendCanvas.height/Math.max(trendCanvas.width,1))):0;
+      TREND_H=Math.min(Math.max(220,TREND_H),360);
+      // For each 2-col row, compute height from tallest canvas in that row
+      var gridRows=Math.ceil(gridCanvases.length/2);
+      var rowHeights=[];
+      for(var ri=0;ri<gridRows;ri++){{
+        var rh=260;
+        for(var ci=0;ci<2;ci++){{
+          var cv=gridCanvases[ri*2+ci];
+          if(cv&&cv.width>0){{
+            var nat=Math.round(COLW*cv.height/Math.max(cv.width,1));
+            rh=Math.max(rh,Math.min(420,nat));
+          }}
+        }}
+        rowHeights.push(rh);
+      }}
+      var gridH=rowHeights.reduce(function(a,b){{return a+b+ROW_PAD;}},0);
+      var TOTAL_H=HEADER_H+(hasTrend?TREND_H+ROW_PAD:0)+gridH+FOOTER_H;
+      var out=document.createElement('canvas');out.width=TOTAL_W;out.height=TOTAL_H;
       var ctx=out.getContext('2d');
-      var cs=getComputedStyle(document.body);
-      var bg=cs.getPropertyValue('--bg').trim()||'#f5efe8';
-      var oxide=cs.getPropertyValue('--oxide').trim()||'#C45C10';
-      var muted=cs.getPropertyValue('--muted').trim()||'#7b675b';
-      ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
-      ctx.fillStyle=oxide;ctx.font='800 20px '+TM_FONT;ctx.textBaseline='alphabetic';ctx.textAlign='left';
-      ctx.fillText('Test Metrics — '+t.proj,18,36);
-      ctx.fillStyle=muted;ctx.font='600 12px '+TM_FONT;
-      ctx.fillText('oxide-sloc v{version}  ·  Generated '+t.date,18,60);
-      ctx.strokeStyle=oxide;ctx.globalAlpha=0.45;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(18,72);ctx.lineTo(W-18,72);ctx.stroke();ctx.globalAlpha=1;
-      canvases.forEach(function(c,i){{
-        var row=Math.floor(i/cols),col=i%cols;
-        var x=col*(CW+gap),y=headerH+row*(CH+gap);
-        var surf=document.createElement('canvas');surf.width=CW;surf.height=CH;
-        var sc=surf.getContext('2d');sc.fillStyle=bg;sc.fillRect(0,0,CW,CH);
-        sc.drawImage(c,0,0,CW,CH);
-        ctx.drawImage(surf,x,y);
-      }});
-      ctx.fillStyle=muted;ctx.font='600 10px '+TM_FONT;ctx.textAlign='center';
-      ctx.fillText('© 2026 OxideSLOC  ·  oxide-sloc v{version}  ·  AGPL-3.0-or-later',W/2,H-10);
-      var a=document.createElement('a');a.download='oxide-sloc-test-metrics.png';a.href=out.toDataURL('image/png');a.click();
+      var cs2=getComputedStyle(document.body);
+      var bg=cs2.getPropertyValue('--bg').trim()||'#f5efe8';
+      var oxide=cs2.getPropertyValue('--oxide').trim()||'#C45C10';
+      var muted=cs2.getPropertyValue('--muted').trim()||'#7b675b';
+      ctx.fillStyle=bg;ctx.fillRect(0,0,TOTAL_W,TOTAL_H);
+      // Header block
+      ctx.fillStyle=oxide;ctx.fillRect(0,0,TOTAL_W,HEADER_H-8);
+      ctx.fillStyle='#fff';ctx.font='800 24px '+TM_FONT;ctx.textBaseline='alphabetic';ctx.textAlign='left';
+      ctx.fillText('Test Metrics — '+t.proj,22,42);
+      ctx.fillStyle='rgba(255,255,255,0.82)';ctx.font='600 13px '+TM_FONT;
+      ctx.fillText('oxide-sloc v{version}  ·  Generated '+t.full,22,70);
+      ctx.fillStyle=bg;ctx.fillRect(0,HEADER_H-8,TOTAL_W,TOTAL_H-(HEADER_H-8));
+      var yOff=HEADER_H;
+      // Trend chart (full width)
+      if(hasTrend){{
+        var surf=document.createElement('canvas');surf.width=TOTAL_W;surf.height=TREND_H;
+        var sc=surf.getContext('2d');sc.fillStyle=bg;sc.fillRect(0,0,TOTAL_W,TREND_H);
+        sc.drawImage(trendCanvas,0,0,TOTAL_W,TREND_H);
+        ctx.drawImage(surf,0,yOff);
+        yOff+=TREND_H+ROW_PAD;
+      }}
+      // Grid charts (2-col)
+      for(var gi=0;gi<gridRows;gi++){{
+        var rh2=rowHeights[gi];
+        for(var gci=0;gci<2;gci++){{
+          var idx2=gi*2+gci;
+          if(idx2>=gridCanvases.length)continue;
+          var gcv=gridCanvases[idx2];
+          var gx=gci*(COLW+GAP);
+          var natW=gcv.width,natH=gcv.height;
+          var scale=Math.min(COLW/Math.max(natW,1),rh2/Math.max(natH,1));
+          var dw=Math.round(natW*scale),dh=Math.round(natH*scale);
+          var surf2=document.createElement('canvas');surf2.width=COLW;surf2.height=rh2;
+          var sc2=surf2.getContext('2d');sc2.fillStyle=bg;sc2.fillRect(0,0,COLW,rh2);
+          sc2.drawImage(gcv,Math.round((COLW-dw)/2),Math.round((rh2-dh)/2),dw,dh);
+          ctx.drawImage(surf2,gx,yOff);
+        }}
+        yOff+=rh2+ROW_PAD;
+      }}
+      // Footer
+      ctx.fillStyle='#43342d';ctx.fillRect(0,TOTAL_H-FOOTER_H,TOTAL_W,FOOTER_H);
+      ctx.fillStyle='rgba(255,255,255,0.72)';ctx.font='600 11px '+TM_FONT;ctx.textAlign='center';
+      ctx.fillText('© 2026 OxideSLOC  ·  oxide-sloc v{version}  ·  AGPL-3.0-or-later',TOTAL_W/2,TOTAL_H-FOOTER_H+24);
+      var proj3=t.proj.replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').substring(0,30)||'all';
+      var a=document.createElement('a');a.download='oxide-sloc-test-metrics-'+proj3+'-'+t.slug+'.png';a.href=out.toDataURL('image/png');a.click();
     }}
 
     function exportTmPDF() {{
@@ -14092,23 +14259,63 @@ async fn test_metrics_handler(
       if(btn){{btn.disabled=true;btn.textContent='Generating…';}}
       var strips=document.querySelectorAll('.summary-strip');
       var statsHtml='';strips.forEach(function(s){{statsHtml+=s.outerHTML;}});
+      var totTests=D.reduce(function(a,d){{return a+d.tests;}},0);
+      var totAssert=D.reduce(function(a,d){{return a+(d.assertions||0);}},0);
+      var totSuites=D.reduce(function(a,d){{return a+(d.suites||0);}},0);
+      var totCode=D.reduce(function(a,d){{return a+d.code;}},0);
+      var totFiles=D.reduce(function(a,d){{return a+d.files;}},0);
+      var avgDensity=totCode>0?(totTests/totCode*1000).toFixed(2):'0.00';
       var rows='';
       (D||[]).forEach(function(d){{
-        rows+='<tr><td><strong>'+d.lang+'</strong></td><td>'+Number(d.tests).toLocaleString()+'</td><td>'+(Number(d.assertions||0)).toLocaleString()+'</td><td>'+(Number(d.suites||0)).toLocaleString()+'</td><td>'+Number(d.code).toLocaleString()+'</td><td>'+Number(d.files).toLocaleString()+'</td><td>'+Number(d.density).toFixed(2)+'</td></tr>';
+        rows+='<tr><td><strong>'+d.lang+'</strong></td>'
+          +'<td class="n">'+Number(d.tests).toLocaleString()+'</td>'
+          +'<td class="n">'+Number(d.assertions||0).toLocaleString()+'</td>'
+          +'<td class="n">'+Number(d.suites||0).toLocaleString()+'</td>'
+          +'<td class="n">'+Number(d.code).toLocaleString()+'</td>'
+          +'<td class="n">'+Number(d.files).toLocaleString()+'</td>'
+          +'<td class="n">'+Number(d.density).toFixed(2)+'</td></tr>';
       }});
-      var tableHtml='<table><thead><tr><th>Language</th><th>Test Fns</th><th>Assertions</th><th>Suites</th><th>Code Lines</th><th>Files</th><th>Density/1K</th></tr></thead><tbody>'+rows+'</tbody></table>';
-      var css='<style>*{{box-sizing:border-box;}}body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;margin:0;padding:30px 34px;background:#fff;}}.rep-head{{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #C45C10;padding-bottom:14px;margin-bottom:18px;}}.rep-title{{font-size:23px;font-weight:900;margin:0;color:#241813;}}.rep-sub{{font-size:13px;color:#7b675b;margin:6px 0 0;}}.rep-brand{{font-size:14px;font-weight:800;color:#C45C10;text-align:right;white-space:nowrap;}}.rep-brand small{{display:block;font-weight:600;color:#7b675b;font-size:11px;margin-top:2px;}}.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 14px;}}.stat-chip{{border:1px solid #e6d0bf;border-radius:12px;padding:12px 14px;position:relative;}}.stat-chip-tip,.stat-chip-exact{{display:none!important;}}.stat-chip-val{{font-size:18px;font-weight:900;color:#C45C10;}}.stat-chip-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;margin-top:4px;}}.chart-section-header{{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#C45C10;margin:18px 0 10px;}}table{{border-collapse:collapse;width:100%;font-size:11px;}}th,td{{border:1px solid #e6d0bf;padding:5px 8px;text-align:left;}}th{{background:#f5efe8;font-weight:800;}}.rep-foot{{margin-top:24px;border-top:1px solid #e6d0bf;padding-top:12px;font-size:11px;color:#7b675b;text-align:center;}}</style>';
+      var totRow='<tr class="tot-row"><td><strong>TOTAL</strong></td>'
+        +'<td class="n"><strong>'+Number(totTests).toLocaleString()+'</strong></td>'
+        +'<td class="n"><strong>'+Number(totAssert).toLocaleString()+'</strong></td>'
+        +'<td class="n"><strong>'+Number(totSuites).toLocaleString()+'</strong></td>'
+        +'<td class="n"><strong>'+Number(totCode).toLocaleString()+'</strong></td>'
+        +'<td class="n"><strong>'+Number(totFiles).toLocaleString()+'</strong></td>'
+        +'<td class="n"><strong>'+avgDensity+'</strong></td></tr>';
+      var tableHtml='<table><thead><tr><th>Language</th><th class="n">Test Fns</th><th class="n">Assertions</th><th class="n">Suites</th><th class="n">Code Lines</th><th class="n">Files</th><th class="n">Density/1K</th></tr></thead><tbody>'+rows+totRow+'</tbody></table>';
+      var css='<style>*{{box-sizing:border-box;margin:0;padding:0;}}'
+        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;}}'
+        +'.rep-header{{background:#C45C10;color:#fff;padding:18px 32px 16px;display:flex;justify-content:space-between;align-items:flex-start;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
+        +'.rep-header h1{{font-size:22px;font-weight:900;margin:0;color:#fff;}}'
+        +'.rep-header .sub{{font-size:12px;margin:5px 0 0;color:rgba(255,255,255,0.85);}}'
+        +'.rep-brand{{font-size:14px;font-weight:800;color:#fff;text-align:right;}}'
+        +'.rep-brand small{{display:block;font-weight:500;font-size:11px;opacity:.85;margin-top:2px;}}'
+        +'.rep-body{{padding:20px 32px;}}'
+        +'.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 0 12px;}}'
+        +'.stat-chip{{border:1px solid #e6d0bf;border-radius:10px;padding:10px 12px;position:relative;}}'
+        +'.stat-chip-tip,.stat-chip-exact{{display:none!important;}}'
+        +'.stat-chip-val{{font-size:17px;font-weight:900;color:#C45C10;}}'
+        +'.stat-chip-label{{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;margin-top:3px;}}'
+        +'.section-hdr{{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:#C45C10;margin:16px 0 8px;border-bottom:2px solid #C45C10;padding-bottom:4px;}}'
+        +'table{{border-collapse:collapse;width:100%;font-size:11px;margin-top:4px;}}'
+        +'th,td{{border:1px solid #e6d0bf;padding:5px 8px;text-align:left;white-space:nowrap;}}'
+        +'th{{background:#f5efe8;font-weight:800;font-size:10px;}}'
+        +'.n{{text-align:right;}}'
+        +'.tot-row td{{background:#f0e6dc;border-top:2px solid #C45C10;}}'
+        +'.rep-footer{{background:#43342d;color:rgba(255,255,255,0.75);padding:10px 32px;font-size:10px;text-align:center;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
+        +'</style>';
       var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Test Metrics</title>'+css+'</head><body>'
-        +'<div class="rep-head"><div><h1 class="rep-title">Test Metrics Report</h1><p class="rep-sub">Scope: '+t.proj+'</p></div>'
-        +'<div class="rep-brand">OxideSLOC<small>Test Metrics</small></div></div>'
-        +statsHtml
-        +'<div class="chart-section-header">Language Breakdown</div>'
-        +tableHtml
-        +'<div class="rep-foot">© 2026 OxideSLOC · oxide-sloc v{version} · local code metrics workbench · AGPL-3.0-or-later · Generated '+t.date+'</div>'
+        +'<div class="rep-header"><div><h1>Test Metrics Report</h1><p class="sub">Scope: '+t.proj+'  ·  Generated: '+t.full+'</p></div>'
+        +'<div class="rep-brand">OxideSLOC<small>oxide-sloc v{version}</small></div></div>'
+        +'<div class="rep-body">'+statsHtml
+        +'<div class="section-hdr">Language Breakdown</div>'
+        +tableHtml+'</div>'
+        +'<div class="rep-footer">© 2026 OxideSLOC · oxide-sloc v{version} · local code metrics workbench · AGPL-3.0-or-later · Generated '+t.full+'</div>'
         +'</body></html>';
-      fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-test-metrics.pdf'}})}})
+      var proj4=t.proj.replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').substring(0,30)||'all';
+      fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf'}})}})
         .then(function(r){{if(!r.ok)throw new Error('server returned '+r.status);return r.blob();}})
-        .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='oxide-sloc-test-metrics.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},300);}})
+        .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},300);}})
         .catch(function(e){{alert('PDF export failed: '+e.message+'. A Chromium-based browser (Chrome/Edge/Brave) must be installed on the server for PDF rendering.');}})
         .finally(function(){{if(btn){{btn.disabled=false;btn.innerHTML=origHtml;}}}});
     }}
@@ -14632,9 +14839,9 @@ fn generate_offline_index(
         pdf_generating: false,
         scan_config_url: scan_config_rel,
         lang_chart_json,
-        scatter_chart_json: String::new(),
-        semantic_chart_json: String::new(),
-        submodule_chart_json: String::new(),
+        scatter_chart_json: build_scatter_chart_json(run),
+        semantic_chart_json: build_semantic_chart_json(run),
+        submodule_chart_json: build_submodule_chart_json(run),
         has_submodule_data: !run.submodule_summaries.is_empty(),
         has_semantic_data: run
             .totals_by_language
@@ -14700,11 +14907,32 @@ fn generate_offline_index(
     };
 
     if let Ok(html) = template.render() {
+        // Inline the brand + watermark logos as data URIs: a file:// page has no
+        // server to resolve the /images/logo/* routes, so without this the top-left
+        // logo and the repeated "Oxide" background watermark render as broken images.
+        let html = inline_offline_logos(&html);
         let index_path = run_dir.join("index.html");
         if let Err(e) = fs::write(&index_path, html) {
             eprintln!("[oxide-sloc] index.html write failed (non-fatal): {e:#}");
         }
     }
+}
+
+/// Rewrite the server-absolute logo image URLs to base64 data URIs so the static
+/// offline `index.html` displays the brand logo and background watermark when
+/// opened directly from disk (file://), where the `/images/...` routes do not exist.
+fn inline_offline_logos(html: &str) -> String {
+    use base64::Engine;
+    let text_uri = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(IMG_LOGO_TEXT)
+    );
+    let small_uri = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(IMG_LOGO_SMALL)
+    );
+    html.replace("/images/logo/logo-text.png", &text_uri)
+        .replace("/images/logo/small-logo.png", &small_uri)
 }
 
 /// Find a scan-config JSON file in `dir`, checking json/ subfolder first (new layout),
@@ -22495,6 +22723,10 @@ struct ScanSetupTemplate {
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
         function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
+        // Largest font size (<=10) at which `t` fits in a `w`-wide segment, or 0 if
+        // it cannot fit legibly even at the 6.5 floor. Lets bar labels shrink to fit
+        // instead of vanishing; the SVG scales up in Full View so small fonts stay legible.
+        function fitFs(t,w){var fs=Math.min(10,(w-4)/((String(t).length||1)*0.58));return fs>=6.5?Math.round(fs*10)/10:0;}
         var tot=D.reduce(function(a,d){return a+d.code;},0)||1;
 
         // Donut chart — height matches the stacked-bar chart so both panels align
@@ -22555,9 +22787,9 @@ struct ScanSetupTemplate {
           bs+='<g class="lang-bar-row">';
           bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'" rx="0"/>';if(cW>=fmt(d.code).length*6.5+10)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
-          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'" rx="0"/>';if(cmW>=fmt(d.comments).length*6.5+10)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
-          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'" rx="0"/>';if(blW>=fmt(d.blanks).length*6.5+10)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'" rx="0"/>';var _fc=fitFs(fmt(d.code),cW);if(_fc)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'" rx="0"/>';var _fm=fitFs(fmt(d.comments),cmW);if(_fm)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'" rx="0"/>';var _fb=fitFs(fmt(d.blanks),blW);if(_fb)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
           bs+='<text x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
@@ -22658,6 +22890,10 @@ struct ScanSetupTemplate {
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function px(n){return Math.round(n);}
         function tt(label,val){var l=String(label).replace(/&/g,'&amp;').replace(/"/g,'&quot;'),v=String(val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');return' class="rchit" data-ttl="'+l+'" data-ttv="'+v+'"';}
+        // Largest font size (<=10) at which `t` fits in a `w`-wide bar segment, or 0
+        // when it cannot fit legibly even at the 6.5 floor (labels shrink to fit
+        // rather than disappear; the SVG scales up in Full View).
+        function fitFs(t,w){var fs=Math.min(10,(w-4)/((String(t).length||1)*0.58));return fs>=6.5?Math.round(fs*10)/10:0;}
 
         // ── Composition (horizontal stacked bars, abs or 100% pct) ────────────
         function renderCompositionInEl(el,mode,shOvr){
@@ -22682,9 +22918,9 @@ struct ScanSetupTemplate {
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';var _fc=fitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';var _fm=fitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';var _fb=fitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var pct=Math.round((d.code||0)/tot2*100);
               s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+pct+'%</text>';
             });
@@ -22695,9 +22931,9 @@ struct ScanSetupTemplate {
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';var _fc=fitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';var _fm=fitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';var _fb=fitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
@@ -22761,9 +22997,9 @@ struct ScanSetupTemplate {
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
           var n=SCAT_D.length;
-          var legW=132,H=hOvr||224,PL=52,PB=36,PT=44,PR=22;
+          var legW=140,LG=64,H=hOvr||224,PL=52,PB=36,PT=44,PR=30;
           var W=Math.max(320,el.offsetWidth||480);
-          var cW=W-PL-PR-legW,cH=H-PT-PB;
+          var cW=W-PL-LG-legW,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
           var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
@@ -22807,7 +23043,7 @@ struct ScanSetupTemplate {
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75">Files Analyzed</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
           // Legend column (right side — colour-coded circle + name per language)
-          var legX=PL+cW+PR+14;
+          var legX=PL+cW+LG;
           var legItemH=Math.min(22,Math.max(14,Math.floor(cH/n)));
           var legTotalH=n*legItemH;
           var legY0=PT+Math.max(0,Math.floor((cH-legTotalH)/2));
