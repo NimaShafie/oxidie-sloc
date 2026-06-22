@@ -1962,10 +1962,10 @@ fn default_each_physical_line() -> String {
 fn default_count_as_comment() -> String {
     "count_as_comment".to_string()
 }
-fn default_true_bool() -> bool {
+const fn default_true_bool() -> bool {
     true
 }
-fn default_style_col_threshold() -> u16 {
+const fn default_style_col_threshold() -> u16 {
     80
 }
 fn default_all_scope() -> String {
@@ -2340,8 +2340,8 @@ fn parse_tarball_size_caps() -> (u64, u64) {
     (compressed, decompressed)
 }
 
-/// HTTP-layer body limit for tarball uploads, matching SLOC_MAX_TARBALL_MB.
-/// Applied via DefaultBodyLimit::max() at the route layer so oversized requests
+/// HTTP-layer body limit for tarball uploads, matching `SLOC_MAX_TARBALL_MB`.
+/// Applied via `DefaultBodyLimit::max()` at the route layer so oversized requests
 /// are rejected before the streaming handler is invoked.
 fn tarball_http_body_limit_bytes() -> usize {
     std::env::var("SLOC_MAX_TARBALL_MB")
@@ -3392,19 +3392,18 @@ fn find_matching_run_json(candidates: &[PathBuf], run_id: &str) -> Option<PathBu
 /// point at the parent — the actual top-level output directory — so the user
 /// selects the root folder rather than the subfolder.
 fn output_folder_hint(json_path: &std::path::Path) -> String {
-    let direct_parent = match json_path.parent() {
-        Some(p) => p,
-        None => return String::new(),
+    let Some(direct_parent) = json_path.parent() else {
+        return String::new();
     };
     let parent_name = direct_parent
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
     if matches!(parent_name, "json" | "html" | "pdf" | "excel") {
-        direct_parent
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| direct_parent.display().to_string())
+        direct_parent.parent().map_or_else(
+            || direct_parent.display().to_string(),
+            |p| p.display().to_string(),
+        )
     } else {
         direct_parent.display().to_string()
     }
@@ -3484,27 +3483,35 @@ fn find_file_by_ext(dir: &Path, ext: &str) -> Option<PathBuf> {
         })
 }
 
+/// Collect `result*.json` candidates from a single scan subdirectory, covering both the
+/// legacy flat layout (`<scan_dir>/result*.json`) and the structured one
+/// (`<scan_dir>/json/result*.json`).
+fn subdir_result_json_candidates(sub: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(j) = find_result_json_in_dir(sub) {
+        out.push(j);
+    }
+    let json_sub = sub.join("json");
+    if json_sub.is_dir() {
+        if let Some(j) = find_result_json_in_dir(&json_sub) {
+            out.push(j);
+        }
+    }
+    out
+}
+
 fn collect_result_json_candidates(folder: &std::path::Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(j) = find_result_json_in_dir(folder) {
         candidates.push(j);
     }
-    if let Ok(dir_entries) = fs::read_dir(folder) {
-        for entry in dir_entries.flatten() {
-            let sub = entry.path();
-            if sub.is_dir() {
-                // Legacy flat structure: <scan_dir>/result*.json
-                if let Some(j) = find_result_json_in_dir(&sub) {
-                    candidates.push(j);
-                }
-                // Structured output: <scan_dir>/json/result*.json
-                let json_sub = sub.join("json");
-                if json_sub.is_dir() {
-                    if let Some(j) = find_result_json_in_dir(&json_sub) {
-                        candidates.push(j);
-                    }
-                }
-            }
+    let Ok(dir_entries) = fs::read_dir(folder) else {
+        return candidates;
+    };
+    for entry in dir_entries.flatten() {
+        let sub = entry.path();
+        if sub.is_dir() {
+            candidates.extend(subdir_result_json_candidates(&sub));
         }
     }
     candidates
@@ -5127,6 +5134,369 @@ async fn async_run_result_handler(
     )
 }
 
+/// Escape backslashes and double quotes for embedding a value inside a JSON string literal.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Per-language line/symbol totals summed across every language in a run.
+struct LangTotals {
+    physical_lines: u64,
+    code_lines: u64,
+    comment_lines: u64,
+    blank_lines: u64,
+    mixed_lines: u64,
+    functions: u64,
+    classes: u64,
+    variables: u64,
+    imports: u64,
+}
+
+fn sum_lang_totals(run: &AnalysisRun) -> LangTotals {
+    let s = |f: fn(&sloc_core::LanguageSummary) -> u64| -> u64 {
+        run.totals_by_language.iter().map(f).sum()
+    };
+    LangTotals {
+        physical_lines: s(|r| r.total_physical_lines),
+        code_lines: s(|r| r.code_lines),
+        comment_lines: s(|r| r.comment_lines),
+        blank_lines: s(|r| r.blank_lines),
+        mixed_lines: s(|r| r.mixed_lines_separate),
+        functions: s(|r| r.functions),
+        classes: s(|r| r.classes),
+        variables: s(|r| r.variables),
+        imports: s(|r| r.imports),
+    }
+}
+
+/// Previous-scan baseline strings and per-metric deltas shared by the live and offline pages.
+struct DeltaFields {
+    prev_fa_str: String,
+    prev_fs_str: String,
+    prev_pl_str: String,
+    prev_cl_str: String,
+    prev_cml_str: String,
+    prev_bl_str: String,
+    delta_fa_str: String,
+    delta_fa_class: String,
+    delta_fs_str: String,
+    delta_fs_class: String,
+    delta_pl_str: String,
+    delta_pl_class: String,
+    delta_cl_str: String,
+    delta_cl_class: String,
+    delta_cml_str: String,
+    delta_cml_class: String,
+    delta_bl_str: String,
+    delta_bl_class: String,
+    delta_lines_added: Option<i64>,
+    delta_lines_removed: Option<i64>,
+    delta_lines_net_str: String,
+    delta_lines_net_class: String,
+}
+
+// The delta_* locals deliberately mirror the `DeltaFields` struct field names (fa/fs/pl/cl/
+// cml/bl = files-analyzed/skipped, physical/code/comment/blank lines) which are consumed by
+// name in the Askama templates; renaming the locals to satisfy `similar_names` would diverge
+// from those field names and obscure the 1:1 mapping.
+#[allow(
+    clippy::similar_names,
+    reason = "locals mirror template-bound struct fields"
+)]
+fn compute_delta_fields(
+    prev_entry: Option<&RegistryEntry>,
+    totals: &LangTotals,
+    files_analyzed: u64,
+    files_skipped: u64,
+    scan_delta: Option<&sloc_core::ScanComparison>,
+) -> DeltaFields {
+    let prev_sum = prev_entry.map(|e| &e.summary);
+    let fmt_prev = |opt: Option<u64>| opt.map_or_else(|| "\u{2014}".into(), |v| v.to_string());
+
+    let (delta_fa_str, delta_fa_class) =
+        summary_delta(files_analyzed, prev_sum.map(|s| s.files_analyzed));
+    let (delta_fs_str, delta_fs_class) =
+        summary_delta(files_skipped, prev_sum.map(|s| s.files_skipped));
+    let (delta_pl_str, delta_pl_class) = summary_delta(
+        totals.physical_lines,
+        prev_sum.map(|s| s.total_physical_lines),
+    );
+    let (delta_cl_str, delta_cl_class) =
+        summary_delta(totals.code_lines, prev_sum.map(|s| s.code_lines));
+    let (delta_cml_str, delta_cml_class) =
+        summary_delta(totals.comment_lines, prev_sum.map(|s| s.comment_lines));
+    let (delta_bl_str, delta_bl_class) =
+        summary_delta(totals.blank_lines, prev_sum.map(|s| s.blank_lines));
+
+    let delta_lines_added = scan_delta.map(sum_added_code_lines);
+    let delta_lines_removed = scan_delta.map(sum_removed_code_lines);
+    let (delta_lines_net_str, delta_lines_net_class) =
+        match (delta_lines_added, delta_lines_removed) {
+            (Some(a), Some(r)) => {
+                let net = a - r;
+                (fmt_delta(net), delta_class(net).to_string())
+            }
+            _ => ("\u{2014}".to_string(), "na".to_string()),
+        };
+
+    DeltaFields {
+        prev_fa_str: fmt_prev(prev_sum.map(|s| s.files_analyzed)),
+        prev_fs_str: fmt_prev(prev_sum.map(|s| s.files_skipped)),
+        prev_pl_str: fmt_prev(prev_sum.map(|s| s.total_physical_lines)),
+        prev_cl_str: fmt_prev(prev_sum.map(|s| s.code_lines)),
+        prev_cml_str: fmt_prev(prev_sum.map(|s| s.comment_lines)),
+        prev_bl_str: fmt_prev(prev_sum.map(|s| s.blank_lines)),
+        delta_fa_str,
+        delta_fa_class: delta_fa_class.to_string(),
+        delta_fs_str,
+        delta_fs_class: delta_fs_class.to_string(),
+        delta_pl_str,
+        delta_pl_class: delta_pl_class.to_string(),
+        delta_cl_str,
+        delta_cl_class: delta_cl_class.to_string(),
+        delta_cml_str,
+        delta_cml_class: delta_cml_class.to_string(),
+        delta_bl_str,
+        delta_bl_class: delta_bl_class.to_string(),
+        delta_lines_added,
+        delta_lines_removed,
+        delta_lines_net_str,
+        delta_lines_net_class,
+    }
+}
+
+/// Count of unchanged code lines in a scan comparison.
+fn delta_unmodified_lines(scan_delta: &sloc_core::ScanComparison) -> u64 {
+    scan_delta
+        .file_deltas
+        .iter()
+        .filter(|f| f.status == sloc_core::FileChangeStatus::Unchanged)
+        .map(|f| {
+            #[allow(clippy::cast_sign_loss)]
+            let n = f.current_code as u64;
+            n
+        })
+        .sum()
+}
+
+fn git_commit_url_for(run: &AnalysisRun) -> Option<String> {
+    run.git_remote_url
+        .as_deref()
+        .zip(run.git_commit_long.as_deref())
+        .and_then(|(remote, sha)| remote_to_commit_url(remote, sha))
+}
+
+fn git_branch_url_for(run: &AnalysisRun) -> Option<String> {
+    run.git_remote_url
+        .as_deref()
+        .zip(run.git_branch.as_deref())
+        .and_then(|(remote, branch)| remote_to_branch_url(remote, branch))
+}
+
+fn scan_performed_by(run: &AnalysisRun) -> String {
+    run.environment.ci_name.clone().unwrap_or_else(|| {
+        format!(
+            "{} / {}",
+            run.environment.initiator_username, run.environment.initiator_hostname
+        )
+    })
+}
+
+/// Top-12 languages (by code lines) as a JSON array for the language bar chart.
+fn build_lang_chart_json(run: &AnalysisRun) -> String {
+    let mut langs: Vec<&sloc_core::LanguageSummary> = run.totals_by_language.iter().collect();
+    langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
+    let entries: Vec<String> = langs
+        .into_iter()
+        .take(12)
+        .map(|l| {
+            let name = json_escape(l.language.display_name());
+            format!(
+                r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"physical":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
+                name,
+                l.code_lines,
+                l.comment_lines,
+                l.blank_lines,
+                l.total_physical_lines,
+                l.functions,
+                l.classes,
+                l.variables,
+                l.imports,
+                l.files,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Per-language files-vs-lines points as a JSON array for the scatter chart.
+fn build_scatter_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .totals_by_language
+        .iter()
+        .map(|l| {
+            let name = json_escape(l.language.display_name());
+            format!(
+                r#"{{"lang":"{}","files":{},"code":{},"physical":{}}}"#,
+                name, l.files, l.code_lines, l.total_physical_lines,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Per-language semantic-symbol counts as a JSON array for the semantic chart.
+fn build_semantic_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .totals_by_language
+        .iter()
+        .filter(|l| {
+            l.functions > 0 || l.classes > 0 || l.variables > 0 || l.imports > 0 || l.test_count > 0
+        })
+        .map(|l| {
+            let name = json_escape(l.language.display_name());
+            format!(
+                r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{},"tests":{}}}"#,
+                name, l.functions, l.classes, l.variables, l.imports, l.test_count,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Per-submodule line counts as a JSON array for the submodule chart.
+fn build_submodule_chart_json(run: &AnalysisRun) -> String {
+    let entries: Vec<String> = run
+        .submodule_summaries
+        .iter()
+        .map(|s| {
+            let name = json_escape(&s.name);
+            format!(
+                r#"{{"name":"{}","code":{},"comment":{},"blank":{},"physical":{},"files":{}}}"#,
+                name,
+                s.code_lines,
+                s.comment_lines,
+                s.blank_lines,
+                s.total_physical_lines,
+                s.files_analyzed,
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// `hit / found` as a one-decimal percentage string, or empty when nothing was found.
+#[allow(clippy::cast_precision_loss)]
+fn cov_pct_str(hit: u64, found: u64) -> String {
+    if found > 0 {
+        format!("{:.1}", hit as f64 / found as f64 * 100.0)
+    } else {
+        String::new()
+    }
+}
+
+/// `hit / found` summary string, or empty when nothing was found.
+fn cov_lines_summary_str(hit: u64, found: u64) -> String {
+    if found > 0 {
+        format!("{hit} / {found}")
+    } else {
+        String::new()
+    }
+}
+
+const fn cocomo_coefficients(mode: sloc_core::CocomoMode) -> (f64, f64, f64, f64) {
+    use sloc_core::CocomoMode;
+    match mode {
+        CocomoMode::SemiDetached => (3.0, 1.12, 2.5, 0.35),
+        CocomoMode::Embedded => (3.6, 1.20, 2.5, 0.32),
+        CocomoMode::Organic => (2.4, 1.05, 2.5, 0.38),
+    }
+}
+
+const fn cocomo_mode_label(mode: sloc_core::CocomoMode) -> &'static str {
+    use sloc_core::CocomoMode;
+    match mode {
+        CocomoMode::Organic => "Organic",
+        CocomoMode::SemiDetached => "Semi-detached",
+        CocomoMode::Embedded => "Embedded",
+    }
+}
+
+const fn cocomo_mode_tooltip(mode: sloc_core::CocomoMode) -> &'static str {
+    use sloc_core::CocomoMode;
+    match mode {
+        CocomoMode::Organic => {
+            "Organic: A small team working on a well-understood project in a familiar \
+             environment with minimal external constraints. Suited for internal tools, \
+             utilities, and projects with stable requirements. Effort = 2.4 \u{00D7} KSLOC^1.05."
+        }
+        CocomoMode::SemiDetached => {
+            "Semi-detached: A mixed team with varying experience tackling a project with \
+             moderate novelty and some rigid constraints. Typical for compilers, transaction \
+             systems, and batch processors. Effort = 3.0 \u{00D7} KSLOC^1.12."
+        }
+        CocomoMode::Embedded => {
+            "Embedded: Tight hardware, software, or operational constraints requiring \
+             significant innovation and deep integration work. Typical for real-time control \
+             systems and safety-critical software. Effort = 3.6 \u{00D7} KSLOC^1.20."
+        }
+    }
+}
+
+/// COCOMO display strings recomputed for the scan-wizard-selected mode.
+struct CocomoFields {
+    has_cocomo: bool,
+    effort_str: String,
+    duration_str: String,
+    staff_str: String,
+    ksloc_str: String,
+    mode_label: String,
+    mode_tooltip: String,
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn recompute_cocomo(run: &AnalysisRun, mode_str: &str) -> CocomoFields {
+    use sloc_core::CocomoMode;
+    let mode = match mode_str {
+        "semi_detached" => CocomoMode::SemiDetached,
+        "embedded" => CocomoMode::Embedded,
+        _ => CocomoMode::Organic,
+    };
+    let (a, b, c, d) = cocomo_coefficients(mode);
+    let ksloc = run.summary_totals.code_lines as f64 / 1_000.0;
+    let effort = a * ksloc.powf(b);
+    let duration = c * effort.powf(d);
+    let staff = if duration > 0.0 {
+        effort / duration
+    } else {
+        0.0
+    };
+    let round2 = |x: f64| format!("{:.2}", (x * 100.0).round() / 100.0);
+    let mode_label = cocomo_mode_label(mode).to_string();
+    let mode_tooltip = cocomo_mode_tooltip(mode).to_string();
+    if run.summary_totals.code_lines > 0 {
+        CocomoFields {
+            has_cocomo: true,
+            effort_str: round2(effort),
+            duration_str: round2(duration),
+            staff_str: round2(staff),
+            ksloc_str: round2(ksloc),
+            mode_label,
+            mode_tooltip,
+        }
+    } else {
+        CocomoFields {
+            has_cocomo: false,
+            effort_str: String::new(),
+            duration_str: String::new(),
+            staff_str: String::new(),
+            ksloc_str: String::new(),
+            mode_label,
+            mode_tooltip,
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)] // abbreviated names (fa=files_analyzed, cl=code_lines, etc.) are intentional
 #[allow(clippy::cast_precision_loss)] // COCOMO ratio: f64 precision on line counts is adequate
@@ -5160,111 +5530,47 @@ fn render_result_page(
 
     let files_analyzed = run.per_file_records.len() as u64;
     let files_skipped = run.skipped_file_records.len() as u64;
-    let physical_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.total_physical_lines)
-        .sum::<u64>();
-    let code_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.code_lines)
-        .sum::<u64>();
-    let comment_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.comment_lines)
-        .sum::<u64>();
-    let blank_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.blank_lines)
-        .sum::<u64>();
-    let mixed_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.mixed_lines_separate)
-        .sum::<u64>();
-    let functions = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.functions)
-        .sum::<u64>();
-    let classes = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.classes)
-        .sum::<u64>();
-    let variables = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.variables)
-        .sum::<u64>();
-    let imports = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.imports)
-        .sum::<u64>();
+    let totals = sum_lang_totals(run);
 
-    let prev_sum = prev_entry.as_ref().map(|e| &e.summary);
-    let prev_fa = prev_sum.map(|s| s.files_analyzed);
-    let prev_fs = prev_sum.map(|s| s.files_skipped);
-    let prev_pl = prev_sum.map(|s| s.total_physical_lines);
-    let prev_cl = prev_sum.map(|s| s.code_lines);
-    let prev_cml = prev_sum.map(|s| s.comment_lines);
-    let prev_bl = prev_sum.map(|s| s.blank_lines);
-    let fmt_prev = |opt: Option<u64>| opt.map_or_else(|| "—".into(), |v| v.to_string());
-    let prev_fa_str = fmt_prev(prev_fa);
-    let prev_fs_str = fmt_prev(prev_fs);
-    let prev_pl_str = fmt_prev(prev_pl);
-    let prev_cl_str = fmt_prev(prev_cl);
-    let prev_cml_str = fmt_prev(prev_cml);
-    let prev_bl_str = fmt_prev(prev_bl);
-    let (delta_fa_str, delta_fa_class) = summary_delta(files_analyzed, prev_fa);
-    let (delta_fs_str, delta_fs_class) = summary_delta(files_skipped, prev_fs);
-    let (delta_pl_str, delta_pl_class) = summary_delta(physical_lines, prev_pl);
-    let (delta_cl_str, delta_cl_class) = summary_delta(code_lines, prev_cl);
-    let (delta_cml_str, delta_cml_class) = summary_delta(comment_lines, prev_cml);
-    let (delta_bl_str, delta_bl_class) = summary_delta(blank_lines, prev_bl);
-    let delta_fa_class = delta_fa_class.to_string();
-    let delta_fs_class = delta_fs_class.to_string();
-    let delta_pl_class = delta_pl_class.to_string();
-    let delta_cl_class = delta_cl_class.to_string();
-    let delta_cml_class = delta_cml_class.to_string();
-    let delta_bl_class = delta_bl_class.to_string();
-
-    let delta_lines_added: Option<i64> = scan_delta.as_ref().map(sum_added_code_lines);
-    let delta_lines_removed: Option<i64> = scan_delta.as_ref().map(sum_removed_code_lines);
-    let (delta_lines_net_str, delta_lines_net_class) =
-        match (delta_lines_added, delta_lines_removed) {
-            (Some(a), Some(r)) => {
-                let net = a - r;
-                (fmt_delta(net), delta_class(net).to_string())
-            }
-            _ => ("—".to_string(), "na".to_string()),
-        };
+    let DeltaFields {
+        prev_fa_str,
+        prev_fs_str,
+        prev_pl_str,
+        prev_cl_str,
+        prev_cml_str,
+        prev_bl_str,
+        delta_fa_str,
+        delta_fa_class,
+        delta_fs_str,
+        delta_fs_class,
+        delta_pl_str,
+        delta_pl_class,
+        delta_cl_str,
+        delta_cl_class,
+        delta_cml_str,
+        delta_cml_class,
+        delta_bl_str,
+        delta_bl_class,
+        delta_lines_added,
+        delta_lines_removed,
+        delta_lines_net_str,
+        delta_lines_net_class,
+    } = compute_delta_fields(
+        prev_entry.as_ref(),
+        &totals,
+        files_analyzed,
+        files_skipped,
+        scan_delta.as_ref(),
+    );
 
     let run_dir = artifacts.output_dir.clone();
     let git_branch = run.git_branch.clone();
     let git_commit = run.git_commit_short.clone();
     let git_commit_long = run.git_commit_long.clone();
     let git_author = run.git_commit_author.clone();
-    let git_commit_url = run
-        .git_remote_url
-        .as_deref()
-        .zip(run.git_commit_long.as_deref())
-        .and_then(|(remote, sha)| remote_to_commit_url(remote, sha));
-    let git_branch_url = run
-        .git_remote_url
-        .as_deref()
-        .zip(run.git_branch.as_deref())
-        .and_then(|(remote, branch)| remote_to_branch_url(remote, branch));
-    let scan_performed_by = run.environment.ci_name.clone().unwrap_or_else(|| {
-        format!(
-            "{} / {}",
-            run.environment.initiator_username, run.environment.initiator_hostname
-        )
-    });
+    let git_commit_url = git_commit_url_for(run);
+    let git_branch_url = git_branch_url_for(run);
+    let scan_performed_by = scan_performed_by(run);
     let scan_time_display = fmt_la_time_meta(run.tool.timestamp_utc);
     let os_display = format!(
         "{} / {}",
@@ -5281,60 +5587,15 @@ fn render_result_page(
 
     // Re-compute COCOMO with the mode selected in the scan wizard.
     let ctx = &artifacts.result_context;
-    let (
+    let CocomoFields {
         has_cocomo,
-        cocomo_effort_str,
-        cocomo_duration_str,
-        cocomo_staff_str,
-        cocomo_ksloc_str,
-        cocomo_mode_label,
-        cocomo_mode_tooltip,
-    ) = {
-        let ksloc = run.summary_totals.code_lines as f64 / 1_000.0;
-        let mode_str = ctx.cocomo_mode.as_str();
-        let (a, b, c, d, label, tooltip): (f64, f64, f64, f64, &str, &str) = match mode_str {
-            "semi_detached" => (3.0, 1.12, 2.5, 0.35, "Semi-detached",
-                "Semi-detached: A mixed team with varying experience tackling a project with \
-                 moderate novelty and some rigid constraints. Typical for compilers, transaction \
-                 systems, and batch processors. Effort = 3.0 \u{00D7} KSLOC^1.12."),
-            "embedded" => (3.6, 1.20, 2.5, 0.32, "Embedded",
-                "Embedded: Tight hardware, software, or operational constraints requiring \
-                 significant innovation and deep integration work. Typical for real-time control \
-                 systems and safety-critical software. Effort = 3.6 \u{00D7} KSLOC^1.20."),
-            _ => (2.4, 1.05, 2.5, 0.38, "Organic",
-                "Organic: A small team working on a well-understood project in a familiar \
-                 environment with minimal external constraints. Suited for internal tools, \
-                 utilities, and projects with stable requirements. Effort = 2.4 \u{00D7} KSLOC^1.05."),
-        };
-        let effort = a * ksloc.powf(b);
-        let duration = c * effort.powf(d);
-        let staff = if duration > 0.0 {
-            effort / duration
-        } else {
-            0.0
-        };
-        if run.summary_totals.code_lines > 0 {
-            (
-                true,
-                format!("{:.2}", (effort * 100.0).round() / 100.0),
-                format!("{:.2}", (duration * 100.0).round() / 100.0),
-                format!("{:.2}", (staff * 100.0).round() / 100.0),
-                format!("{:.2}", (ksloc * 100.0).round() / 100.0),
-                label.to_string(),
-                tooltip.to_string(),
-            )
-        } else {
-            (
-                false,
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                label.to_string(),
-                tooltip.to_string(),
-            )
-        }
-    };
+        effort_str: cocomo_effort_str,
+        duration_str: cocomo_duration_str,
+        staff_str: cocomo_staff_str,
+        ksloc_str: cocomo_ksloc_str,
+        mode_label: cocomo_mode_label,
+        mode_tooltip: cocomo_mode_tooltip,
+    } = recompute_cocomo(run, ctx.cocomo_mode.as_str());
     let complexity_alert = ctx.complexity_alert;
 
     let template = ResultTemplate {
@@ -5352,15 +5613,15 @@ fn render_result_page(
             .collect(),
         files_analyzed,
         files_skipped,
-        physical_lines,
-        code_lines,
-        comment_lines,
-        blank_lines,
-        mixed_lines,
-        functions,
-        classes,
-        variables,
-        imports,
+        physical_lines: totals.physical_lines,
+        code_lines: totals.code_lines,
+        comment_lines: totals.comment_lines,
+        blank_lines: totals.blank_lines,
+        mixed_lines: totals.mixed_lines,
+        functions: totals.functions,
+        classes: totals.classes,
+        variables: totals.variables,
+        imports: totals.imports,
         html_url: artifacts
             .html_path
             .as_ref()
@@ -5416,17 +5677,7 @@ fn render_result_page(
         delta_files_removed: scan_delta.as_ref().map(|d| d.files_removed),
         delta_files_modified: scan_delta.as_ref().map(|d| d.files_modified),
         delta_files_unchanged: scan_delta.as_ref().map(|d| d.files_unchanged),
-        delta_unmodified_lines: scan_delta.as_ref().map(|d| {
-            d.file_deltas
-                .iter()
-                .filter(|f| f.status == sloc_core::FileChangeStatus::Unchanged)
-                .map(|f| {
-                    #[allow(clippy::cast_sign_loss)]
-                    let n = f.current_code as u64;
-                    n
-                })
-                .sum()
-        }),
+        delta_unmodified_lines: scan_delta.as_ref().map(delta_unmodified_lines),
         git_branch,
         git_branch_url,
         git_commit,
@@ -5446,98 +5697,10 @@ fn render_result_page(
             .collect(),
         pdf_generating: artifacts.pdf_path.as_ref().is_some_and(|p| !p.exists()),
         scan_config_url: format!("/runs/scan-config/{run_id}"),
-        lang_chart_json: {
-            let mut langs: Vec<&sloc_core::LanguageSummary> =
-                run.totals_by_language.iter().collect();
-            langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
-            let entries: Vec<String> = langs
-                .into_iter()
-                .take(12)
-                .map(|l| {
-                    let name = l
-                        .language
-                        .display_name()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    format!(
-                        r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"physical":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
-                        name,
-                        l.code_lines,
-                        l.comment_lines,
-                        l.blank_lines,
-                        l.total_physical_lines,
-                        l.functions,
-                        l.classes,
-                        l.variables,
-                        l.imports,
-                        l.files,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
-        scatter_chart_json: {
-            let entries: Vec<String> = run
-                .totals_by_language
-                .iter()
-                .map(|l| {
-                    let name = l
-                        .language
-                        .display_name()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    format!(
-                        r#"{{"lang":"{}","files":{},"code":{},"physical":{}}}"#,
-                        name, l.files, l.code_lines, l.total_physical_lines,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
-        semantic_chart_json: {
-            let entries: Vec<String> = run
-                .totals_by_language
-                .iter()
-                .filter(|l| {
-                    l.functions > 0
-                        || l.classes > 0
-                        || l.variables > 0
-                        || l.imports > 0
-                        || l.test_count > 0
-                })
-                .map(|l| {
-                    let name = l
-                        .language
-                        .display_name()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    format!(
-                        r#"{{"lang":"{}","functions":{},"classes":{},"variables":{},"imports":{},"tests":{}}}"#,
-                        name, l.functions, l.classes, l.variables, l.imports, l.test_count,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
-        submodule_chart_json: {
-            let entries: Vec<String> = run
-                .submodule_summaries
-                .iter()
-                .map(|s| {
-                    let name = s.name.replace('\\', "\\\\").replace('"', "\\\"");
-                    format!(
-                        r#"{{"name":"{}","code":{},"comment":{},"blank":{},"physical":{},"files":{}}}"#,
-                        name,
-                        s.code_lines,
-                        s.comment_lines,
-                        s.blank_lines,
-                        s.total_physical_lines,
-                        s.files_analyzed,
-                    )
-                })
-                .collect();
-            format!("[{}]", entries.join(","))
-        },
+        lang_chart_json: build_lang_chart_json(run),
+        scatter_chart_json: build_scatter_chart_json(run),
+        semantic_chart_json: build_semantic_chart_json(run),
+        submodule_chart_json: build_submodule_chart_json(run),
         has_submodule_data: !run.submodule_summaries.is_empty(),
         has_semantic_data: run
             .totals_by_language
@@ -5566,44 +5729,22 @@ fn render_result_page(
         cocomo_mode_tooltip,
         complexity_alert,
         has_coverage_data: run.summary_totals.coverage_lines_found > 0,
-        cov_line_pct: if run.summary_totals.coverage_lines_found > 0 {
-            format!(
-                "{:.1}",
-                run.summary_totals.coverage_lines_hit as f64
-                    / run.summary_totals.coverage_lines_found as f64
-                    * 100.0
-            )
-        } else {
-            String::new()
-        },
-        cov_fn_pct: if run.summary_totals.coverage_functions_found > 0 {
-            format!(
-                "{:.1}",
-                run.summary_totals.coverage_functions_hit as f64
-                    / run.summary_totals.coverage_functions_found as f64
-                    * 100.0
-            )
-        } else {
-            String::new()
-        },
-        cov_branch_pct: if run.summary_totals.coverage_branches_found > 0 {
-            format!(
-                "{:.1}",
-                run.summary_totals.coverage_branches_hit as f64
-                    / run.summary_totals.coverage_branches_found as f64
-                    * 100.0
-            )
-        } else {
-            String::new()
-        },
-        cov_lines_summary: if run.summary_totals.coverage_lines_found > 0 {
-            format!(
-                "{} / {}",
-                run.summary_totals.coverage_lines_hit, run.summary_totals.coverage_lines_found
-            )
-        } else {
-            String::new()
-        },
+        cov_line_pct: cov_pct_str(
+            run.summary_totals.coverage_lines_hit,
+            run.summary_totals.coverage_lines_found,
+        ),
+        cov_fn_pct: cov_pct_str(
+            run.summary_totals.coverage_functions_hit,
+            run.summary_totals.coverage_functions_found,
+        ),
+        cov_branch_pct: cov_pct_str(
+            run.summary_totals.coverage_branches_hit,
+            run.summary_totals.coverage_branches_found,
+        ),
+        cov_lines_summary: cov_lines_summary_str(
+            run.summary_totals.coverage_lines_hit,
+            run.summary_totals.coverage_lines_found,
+        ),
     };
 
     Html(
@@ -8484,14 +8625,17 @@ fn group_thousands(s: &str) -> String {
         }
         grouped.push(b as char);
     }
-    match frac_part {
-        Some(f) => format!("{sign}{grouped}.{f}"),
-        None => format!("{sign}{grouped}"),
-    }
+    frac_part.map_or_else(
+        || format!("{sign}{grouped}"),
+        |f| format!("{sign}{grouped}.{f}"),
+    )
 }
 
 /// Custom Askama filters available to templates in this crate.
 mod filters {
+    // These lints fire on the wrapper code generated by `#[askama::filter_fn]`
+    // (a `&self` `execute` method returning `Result`), not on our own source.
+    #![allow(clippy::inline_always, clippy::unused_self, clippy::unnecessary_wraps)]
     use askama::{Result, Values};
 
     /// `{{ value|commas }}` — render any `Display` value with thousands separators.
@@ -9270,13 +9414,23 @@ fn multi_compare_page(
     #mc-chart{{display:block;width:100%;}}
     h2,.mc-charts-h2{{font-size:14px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 14px;}}
     .export-group{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;}}
-    .ic-grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px;}}
+    .ic-grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px;}}
     @media(max-width:800px){{.ic-grid{{grid-template-columns:1fr;}}}}
-    .ic-card{{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:16px 20px;}}
-    body.dark-theme .ic-card{{border-color:var(--line-strong);}}
-    .ic-card-h2{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 10px;}}
-    .ic-card-h2-row{{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}}
+    .ic-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;}}
+    body.dark-theme .ic-card{{background:var(--surface);border-color:var(--line-strong);}}
+    .ic-card-h2{{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);margin:0;}}
+    .ic-card-h2-row{{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px;flex-wrap:wrap;}}
     .ic-card-h2-row .ic-card-h2{{margin:0;}}
+    .ic-chart-hdr{{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}}
+    .ic-expand-btn{{background:none;border:1px solid var(--line-strong);border-radius:6px;cursor:pointer;color:var(--muted);padding:4px 10px;font-size:12px;line-height:1;transition:background .13s,color .13s;flex-shrink:0;white-space:nowrap;}}
+    .ic-expand-btn:hover{{background:var(--surface-2);color:var(--text);}}
+    .ic-svg-modal-ov{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.58);z-index:9998;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}}
+    .ic-svg-modal-ov.open{{display:flex;}}
+    .ic-svg-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;padding:22px 24px;max-width:900px;width:100%;max-height:88vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}}
+    .ic-svg-modal-hdr{{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--line);}}
+    .ic-svg-modal-title{{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);}}
+    .ic-svg-modal-close{{background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:5px 11px;cursor:pointer;color:var(--text);font-size:12px;font-weight:700;}}
+    .ic-svg-modal-close:hover{{background:var(--line);}}
     .ic-leg{{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;flex-wrap:wrap;}}
     .ic-dot{{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}}
     .ic-cb{{cursor:pointer;transition:filter .15s;}}
@@ -9478,23 +9632,23 @@ fn multi_compare_page(
         </div>
         <!-- Code Metrics: Scan 1 vs Latest -->
         <div class="ic-card">
-          <div class="ic-card-h2">Code Metrics &mdash; Scan 1 vs Latest</div>
+          <div class="ic-chart-hdr"><span class="ic-card-h2">Code Metrics &mdash; Scan 1 vs Latest</span><button class="ic-expand-btn" data-expand-src="mc-ic-c1" data-expand-title="Code Metrics — Scan 1 vs Latest">&#x2922; Full View</button></div>
           <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files"><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;scan&nbsp;1)</span></div>
           <div id="mc-ic-c1"></div>
         </div>
         <!-- Language Code Delta -->
         <div class="ic-card" id="mc-ic-lang-card">
-          <div class="ic-card-h2">Language Code Delta</div>
+          <div class="ic-chart-hdr"><span class="ic-card-h2">Language Code Delta</span><button class="ic-expand-btn" data-expand-src="mc-ic-c3" data-expand-title="Language Code Delta">&#x2922; Full View</button></div>
           <div id="mc-ic-c3"></div>
         </div>
         <!-- Delta by Metric -->
         <div class="ic-card">
-          <div class="ic-card-h2">Delta by Metric</div>
+          <div class="ic-chart-hdr"><span class="ic-card-h2">Delta by Metric</span><button class="ic-expand-btn" data-expand-src="mc-ic-c2" data-expand-title="Delta by Metric">&#x2922; Full View</button></div>
           <div id="mc-ic-c2"></div>
         </div>
         <!-- File Change Distribution -->
         <div class="ic-card">
-          <div class="ic-card-h2">File Change Distribution</div>
+          <div class="ic-chart-hdr"><span class="ic-card-h2">File Change Distribution</span><button class="ic-expand-btn" data-expand-src="mc-ic-c4" data-expand-title="File Change Distribution">&#x2922; Full View</button></div>
           <div id="mc-ic-c4"></div>
         </div>
       </div>
@@ -9557,6 +9711,16 @@ fn multi_compare_page(
 
   <div id="mc-ic-tt"></div>
 
+  <div class="ic-svg-modal-ov" id="ic-svg-modal-ov">
+    <div class="ic-svg-modal">
+      <div class="ic-svg-modal-hdr">
+        <span class="ic-svg-modal-title" id="ic-svg-modal-title"></span>
+        <button type="button" class="ic-svg-modal-close" id="ic-svg-modal-close">&times; Close</button>
+      </div>
+      <div id="ic-svg-modal-body"></div>
+    </div>
+  </div>
+
   <footer class="site-footer">
     oxide-sloc v{version} &mdash; local code metrics workbench &nbsp;&middot;&nbsp;
     Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
@@ -9569,11 +9733,13 @@ fn multi_compare_page(
   (function(){{
     // ── Dark theme ───────────────────────────────────────────────────────────
     try{{if(localStorage.getItem('sloc-dark')==='1')document.body.classList.add('dark-theme');}}catch(e){{}}
+    var renderInlineCharts=null;
     var tt=document.getElementById('theme-toggle');
     if(tt)tt.addEventListener('click',function(){{
       var on=document.body.classList.toggle('dark-theme');
       try{{localStorage.setItem('sloc-dark',on?'1':'0');}}catch(e){{}}
       renderChart(activeMetric);
+      if(renderInlineCharts)renderInlineCharts();
     }});
 
     // ── Code particles ───────────────────────────────────────────────────────
@@ -10097,7 +10263,7 @@ fn multi_compare_page(
 
     // ── Inline scan charts (matching Scan Delta layout) ──────────────────────
     (function(){{
-      var OX='#C45C10',GN='#2A6846',RD='#B23030',LGY='#DDDDDD';
+      var OX='#C45C10',GN='#2A6846',RD='#B23030';
       function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
       function fmt2(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
       function px(n){{return Math.round(n);}}
@@ -10125,34 +10291,46 @@ fn multi_compare_page(
         el.addEventListener('mousemove',function(e){{mvTT(e);}});
       }}
       function mvTT(e){{if(!_tt)return;var x=e.clientX+16,y=e.clientY-10,r=_tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;_tt.style.left=x+'px';_tt.style.top=y+'px';}}
-      if(N<2)return;
-      var p0=POINTS[0],pLast=POINTS[N-1];
-      // Chart 1: Code Metrics — Scan 1 vs Latest (grouped bars, same structure as Scan Delta)
+      var FONT='Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+      function buildCharts(){{
+        if(N<2)return;
+        var cs=getComputedStyle(document.body);
+        function cv(name,fb){{var v=cs.getPropertyValue(name);return(v&&v.trim())||fb;}}
+        var textCol=cv('--text','#43342d');
+        var mutedCol=cv('--muted','#7b675b');
+        var gFill=cv('--muted-2','#a08777');
+        var LGY=cv('--line','#e6d0bf');
+        var axisCol=cv('--line-strong','#d8bfad');
+        var surf2col=cv('--surface-2','#f4ede4');
+        var p0=POINTS[0],pLast=POINTS[N-1];
+        var dark=document.body.classList.contains('dark-theme');
+        var barBorder=dark?'rgba(255,255,255,0.40)':'rgba(0,0,0,0.62)';
+        function niceMax(v){{var x=v||1;var p=Math.pow(10,Math.floor(Math.log10(x)));var n=x/p;var s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}}
       var c1mets=[
         {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:'#93C5FD',cc:'#2563EB'}},
         {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:'#C4B5FD',cc:'#7C3AED'}},
         {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:'#6EE7B7',cc:'#0D9488'}}
       ];
-      var maxV1=Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))*1.15||1;
-      var C1W=620,C1H=196,c1mt=38,c1mb=30,c1ml=56,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=54,c1gap=10;
+      var maxV1=niceMax(Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))||1);
+      var C1W=620,C1H=200,c1mt=40,c1mb=30,c1ml=58,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=54,c1gap=10;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       for(var gi=1;gi<=4;gi++){{
         var gy=c1mt+c1ph*(1-gi/4),gv=maxV1*gi/4;
         c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';
-        c1+='<text x="'+(c1ml-5)+'" y="'+(px(gy)+4)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">'+fmt2(gv)+'</text>';
+        c1+='<text x="'+(c1ml-6)+'" y="'+(px(gy)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">'+fmt2(gv)+'</text>';
       }}
-      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
-      c1+='<text x="'+(c1ml-5)+'" y="'+(c1mt+c1ph+4)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">0</text>';
+      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="'+axisCol+'" stroke-width="1.5"/>';
+      c1+='<text x="'+(c1ml-6)+'" y="'+(c1mt+c1ph+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">0</text>';
       c1mets.forEach(function(m,i){{
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="17" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="13" font-weight="700" fill="#444">'+esc(m.l)+'</text>';
-        c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3" style="cursor:pointer;"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="600" fill="'+m.bc+'">'+fmt2(m.b)+'</text>';
-        c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3" style="cursor:pointer;"/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="600" fill="'+m.cc+'">'+fmt2(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="500" fill="#888">Scan 1</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.cc+'">Latest</text>';
+        c1+='<text x="'+cx+'" y="18" text-anchor="middle" font-family="'+FONT+'" font-size="13" font-weight="700" fill="'+textCol+'">'+esc(m.l)+'</text>';
+        c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" stroke="'+barBorder+'" stroke-width="1" rx="3" style="cursor:pointer;"/>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.b)+'</text>';
+        c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" stroke="'+barBorder+'" stroke-width="1" rx="3" style="cursor:pointer;"/>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.c)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="500" fill="'+mutedCol+'">Scan 1</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="600" fill="'+mutedCol+'">Latest</text>';
       }});
       c1+='</svg>';
       // Chart 2: Delta by Metric (net delta first scan to last)
@@ -10167,65 +10345,109 @@ fn multi_compare_page(
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){{
         var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt2(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+22)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="13" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+22)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" font-weight="600" fill="'+textCol+'">'+esc(m.l)+'</text>';
         c2+='<rect'+btt(m.l,'Net delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3" style="cursor:pointer;"/>';
-        if(bw>=52){{c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
-        else{{var vx2=m.v>=0?px(bx+bw)+6:px(bx)-6,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
+        if(bw>=52){{c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
+        else{{var vx2=m.v>=0?px(bx+bw)+6:px(bx)-6,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="'+FONT+'" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
       }});
       c2+='</svg>';
       // Chart 3: Language Code Delta (from FILES net total_code_delta per language)
       var lm={{}};
       FILES.forEach(function(f){{var l=f.l||'Unknown';if(!lm[l])lm[l]={{f:0,d:0}};lm[l].f++;lm[l].d+=f.t;}});
       var langs=Object.keys(lm).sort(function(a,b){{return Math.abs(lm[b].d)-Math.abs(lm[a].d);}}).slice(0,12);
-      var c3='';
-      if(langs.length){{
+      function drawC3(){{
+        if(!langs.length)return'';
         var maxLD=Math.max.apply(null,langs.map(function(l){{return Math.abs(lm[l].d);}}));maxLD=maxLD||1;
-        var C3W=550,c3LW=124,c3FW=52,cx3=c3LW+Math.floor((C3W-c3LW-c3FW-14)/2),maxLBW=Math.floor((C3W-c3LW-c3FW-14)/2)-4,L3rH=30,C3H=langs.length*L3rH+20;
-        c3='<svg viewBox="0 0 '+C3W+' '+C3H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
-        c3+='<line x1="'+cx3+'" y1="0" x2="'+cx3+'" y2="'+C3H+'" stroke="'+LGY+'" stroke-width="1.5"/>';
+        var C3W=550,c3LW=124,c3FW=52,cx3=c3LW+Math.floor((C3W-c3LW-c3FW-14)/2),maxLBW=Math.floor((C3W-c3LW-c3FW-14)/2)-4;
+        var c3host=document.getElementById('mc-ic-c3');
+        var c3card=document.getElementById('mc-ic-lang-card');
+        var C3H=langs.length*44+24;
+        if(c3host&&c3card&&c3host.clientWidth>0){{
+          var avW=c3host.clientWidth;
+          var availPx=(c3card.getBoundingClientRect().bottom-16)-c3host.getBoundingClientRect().top;
+          var wantH=availPx*C3W/avW;
+          if(wantH>C3H)C3H=wantH;
+        }}
+        var topPad=12,botPad=12,band=(C3H-topPad-botPad)/langs.length,barH=Math.min(22,band*0.5);
+        var c3='<svg viewBox="0 0 '+C3W+' '+px(C3H)+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+        c3+='<line x1="'+cx3+'" y1="'+topPad+'" x2="'+cx3+'" y2="'+px(C3H-botPad)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
         langs.forEach(function(l,i){{
-          var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
-          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
-          c3+='<rect'+btt(l,'Net delta: '+vStr+' \u2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
-          if(bw>=48){{c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
-          else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
-          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
+          var e=lm[l],yc=topPad+band*(i+0.5),bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
+          c3+='<text x="'+(c3LW-7)+'" y="'+px(yc+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">'+esc(l)+'</text>';
+          c3+='<rect'+btt(l,'Net delta: '+vStr+' 2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+px(yc-barH/2)+'" width="'+px(bw)+'" height="'+px(barH)+'" fill="'+col+'" rx="3"/>';
+          if(bw>=48){{c3+='<text x="'+px(bx+bw/2)+'" y="'+px(yc+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
+          else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+px(yc+4)+'" text-anchor="'+anc3+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
+          c3+='<text x="'+(C3W-5)+'" y="'+px(yc+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="'+mutedCol+'">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
         }});
         c3+='</svg>';
+        return c3;
       }}
-      // Chart 4: File Change Distribution (centered donut, legend below)
+      // Chart 4: File Change Distribution (donut left, legend right, % on slices)
       var fm=0,fa=0,fr=0,fu=0;
       FILES.forEach(function(f){{if(f.s==='modified')fm++;else if(f.s==='added')fa++;else if(f.s==='removed')fr++;else fu++;}});
       var segs=[{{l:'Modified',v:fm,c:OX}},{{l:'Added',v:fa,c:GN}},{{l:'Removed',v:fr,c:RD}},{{l:'Unchanged',v:fu,c:'#CCCCCC'}}].filter(function(s){{return s.v>0;}});
       var tot4=segs.reduce(function(a,s){{return a+s.v;}},0)||1;
-      var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
-      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang4=-Math.PI/2;
+      var C4W=380,C4H=210,cx4=104,cy4=105,Ro=80,Ri=50;
+      function pctFill(c){{return c==='#CCCCCC'?'#555555':'#ffffff';}}
+      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:440px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang4=-Math.PI/2;
       if(segs.length===1){{
-        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files \u2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
-        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface-2)"/>';
+        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files 2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
+        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="'+surf2col+'"/>';
+        c4+='<text x="'+cx4+'" y="'+px(cy4-(Ro+Ri)/2+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="700" fill="'+pctFill(segs[0].c)+'">100%</text>';
       }} else {{
         segs.forEach(function(s){{
           var sw=Math.min(s.v/tot4*2*Math.PI,2*Math.PI-0.001),a2=ang4+sw;
           var x1=cx4+Ro*Math.cos(ang4),y1=cy4+Ro*Math.sin(ang4),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang4),yi2=cy4+Ri*Math.sin(ang4);
-          c4+='<path'+btt(s.l,fmt2(s.v)+' files \u2022 '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          c4+='<path'+btt(s.l,fmt2(s.v)+' files 2022 '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="'+surf2col+'" stroke-width="2.5"/>';
+          if(sw>0.32){{var midA=ang4+sw/2,rr=(Ro+Ri)/2,lx=cx4+rr*Math.cos(midA),ly=cy4+rr*Math.sin(midA);c4+='<text x="'+px(lx)+'" y="'+px(ly+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="'+pctFill(s.c)+'">'+px(s.v/tot4*100)+'%</text>';}}
           ang4+=sw;
         }});
       }}
-      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#444">'+fmt2(tot4)+'</text>';
-      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4-2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="21" font-weight="bold" fill="'+textCol+'">'+fmt2(tot4)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">total files</text>';
+      var legX=212,legRowH=26,legBlockH=segs.length*legRowH,legStartY=cy4-legBlockH/2+legRowH/2;
       segs.forEach(function(s,i){{
-        var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
-        c4+='<rect'+btt(s.l,fmt2(s.v)+' files \u2022 '+px(s.v/tot4*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt2(s.v)+' files \u2022 '+px(s.v/tot4*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt2(s.v)+'</text>';
+        var ly=legStartY+i*legRowH,pct=px(s.v/tot4*100);
+        c4+='<rect'+btt(s.l,fmt2(s.v)+' files 2022 '+pct+'%')+' x="'+legX+'" y="'+px(ly-10)+'" width="13" height="13" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
+        c4+='<text'+btt(s.l,fmt2(s.v)+' files 2022 '+pct+'%')+' x="'+(legX+20)+'" y="'+px(ly+1)+'" font-family="'+FONT+'" font-size="12" font-weight="600" fill="'+textCol+'" style="cursor:pointer;">'+esc(s.l)+'</text>';
+        c4+='<text x="'+(legX+20)+'" y="'+px(ly+15)+'" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">'+fmt2(s.v)+' files 2022 '+pct+'%</text>';
       }});
       c4+='</svg>';
-      // Inject charts
-      var e1=document.getElementById('mc-ic-c1');if(e1){{e1.innerHTML=c1;addTT(e1);}}
-      var e2=document.getElementById('mc-ic-c2');if(e2){{e2.innerHTML=c2;addTT(e2);}}
-      var e3=document.getElementById('mc-ic-c3');if(e3){{e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';addTT(e3);}}
-      var e4=document.getElementById('mc-ic-c4');if(e4){{e4.innerHTML=c4;addTT(e4);}}
+      // Inject the fixed-size charts first so the grid row reaches its final height,
+      // then build the Language Code Delta chart (which measures that height).
       var lc=document.getElementById('mc-ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
+      var e1=document.getElementById('mc-ic-c1');if(e1)e1.innerHTML=c1;
+      var e2=document.getElementById('mc-ic-c2');if(e2)e2.innerHTML=c2;
+      var e4=document.getElementById('mc-ic-c4');if(e4)e4.innerHTML=c4;
+      var e3=document.getElementById('mc-ic-c3');if(e3)e3.innerHTML=langs.length?drawC3():'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';
+      }}
+      buildCharts();
+      renderInlineCharts=buildCharts;
+      ['mc-ic-c1','mc-ic-c2','mc-ic-c3','mc-ic-c4'].forEach(function(id){{var el=document.getElementById(id);if(el)addTT(el);}});
+      (function(){{
+        var ov=document.getElementById('ic-svg-modal-ov');
+        var body=document.getElementById('ic-svg-modal-body');
+        var ttl=document.getElementById('ic-svg-modal-title');
+        var closeBtn=document.getElementById('ic-svg-modal-close');
+        if(!ov||!body)return;
+        function close(){{ov.classList.remove('open');body.innerHTML='';}}
+        function open(srcId,title){{
+          var src=document.getElementById(srcId);if(!src)return;
+          ttl.textContent=title||'';
+          body.innerHTML=src.innerHTML;
+          var svg=body.querySelector('svg');
+          if(svg){{svg.removeAttribute('width');svg.removeAttribute('height');svg.style.width='100%';svg.style.height='auto';svg.style.maxWidth='none';}}
+          addTT(body);
+          ov.classList.add('open');
+        }}
+        document.querySelectorAll('.ic-expand-btn[data-expand-src]').forEach(function(btn){{
+          btn.addEventListener('click',function(){{open(btn.getAttribute('data-expand-src'),btn.getAttribute('data-expand-title'));}});
+        }});
+        if(closeBtn)closeBtn.addEventListener('click',close);
+        ov.addEventListener('click',function(e){{if(e.target===ov)close();}});
+        document.addEventListener('keydown',function(e){{if(e.key==='Escape'&&ov.classList.contains('open'))close();}});
+      }})();
 
       // HTML legend hover → highlight matching SVG bars within the SAME card only
       document.querySelectorAll('.ic-leg-item[data-highlight]').forEach(function(leg){{
@@ -10300,24 +10522,29 @@ fn multi_compare_page(
         var commitsList=POINTS.map(function(pt,i){{return esc(ptRef(pt,i));}}).join(', ');
         var p0=N>0?POINTS[0]:null,pLast=N>0?POINTS[N-1]:null;
         var codeDelta=(p0&&pLast)?Number(pLast.code)-Number(p0.code):null;
-        var css='body{{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}}'+
-          '.hdr{{background:#1a2035;color:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:flex-start;}}'+
-          '.brand{{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}}'+
-          '.title{{font-size:20px;font-weight:700;margin:3px 0 2px;line-height:1.2;}}'+
-          '.proj{{font-size:12px;color:#99aabb;margin-top:3px;}}'+
-          '.hr{{font-size:11px;color:#8899aa;text-align:right;line-height:1.9;}}'+
-          '.body{{padding:10px 14px;}}'+
+        var css='body{{margin:0;padding:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}}'+
+          '.pdf-header{{position:fixed;top:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
+          '.pdf-footer{{position:fixed;bottom:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
+          '.page-hdr{{background:#fff;border-bottom:2px solid #1a2035;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;}}'+
+          '.ph-brand{{font-size:14px;font-weight:900;color:#1a2035;white-space:nowrap;}}'+
+          '.ph-brand em{{color:#c45c10;font-style:normal;}}'+
+          '.ph-title{{font-size:14px;font-weight:600;color:#555;}}'+
+          '.ph-date{{font-size:11px;color:#888;text-align:right;white-space:nowrap;}}'+
+          '.info-bar{{background:#1a2035;color:#fff;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
+          '.ib-name{{font-size:13px;font-weight:800;color:#fff;}}'+
+          '.ib-right{{font-size:11px;color:#8899aa;text-align:right;line-height:1.7;}}'+
+          '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:5px 14px;display:flex;justify-content:space-between;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
+          '.body{{padding:8px 14px;margin-top:76px;margin-bottom:34px;}}'+
           '.sg{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}}'+
           '.sc{{border:1px solid #ddd;border-radius:8px;padding:8px 10px;}}'+
           '.sv{{font-size:18px;font-weight:900;color:#c45c10;}}'+
           '.sl{{font-size:10px;font-weight:700;text-transform:uppercase;color:#888;margin-top:3px;letter-spacing:.06em;}}'+
-          '.sec{{margin-bottom:12px;}}'+
-          '.sh{{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}}'+
+          '.sec{{margin-bottom:10px;}}'+
+          '.sh{{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
           'table{{width:100%;border-collapse:collapse;font-size:11px;}}'+
-          'th{{background:#1a2035;color:#fff;padding:4px 7px;font-size:10px;font-weight:700;text-align:left;letter-spacing:.04em;white-space:nowrap;}}'+
+          'th{{background:#1a2035;color:#fff;padding:4px 7px;font-size:10px;font-weight:700;text-align:left;letter-spacing:.04em;white-space:nowrap;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
           'td{{border-bottom:1px solid #eee;padding:3px 7px;vertical-align:middle;}}'+
-          'tr:nth-child(even) td{{background:#faf8f6;}}'+
-          '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:5px 14px;display:flex;justify-content:space-between;margin-top:12px;}}';
+          'tr:nth-child(even) td{{background:#faf8f6;}}';
         // ── Metric Progression ────────────────────────────────────────────────
         var hasTests=POINTS.some(function(pt){{return pt.tests!=null&&Number(pt.tests)>0;}});
         var hasCov=POINTS.some(function(pt){{return pt.cov!=null;}});
@@ -10368,8 +10595,8 @@ fn multi_compare_page(
         }}
         return '<!DOCTYPE html><html><head><meta charset="utf-8">'+
           '<title>OxideSLOC \u2014 Multi-Scan Timeline</title><style>'+css+'</style></head><body>'+
-          '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Multi-Scan Timeline</div><div class="proj">{project_label}</div></div>'+
-          '<div class="hr">{n} scans<br><span style="color:#7a8b9c">'+commitsList+'</span><br>Generated: '+esc(now)+'</div></div>'+
+          '<div class="pdf-header"><div class="page-hdr"><div class="ph-brand"><em>oxide</em>-sloc</div><div class="ph-title">Multi-Scan Timeline</div><div class="ph-date">'+esc(now)+'</div></div><div class="info-bar"><div><div class="ib-name">{project_label}</div></div><div class="ib-right">{n} scans compared<br>'+commitsList+'</div></div></div><div class="pdf-footer"><div class="ftr"><span>oxide-sloc v{version} | AGPL-3.0-or-later</span><span>Multi-Scan Timeline Report</span><span>{project_label} &middot; {n} scans</span></div></div>'+
+          
           '<div class="body">'+
           '<div class="sg">'+
           (pLast?'<div class="sc"><div class="sv">'+full(pLast.code)+'</div><div class="sl">Latest Code Lines</div></div>':
@@ -10389,7 +10616,7 @@ fn multi_compare_page(
           '</tr></thead><tbody>'+deltaRows+'</tbody></table></div>':'')+
           fmSection+
           '</div>'+
-          '<div class="ftr"><span>oxide-sloc v{version}</span><span>Multi-Scan Timeline Report</span><span>{project_label} &middot; {n} scans</span></div>'+
+          ''+
           '</body></html>';
       }}
       function mcDoPdf(btn){{
@@ -10748,6 +10975,8 @@ async fn trend_report_handler(
     .tr-modal-backdrop{{display:none;position:fixed;inset:0;z-index:9000;background:rgba(40,24,12,0.34);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);align-items:center;justify-content:center;padding:24px;animation:tr-fade .16s ease;}}
     @keyframes tr-fade{{from{{opacity:0;}}to{{opacity:1;}}}}
     .tr-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:18px;box-shadow:0 28px 70px rgba(40,24,12,0.32),0 4px 14px rgba(40,24,12,0.16);width:100%;max-height:92vh;overflow-y:auto;animation:tr-pop .18s cubic-bezier(.2,.9,.3,1.2);}}
+    .tr-modal{{background:rgba(255,255,255,0.97);}}
+    body.dark-theme .tr-modal{{background:#261c17;}}
     @keyframes tr-pop{{from{{transform:translateY(14px) scale(.97);opacity:0;}}to{{transform:none;opacity:1;}}}}
     .tr-modal-head{{display:flex;align-items:center;gap:14px;padding:24px 30px 18px;border-bottom:1px solid var(--line);}}
     .tr-modal-icon{{flex:none;width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#e07b3a,#b85028);box-shadow:0 4px 12px rgba(184,80,40,0.32);}}
@@ -11407,7 +11636,7 @@ async fn trend_report_handler(
         var mn=Math.min.apply(null,codes),mx=Math.max.apply(null,codes),av=Math.round(codes.reduce(function(a,b){{return a+b;}},0)/codes.length);
         return[p,sc.length,fst.timestamp.substring(0,16).replace('T',' '),lat.timestamp.substring(0,16).replace('T',' '),+(lat.code_lines)||0,+(lat.comment_lines)||0,+(lat.blank_lines)||0,+(lat.physical_lines)||0,+(lat.files_analyzed)||0,mn,mx,av];
       }});
-      var buf=buildXLSX([{{name:'Scan History',headers:s1H,rows:s1R}},{{name:'By Project',headers:s2H,rows:s2R}}],s1R,s2R);
+      var buf=buildXLSX([{{name:'Scan History',headers:s1H,rows:s1R}},{{name:'By Project',headers:s2H,rows:s2R}},{{name:'Focus Chart',headers:[],rows:[]}}],s1R,s2R);
       var a=document.createElement('a');a.download='oxide-sloc-trend.xlsx';
       a.href=URL.createObjectURL(new Blob([buf],{{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}}));
       a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},1000);
@@ -11427,7 +11656,7 @@ async fn trend_report_handler(
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet '+ns+'><sheetData>';
         x+='<row r="1">';
         hdr.forEach(function(h,ci){{x+='<c r="'+col2l(ci+1)+'1" t="inlineStr" s="1"><is><t>'+xe(h)+'</t></is></c>';}});
-        if(withCtrl){{x+='<c r="M1" t="inlineStr" s="1"><is><t>&#8595; Metric Selector</t></is></c><c r="N1" t="inlineStr"><is><t>Code Lines</t></is></c>';}}
+        if(withCtrl){{x+='<c r="M1" t="inlineStr" s="1"><is><t>Selected Metric (set on Focus Chart tab)</t></is></c>';}}
         x+='</row>';
         rows.forEach(function(row,ri){{
           var rn=ri+2;
@@ -11437,11 +11666,10 @@ async fn trend_report_handler(
             if(typeof cell==='number'){{x+='<c r="'+addr+'"><v>'+cell+'</v></c>';}}
             else{{x+='<c r="'+addr+'" t="inlineStr"><is><t>'+xe(String(cell))+'</t></is></c>';}}
           }});
-          if(withCtrl){{x+='<c r="M'+rn+'"><f>CHOOSE(MATCH($N$1,{{"Code Lines","Comment Lines","Blank Lines","Physical Lines"}},0),F'+rn+',G'+rn+',H'+rn+',I'+rn+')</f><v>'+Number(row[5])+'</v></c>';}}
+          if(withCtrl){{x+="<c r=\"M"+rn+"\"><f>CHOOSE(MATCH('Focus Chart'!$B$1,{{\"Code Lines\",\"Comment Lines\",\"Blank Lines\",\"Physical Lines\"}},0),F"+rn+",G"+rn+",H"+rn+",I"+rn+")</f><v>"+Number(row[5])+"</v></c>";}}
           x+='</row>';
         }});
         x+='</sheetData>';
-        if(withCtrl){{x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="N1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines"</formula1></dataValidation></dataValidations>';}}
         if(drawRid){{x+='<drawing r:id="'+drawRid+'"/>';}}
         return x+'</worksheet>';
       }}
@@ -11459,8 +11687,6 @@ async fn trend_report_handler(
           x+='<c:tx><c:strRef><c:f>'+sn+'!$'+s.col+'$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>'+xe(s.name)+'</c:v></c:pt></c:strCache></c:strRef></c:tx>';
           x+='<c:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr>';
           x+='<c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr></c:marker>';
-          var dlp=(i===2)?'b':'t';
-          x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="'+dlp+'"/></c:dLbls>';
           x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
           rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
           x+='</c:strCache></c:strRef></c:cat>';
@@ -11488,8 +11714,6 @@ async fn trend_report_handler(
           x+='<c:tx><c:strRef><c:f>'+sn+'!$'+s.col+'$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>'+xe(s.name)+'</c:v></c:pt></c:strCache></c:strRef></c:tx>';
           x+='<c:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr>';
           x+='<c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr></c:marker>';
-          var dlp=(i===2)?'b':'t';
-          x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="'+dlp+'"/></c:dLbls>';
           x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
           rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
           x+='</c:strCache></c:strRef></c:cat>';
@@ -11511,7 +11735,7 @@ async fn trend_report_handler(
         x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="0"/><c:plotArea>';
         x+='<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>';
         x+='<c:ser><c:idx val="0"/><c:order val="0"/>';
-        x+='<c:tx><c:strRef><c:f>'+sn+'!$N$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Code Lines</c:v></c:pt></c:strCache></c:strRef></c:tx>';
+        x+="<c:tx><c:strRef><c:f>'Focus Chart'!$B$1</c:f><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\"><c:v>Code Lines</c:v></c:pt></c:strCache></c:strRef></c:tx>";
         x+='<c:spPr><a:ln w="31750"><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill></a:ln></c:spPr>';
         x+='<c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill></a:ln></c:spPr></c:marker>';
         x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="t"/></c:dLbls>';
@@ -11524,8 +11748,22 @@ async fn trend_report_handler(
         x+='<c:axId val="5"/><c:axId val="6"/></c:lineChart>';
         x+='<c:catAx><c:axId val="5"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="6"/></c:catAx>';
         x+='<c:valAx><c:axId val="6"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:tickLblPos val="nextTo"/><c:crossAx val="5"/><c:crossBetween val="between"/></c:valAx>';
-        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Single-Metric Focus \u2014 pick a metric from the dropdown in cell N1 to switch this chart</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
+        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1400" b="1"/></a:pPr><a:r><a:rPr lang="en-US" sz="1400" b="1"/><a:t>Single-Metric Focus</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
         return x;
+      }}
+      function buildFocusSheet(drawRid){{
+        var ns='xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+        if(drawRid){{ns+=' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';}}
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet '+ns+'>';
+        x+='<cols><col min="1" max="1" width="11" customWidth="1"/><col min="2" max="2" width="20" customWidth="1"/></cols>';
+        x+='<sheetData><row r="1">';
+        x+='<c r="A1" t="inlineStr" s="1"><is><t>Metric:</t></is></c>';
+        x+='<c r="B1" t="inlineStr"><is><t>Code Lines</t></is></c>';
+        x+='<c r="D1" t="inlineStr"><is><t>&#8592; Pick a metric from the dropdown to update the chart below</t></is></c>';
+        x+='</row></sheetData>';
+        x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="B1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines"</formula1></dataValidation></dataValidations>';
+        if(drawRid){{x+='<drawing r:id="'+drawRid+'"/>';}}
+        return x+'</worksheet>';
       }}
       var hasChart=!!(chartRows&&chartRows.length);
       var nr=hasChart?chartRows.length:0;
@@ -11534,7 +11772,7 @@ async fn trend_report_handler(
       var styl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
       var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
       sheets.forEach(function(s,i){{ct+='<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}});
-      if(hasChart){{ct+='<Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/charts/chart3.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';}}
+      if(hasChart){{ct+='<Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/charts/chart3.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/drawings/drawing3.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';}}
       if(hasChart2){{ct+='<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';}}
       ct+='<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
       var dotrels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
@@ -11553,10 +11791,13 @@ async fn trend_report_handler(
       ];
       // Chart embedded directly in Scan History (sheet1); By Project is plain
       sheets.forEach(function(s,i){{
-        files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(buildSheet(s.headers,s.rows,(hasChart&&i===0)?'rId1':(hasChart2&&i===1)?'rId1':null,(hasChart&&i===0)))}});
+        var sx;
+        if(s.name==='Focus Chart'){{sx=buildFocusSheet(hasChart?'rId1':null);}}
+        else{{sx=buildSheet(s.headers,s.rows,(hasChart&&i===0)?'rId1':(hasChart2&&i===1)?'rId1':null,(hasChart&&i===0));}}
+        files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(sx)}});
       }});
       if(hasChart){{
-        var fromRow=nr+4,toRow=nr+36;
+        var fromRow=nr+4,toRow=nr+34;
         files.push({{name:'xl/worksheets/_rels/sheet1.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')}});
         var drx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         drx+='<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
@@ -11567,19 +11808,23 @@ async fn trend_report_handler(
         drx+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
         drx+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
         drx+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>';
-        drx+='</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>';
-        var focRow=toRow+2,focRowEnd=focRow+32;
-        drx+='<xdr:twoCellAnchor editAs="twoCell">';
-        drx+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
-        drx+='<xdr:to><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRowEnd+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
-        drx+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="4" name="Chart 3"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
-        drx+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
-        drx+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
-        drx+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId2"/>';
         drx+='</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>';
         files.push({{name:'xl/drawings/drawing1.xml',data:s2b(drx)}});
-        files.push({{name:'xl/drawings/_rels/drawing1.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart3.xml"/></Relationships>')}});
+        files.push({{name:'xl/drawings/_rels/drawing1.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>')}});
         files.push({{name:'xl/charts/chart1.xml',data:s2b(buildChartXML(chartRows))}});
+        files.push({{name:'xl/worksheets/_rels/sheet3.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing3.xml"/></Relationships>')}});
+        var drx3='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        drx3+='<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx3+='<xdr:twoCellAnchor editAs="twoCell">';
+        drx3+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
+        drx3+='<xdr:to><xdr:col>15</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>31</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx3+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="4" name="Chart 3"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
+        drx3+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
+        drx3+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
+        drx3+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>';
+        drx3+='</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>';
+        files.push({{name:'xl/drawings/drawing3.xml',data:s2b(drx3)}});
+        files.push({{name:'xl/drawings/_rels/drawing3.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart3.xml"/></Relationships>')}});
         files.push({{name:'xl/charts/chart3.xml',data:s2b(buildChartXML3(chartRows))}});
       }}
       if(hasChart2){{
@@ -11655,9 +11900,9 @@ async fn trend_report_handler(
       if(!svgEl){{alert('No chart to export yet.');return;}}
       var svgStr=new XMLSerializer().serializeToString(svgEl);
       var vb=svgEl.viewBox.baseVal,scale=2;
-      var headerH=84;
+      var headerH=84,footerH=36;
       var lw=(vb.width||900),lh=(vb.height||380);
-      var w=lw*scale,h=(lh+headerH)*scale;
+      var w=lw*scale,h=(lh+headerH+footerH)*scale;
       var blob=new Blob([svgStr],{{type:'image/svg+xml'}});
       var url=URL.createObjectURL(blob);
       var img=new Image();
@@ -11677,6 +11922,11 @@ async fn trend_report_handler(
         ctx.fillStyle=muted;ctx.font='700 12px '+FONT;ctx.textAlign='right';ctx.fillText('OxideSLOC Trend Report',lw-24,40);ctx.textAlign='left';
         ctx.strokeStyle=oxide;ctx.globalAlpha=0.55;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(24,74);ctx.lineTo(lw-24,74);ctx.stroke();ctx.globalAlpha=1;
         ctx.drawImage(img,0,headerH);
+        var fy=headerH+lh;
+        ctx.strokeStyle=oxide;ctx.globalAlpha=0.4;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(24,fy+9);ctx.lineTo(lw-24,fy+9);ctx.stroke();ctx.globalAlpha=1;
+        ctx.fillStyle=muted;ctx.font='600 11px '+FONT;ctx.textAlign='center';
+        ctx.fillText('\u00a9 2026 OxideSLOC  \u00b7  oxide-sloc v{version}  \u00b7  AGPL-3.0-or-later  \u00b7  github.com/oxide-sloc/oxide-sloc',lw/2,fy+27);
+        ctx.textAlign='left';
         URL.revokeObjectURL(url);
         var a=document.createElement('a');a.download='oxide-sloc-trend.png';a.href=canvas.toDataURL('image/png');a.click();
       }};
@@ -11692,8 +11942,9 @@ async fn trend_report_handler(
       var statsHtml=statsEl?statsEl.innerHTML:'';
       var tableEl=document.getElementById('data-table-wrap');
       var tableHtml=tableEl?tableEl.innerHTML:'';
-      var win=window.open('','_blank','width=1100,height=850');
-      if(!win){{alert('Pop-up blocked. Allow pop-ups for this site to export PDF.');return;}}
+      var btn=document.getElementById('export-pdf-btn');
+      var origBtn=btn?btn.innerHTML:'';
+      if(btn){{btn.disabled=true;btn.textContent='Generating PDF\u2026';}}
       var css='<style>'
         +'*{{box-sizing:border-box;}}'
         +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;margin:0;padding:30px 34px;background:#fff;}}'
@@ -11727,11 +11978,13 @@ async fn trend_report_handler(
         +'<div class="summary-strip">'+statsHtml+'</div>'
         +'<div class="rep-chart">'+svgStr+'</div>'
         +tableHtml
-        +'<div class="rep-foot">oxide-sloc v{version} \u2014 local code metrics workbench  \u00b7  Generated '+tp.date+'</div>'
+        +'<div class="rep-foot">\u00a9 2026 OxideSLOC \u00b7 oxide-sloc v{version} \u00b7 local code metrics workbench \u00b7 AGPL-3.0-or-later \u00b7 github.com/oxide-sloc/oxide-sloc \u00b7 Generated '+tp.date+'</div>'
         +'</body></html>';
-      win.document.open();win.document.write(doc);win.document.close();
-      win.focus();
-      setTimeout(function(){{try{{win.print();}}catch(e){{}}}},450);
+      fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-trend-report.pdf'}})}})
+        .then(function(r){{if(!r.ok)throw new Error('server returned '+r.status);return r.blob();}})
+        .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='oxide-sloc-trend-report.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},300);}})
+        .catch(function(e){{alert('PDF export failed: '+e.message+'. A Chromium-based browser (Chrome/Edge/Brave) must be installed on the server for PDF rendering.');}})
+        .finally(function(){{if(btn){{btn.disabled=false;btn.innerHTML=origBtn;}}}});
     }}
 
     ['y-sel','x-sel','scale-sel'].forEach(function(id){{
@@ -13090,6 +13343,46 @@ async fn test_metrics_handler(
       }};
     }}
 
+    // Cursor: pointer over chart data, default over empty chart area.
+    function chartCursor(e, els) {{
+      var t = e.native && e.native.target;
+      if (t) t.style.cursor = els.length ? 'pointer' : 'default';
+    }}
+    Chart.defaults.onHover = chartCursor; // applies to every chart on this page
+
+    // Plugin: draws % labels inside each doughnut slice.
+    var donutPctPlugin = {{
+      afterDatasetsDraw: function(chart) {{
+        var ctx = chart.ctx;
+        chart.data.datasets.forEach(function(ds, di) {{
+          var meta = chart.getDatasetMeta(di);
+          if (meta.hidden) return;
+          var total = 0;
+          for (var k = 0; k < ds.data.length; k++) total += (ds.data[k] || 0);
+          if (!total) return;
+          meta.data.forEach(function(arc, i) {{
+            if (arc.hidden) return;
+            var val = ds.data[i] || 0;
+            var pct = val / total * 100;
+            if (pct < 3) return;
+            var midAngle = (arc.startAngle + arc.endAngle) / 2;
+            var midR = (arc.innerRadius + arc.outerRadius) / 2;
+            var tx = arc.x + midR * Math.cos(midAngle);
+            var ty = arc.y + midR * Math.sin(midAngle);
+            ctx.save();
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = 'bold 13px Inter,ui-sans-serif,sans-serif';
+            ctx.shadowColor = 'rgba(0,0,0,0.45)';
+            ctx.shadowBlur = 3;
+            ctx.fillStyle = '#fff';
+            ctx.fillText(pct.toFixed(0) + '%', tx, ty);
+            ctx.restore();
+          }});
+        }});
+      }}
+    }};
+
     function makeTmOverlay(title, subtitle, h) {{
       var overlay = document.createElement('div');
       overlay.className = 'chart-modal-overlay';
@@ -13247,16 +13540,39 @@ async fn test_metrics_handler(
         }},
         options: {{
           responsive: true, maintainAspectRatio: false, cutout: '62%',
+          onHover: chartCursor,
           plugins: {{
-            legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }},
+            legend: {{ position: 'right', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16,
+              generateLabels: function(chart) {{
+                var ds = chart.data.datasets[0];
+                var tot = ds.data.reduce(function(a,b){{return a+(b||0);}}, 0);
+                return chart.data.labels.map(function(lbl, i) {{
+                  var val = ds.data[i] || 0;
+                  var pct = tot > 0 ? (val / tot * 100).toFixed(0) : '0';
+                  return {{
+                    text: lbl + ' ' + fmt(val) + ' (' + pct + '%)',
+                    fillStyle: ds.backgroundColor[i],
+                    strokeStyle: ds.borderColor,
+                    lineWidth: ds.borderWidth,
+                    hidden: false,
+                    index: i,
+                    datasetIndex: 0
+                  }};
+                }});
+              }}
+            }},
               onHover: function(e, item, leg) {{
                 var ch = leg.chart;
+                var t = e.native && e.native.target;
+                if (t) t.style.cursor = 'pointer';
                 ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
                 ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
                 ch.update();
               }},
               onLeave: function(e, item, leg) {{
                 var ch = leg.chart;
+                var t = e.native && e.native.target;
+                if (t) t.style.cursor = 'default';
                 ch.setActiveElements([]);
                 ch.tooltip.setActiveElements([], {{}});
                 ch.update('none');
@@ -13267,7 +13583,8 @@ async fn test_metrics_handler(
               return ' ' + fmtFull(v) + ' files (' + pct + '%)';
             }} }} }}
           }}
-        }}
+        }},
+        plugins: [donutPctPlugin]
       }});
       ALL_CHARTS.push(filesChart);
     }}
@@ -13332,16 +13649,21 @@ async fn test_metrics_handler(
           }},
           options: {{
             responsive: true, maintainAspectRatio: false, cutout: '62%',
+            onHover: chartCursor,
             plugins: {{
-              legend: {{ position: 'bottom', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16 }},
+              legend: {{ position: 'right', labels: {{ color: txtClr(), font: {{size:12}}, padding: 14 }},
                 onHover: function(e, item, leg) {{
                   var ch = leg.chart;
+                  var t = e.native && e.native.target;
+                  if (t) t.style.cursor = 'pointer';
                   ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
                   ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
                   ch.update();
                 }},
                 onLeave: function(e, item, leg) {{
                   var ch = leg.chart;
+                  var t = e.native && e.native.target;
+                  if (t) t.style.cursor = 'default';
                   ch.setActiveElements([]);
                   ch.tooltip.setActiveElements([], {{}});
                   ch.update('none');
@@ -13352,7 +13674,8 @@ async fn test_metrics_handler(
                 return ' ' + v + ' file' + (v !== 1 ? 's' : '') + ' (' + pct + '%)';
               }} }} }}
             }}
-          }}
+          }},
+          plugins: [donutPctPlugin]
         }});
         ALL_CHARTS.push(tierChart);
       }}
@@ -13779,7 +14102,11 @@ async fn test_metrics_handler(
 </body>
 </html>"#,
     );
-    Html(html).into_response()
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Html(html),
+    )
+        .into_response()
 }
 
 // ── Embeddable widget ─────────────────────────────────────────────────────────
@@ -14122,100 +14449,42 @@ fn generate_offline_index(
 
     let files_analyzed = run.per_file_records.len() as u64;
     let files_skipped = run.skipped_file_records.len() as u64;
-    let physical_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.total_physical_lines)
-        .sum::<u64>();
-    let code_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.code_lines)
-        .sum::<u64>();
-    let comment_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.comment_lines)
-        .sum::<u64>();
-    let blank_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.blank_lines)
-        .sum::<u64>();
-    let mixed_lines = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.mixed_lines_separate)
-        .sum::<u64>();
-    let functions = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.functions)
-        .sum::<u64>();
-    let classes = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.classes)
-        .sum::<u64>();
-    let variables = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.variables)
-        .sum::<u64>();
-    let imports = run
-        .totals_by_language
-        .iter()
-        .map(|r| r.imports)
-        .sum::<u64>();
+    let totals = sum_lang_totals(run);
 
-    let prev_sum = prev_entry.as_ref().map(|e| &e.summary);
-    let fmt_prev = |opt: Option<u64>| opt.map_or_else(|| "\u{2014}".into(), |v| v.to_string());
-    let prev_fa_str = fmt_prev(prev_sum.map(|s| s.files_analyzed));
-    let prev_fs_str = fmt_prev(prev_sum.map(|s| s.files_skipped));
-    let prev_pl_str = fmt_prev(prev_sum.map(|s| s.total_physical_lines));
-    let prev_cl_str = fmt_prev(prev_sum.map(|s| s.code_lines));
-    let prev_cml_str = fmt_prev(prev_sum.map(|s| s.comment_lines));
-    let prev_bl_str = fmt_prev(prev_sum.map(|s| s.blank_lines));
+    let DeltaFields {
+        prev_fa_str,
+        prev_fs_str,
+        prev_pl_str,
+        prev_cl_str,
+        prev_cml_str,
+        prev_bl_str,
+        delta_fa_str,
+        delta_fa_class,
+        delta_fs_str,
+        delta_fs_class,
+        delta_pl_str,
+        delta_pl_class,
+        delta_cl_str,
+        delta_cl_class,
+        delta_cml_str,
+        delta_cml_class,
+        delta_bl_str,
+        delta_bl_class,
+        delta_lines_added,
+        delta_lines_removed,
+        delta_lines_net_str,
+        delta_lines_net_class,
+    } = compute_delta_fields(
+        prev_entry.as_ref(),
+        &totals,
+        files_analyzed,
+        files_skipped,
+        scan_delta.as_ref(),
+    );
 
-    let (delta_fa_str, delta_fa_class) =
-        summary_delta(files_analyzed, prev_sum.map(|s| s.files_analyzed));
-    let (delta_fs_str, delta_fs_class) =
-        summary_delta(files_skipped, prev_sum.map(|s| s.files_skipped));
-    let (delta_pl_str, delta_pl_class) =
-        summary_delta(physical_lines, prev_sum.map(|s| s.total_physical_lines));
-    let (delta_cl_str, delta_cl_class) = summary_delta(code_lines, prev_sum.map(|s| s.code_lines));
-    let (delta_cml_str, delta_cml_class) =
-        summary_delta(comment_lines, prev_sum.map(|s| s.comment_lines));
-    let (delta_bl_str, delta_bl_class) =
-        summary_delta(blank_lines, prev_sum.map(|s| s.blank_lines));
-
-    let delta_lines_added: Option<i64> = scan_delta.as_ref().map(sum_added_code_lines);
-    let delta_lines_removed: Option<i64> = scan_delta.as_ref().map(sum_removed_code_lines);
-    let (delta_lines_net_str, delta_lines_net_class) =
-        match (delta_lines_added, delta_lines_removed) {
-            (Some(a), Some(r)) => {
-                let net = a - r;
-                (fmt_delta(net), delta_class(net).to_string())
-            }
-            _ => ("\u{2014}".to_string(), "na".to_string()),
-        };
-
-    let git_commit_url = run
-        .git_remote_url
-        .as_deref()
-        .zip(run.git_commit_long.as_deref())
-        .and_then(|(remote, sha)| remote_to_commit_url(remote, sha));
-    let git_branch_url = run
-        .git_remote_url
-        .as_deref()
-        .zip(run.git_branch.as_deref())
-        .and_then(|(remote, branch)| remote_to_branch_url(remote, branch));
-    let scan_performed_by = run.environment.ci_name.clone().unwrap_or_else(|| {
-        format!(
-            "{} / {}",
-            run.environment.initiator_username, run.environment.initiator_hostname
-        )
-    });
+    let git_commit_url = git_commit_url_for(run);
+    let git_branch_url = git_branch_url_for(run);
+    let scan_performed_by = scan_performed_by(run);
 
     // Convert absolute path to relative from run_dir (for file:// navigation).
     let make_rel = |p: Option<&Path>| -> Option<String> {
@@ -14250,26 +14519,7 @@ fn generate_offline_index(
         })
         .collect();
 
-    let lang_chart_json = {
-        let mut langs: Vec<&sloc_core::LanguageSummary> = run.totals_by_language.iter().collect();
-        langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
-        let entries: Vec<String> = langs
-            .into_iter()
-            .take(12)
-            .map(|l| {
-                let name = l.language.display_name()
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"");
-                format!(
-                    r#"{{"lang":"{}","code":{},"comments":{},"blanks":{},"physical":{},"functions":{},"classes":{},"variables":{},"imports":{},"files":{}}}"#,
-                    name, l.code_lines, l.comment_lines, l.blank_lines,
-                    l.total_physical_lines, l.functions, l.classes,
-                    l.variables, l.imports, l.files
-                )
-            })
-            .collect();
-        format!("[{}]", entries.join(","))
-    };
+    let lang_chart_json = build_lang_chart_json(run);
 
     let scan_config_rel =
         make_rel(scan_config_path).unwrap_or_else(|| format!("json/scan-config_{file_stem}.json"));
@@ -14289,15 +14539,15 @@ fn generate_offline_index(
             .collect(),
         files_analyzed,
         files_skipped,
-        physical_lines,
-        code_lines,
-        comment_lines,
-        blank_lines,
-        mixed_lines,
-        functions,
-        classes,
-        variables,
-        imports,
+        physical_lines: totals.physical_lines,
+        code_lines: totals.code_lines,
+        comment_lines: totals.comment_lines,
+        blank_lines: totals.blank_lines,
+        mixed_lines: totals.mixed_lines,
+        functions: totals.functions,
+        classes: totals.classes,
+        variables: totals.variables,
+        imports: totals.imports,
         html_url: make_rel(html_path),
         pdf_url: make_rel(pdf_path),
         json_url: make_rel(json_path),
@@ -14316,17 +14566,17 @@ fn generate_offline_index(
         prev_cml_str,
         prev_bl_str,
         delta_fa_str,
-        delta_fa_class: delta_fa_class.to_string(),
+        delta_fa_class,
         delta_fs_str,
-        delta_fs_class: delta_fs_class.to_string(),
+        delta_fs_class,
         delta_pl_str,
-        delta_pl_class: delta_pl_class.to_string(),
+        delta_pl_class,
         delta_cl_str,
-        delta_cl_class: delta_cl_class.to_string(),
+        delta_cl_class,
         delta_cml_str,
-        delta_cml_class: delta_cml_class.to_string(),
+        delta_cml_class,
         delta_bl_str,
-        delta_bl_class: delta_bl_class.to_string(),
+        delta_bl_class,
         delta_lines_added,
         delta_lines_removed,
         delta_lines_net_str,
@@ -14335,17 +14585,7 @@ fn generate_offline_index(
         delta_files_removed: scan_delta.as_ref().map(|d| d.files_removed),
         delta_files_modified: scan_delta.as_ref().map(|d| d.files_modified),
         delta_files_unchanged: scan_delta.as_ref().map(|d| d.files_unchanged),
-        delta_unmodified_lines: scan_delta.as_ref().map(|d| {
-            d.file_deltas
-                .iter()
-                .filter(|f| f.status == sloc_core::FileChangeStatus::Unchanged)
-                .map(|f| {
-                    #[allow(clippy::cast_sign_loss)]
-                    let n = f.current_code as u64;
-                    n
-                })
-                .sum()
-        }),
+        delta_unmodified_lines: scan_delta.as_ref().map(delta_unmodified_lines),
         git_branch: run.git_branch.clone(),
         git_branch_url,
         git_commit: run.git_commit_short.clone(),
@@ -14406,80 +14646,30 @@ fn generate_offline_index(
             .map_or(String::new(), |c| format!("{:.2}", c.ksloc)),
         cocomo_mode_label: run.cocomo.as_ref().map_or_else(
             || "Organic".to_string(),
-            |c| {
-                use sloc_core::CocomoMode;
-                match c.mode {
-                    CocomoMode::Organic => "Organic",
-                    CocomoMode::SemiDetached => "Semi-detached",
-                    CocomoMode::Embedded => "Embedded",
-                }
-                .to_string()
-            },
+            |c| cocomo_mode_label(c.mode).to_string(),
         ),
-        cocomo_mode_tooltip: run.cocomo.as_ref().map_or(String::new(), |c| {
-            use sloc_core::CocomoMode;
-            match c.mode {
-                CocomoMode::Organic => {
-                    "Organic: A small team working on a well-understood \
-                    project in a familiar environment with minimal external constraints. \
-                    Suited for internal tools, utilities, and projects with stable requirements. \
-                    Effort = 2.4 \u{00D7} KSLOC^1.05."
-                }
-                CocomoMode::SemiDetached => {
-                    "Semi-detached: A mixed team with varying experience \
-                    tackling a project with moderate novelty and some rigid constraints. \
-                    Typical for compilers, transaction systems, and batch processors. \
-                    Effort = 3.0 \u{00D7} KSLOC^1.12."
-                }
-                CocomoMode::Embedded => {
-                    "Embedded: Tight hardware, software, or operational \
-                    constraints requiring significant innovation and deep integration work. \
-                    Typical for real-time control systems and safety-critical software. \
-                    Effort = 3.6 \u{00D7} KSLOC^1.20."
-                }
-            }
-            .to_string()
-        }),
+        cocomo_mode_tooltip: run
+            .cocomo
+            .as_ref()
+            .map_or(String::new(), |c| cocomo_mode_tooltip(c.mode).to_string()),
         complexity_alert: 0,
         has_coverage_data: run.summary_totals.coverage_lines_found > 0,
-        cov_line_pct: if run.summary_totals.coverage_lines_found > 0 {
-            format!(
-                "{:.1}",
-                run.summary_totals.coverage_lines_hit as f64
-                    / run.summary_totals.coverage_lines_found as f64
-                    * 100.0
-            )
-        } else {
-            String::new()
-        },
-        cov_fn_pct: if run.summary_totals.coverage_functions_found > 0 {
-            format!(
-                "{:.1}",
-                run.summary_totals.coverage_functions_hit as f64
-                    / run.summary_totals.coverage_functions_found as f64
-                    * 100.0
-            )
-        } else {
-            String::new()
-        },
-        cov_branch_pct: if run.summary_totals.coverage_branches_found > 0 {
-            format!(
-                "{:.1}",
-                run.summary_totals.coverage_branches_hit as f64
-                    / run.summary_totals.coverage_branches_found as f64
-                    * 100.0
-            )
-        } else {
-            String::new()
-        },
-        cov_lines_summary: if run.summary_totals.coverage_lines_found > 0 {
-            format!(
-                "{} / {}",
-                run.summary_totals.coverage_lines_hit, run.summary_totals.coverage_lines_found
-            )
-        } else {
-            String::new()
-        },
+        cov_line_pct: cov_pct_str(
+            run.summary_totals.coverage_lines_hit,
+            run.summary_totals.coverage_lines_found,
+        ),
+        cov_fn_pct: cov_pct_str(
+            run.summary_totals.coverage_functions_hit,
+            run.summary_totals.coverage_functions_found,
+        ),
+        cov_branch_pct: cov_pct_str(
+            run.summary_totals.coverage_branches_hit,
+            run.summary_totals.coverage_branches_found,
+        ),
+        cov_lines_summary: cov_lines_summary_str(
+            run.summary_totals.coverage_lines_hit,
+            run.summary_totals.coverage_lines_found,
+        ),
     };
 
     if let Ok(html) = template.render() {
@@ -27509,27 +27699,33 @@ struct CompareSelectTemplate {
         dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
         var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
         var tfTotal=sd.fm+sd.fa+sd.fr+sd.fu;
-        var css='body{margin:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}'+
-          '.hdr{background:#1a2035;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:flex-start;}'+
-          '.brand{font-size:13px;font-weight:800;color:#c45c10;letter-spacing:.06em;}'+
-          '.title{font-size:20px;font-weight:700;margin:3px 0 2px;line-height:1.2;}'+
-          '.proj{font-size:12px;color:#99aabb;margin-top:3px;}'+
-          '.hr{font-size:11px;color:#8899aa;text-align:right;line-height:1.9;}'+
-          '.body{padding:18px 24px;}'+
-          '.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}'+
-          '.sc{border:1px solid #ddd;border-radius:8px;padding:10px 12px;}'+
+        var css='body{margin:0;padding:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}'+
+          '.pdf-header{position:fixed;top:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.pdf-footer{position:fixed;bottom:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.page-hdr{background:#fff;border-bottom:2px solid #1a2035;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;}'+
+          '.ph-brand{font-size:14px;font-weight:900;color:#1a2035;white-space:nowrap;}'+
+          '.ph-brand em{color:#c45c10;font-style:normal;}'+
+          '.ph-title{font-size:14px;font-weight:600;color:#555;}'+
+          '.ph-date{font-size:11px;color:#888;text-align:right;white-space:nowrap;}'+
+          '.info-bar{background:#1a2035;color:#fff;padding:7px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.ib-name{font-size:13px;font-weight:800;color:#fff;}'+
+          '.ib-path{font-size:10px;color:#8899aa;margin-top:2px;}'+
+          '.ib-right{font-size:11px;color:#8899aa;text-align:right;line-height:1.7;}'+
+          '.ftr{background:#1a2035;color:#7a8b9c;font-size:10px;padding:5px 14px;display:flex;justify-content:space-between;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.body{padding:8px 14px;margin-top:76px;margin-bottom:34px;}'+
+          '.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}'+
+          '.sc{border:1px solid #ddd;border-radius:8px;padding:8px 10px;}'+
           '.sv{font-size:18px;font-weight:900;color:#c45c10;}'+
           '.sl{font-size:10px;font-weight:700;text-transform:uppercase;color:#888;margin-top:3px;letter-spacing:.06em;}'+
-          '.meta{background:#f5f2ee;border:1px solid #e5e0d8;border-radius:6px;padding:12px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:center;}'+
+          '.meta{background:#f5f2ee;border:1px solid #e5e0d8;border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:center;}'+
           '.meta>div{flex:1 1 0;}'+
-          '.ml{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.06em;}.mv{font-weight:700;margin-top:4px;font-size:15px;}'+
-          '.sec{margin-bottom:18px;}'+
-          '.sh{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;}'+
+          '.ml{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.06em;}.mv{font-weight:700;margin-top:3px;font-size:15px;}'+
+          '.sec{margin-bottom:10px;}'+
+          '.sh{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           'table{width:100%;border-collapse:collapse;font-size:12px;}'+
-          'th{background:#1a2035;color:#fff;padding:5px 10px;font-size:11px;font-weight:700;text-align:left;letter-spacing:.03em;}'+
-          'td{border-bottom:1px solid #eee;padding:5px 10px;vertical-align:middle;}'+
-          'tr:nth-child(even) td{background:#faf8f6;}'+
-          '.ftr{background:#1a2035;color:#7a8b9c;font-size:10px;padding:7px 24px;display:flex;justify-content:space-between;margin-top:16px;}';
+          'th{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-align:left;letter-spacing:.03em;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          'td{border-bottom:1px solid #eee;padding:3px 8px;vertical-align:middle;}'+
+          'tr:nth-child(even) td{background:#faf8f6;}';
         var fileRows=dr.slice(0,200).map(function(r){
           var st=r[2]||'',ss=st==='added'?'color:#2a6846;font-weight:700':st==='removed'?'color:#b23030;font-weight:700':'';
           return '<tr><td style="word-break:break-all">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td>'+
@@ -27541,8 +27737,15 @@ struct CompareSelectTemplate {
         var more=dr.length>200?'<tr><td colspan="6" style="color:#888;font-style:italic;text-align:center">\u2026 '+fmtN(dr.length-200)+' more files \u2014 export to XLS for full list</td></tr>':'';
         var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
         return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC \u2014 Scan Delta</title><style>'+css+'</style></head><body>'+
-          '<div class="hdr"><div><div class="brand">oxide-sloc</div><div class="title">Scan Delta</div><div class="proj">'+esc(projName)+'</div></div>'+
-          '<div class="hr">'+esc(_blabel)+'<br>'+esc(_clabel)+'<br>Generated: '+esc(now)+'</div></div>'+
+          '<div class="pdf-header">'+
+          '<div class="page-hdr"><div class="ph-brand"><em>oxide</em>-sloc</div><div class="ph-title">Scan Delta</div><div class="ph-date">'+esc(now)+'</div></div>'+
+          '<div class="info-bar"><div><div class="ib-name">'+esc(projName)+'</div><div class="ib-path">'+esc(proj)+'</div></div>'+
+          '<div class="ib-right">Baseline: '+esc(_blabel)+'<br>Current: '+esc(_clabel)+'</div></div>'+
+          '</div>'+
+          '<div class="pdf-footer"><div class="ftr">'+
+          '<span>oxide-sloc v{{ version }} | AGPL-3.0-or-later</span><span>Scan Delta Report</span>'+
+          '<span>'+esc(sd.bid)+' \u2192 '+esc(sd.cid)+'</span>'+
+          '</div></div>'+
           '<div class="body">'+
           '<div class="sg">'+
           '<div class="sc"><div class="sv">'+delt(sd.cd)+'</div><div class="sl">Code Lines \u0394</div></div>'+
@@ -27564,8 +27767,6 @@ struct CompareSelectTemplate {
           '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code \u0394</th>'+
           '</tr></thead><tbody>'+fileRows+more+'</tbody></table></div>'+
           '</div>'+
-          '<div class="ftr"><span>oxide-sloc v{{ version }}</span><span>Scan Delta Report</span>'+
-          '<span>'+esc(sd.bid)+' \u2192 '+esc(sd.cid)+'</span></div>'+
           '</body></html>';
       }
       function doDeltaPdf(btn) {
@@ -32051,7 +32252,7 @@ mod tests_private {
     fn auth_lockout_remaining_secs_no_entry_returns_zero() {
         use std::net::IpAddr;
         use std::str::FromStr;
-        let limiter = IpRateLimiter::new(Duration::from_secs(60), 100, 5, Duration::from_secs(300));
+        let limiter = IpRateLimiter::new(Duration::from_mins(1), 100, 5, Duration::from_mins(5));
         let ip = IpAddr::from_str("192.168.1.1").unwrap();
         assert_eq!(limiter.auth_lockout_remaining_secs(ip), 0);
     }
@@ -32061,7 +32262,7 @@ mod tests_private {
         use std::net::IpAddr;
         use std::str::FromStr;
         let limiter = IpRateLimiter::new(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             100,
             1, // 1 failure triggers lockout
             Duration::from_millis(1),
@@ -32079,10 +32280,10 @@ mod tests_private {
         use std::net::IpAddr;
         use std::str::FromStr;
         let limiter = IpRateLimiter::new(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             100,
             2, // 2 failures triggers lockout
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
         );
         let ip = IpAddr::from_str("192.168.1.3").unwrap();
         limiter.record_auth_failure(ip);

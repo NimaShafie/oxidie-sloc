@@ -36,7 +36,9 @@ fn validate_confluence_url(url: &str) -> Result<(), String> {
         ));
     }
     // Extract the host portion (between "://" and the first "/" or end of string).
-    let after_scheme = lower.find("://").map(|i| &lower[i + 3..]).unwrap_or(&lower);
+    let after_scheme = lower
+        .find("://")
+        .map_or(lower.as_str(), |i| &lower[i + 3..]);
     // Strip credentials (user:pass@host) if present.
     let after_creds = after_scheme
         .find('@')
@@ -45,11 +47,10 @@ fn validate_confluence_url(url: &str) -> Result<(), String> {
     let authority = after_creds.split('/').next().unwrap_or(after_creds);
     // Strip the port. For bracketed IPv6 literals ("[::1]:8090") keep the bracketed
     // host intact rather than splitting on the IPv6 colons.
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        stripped.split(']').next().unwrap_or(stripped)
-    } else {
-        authority.split(':').next().unwrap_or(authority)
-    };
+    let host = authority.strip_prefix('[').map_or_else(
+        || authority.split(':').next().unwrap_or(authority),
+        |stripped| stripped.split(']').next().unwrap_or(stripped),
+    );
 
     if is_blocked_confluence_host(host) {
         return Err(format!(
@@ -625,6 +626,12 @@ pub async fn api_test_confluence(State(state): State<AppState>) -> Response {
     }
 }
 
+// Linear chain of request-validation guard clauses, each returning a distinct JSON error
+// response; splitting it would scatter the validation flow without reducing complexity.
+#[allow(
+    clippy::too_many_lines,
+    reason = "sequential request-validation guard clauses"
+)]
 pub async fn api_post_to_confluence(
     State(state): State<AppState>,
     Json(body): Json<PostToConfluenceRequest>,
