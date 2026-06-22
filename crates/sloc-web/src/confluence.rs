@@ -19,6 +19,87 @@ use sloc_report::{render_confluence_storage, render_confluence_wiki_markup};
 
 use super::{recover_artifacts_from_registry, AppState};
 
+// ── URL validation ────────────────────────────────────────────────────────────
+
+/// Validate a Confluence base URL to prevent SSRF.
+/// Only https:// and http:// are accepted; private/reserved IP ranges and
+/// cloud metadata endpoints are blocked regardless of scheme.
+fn validate_confluence_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(()); // Empty URL: no connection will be made, save is a clear/reset.
+    }
+    let lower = url.to_lowercase();
+    if !lower.starts_with("https://") && !lower.starts_with("http://") {
+        return Err(format!(
+            "Confluence URL must start with https:// or http:// (got {url:?})"
+        ));
+    }
+    // Extract the host portion (between "://" and the first "/" or end of string).
+    let after_scheme = lower.find("://").map(|i| &lower[i + 3..]).unwrap_or(&lower);
+    // Strip credentials (user:pass@host) if present.
+    let after_creds = after_scheme
+        .find('@')
+        .map_or(after_scheme, |i| &after_scheme[i + 1..]);
+    // Strip path/query, leaving host[:port] (or "[ipv6]:port").
+    let authority = after_creds.split('/').next().unwrap_or(after_creds);
+    // Strip the port. For bracketed IPv6 literals ("[::1]:8090") keep the bracketed
+    // host intact rather than splitting on the IPv6 colons.
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+
+    if is_blocked_confluence_host(host) {
+        return Err(format!(
+            "Confluence URL host {host:?} resolves to a private or reserved address; \
+             SSRF protection prevents connecting to it"
+        ));
+    }
+    Ok(())
+}
+
+/// Cloud-metadata / instance-data hostnames that must never be reachable.
+const BLOCKED_METADATA_HOSTNAMES: &[&str] = &[
+    "metadata.google.internal",
+    "metadata.internal",
+    "instance-data",
+];
+
+/// Returns true when `host` is an SSRF-sensitive loopback, link-local,
+/// unspecified, multicast, or cloud-metadata target. RFC 1918 / IPv6 unique-local
+/// private ranges are intentionally NOT blocked, so self-hosted Confluence
+/// Server/DC on a corporate network remains reachable. IP literals are parsed
+/// (not prefix-matched) so hostnames like `fd-corp.com` are never false-blocked.
+fn is_blocked_confluence_host(host: &str) -> bool {
+    let h = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_lowercase();
+    if h == "localhost" || BLOCKED_METADATA_HOSTNAMES.contains(&h.as_str()) {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.octets() == [100, 100, 100, 200] // Alibaba Cloud metadata
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+        Err(_) => false,
+    }
+}
+
 // ── config structs ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -467,7 +548,15 @@ pub async fn api_get_confluence_config(State(state): State<AppState>) -> impl In
 pub async fn api_save_confluence_config(
     State(state): State<AppState>,
     Json(body): Json<SaveConfluenceConfig>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(msg) = validate_confluence_url(&body.base_url) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response();
+    }
+
     let tier = match body.tier.as_deref() {
         Some("server") => ConfluenceTier::Server,
         _ => ConfluenceTier::Cloud,
@@ -497,7 +586,7 @@ pub async fn api_save_confluence_config(
     });
     let _ = store.save(&state.confluence_path);
     drop(store);
-    Json(serde_json::json!({ "ok": true }))
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 pub async fn api_test_confluence(State(state): State<AppState>) -> Response {
@@ -512,6 +601,16 @@ pub async fn api_test_confluence(State(state): State<AppState>) -> Response {
         )
             .into_response();
     };
+    // Defense in depth: re-validate the stored URL before any outbound request,
+    // in case the config was written to disk directly, bypassing save-time validation.
+    if let Err(msg) = validate_confluence_url(&config.base_url) {
+        tracing::warn!("Confluence connection test blocked: {msg}");
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "ok": false, "error": msg })),
+        )
+            .into_response();
+    }
     let client = ConfluenceClient::new(&config);
     match client.test_connection().await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -611,6 +710,18 @@ pub async fn api_post_to_confluence(
         }
     };
 
+    // Defense in depth: re-validate the stored URL before publishing.
+    if let Err(msg) = validate_confluence_url(&config.base_url) {
+        tracing::warn!(
+            "Confluence publish blocked for run '{}': {msg}",
+            body.run_id
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "ok": false, "error": msg })),
+        )
+            .into_response();
+    }
     let client = ConfluenceClient::new(&config);
     let report_url = body.report_url.as_deref();
 
@@ -692,6 +803,11 @@ pub async fn maybe_auto_post_confluence(
     }
     let Some(config) = config else { return };
 
+    // Defense in depth: re-validate the stored URL before auto-posting.
+    if let Err(msg) = validate_confluence_url(&config.base_url) {
+        tracing::warn!("Confluence auto-post skipped for schedule {sched_id}: {msg}");
+        return;
+    }
     let client = ConfluenceClient::new(&config);
     let title = format!(
         "OxideSLOC — {} ({})",
@@ -705,7 +821,7 @@ pub async fn maybe_auto_post_confluence(
     let report_url = format!("{proto}://{bind}/runs/result/{run_id}");
 
     if let Err(e) = post_to_confluence(&client, run, &title, Some(&report_url)).await {
-        eprintln!("[sloc-confluence] auto-post failed for schedule {sched_id}: {e:#}");
+        tracing::warn!("Confluence auto-post failed for schedule {sched_id}: {e:#}");
     }
 }
 
@@ -733,6 +849,65 @@ fn urlencoding_encode(s: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    // ── validate_confluence_url / is_blocked_confluence_host ──────────────────
+
+    #[test]
+    fn validate_confluence_url_empty_is_ok() {
+        // Empty URL = clear/reset, allowed.
+        assert!(validate_confluence_url("").is_ok());
+        assert!(validate_confluence_url("   ").is_ok());
+    }
+
+    #[test]
+    fn validate_confluence_url_public_https_ok() {
+        assert!(validate_confluence_url("https://mycompany.atlassian.net").is_ok());
+        assert!(validate_confluence_url("https://confluence.example.com/wiki").is_ok());
+    }
+
+    #[test]
+    fn validate_confluence_url_internal_private_ok() {
+        // Self-hosted Confluence on a corporate network must remain reachable.
+        assert!(validate_confluence_url("https://confluence.corp.internal").is_ok());
+        assert!(validate_confluence_url("https://10.0.0.5:8090").is_ok());
+        assert!(validate_confluence_url("http://192.168.1.10/wiki").is_ok());
+    }
+
+    #[test]
+    fn validate_confluence_url_rejects_non_http_scheme() {
+        assert!(validate_confluence_url("file:///etc/passwd").is_err());
+        assert!(validate_confluence_url("gopher://x/").is_err());
+    }
+
+    #[test]
+    fn validate_confluence_url_rejects_metadata_and_loopback() {
+        assert!(validate_confluence_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(validate_confluence_url("http://metadata.google.internal/").is_err());
+        assert!(validate_confluence_url("http://100.100.100.200/").is_err());
+        assert!(validate_confluence_url("http://127.0.0.1:8090/").is_err());
+        assert!(validate_confluence_url("http://localhost/wiki").is_err());
+        assert!(validate_confluence_url("http://[::1]/wiki").is_err());
+    }
+
+    #[test]
+    fn is_blocked_confluence_host_no_false_positive_on_fc_fd_names() {
+        // Regression: hostname prefix "fc"/"fd" must NOT be treated as IPv6 ULA.
+        assert!(!is_blocked_confluence_host("fc.example.com"));
+        assert!(!is_blocked_confluence_host("fd-corp.example.com"));
+        assert!(!is_blocked_confluence_host("fe80-server.example.com"));
+    }
+
+    #[test]
+    fn is_blocked_confluence_host_blocks_ipv6_link_local_literal() {
+        assert!(is_blocked_confluence_host("fe80::1"));
+        assert!(is_blocked_confluence_host("[fe80::1]"));
+    }
+
+    #[test]
+    fn is_blocked_confluence_host_allows_ipv6_ula_literal() {
+        // IPv6 unique-local is the private-range equivalent — allowed.
+        assert!(!is_blocked_confluence_host("fd12:3456:789a::1"));
+    }
 
     // ── ConfluenceTier default ────────────────────────────────────────────────
 

@@ -10,7 +10,7 @@ use axum::{
 use http_body_util::BodyExt;
 use sloc_web::{
     make_test_router, make_test_router_exhausted_semaphore, make_test_router_server_mode,
-    make_test_router_tight_rate_limit, make_test_router_with_key,
+    make_test_router_tight_rate_limit, make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
 };
 use tower::ServiceExt;
 
@@ -41,6 +41,27 @@ async fn get(uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
 async fn get_shared(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     let resp = app
         .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
+}
+
+/// GET against a server-mode router (includes auth header for TEST_SERVER_MODE_API_KEY).
+async fn get_server_shared(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let resp = app
+        .oneshot(
+            Request::get(uri)
+                .header(
+                    "Authorization",
+                    format!("Bearer {TEST_SERVER_MODE_API_KEY}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = resp.status();
@@ -3289,7 +3310,7 @@ async fn locate_reports_dir_with_real_dir_not_5xx() {
 #[tokio::test]
 async fn server_mode_trend_reports_shows_locked_watched_bar() {
     let app = make_test_router_server_mode();
-    let (status, _, body) = get_shared(app, "/trend-reports").await;
+    let (status, _, body) = get_server_shared(app, "/trend-reports").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         body.contains("Network Server mode")
@@ -3303,7 +3324,7 @@ async fn server_mode_trend_reports_shows_locked_watched_bar() {
 #[tokio::test]
 async fn server_mode_test_metrics_renders_html() {
     let app = make_test_router_server_mode();
-    let (status, headers, body) = get_shared(app, "/test-metrics").await;
+    let (status, headers, body) = get_server_shared(app, "/test-metrics").await;
     assert_eq!(status, StatusCode::OK);
     assert!(has_csp(&headers));
     assert!(
@@ -3344,7 +3365,7 @@ async fn server_mode_preview_rejects_arbitrary_path() {
 #[tokio::test]
 async fn server_mode_view_reports_renders_html() {
     let app = make_test_router_server_mode();
-    let (status, _, body) = get_shared(app, "/view-reports").await;
+    let (status, _, body) = get_server_shared(app, "/view-reports").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         body.contains("<html"),
@@ -3356,7 +3377,7 @@ async fn server_mode_view_reports_renders_html() {
 async fn server_mode_history_handler_with_error_query_param() {
     let app = make_test_router_server_mode();
     // history_handler has an error query param branch
-    let (status, _, body) = get_shared(app, "/view-reports?error=scan_failed").await;
+    let (status, _, body) = get_server_shared(app, "/view-reports?error=scan_failed").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         body.contains("<html"),
@@ -4400,7 +4421,7 @@ async fn server_mode_watched_dirs_add_not_5xx() {
 #[tokio::test]
 async fn server_mode_compare_scans_returns_html() {
     let app = make_test_router_server_mode();
-    let (status, _, body) = get_shared(app, "/compare-scans").await;
+    let (status, _, body) = get_server_shared(app, "/compare-scans").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         body.contains("<html"),

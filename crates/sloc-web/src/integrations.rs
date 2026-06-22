@@ -444,7 +444,11 @@ use super::{AppState, CspNonce};
       el.innerHTML = list.map(function (s) {
         var badge = s.kind === 'webhook' ? '<span class="sched-badge badge-webhook">Webhook</span>' : '<span class="sched-badge badge-poll">Poll</span>';
         var extra = s.interval_secs ? ' \u00b7 every ' + s.interval_secs + 's' : (s.provider && s.provider !== 'any' ? ' \u00b7 ' + esc(s.provider) : '');
-        var secret = s.webhook_secret ? '<div>Secret: <span class="sched-secret">' + esc(s.webhook_secret) + '</span></div>' : '';
+        var rawSecret = s.webhook_secret || '';
+        var maskedSecret = rawSecret.length > 4
+          ? '••••••••' + esc(rawSecret.slice(-4))
+          : rawSecret.length > 0 ? '••••' : '';
+        var secret = maskedSecret ? '<div>Secret: <span class="sched-secret">' + maskedSecret + '</span></div>' : '';
         var last = s.last_scan_at ? 'Last scanned: ' + new Date(s.last_scan_at).toLocaleString() : 'Not yet scanned';
         return '<div class="sched-item">'
           + '<div class="sched-header">' + badge + '<span class="sched-label">' + esc(s.label) + '</span></div>'

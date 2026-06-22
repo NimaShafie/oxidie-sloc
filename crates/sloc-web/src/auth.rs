@@ -31,6 +31,41 @@ pub(crate) async fn require_api_key(
     next: Next,
 ) -> Response {
     if state.api_keys.is_empty() {
+        // In server mode with no API key configured every protected route would
+        // be publicly accessible. Fail closed so operators must opt in.
+        // Desktop mode (server_mode = false) keeps the open-by-default behaviour.
+        if state.server_mode {
+            tracing::warn!(
+                event = "auth_unconfigured_server_mode",
+                path = %req.uri().path(),
+                "Rejected request: server mode requires SLOC_API_KEY or SLOC_API_KEYS"
+            );
+            if is_browser_request(&req) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Html(
+                        r#"<!doctype html><html><head><meta charset="utf-8">
+<title>Authentication Required — OxideSLOC</title>
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}
+h1{color:#b85d33}p{line-height:1.6}code{background:#f3e9e0;padding:2px 6px;border-radius:4px}</style>
+</head><body>
+<h1>Authentication not configured</h1>
+<p>This server is running in network mode but <code>SLOC_API_KEY</code> is not set.</p>
+<p>Restart with <code>SLOC_API_KEY=&lt;secret&gt;</code> or <code>SLOC_API_KEYS=&lt;k1,k2&gt;</code>
+to enable access.</p>
+</body></html>"#
+                            .to_owned(),
+                    ),
+                )
+                    .into_response();
+            }
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
+                "503 Service Unavailable — set SLOC_API_KEY to enable server-mode access\n",
+            )
+                .into_response();
+        }
         return next.run(req).await;
     }
 
@@ -331,6 +366,45 @@ pub(crate) async fn auth_login_post(
         resp.headers_mut().insert(header::LOCATION, location);
         resp
     }
+}
+
+// ── Logout handler ────────────────────────────────────────────────────────────
+
+/// POST /auth/logout — invalidates the current session cookie immediately.
+/// Redirects to /auth/login (or / when no API key is configured).
+pub(crate) async fn auth_logout(State(state): State<AppState>, req: Request<Body>) -> Response {
+    // Remove the session from the server-side store so the token is dead instantly.
+    if let Some(tok) = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_session_cookie)
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions.remove(tok);
+    }
+
+    // Expire the cookie on the client side regardless.
+    let expire_cookie =
+        "sloc_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+
+    let redirect_to = if state.api_keys.is_empty() {
+        "/"
+    } else {
+        "/auth/login"
+    };
+    let location = HeaderValue::from_str(redirect_to).unwrap_or(HeaderValue::from_static("/"));
+    let cookie_hv = HeaderValue::from_str(expire_cookie)
+        .unwrap_or_else(|_| HeaderValue::from_static("sloc_session=; Path=/; HttpOnly; Max-Age=0"));
+
+    let mut resp = StatusCode::FOUND.into_response();
+    resp.headers_mut().insert(header::LOCATION, location);
+    resp.headers_mut().insert(header::SET_COOKIE, cookie_hv);
+    tracing::info!(event = "auth_logout", "Session invalidated via logout");
+    resp
 }
 
 #[cfg(test)]

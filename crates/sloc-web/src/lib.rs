@@ -653,7 +653,10 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/upload-tarball",
-            post(upload_tarball_handler).layer(DefaultBodyLimit::disable()),
+            // Limit to SLOC_MAX_TARBALL_MB (default 2 048 MB) at the HTTP layer.
+            // The handler also enforces this limit during streaming so both layers agree.
+            post(upload_tarball_handler)
+                .layer(DefaultBodyLimit::max(tarball_http_body_limit_bytes())),
         )
         .route("/locate-report", post(locate_report_handler))
         .route("/locate-reports-dir", post(locate_reports_dir_handler))
@@ -772,6 +775,7 @@ fn build_router(state: AppState) -> Router {
         .route("/static/chart-report.js", get(report_chart_js_handler))
         .route("/auth/login", get(auth::auth_login_get))
         .route("/auth/login", post(auth::auth_login_post))
+        .route("/auth/logout", post(auth::auth_logout))
         // Webhook receivers are public (no API-key auth) — they use per-schedule HMAC secrets.
         // Explicit 512 KB body cap: generous for any real webhook payload, blocks body-flood attacks.
         .route(
@@ -795,6 +799,10 @@ fn build_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state)
 }
+
+/// Bearer token used by `make_test_router_server_mode()` test routers.
+/// Tests that exercise server-mode paths must include this key in their requests.
+pub const TEST_SERVER_MODE_API_KEY: &str = "oxide-sloc-test-server-mode-internal-key";
 
 /// Build a minimal router suitable for integration tests — no TCP binding, no API keys, no TLS.
 pub fn make_test_router() -> Router {
@@ -889,7 +897,9 @@ pub fn make_test_router_server_mode() -> Router {
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode: true,
         tls_enabled: false,
-        api_keys: Arc::new(vec![]),
+        api_keys: Arc::new(vec![secrecy::SecretBox::new(Box::new(
+            TEST_SERVER_MODE_API_KEY.to_owned(),
+        ))]),
         rate_limiter: Arc::new(IpRateLimiter::new(
             Duration::from_mins(1),
             600,
@@ -1219,6 +1229,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     };
 
     restart_poll_schedules(&state).await;
+    warn_insecure_gitlab_webhooks(&state).await;
 
     // Restart auto-cleanup task if a policy was previously saved and is enabled.
     {
@@ -2278,7 +2289,6 @@ async fn write_upload_files(
 ) -> Result<(usize, Option<PathBuf>), Response> {
     let mut total_bytes: usize = 0;
     let mut project_root: Option<PathBuf> = None;
-    let mut traversal_attempts: usize = 0;
 
     for entry in files {
         let rel = std::path::Path::new(&entry.path);
@@ -2286,21 +2296,19 @@ async fn write_upload_files(
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            traversal_attempts += 1;
-            if traversal_attempts >= 5 {
-                let _ = tokio::fs::remove_dir_all(staging).await;
-                tracing::warn!(
-                    event = "upload_path_traversal",
-                    upload_id = %upload_id,
-                    "Upload rejected: repeated path traversal attempts detected"
-                );
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Upload rejected"})),
-                )
-                    .into_response());
-            }
-            continue;
+            // Reject the entire upload on the first path traversal attempt.
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            tracing::warn!(
+                event = "upload_path_traversal",
+                upload_id = %upload_id,
+                path = %entry.path,
+                "Upload rejected: path traversal component detected"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Upload rejected: path traversal detected"})),
+            )
+                .into_response());
         }
 
         if let Err(resp) =
@@ -2330,6 +2338,17 @@ fn parse_tarball_size_caps() -> (u64, u64) {
         * 1024
         * 1024;
     (compressed, decompressed)
+}
+
+/// HTTP-layer body limit for tarball uploads, matching SLOC_MAX_TARBALL_MB.
+/// Applied via DefaultBodyLimit::max() at the route layer so oversized requests
+/// are rejected before the streaming handler is invoked.
+fn tarball_http_body_limit_bytes() -> usize {
+    std::env::var("SLOC_MAX_TARBALL_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2048)
+        .saturating_mul(1024 * 1024)
 }
 
 /// Stream `body` into `dest_path`, enforcing `max_bytes`.
@@ -2621,10 +2640,11 @@ async fn upload_file_handler(
 /// project root. The two size fields power the "Original / Compressed project size" display in the
 /// web UI.
 ///
-/// `DefaultBodyLimit::disable()` is applied per-route so there is no hard size cap at the HTTP
-/// layer; the only limit is the disk space on the server. The browser-side JS creates the archive
-/// one file at a time using the native `CompressionStream('gzip')` API so browser RAM usage stays
-/// bounded regardless of project size.
+/// `DefaultBodyLimit::max(SLOC_MAX_TARBALL_MB)` is applied per-route (default 2 048 MB) so
+/// oversized requests are rejected at the HTTP layer; the streaming handler enforces the same
+/// cap during decompression. The browser-side JS creates the archive one file at a time using
+/// the native `CompressionStream('gzip')` API so browser RAM usage stays bounded regardless of
+/// project size.
 /// Guards against zip-bomb archives: errors once more than `remaining` bytes have been
 /// decompressed. Wraps any `std::io::Read` source.
 struct SizeLimitReader<R> {
@@ -5121,7 +5141,15 @@ fn render_result_page(
     let ctx = &artifacts.result_context;
     let prev_entry = &ctx.prev_entry;
     let prev_scan_count = ctx.prev_scan_count;
-    let project_path = &ctx.project_path;
+    // `result_context` is empty when the run is recovered from the scan registry (e.g. reopening a
+    // past report). Fall back to the scanned roots recorded in the run JSON so the "Project path"
+    // field is never blank.
+    let project_path_owned = if ctx.project_path.is_empty() {
+        run.input_roots.join(", ")
+    } else {
+        ctx.project_path.clone()
+    };
+    let project_path = &project_path_owned;
 
     let scan_delta = prev_entry.as_ref().and_then(|prev| {
         prev.json_path
@@ -8428,6 +8456,54 @@ fn fmt_comma(n: i64) -> String {
     format!("{sign}{out}")
 }
 
+/// Insert thousands separators into the integer portion of a number's textual form.
+///
+/// Works for plain integers (`"266148"` → `"266,148"`), signed values
+/// (`"+1234"` → `"+1,234"`), and pre-formatted decimal strings
+/// (`"16608.28"` → `"16,608.28"`). Any input whose integer part is not all
+/// ASCII digits (e.g. `"—"`, `"No prior scan"`) is returned unchanged.
+fn group_thousands(s: &str) -> String {
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'-') => ("-", &s[1..]),
+        Some(b'+') => ("+", &s[1..]),
+        _ => ("", s),
+    };
+    let (int_part, frac_part) = match rest.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (rest, None),
+    };
+    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return s.to_string();
+    }
+    let bytes = int_part.as_bytes();
+    let len = bytes.len();
+    let mut grouped = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(b as char);
+    }
+    match frac_part {
+        Some(f) => format!("{sign}{grouped}.{f}"),
+        None => format!("{sign}{grouped}"),
+    }
+}
+
+/// Custom Askama filters available to templates in this crate.
+mod filters {
+    use askama::{Result, Values};
+
+    /// `{{ value|commas }}` — render any `Display` value with thousands separators.
+    ///
+    /// Integers and pre-formatted decimal strings are grouped; non-numeric text
+    /// (dashes, "No prior scan", etc.) passes through untouched.
+    #[askama::filter_fn]
+    pub fn commas<T: core::fmt::Display>(value: T, _: &dyn Values) -> Result<String> {
+        Ok(super::group_thousands(&value.to_string()))
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct MultiCompareQuery {
     runs: Option<String>,
@@ -10668,6 +10744,30 @@ async fn trend_report_handler(
     .loading-state{{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:52px 24px;gap:14px;color:var(--muted);font-size:13px;font-weight:600;}}
     .loading-spinner{{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--oxide);border-radius:50%;animation:spin-load 0.75s linear infinite;}}
     @keyframes spin-load{{to{{transform:rotate(360deg);}}}}
+    /* Modal system (Retention Policy / Clean-up) */
+    .tr-modal-backdrop{{display:none;position:fixed;inset:0;z-index:9000;background:rgba(40,24,12,0.34);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);align-items:center;justify-content:center;padding:24px;animation:tr-fade .16s ease;}}
+    @keyframes tr-fade{{from{{opacity:0;}}to{{opacity:1;}}}}
+    .tr-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:18px;box-shadow:0 28px 70px rgba(40,24,12,0.32),0 4px 14px rgba(40,24,12,0.16);width:100%;max-height:92vh;overflow-y:auto;animation:tr-pop .18s cubic-bezier(.2,.9,.3,1.2);}}
+    @keyframes tr-pop{{from{{transform:translateY(14px) scale(.97);opacity:0;}}to{{transform:none;opacity:1;}}}}
+    .tr-modal-head{{display:flex;align-items:center;gap:14px;padding:24px 30px 18px;border-bottom:1px solid var(--line);}}
+    .tr-modal-icon{{flex:none;width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#e07b3a,#b85028);box-shadow:0 4px 12px rgba(184,80,40,0.32);}}
+    .tr-modal-icon svg{{width:23px;height:23px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}}
+    .tr-modal-icon.danger{{background:linear-gradient(135deg,#d65a5a,#b23030);box-shadow:0 4px 12px rgba(178,48,48,0.32);}}
+    .tr-modal-title{{font-size:21px;font-weight:900;letter-spacing:-.01em;color:var(--text);margin:0;line-height:1.15;}}
+    .tr-modal-sub{{font-size:12.5px;color:var(--muted);margin:2px 0 0;line-height:1.4;}}
+    .tr-modal-body{{padding:22px 30px;}}
+    .tr-modal-foot{{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;padding:18px 30px 24px;border-top:1px solid var(--line);}}
+    .tr-btn{{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:11px 20px;border-radius:10px;font-size:13.5px;font-weight:800;cursor:pointer;border:1px solid transparent;transition:transform .12s ease,box-shadow .12s ease,background .12s ease,opacity .12s ease;font-family:inherit;line-height:1;}}
+    .tr-btn:hover{{transform:translateY(-1px);}}
+    .tr-btn:active{{transform:translateY(0);}}
+    .tr-btn:disabled{{opacity:.55;cursor:not-allowed;transform:none;}}
+    .tr-btn svg{{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;}}
+    .tr-btn-primary{{background:linear-gradient(135deg,#e07b3a,#b85028);color:#fff;box-shadow:0 4px 14px rgba(184,80,40,0.28);}}
+    .tr-btn-primary:hover{{box-shadow:0 7px 20px rgba(184,80,40,0.38);}}
+    .tr-btn-secondary{{background:var(--surface-2);color:var(--text);border-color:var(--line-strong);}}
+    .tr-btn-secondary:hover{{background:var(--line);}}
+    .tr-btn-danger{{background:linear-gradient(135deg,#d65a5a,#b23030);color:#fff;box-shadow:0 4px 14px rgba(178,48,48,0.28);}}
+    .tr-btn-danger:hover{{box-shadow:0 7px 20px rgba(178,48,48,0.4);}}
   </style>
 </head>
 <body>
@@ -10753,6 +10853,10 @@ async fn trend_report_handler(
           <button type="button" class="export-btn" id="export-png-btn" title="Save chart as PNG image">
             <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
             Export PNG
+          </button>
+          <button type="button" class="export-btn" id="export-pdf-btn" title="Open a print-ready PDF report (chart + summary + table)">
+            <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>
+            Export PDF
           </button>
         </div>
       </div>
@@ -11347,7 +11451,8 @@ async fn trend_report_handler(
         var sd=[{{name:'Code Lines',col:'F',di:5,clr:'C45C10'}},{{name:'Comment Lines',col:'G',di:6,clr:'4472C4'}},{{name:'Blank Lines',col:'H',di:7,clr:'70AD47'}},{{name:'Physical Lines',col:'I',di:8,clr:'7030A0'}}];
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
-        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>';
+        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart>';
+        x+='<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1400" b="1"/></a:pPr><a:r><a:rPr lang="en-US" sz="1400" b="1"/><a:t>Scan History \u2014 all metrics over time</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea>';
         x+='<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>';
         sd.forEach(function(s,i){{
           x+='<c:ser><c:idx val="'+i+'"/><c:order val="'+i+'"/>';
@@ -11375,7 +11480,8 @@ async fn trend_report_handler(
         var sd=[{{name:'Latest Code Lines',col:'E',di:4,clr:'C45C10'}},{{name:'Latest Comment Lines',col:'F',di:5,clr:'4472C4'}},{{name:'Latest Blank Lines',col:'G',di:6,clr:'70AD47'}},{{name:'Latest Physical Lines',col:'H',di:7,clr:'7030A0'}}];
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
-        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>';
+        x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart>';
+        x+='<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1400" b="1"/></a:pPr><a:r><a:rPr lang="en-US" sz="1400" b="1"/><a:t>Latest metrics by project</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea>';
         x+='<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>';
         sd.forEach(function(s,i){{
           x+='<c:ser><c:idx val="'+i+'"/><c:order val="'+i+'"/>';
@@ -11418,7 +11524,7 @@ async fn trend_report_handler(
         x+='<c:axId val="5"/><c:axId val="6"/></c:lineChart>';
         x+='<c:catAx><c:axId val="5"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="6"/></c:catAx>';
         x+='<c:valAx><c:axId val="6"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:tickLblPos val="nextTo"/><c:crossAx val="5"/><c:crossBetween val="between"/></c:valAx>';
-        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Focus View \u2014 change N1 to switch metric</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
+        x+='</c:plotArea><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Single-Metric Focus \u2014 pick a metric from the dropdown in cell N1 to switch this chart</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart></c:chartSpace>';
         return x;
       }}
       var hasChart=!!(chartRows&&chartRows.length);
@@ -11450,22 +11556,22 @@ async fn trend_report_handler(
         files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(buildSheet(s.headers,s.rows,(hasChart&&i===0)?'rId1':(hasChart2&&i===1)?'rId1':null,(hasChart&&i===0)))}});
       }});
       if(hasChart){{
-        var fromRow=nr+4,toRow=nr+24;
+        var fromRow=nr+4,toRow=nr+36;
         files.push({{name:'xl/worksheets/_rels/sheet1.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')}});
         var drx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         drx+='<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
         drx+='<xdr:twoCellAnchor editAs="twoCell">';
         drx+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+fromRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
-        drx+='<xdr:to><xdr:col>10</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx+='<xdr:to><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
         drx+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
         drx+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
         drx+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
         drx+='<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>';
         drx+='</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>';
-        var focRow=toRow+2,focRowEnd=toRow+22;
+        var focRow=toRow+2,focRowEnd=focRow+32;
         drx+='<xdr:twoCellAnchor editAs="twoCell">';
         drx+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
-        drx+='<xdr:to><xdr:col>10</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRowEnd+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx+='<xdr:to><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+focRowEnd+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
         drx+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="4" name="Chart 3"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
         drx+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
         drx+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
@@ -11477,13 +11583,13 @@ async fn trend_report_handler(
         files.push({{name:'xl/charts/chart3.xml',data:s2b(buildChartXML3(chartRows))}});
       }}
       if(hasChart2){{
-        var fromRow2=nr2+4,toRow2=nr2+24;
+        var fromRow2=nr2+4,toRow2=nr2+36;
         files.push({{name:'xl/worksheets/_rels/sheet2.xml.rels',data:s2b('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/></Relationships>')}});
         var drx2='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         drx2+='<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">';
         drx2+='<xdr:twoCellAnchor editAs="twoCell">';
         drx2+='<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+fromRow2+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
-        drx2+='<xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow2+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+        drx2+='<xdr:to><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow2+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
         drx2+='<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="Chart 2"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>';
         drx2+='<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>';
         drx2+='<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">';
@@ -11530,25 +11636,102 @@ async fn trend_report_handler(
       return out.buffer;
     }}
 
+    function trendTitleParts(){{
+      var ySel=document.getElementById('y-sel'),xSel=document.getElementById('x-sel');
+      var subSelEl=document.getElementById('sub-sel');
+      var metricLbl=ySel?ySel.options[ySel.selectedIndex].text:'Metric';
+      var xLbl=xSel?xSel.options[xSel.selectedIndex].text:'';
+      var proj=(document.getElementById('root-sel').value)||'All projects';
+      var subTxt=(subSelEl&&subSelEl.value)?(' / '+subSelEl.value):'';
+      var cnt=(allData&&allData.length)||0;
+      var now=new Date();
+      function p2(n){{return(n<10?'0':'')+n;}}
+      var dstr=now.getFullYear()+'-'+p2(now.getMonth()+1)+'-'+p2(now.getDate())+' '+p2(now.getHours())+':'+p2(now.getMinutes());
+      return{{title:metricLbl+' \u2014 '+xLbl,sub:'Project: '+proj+subTxt+'  \u00b7  '+cnt+' scan'+(cnt===1?'':'s')+'  \u00b7  Generated '+dstr,date:dstr}};
+    }}
+
     function exportPNG(){{
       var svgEl=document.querySelector('#chart-wrap svg');
       if(!svgEl){{alert('No chart to export yet.');return;}}
       var svgStr=new XMLSerializer().serializeToString(svgEl);
       var vb=svgEl.viewBox.baseVal,scale=2;
-      var w=(vb.width||900)*scale,h=(vb.height||380)*scale;
+      var headerH=84;
+      var lw=(vb.width||900),lh=(vb.height||380);
+      var w=lw*scale,h=(lh+headerH)*scale;
       var blob=new Blob([svgStr],{{type:'image/svg+xml'}});
       var url=URL.createObjectURL(blob);
       var img=new Image();
+      var tp=trendTitleParts();
       img.onload=function(){{
         var canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
         var ctx=canvas.getContext('2d');
-        var bg=getComputedStyle(document.body).getPropertyValue('--bg').trim()||'#f5efe8';
+        var cs=getComputedStyle(document.body);
+        var bg=cs.getPropertyValue('--bg').trim()||'#f5efe8';
+        var oxide=cs.getPropertyValue('--oxide').trim()||'#C45C10';
+        var muted=cs.getPropertyValue('--muted').trim()||'#7b675b';
         ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);
-        ctx.scale(scale,scale);ctx.drawImage(img,0,0);
+        ctx.scale(scale,scale);
+        ctx.textBaseline='alphabetic';ctx.textAlign='left';
+        ctx.fillStyle=oxide;ctx.font='800 23px '+FONT;ctx.fillText(tp.title,24,40);
+        ctx.fillStyle=muted;ctx.font='600 13px '+FONT;ctx.fillText(tp.sub,24,62);
+        ctx.fillStyle=muted;ctx.font='700 12px '+FONT;ctx.textAlign='right';ctx.fillText('OxideSLOC Trend Report',lw-24,40);ctx.textAlign='left';
+        ctx.strokeStyle=oxide;ctx.globalAlpha=0.55;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(24,74);ctx.lineTo(lw-24,74);ctx.stroke();ctx.globalAlpha=1;
+        ctx.drawImage(img,0,headerH);
         URL.revokeObjectURL(url);
         var a=document.createElement('a');a.download='oxide-sloc-trend.png';a.href=canvas.toDataURL('image/png');a.click();
       }};
       img.src=url;
+    }}
+
+    function exportPDF(){{
+      var svgEl=document.querySelector('#chart-wrap svg');
+      if(!svgEl){{alert('No chart to export yet.');return;}}
+      var tp=trendTitleParts();
+      var svgStr=new XMLSerializer().serializeToString(svgEl);
+      var statsEl=document.getElementById('trend-stats');
+      var statsHtml=statsEl?statsEl.innerHTML:'';
+      var tableEl=document.getElementById('data-table-wrap');
+      var tableHtml=tableEl?tableEl.innerHTML:'';
+      var win=window.open('','_blank','width=1100,height=850');
+      if(!win){{alert('Pop-up blocked. Allow pop-ups for this site to export PDF.');return;}}
+      var css='<style>'
+        +'*{{box-sizing:border-box;}}'
+        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;margin:0;padding:30px 34px;background:#fff;}}'
+        +'.rep-head{{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #C45C10;padding-bottom:14px;margin-bottom:18px;}}'
+        +'.rep-title{{font-size:23px;font-weight:900;margin:0;color:#241813;}}'
+        +'.rep-sub{{font-size:13px;color:#7b675b;margin:6px 0 0;}}'
+        +'.rep-brand{{font-size:14px;font-weight:800;color:#C45C10;text-align:right;white-space:nowrap;}}'
+        +'.rep-brand small{{display:block;font-weight:600;color:#7b675b;font-size:11px;margin-top:2px;}}'
+        +'.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 22px;}}'
+        +'.stat-chip{{border:1px solid #e6d0bf;border-radius:12px;padding:12px 14px;position:relative;}}'
+        +'.stat-chip-tip{{display:none!important;}}'
+        +'.stat-chip-val{{font-size:20px;font-weight:900;color:#C45C10;}}'
+        +'.stat-chip-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;margin-top:4px;}}'
+        +'.stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:11px;color:#7b675b;}}'
+        +'.stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}'
+        +'.rep-chart{{text-align:center;margin:0 0 22px;}}'
+        +'.rep-chart svg{{max-width:100%;height:auto;}}'
+        +'.chart-section-header{{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#C45C10;margin:18px 0 10px;}}'
+        +'.filter-row{{display:none!important;}}'
+        +'table{{border-collapse:collapse;width:100%;font-size:11px;}}'
+        +'th,td{{border:1px solid #e6d0bf;padding:5px 8px;text-align:left;}}'
+        +'th{{background:#f5efe8;font-weight:800;}}'
+        +'.sort-icon,.col-resize-handle{{display:none!important;}}'
+        +'.pagination,.table-pager,.sh-pager{{display:none!important;}}'
+        +'.rep-foot{{margin-top:24px;border-top:1px solid #e6d0bf;padding-top:12px;font-size:11px;color:#7b675b;text-align:center;}}'
+        +'@media print{{body{{padding:0 12px;}}}}'
+        +'</style>';
+      var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Trend Report</title>'+css+'</head><body>'
+        +'<div class="rep-head"><div><h1 class="rep-title">'+tp.title+'</h1><p class="rep-sub">'+tp.sub+'</p></div>'
+        +'<div class="rep-brand">OxideSLOC<small>Trend Report</small></div></div>'
+        +'<div class="summary-strip">'+statsHtml+'</div>'
+        +'<div class="rep-chart">'+svgStr+'</div>'
+        +tableHtml
+        +'<div class="rep-foot">oxide-sloc v{version} \u2014 local code metrics workbench  \u00b7  Generated '+tp.date+'</div>'
+        +'</body></html>';
+      win.document.open();win.document.write(doc);win.document.close();
+      win.focus();
+      setTimeout(function(){{try{{win.print();}}catch(e){{}}}},450);
     }}
 
     ['y-sel','x-sel','scale-sel'].forEach(function(id){{
@@ -11565,24 +11748,31 @@ async fn trend_report_handler(
     if(xlsxBtn)xlsxBtn.addEventListener('click',exportXLSX);
     var pngBtn=document.getElementById('export-png-btn');
     if(pngBtn)pngBtn.addEventListener('click',exportPNG);
+    var pdfBtn=document.getElementById('export-pdf-btn');
+    if(pdfBtn)pdfBtn.addEventListener('click',exportPDF);
 
     // ── Clean-up modal ───────────────────────────────────────────────────────
     (function(){{
       var triggerBtn=document.getElementById('cleanup-runs-btn');
       if(!triggerBtn)return;
       var modal=document.createElement('div');
-      modal.style.cssText='display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;';
-      modal.innerHTML='<div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px 32px;max-width:460px;width:95%;box-shadow:0 16px 48px rgba(0,0,0,0.28);">'
-        +'<div style="font-size:16px;font-weight:800;margin-bottom:10px;">Clean up old runs</div>'
-        +'<p style="font-size:13px;color:var(--text);margin:0 0 14px;">Delete all scan artifacts older than the chosen number of days. This removes files from disk and clears the registry. <strong>This cannot be undone.</strong></p>'
-        +'<label style="font-size:12px;font-weight:700;color:var(--muted);">Delete runs older than</label>'
-        +'<div style="display:flex;align-items:center;gap:8px;margin:6px 0 16px;">'
-        +'<input type="number" id="cleanup-days-input" value="30" min="1" max="3650" style="width:80px;padding:7px 10px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:14px;font-weight:700;">'
+      modal.className='tr-modal-backdrop';
+      modal.innerHTML='<div class="tr-modal" style="max-width:520px;">'
+        +'<div class="tr-modal-head">'
+        +'<div class="tr-modal-icon danger"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg></div>'
+        +'<div><h2 class="tr-modal-title">Clean up old runs</h2><p class="tr-modal-sub">One-shot deletion of older scan artifacts</p></div>'
+        +'</div>'
+        +'<div class="tr-modal-body">'
+        +'<p style="font-size:13.5px;color:var(--text);margin:0 0 18px;line-height:1.5;">Delete all scan artifacts older than the chosen number of days. This removes files from disk and clears the registry. <strong>This cannot be undone.</strong></p>'
+        +'<label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;">Delete runs older than</label>'
+        +'<div style="display:flex;align-items:center;gap:8px;margin:8px 0 4px;">'
+        +'<input type="number" id="cleanup-days-input" value="30" min="1" max="3650" style="width:90px;padding:9px 12px;border-radius:9px;border:1.5px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:14px;font-weight:700;">'
         +'<span style="font-size:13px;color:var(--muted);">days</span></div>'
-        +'<div id="cleanup-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>'
-        +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
-        +'<button class="button secondary" id="cleanup-cancel-btn" type="button">Cancel</button>'
-        +'<button class="button" id="cleanup-confirm-btn" type="button" style="background:#b23030;border-color:#b23030;">Delete old runs</button>'
+        +'<div id="cleanup-status" style="display:none;padding:10px 14px;border-radius:9px;font-size:13px;font-weight:600;margin-top:16px;"></div>'
+        +'</div>'
+        +'<div class="tr-modal-foot">'
+        +'<button class="tr-btn tr-btn-secondary" id="cleanup-cancel-btn" type="button">Cancel</button>'
+        +'<button class="tr-btn tr-btn-danger" id="cleanup-confirm-btn" type="button"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Delete old runs</button>'
         +'</div></div>';
       document.body.appendChild(modal);
       triggerBtn.addEventListener('click',function(){{
@@ -11626,10 +11816,15 @@ async fn trend_report_handler(
       var triggerBtn=document.getElementById('retention-policy-btn');
       if(!triggerBtn)return;
       var modal=document.createElement('div');
-      modal.style.cssText='display:none;position:fixed;inset:0;z-index:9001;background:rgba(0,0,0,0.72);align-items:center;justify-content:center;';
+      modal.className='tr-modal-backdrop';
+      modal.style.zIndex='9001';
       modal.innerHTML=''
-        +'<div style="background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:36px 44px;max-width:580px;width:95%;box-shadow:0 24px 64px rgba(0,0,0,0.38);">'
-        +'<div style="font-size:19px;font-weight:800;margin-bottom:6px;">Retention Policy</div>'
+        +'<div class="tr-modal" style="max-width:640px;">'
+        +'<div class="tr-modal-head">'
+        +'<div class="tr-modal-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg></div>'
+        +'<div><h2 class="tr-modal-title">Retention Policy</h2><p class="tr-modal-sub">Scheduled automatic cleanup of old scan runs</p></div>'
+        +'</div>'
+        +'<div class="tr-modal-body">'
         +'<p style="font-size:13px;color:var(--muted);margin:0 0 22px;">Automatically clean up old scan runs on a schedule. Both rules apply when set \u2014 a run is deleted if it exceeds the age limit <em>or</em> falls outside the count limit.</p>'
         +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:22px;">'
         +'<input type="checkbox" id="rp-enabled" style="width:16px;height:16px;cursor:pointer;accent-color:var(--oxide);">'
@@ -11661,10 +11856,11 @@ async fn trend_report_handler(
         +'</div>'
         +'<div id="rp-last-run" style="padding:10px 14px;border-radius:8px;background:var(--surface-2);font-size:12px;color:var(--muted);margin-bottom:20px;">\u2014</div>'
         +'<div id="rp-status" style="display:none;padding:9px 13px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:18px;"></div>'
-        +'<div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">'
-        +'<button class="button secondary" id="rp-close-btn" type="button">Close</button>'
-        +'<button class="button secondary" id="rp-run-now-btn" type="button">Run Now</button>'
-        +'<button class="button" id="rp-save-btn" type="button">Save Policy</button>'
+        +'</div>'
+        +'<div class="tr-modal-foot">'
+        +'<button class="tr-btn tr-btn-secondary" id="rp-close-btn" type="button">Close</button>'
+        +'<button class="tr-btn tr-btn-secondary" id="rp-run-now-btn" type="button"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run Now</button>'
+        +'<button class="tr-btn tr-btn-primary" id="rp-save-btn" type="button"><svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save Policy</button>'
         +'</div>'
         +'</div>';
       document.body.appendChild(modal);
@@ -11735,6 +11931,7 @@ async fn trend_report_handler(
 
       document.getElementById('rp-run-now-btn').addEventListener('click',function(){{
         var btn=this;
+        var orig=btn.innerHTML;
         btn.disabled=true;
         btn.textContent='Running\u2026';
         fetch('/api/cleanup-policy/run-now',{{method:'POST'}})
@@ -11744,7 +11941,7 @@ async fn trend_report_handler(
             loadPolicy();
           }})
           .catch(function(e){{rpShowStatus('Network error: '+String(e),false);}})
-          .finally(function(){{btn.disabled=false;btn.textContent='Run Now';}});
+          .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
       }});
     }})();
 
@@ -14607,6 +14804,31 @@ async fn restart_poll_schedules(state: &AppState) {
         let interval = schedule.interval_secs.unwrap_or(300);
         let st = state.clone();
         tokio::spawn(async move { git_webhook::poll_loop(st, schedule, interval).await });
+    }
+}
+
+/// Warn at startup when GitLab webhook schedules exist but native TLS is not
+/// enabled. GitLab authenticates webhooks with a plaintext `X-Gitlab-Token`
+/// header (no HMAC over the body), so the token is exposed in cleartext unless
+/// the transport is encrypted. This is only an advisory — TLS may be terminated
+/// by an upstream reverse proxy, in which case the warning can be ignored.
+async fn warn_insecure_gitlab_webhooks(state: &AppState) {
+    if state.tls_enabled {
+        return;
+    }
+    let store = state.schedules.lock().await;
+    let has_gitlab_webhook = store.schedules.iter().any(|s| {
+        s.kind == sloc_git::ScanScheduleKind::Webhook
+            && s.provider == sloc_git::ScanScheduleProvider::GitLab
+    });
+    drop(store);
+    if has_gitlab_webhook {
+        tracing::warn!(
+            "GitLab webhook schedule(s) configured but native TLS is not enabled. \
+             GitLab sends its webhook token as a plaintext X-Gitlab-Token header; \
+             terminate TLS here (SLOC_TLS_CERT/SLOC_TLS_KEY) or at an upstream reverse \
+             proxy so the token is not exposed in cleartext."
+        );
     }
 }
 
@@ -20870,6 +21092,12 @@ struct ScanSetupTemplate {
     /* Stat chips (matches HTML report) */
     .summary-strip { display:grid; grid-template-columns:repeat(8,1fr); gap:10px; margin-top:18px; }
     @media(max-width:640px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
+    /* Hero stat strip: flex so the cards always fill exactly two rows. JS sets a
+       per-card flex-basis of 1/ceil(n/2); flex-grow lets a short final row stretch
+       its cards to full width so there is never an empty trailing cell. */
+    .summary-strip-hero { display:flex !important; flex-wrap:wrap; align-items:stretch; }
+    .summary-strip-hero > .stat-chip { flex:1 1 150px; }
+    @media(max-width:640px){.summary-strip-hero > .stat-chip{flex-basis:calc(50% - 5px);}}
     .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; overflow:visible; }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
@@ -21141,7 +21369,7 @@ struct ScanSetupTemplate {
       </div>
 
       <!-- All summary stat chips in one unified strip (8 columns) -->
-      <div class="summary-strip">
+      <div class="summary-strip summary-strip-hero">
         <div class="stat-chip" data-raw="{{ physical_lines }}">
           <div class="stat-chip-label">Physical lines</div>
           <div class="stat-chip-val">{{ physical_lines }}</div>
@@ -21474,11 +21702,11 @@ struct ScanSetupTemplate {
             <tr>
               <td style="padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="{{ row.name }}"><strong>{{ row.name }}</strong></td>
               <td style="padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;" title="{{ row.relative_path }}"><code style="font-size:12px;white-space:nowrap;word-break:keep-all;overflow-wrap:normal;">{{ row.relative_path }}</code></td>
-              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.files_analyzed }}</td>
-              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.total_physical_lines }}</td>
-              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.code_lines }}</td>
-              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.comment_lines }}</td>
-              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.blank_lines }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.files_analyzed|commas }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.total_physical_lines|commas }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.code_lines|commas }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.comment_lines|commas }}</td>
+              <td style="padding:10px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;">{{ row.blank_lines|commas }}</td>
               <td style="padding:10px 8px;border-bottom:1px solid var(--line);text-align:center;white-space:nowrap;">{% if let Some(url) = row.html_url %}<a class="button" href="{{ url }}" target="_blank" rel="noopener" style="font-size:12px;padding:6px 10px;min-height:0;display:block;margin:0 auto;width:fit-content;">View</a>{% else %}<span style="color:var(--muted);font-size:12px;">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
@@ -21504,27 +21732,27 @@ struct ScanSetupTemplate {
             <tbody>
               <tr>
                 <td>Files analyzed</td>
-                <td class="mt-val-large">{{ files_analyzed }}</td>
-                <td>{{ prev_fa_str }}</td>
-                <td><span class="mt-val-{{ delta_fa_class }}">{{ delta_fa_str }}</span></td>
+                <td class="mt-val-large">{{ files_analyzed|commas }}</td>
+                <td>{{ prev_fa_str|commas }}</td>
+                <td><span class="mt-val-{{ delta_fa_class }}">{{ delta_fa_str|commas }}</span></td>
               </tr>
               <tr>
                 <td>Files skipped</td>
-                <td>{{ files_skipped }}</td>
-                <td>{{ prev_fs_str }}</td>
-                <td><span class="mt-val-{{ delta_fs_class }}">{{ delta_fs_str }}</span></td>
+                <td>{{ files_skipped|commas }}</td>
+                <td>{{ prev_fs_str|commas }}</td>
+                <td><span class="mt-val-{{ delta_fs_class }}">{{ delta_fs_str|commas }}</span></td>
               </tr>
               <tr>
                 <td>Files modified</td>
                 <td class="mt-val-na">—</td>
                 <td class="mt-val-na">—</td>
-                <td>{% if let Some(v) = delta_files_modified %}<span class="mt-val-mod">{{ v }} modified</span>{% else %}<span class="mt-val-na">—</span>{% endif %}</td>
+                <td>{% if let Some(v) = delta_files_modified %}<span class="mt-val-mod">{{ v|commas }} modified</span>{% else %}<span class="mt-val-na">—</span>{% endif %}</td>
               </tr>
               <tr>
                 <td>Files unchanged</td>
                 <td class="mt-val-na">—</td>
                 <td class="mt-val-na">—</td>
-                <td>{% if let Some(v) = delta_files_unchanged %}<span>{{ v }}</span>{% else %}<span class="mt-val-na">—</span>{% endif %}</td>
+                <td>{% if let Some(v) = delta_files_unchanged %}<span>{{ v|commas }}</span>{% else %}<span class="mt-val-na">—</span>{% endif %}</td>
               </tr>
             </tbody>
           </table>
@@ -21544,31 +21772,31 @@ struct ScanSetupTemplate {
             <tbody>
               <tr>
                 <td>Physical lines</td>
-                <td class="mt-val-large">{{ physical_lines }}</td>
-                <td>{{ prev_pl_str }}</td>
-                <td><span class="mt-val-{{ delta_pl_class }}">{{ delta_pl_str }}</span></td>
+                <td class="mt-val-large">{{ physical_lines|commas }}</td>
+                <td>{{ prev_pl_str|commas }}</td>
+                <td><span class="mt-val-{{ delta_pl_class }}">{{ delta_pl_str|commas }}</span></td>
               </tr>
               <tr>
                 <td>Code lines</td>
-                <td class="mt-val-large">{{ code_lines }}</td>
-                <td>{{ prev_cl_str }}</td>
-                <td><span class="mt-val-{{ delta_cl_class }}">{{ delta_cl_str }}</span></td>
+                <td class="mt-val-large">{{ code_lines|commas }}</td>
+                <td>{{ prev_cl_str|commas }}</td>
+                <td><span class="mt-val-{{ delta_cl_class }}">{{ delta_cl_str|commas }}</span></td>
               </tr>
               <tr>
                 <td>Comment lines</td>
-                <td>{{ comment_lines }}</td>
-                <td>{{ prev_cml_str }}</td>
-                <td><span class="mt-val-{{ delta_cml_class }}">{{ delta_cml_str }}</span></td>
+                <td>{{ comment_lines|commas }}</td>
+                <td>{{ prev_cml_str|commas }}</td>
+                <td><span class="mt-val-{{ delta_cml_class }}">{{ delta_cml_str|commas }}</span></td>
               </tr>
               <tr>
                 <td>Blank lines</td>
-                <td>{{ blank_lines }}</td>
-                <td>{{ prev_bl_str }}</td>
-                <td><span class="mt-val-{{ delta_bl_class }}">{{ delta_bl_str }}</span></td>
+                <td>{{ blank_lines|commas }}</td>
+                <td>{{ prev_bl_str|commas }}</td>
+                <td><span class="mt-val-{{ delta_bl_class }}">{{ delta_bl_str|commas }}</span></td>
               </tr>
               <tr>
                 <td>Mixed (separate)</td>
-                <td>{{ mixed_lines }}</td>
+                <td>{{ mixed_lines|commas }}</td>
                 <td class="mt-val-na">—</td>
                 <td class="mt-val-na">—</td>
               </tr>
@@ -21589,19 +21817,19 @@ struct ScanSetupTemplate {
               <tbody>
                 <tr>
                   <td>Functions</td>
-                  <td>{{ functions }}</td>
+                  <td>{{ functions|commas }}</td>
                 </tr>
                 <tr>
                   <td>Classes / Types</td>
-                  <td>{{ classes }}</td>
+                  <td>{{ classes|commas }}</td>
                 </tr>
                 <tr>
                   <td>Variables</td>
-                  <td>{{ variables }}</td>
+                  <td>{{ variables|commas }}</td>
                 </tr>
                 <tr>
                   <td>Imports</td>
-                  <td>{{ imports }}</td>
+                  <td>{{ imports|commas }}</td>
                 </tr>
               </tbody>
             </table>
@@ -21619,19 +21847,19 @@ struct ScanSetupTemplate {
               <tbody>
                 <tr>
                   <td>Lines added</td>
-                  <td>{% if let Some(v) = delta_lines_added %}<span class="mt-val-pos">+{{ v }}</span>{% else %}<span class="mt-val-na">No prior scan</span>{% endif %}</td>
+                  <td>{% if let Some(v) = delta_lines_added %}<span class="mt-val-pos">+{{ v|commas }}</span>{% else %}<span class="mt-val-na">No prior scan</span>{% endif %}</td>
                 </tr>
                 <tr>
                   <td>Lines removed</td>
-                  <td>{% if let Some(v) = delta_lines_removed %}<span class="mt-val-neg">&minus;{{ v }}</span>{% else %}<span class="mt-val-na">No prior scan</span>{% endif %}</td>
+                  <td>{% if let Some(v) = delta_lines_removed %}<span class="mt-val-neg">&minus;{{ v|commas }}</span>{% else %}<span class="mt-val-na">No prior scan</span>{% endif %}</td>
                 </tr>
                 <tr>
                   <td>Lines modified (net)</td>
-                  <td><span class="mt-val-{{ delta_lines_net_class }}">{{ delta_lines_net_str }}</span></td>
+                  <td><span class="mt-val-{{ delta_lines_net_class }}">{{ delta_lines_net_str|commas }}</span></td>
                 </tr>
                 <tr>
                   <td>Lines unmodified</td>
-                  <td>{% if let Some(v) = delta_unmodified_lines %}<span>{{ v }}</span>{% else %}<span class="mt-val-na">No prior scan</span>{% endif %}</td>
+                  <td>{% if let Some(v) = delta_unmodified_lines %}<span>{{ v|commas }}</span>{% else %}<span class="mt-val-na">No prior scan</span>{% endif %}</td>
                 </tr>
               </tbody>
             </table>
@@ -21643,7 +21871,7 @@ struct ScanSetupTemplate {
       <div class="path-list">
         <div class="path-item">
           <div class="path-item-label">Project path</div>
-          <code>{{ project_path }}</code>
+          {% if project_path.is_empty() %}<code style="color:var(--muted)" title="The scanned project path was not recorded in this run's metadata.">Not recorded for this scan</code>{% else %}<code>{{ project_path }}</code>{% endif %}
         </div>
         <div class="path-item">
           <div class="path-item-label">Git branch</div>
@@ -21680,22 +21908,22 @@ struct ScanSetupTemplate {
       <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
         <div class="stat-chip">
           <div class="stat-chip-label">Person-months</div>
-          <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+          <div class="stat-chip-val">{{ cocomo_effort_str|commas }}</div>
           <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 ({{ cocomo_mode_label }} mode).</div>
         </div>
         <div class="stat-chip">
           <div class="stat-chip-label">Schedule (months)</div>
-          <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+          <div class="stat-chip-val">{{ cocomo_duration_str|commas }}</div>
           <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
         </div>
         <div class="stat-chip">
           <div class="stat-chip-label">Avg. Team Size</div>
-          <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+          <div class="stat-chip-val">{{ cocomo_staff_str|commas }}</div>
           <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
         </div>
         <div class="stat-chip">
           <div class="stat-chip-label">Input KSLOC</div>
-          <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
+          <div class="stat-chip-val">{{ cocomo_ksloc_str|commas }}K</div>
           <div class="stat-chip-tip">KSLOC = Kilo Source Lines of Code (1 KSLOC = 1,000 lines). This is the primary input to the COCOMO model. Only executable code lines are counted &mdash; blank lines and comments are excluded from this total.</div>
         </div>
       </div>
@@ -22335,18 +22563,26 @@ struct ScanSetupTemplate {
             s+='<line x1="'+px(x)+'" y1="'+PT+'" x2="'+px(x)+'" y2="'+(PT+cH)+'" stroke="rgba(128,128,128,0.18)" stroke-width="1"/>';
             if(t>0)s+='<text x="'+px(x)+'" y="'+(PT+cH+15)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.72">'+fmt(xVal)+'</text>';
           });
+          // Full View (hOvr set) has the vertical room to show the per-bubble value
+          // line; the compact card shows only the language label to avoid the
+          // overlapping-label clutter seen when bubbles cluster together.
+          var showVal=!!hOvr;
           SCAT_D.forEach(function(d,i){
             // X uses log1p so outlier languages (many files) don't push others to the far left
             var cx2=PL+(logMaxF>0?Math.log1p(Math.max(1,d.files))/logMaxF:0.5)*cW;
             var cy2=PT+cH-d.code/maxC*cH;
             var r=Math.max(4,Math.sqrt(d.physical/maxP)*18);
             s+='<circle'+tt(d.lang,fmt(d.files)+' files · '+fmt(d.code)+' code lines')+' data-lang="'+esc(d.lang)+'" cx="'+px(cx2)+'" cy="'+px(cy2)+'" r="'+px(r)+'" fill="'+COLS[i%COLS.length]+'" opacity="0.78" stroke="white" stroke-width="1.5"/>';
-            var codeStr=fmt(d.code);
-            // Label centred directly above bubble
-            var ty2=Math.max(14,px(cy2)-px(r)-3);
-            var ty1=Math.max(1,ty2-14);
-            s+='<text x="'+px(cx2)+'" y="'+ty1+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="800" fill="currentColor" opacity="0.92" style="pointer-events:none;">'+esc(d.lang)+'</text>';
-            s+='<text x="'+px(cx2)+'" y="'+ty2+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor" opacity="0.88" style="pointer-events:none;">'+codeStr+'</text>';
+            // Label(s) centred directly above bubble; clamp to stay inside the plot top.
+            if(showVal){
+              var ty2=Math.max(24,px(cy2)-px(r)-3);
+              var ty1=Math.max(12,ty2-14);
+              s+='<text x="'+px(cx2)+'" y="'+ty1+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="800" fill="currentColor" opacity="0.92" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+              s+='<text x="'+px(cx2)+'" y="'+ty2+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="currentColor" opacity="0.88" style="pointer-events:none;">'+fmt(d.code)+'</text>';
+            }else{
+              var ly2=Math.max(12,px(cy2)-px(r)-3);
+              s+='<text x="'+px(cx2)+'" y="'+ly2+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="800" fill="currentColor" opacity="0.92" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+            }
           });
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75">Files Analyzed</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
@@ -22937,7 +23173,7 @@ struct ScanSetupTemplate {
     setInterval(doPing,5000);
     if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
-  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip');if(!s)return;var n=s.querySelectorAll('.stat-chip').length;if(!n)return;function upd(){if(window.innerWidth>=640){s.style.gridTemplateColumns='repeat('+Math.ceil(n/2)+',1fr)';}else{s.style.gridTemplateColumns='';}}upd();window.addEventListener('resize',upd);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip-hero');if(!s)return;var items=Array.prototype.slice.call(s.querySelectorAll('.stat-chip'));var n=items.length;if(!n)return;function upd(){var perRow=window.innerWidth<=640?2:Math.ceil(n/2);var gap=10;var basis='calc((100% - '+((perRow-1)*gap)+'px) / '+perRow+' - 0.02px)';items.forEach(function(el){el.style.flexBasis=basis;el.style.flexGrow='1';el.style.flexShrink='1';});}upd();window.addEventListener('resize',upd);})();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
