@@ -7021,7 +7021,7 @@ struct WarningOpportunityRow {
             responsive: true, maintainAspectRatio: false,
             onHover: chartCursor,
             animation: { duration: 500, easing: 'easeOutQuart' },
-            layout: { padding: { top: 44, right: 25 } },
+            layout: { padding: { top: 44, right: 52 } },
             scales: {
               x: { type: 'logarithmic', min: 0.8,
                    grid: { color: c.grid },
@@ -7709,7 +7709,7 @@ struct WarningOpportunityRow {
                 responsive: true, maintainAspectRatio: false,
                 onHover: chartCursor,
                 animation: { duration: 500, easing: 'easeOutQuart' },
-                layout: { padding: { top: 44, right: 25 } },
+                layout: { padding: { top: 44, right: 52 } },
                 scales: {
                   x: { type: 'logarithmic', min: 0.8, grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, maxTicksLimit: 6, callback: function(v){ return fmt(v); } }, title: { display: true, text: 'Files Analyzed', color: c.text, font: { size: 11 } } },
                   y: { grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text, font: { size: 11 } } }
