@@ -804,12 +804,15 @@ fn build_router(state: AppState) -> Router {
 /// Tests that exercise server-mode paths must include this key in their requests.
 pub const TEST_SERVER_MODE_API_KEY: &str = "oxide-sloc-test-server-mode-internal-key";
 
-/// Build a minimal router suitable for integration tests — no TCP binding, no API keys, no TLS.
-pub fn make_test_router() -> Router {
-    // Suppress native OS dialogs (file pickers, open-path) during tests.
+/// Default `AppState` for integration tests: no API keys, no TLS, single-tenant local mode,
+/// with all on-disk stores rooted under a per-test temp subdirectory. Individual test-router
+/// builders below start from this and override only the fields they care about.
+///
+/// Always suppresses native OS dialogs (file pickers, open-path) via `SLOC_HEADLESS`.
+fn test_app_state(tmp_subdir: &str) -> AppState {
     std::env::set_var("SLOC_HEADLESS", "1");
-    let tmp = std::env::temp_dir().join("sloc_test");
-    let state = AppState {
+    let tmp = std::env::temp_dir().join(tmp_subdir);
+    AppState {
         base_config: AppConfig::default(),
         artifacts: Arc::new(Mutex::new(HashMap::new())),
         async_runs: Arc::new(Mutex::new(HashMap::new())),
@@ -840,45 +843,18 @@ pub fn make_test_router() -> Router {
         cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
         cleanup_policy_path: tmp.join("cleanup_policy.json"),
         cleanup_task_handle: Arc::new(Mutex::new(None)),
-    };
-    build_router(state)
+    }
+}
+
+/// Build a minimal router suitable for integration tests — no TCP binding, no API keys, no TLS.
+pub fn make_test_router() -> Router {
+    build_router(test_app_state("sloc_test"))
 }
 
 /// Test router with one API key pre-loaded. Used by auth integration tests.
 pub fn make_test_router_with_key(api_key: &str) -> Router {
-    let tmp = std::env::temp_dir().join("sloc_test_key");
-    let state = AppState {
-        base_config: AppConfig::default(),
-        artifacts: Arc::new(Mutex::new(HashMap::new())),
-        async_runs: Arc::new(Mutex::new(HashMap::new())),
-        registry: Arc::new(Mutex::new(ScanRegistry::default())),
-        registry_path: tmp.join("registry.json"),
-        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
-        server_mode: false,
-        tls_enabled: false,
-        api_keys: Arc::new(vec![secrecy::SecretBox::new(Box::new(api_key.to_owned()))]),
-        rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_mins(1),
-            600,
-            10,
-            Duration::from_hours(1),
-        )),
-        trust_proxy: false,
-        trusted_proxy_ips: vec![],
-        git_clones_dir: tmp.join("git-clones"),
-        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
-        schedules_path: tmp.join("schedules.json"),
-        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
-        scan_profiles_path: tmp.join("scan_profiles.json"),
-        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
-        confluence_path: tmp.join("confluence_config.json"),
-        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
-        watched_dirs_path: tmp.join("watched_dirs.json"),
-        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
-        cleanup_policy_path: tmp.join("cleanup_policy.json"),
-        cleanup_task_handle: Arc::new(Mutex::new(None)),
-    };
+    let mut state = test_app_state("sloc_test_key");
+    state.api_keys = Arc::new(vec![secrecy::SecretBox::new(Box::new(api_key.to_owned()))]);
     build_router(state)
 }
 
@@ -886,163 +862,46 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
 /// the locked watched-bar in trend-reports, path validation in analyze, and upload-only
 /// preview restrictions.
 pub fn make_test_router_server_mode() -> Router {
-    std::env::set_var("SLOC_HEADLESS", "1");
-    let tmp = std::env::temp_dir().join("sloc_test_server");
-    let state = AppState {
-        base_config: AppConfig::default(),
-        artifacts: Arc::new(Mutex::new(HashMap::new())),
-        async_runs: Arc::new(Mutex::new(HashMap::new())),
-        registry: Arc::new(Mutex::new(ScanRegistry::default())),
-        registry_path: tmp.join("registry.json"),
-        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
-        server_mode: true,
-        tls_enabled: false,
-        api_keys: Arc::new(vec![secrecy::SecretBox::new(Box::new(
-            TEST_SERVER_MODE_API_KEY.to_owned(),
-        ))]),
-        rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_mins(1),
-            600,
-            10,
-            Duration::from_hours(1),
-        )),
-        trust_proxy: false,
-        trusted_proxy_ips: vec![],
-        git_clones_dir: tmp.join("git-clones"),
-        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
-        schedules_path: tmp.join("schedules.json"),
-        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
-        scan_profiles_path: tmp.join("scan_profiles.json"),
-        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
-        confluence_path: tmp.join("confluence_config.json"),
-        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
-        watched_dirs_path: tmp.join("watched_dirs.json"),
-        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
-        cleanup_policy_path: tmp.join("cleanup_policy.json"),
-        cleanup_task_handle: Arc::new(Mutex::new(None)),
-    };
+    let mut state = test_app_state("sloc_test_server");
+    state.server_mode = true;
+    state.api_keys = Arc::new(vec![secrecy::SecretBox::new(Box::new(
+        TEST_SERVER_MODE_API_KEY.to_owned(),
+    ))]);
     build_router(state)
 }
 
 /// Test router where the analysis semaphore is pre-exhausted (0 permits).
 /// Immediately returns 503 on POST /analyze, exercising the busy-server branch.
 pub fn make_test_router_exhausted_semaphore() -> Router {
-    std::env::set_var("SLOC_HEADLESS", "1");
-    let tmp = std::env::temp_dir().join("sloc_test_exhaust");
-    let sem = Arc::new(tokio::sync::Semaphore::new(0));
-    let state = AppState {
-        base_config: AppConfig::default(),
-        artifacts: Arc::new(Mutex::new(HashMap::new())),
-        async_runs: Arc::new(Mutex::new(HashMap::new())),
-        registry: Arc::new(Mutex::new(ScanRegistry::default())),
-        registry_path: tmp.join("registry.json"),
-        analyze_semaphore: sem,
-        server_mode: false,
-        tls_enabled: false,
-        api_keys: Arc::new(vec![]),
-        rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_mins(1),
-            600,
-            10,
-            Duration::from_hours(1),
-        )),
-        trust_proxy: false,
-        trusted_proxy_ips: vec![],
-        git_clones_dir: tmp.join("git-clones"),
-        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
-        schedules_path: tmp.join("schedules.json"),
-        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
-        scan_profiles_path: tmp.join("scan_profiles.json"),
-        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
-        confluence_path: tmp.join("confluence_config.json"),
-        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
-        watched_dirs_path: tmp.join("watched_dirs.json"),
-        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
-        cleanup_policy_path: tmp.join("cleanup_policy.json"),
-        cleanup_task_handle: Arc::new(Mutex::new(None)),
-    };
+    let mut state = test_app_state("sloc_test_exhaust");
+    state.analyze_semaphore = Arc::new(tokio::sync::Semaphore::new(0));
     build_router(state)
 }
 
 /// Test router with a very tight rate limit (3 req/min). The third request from
 /// the same IP (0.0.0.0 when `ConnectInfo` is absent) returns 429.
 pub fn make_test_router_tight_rate_limit() -> Router {
-    std::env::set_var("SLOC_HEADLESS", "1");
-    let tmp = std::env::temp_dir().join("sloc_test_rate");
-    let state = AppState {
-        base_config: AppConfig::default(),
-        artifacts: Arc::new(Mutex::new(HashMap::new())),
-        async_runs: Arc::new(Mutex::new(HashMap::new())),
-        registry: Arc::new(Mutex::new(ScanRegistry::default())),
-        registry_path: tmp.join("registry.json"),
-        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
-        server_mode: false,
-        tls_enabled: false,
-        api_keys: Arc::new(vec![]),
-        rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_mins(1),
-            2,
-            5,
-            Duration::from_secs(5),
-        )),
-        trust_proxy: false,
-        trusted_proxy_ips: vec![],
-        git_clones_dir: tmp.join("git-clones"),
-        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
-        schedules_path: tmp.join("schedules.json"),
-        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
-        scan_profiles_path: tmp.join("scan_profiles.json"),
-        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
-        confluence_path: tmp.join("confluence_config.json"),
-        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
-        watched_dirs_path: tmp.join("watched_dirs.json"),
-        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
-        cleanup_policy_path: tmp.join("cleanup_policy.json"),
-        cleanup_task_handle: Arc::new(Mutex::new(None)),
-    };
+    let mut state = test_app_state("sloc_test_rate");
+    state.rate_limiter = Arc::new(IpRateLimiter::new(
+        Duration::from_mins(1),
+        2,
+        5,
+        Duration::from_secs(5),
+    ));
     build_router(state)
 }
 
 /// Test router with a very tight auth lockout (threshold=2, window=200ms).
 /// Used by tests that need to trigger and verify the auth lockout response.
 pub fn make_test_router_tight_auth_lockout(api_key: &str) -> Router {
-    std::env::set_var("SLOC_HEADLESS", "1");
-    let tmp = std::env::temp_dir().join("sloc_test_auth_lockout");
-    let state = AppState {
-        base_config: AppConfig::default(),
-        artifacts: Arc::new(Mutex::new(HashMap::new())),
-        async_runs: Arc::new(Mutex::new(HashMap::new())),
-        registry: Arc::new(Mutex::new(ScanRegistry::default())),
-        registry_path: tmp.join("registry.json"),
-        analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
-        server_mode: false,
-        tls_enabled: false,
-        api_keys: Arc::new(vec![secrecy::SecretBox::new(Box::new(api_key.to_owned()))]),
-        rate_limiter: Arc::new(IpRateLimiter::new(
-            Duration::from_mins(1),
-            600,
-            2,                          // 2 failures triggers lockout
-            Duration::from_millis(200), // 200ms lockout window (expires fast in tests)
-        )),
-        trust_proxy: false,
-        trusted_proxy_ips: vec![],
-        git_clones_dir: tmp.join("git-clones"),
-        schedules: Arc::new(Mutex::new(ScheduleStore::default())),
-        schedules_path: tmp.join("schedules.json"),
-        scan_profiles: Arc::new(Mutex::new(ScanProfileStore::default())),
-        scan_profiles_path: tmp.join("scan_profiles.json"),
-        sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        confluence: Arc::new(Mutex::new(confluence::ConfluenceConfigStore::default())),
-        confluence_path: tmp.join("confluence_config.json"),
-        watched_dirs: Arc::new(Mutex::new(WatchedDirsStore::default())),
-        watched_dirs_path: tmp.join("watched_dirs.json"),
-        cleanup_policy: Arc::new(Mutex::new(CleanupPolicyStore::default())),
-        cleanup_policy_path: tmp.join("cleanup_policy.json"),
-        cleanup_task_handle: Arc::new(Mutex::new(None)),
-    };
+    let mut state = test_app_state("sloc_test_auth_lockout");
+    state.api_keys = Arc::new(vec![secrecy::SecretBox::new(Box::new(api_key.to_owned()))]);
+    state.rate_limiter = Arc::new(IpRateLimiter::new(
+        Duration::from_mins(1),
+        600,
+        2,                          // 2 failures triggers lockout
+        Duration::from_millis(200), // 200ms lockout window (expires fast in tests)
+    ));
     build_router(state)
 }
 
@@ -9289,7 +9148,7 @@ fn multi_compare_page(
     let scope_label = build_mc_scope_label(active_sub, super_scope_active);
 
     format!(
-        r##"<!doctype html>
+        r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -9633,7 +9492,7 @@ fn multi_compare_page(
         <!-- Code Metrics: Scan 1 vs Latest -->
         <div class="ic-card">
           <div class="ic-chart-hdr"><span class="ic-card-h2">Code Metrics &mdash; Scan 1 vs Latest</span><button class="ic-expand-btn" data-expand-src="mc-ic-c1" data-expand-title="Code Metrics — Scan 1 vs Latest">&#x2922; Full View</button></div>
-          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files"><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;scan&nbsp;1)</span></div>
+          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#E3A876"></span><span style="color:#C45C10;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files"><span class="ic-dot" style="background:#9FC3AE"></span><span style="color:#2A6846;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#E0C58A"></span><span style="color:#BE8A2E;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;scan&nbsp;1)</span></div>
           <div id="mc-ic-c1"></div>
         </div>
         <!-- Language Code Delta -->
@@ -10307,9 +10166,9 @@ fn multi_compare_page(
         var barBorder=dark?'rgba(255,255,255,0.40)':'rgba(0,0,0,0.62)';
         function niceMax(v){{var x=v||1;var p=Math.pow(10,Math.floor(Math.log10(x)));var n=x/p;var s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}}
       var c1mets=[
-        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:'#93C5FD',cc:'#2563EB'}},
-        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:'#C4B5FD',cc:'#7C3AED'}},
-        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:'#6EE7B7',cc:'#0D9488'}}
+        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:'#E3A876',cc:'#C45C10'}},
+        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:'#9FC3AE',cc:'#2A6846'}},
+        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:'#E0C58A',cc:'#BE8A2E'}}
       ];
       var maxV1=niceMax(Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))||1);
       var C1W=620,C1H=200,c1mt=40,c1mb=30,c1ml=58,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=54,c1gap=10;
@@ -10335,9 +10194,9 @@ fn multi_compare_page(
       c1+='</svg>';
       // Chart 2: Delta by Metric (net delta first scan to last)
       var mets=[
-        {{l:'Code Lines',v:Number(pLast.code)-Number(p0.code),mc:'#2563EB'}},
-        {{l:'Files Analyzed',v:Number(pLast.files)-Number(p0.files),mc:'#7C3AED'}},
-        {{l:'Comment Lines',v:Number(pLast.comments)-Number(p0.comments),mc:'#0D9488'}}
+        {{l:'Code Lines',v:Number(pLast.code)-Number(p0.code),mc:'#C45C10'}},
+        {{l:'Files Analyzed',v:Number(pLast.files)-Number(p0.files),mc:'#2A6846'}},
+        {{l:'Comment Lines',v:Number(pLast.comments)-Number(p0.comments),mc:'#BE8A2E'}}
       ];
       var maxD=Math.max.apply(null,mets.map(function(m){{return Math.abs(m.v);}}));maxD=maxD||1;
       var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
@@ -10734,7 +10593,7 @@ fn multi_compare_page(
     </div>
   </div>
 </body>
-</html>"##,
+</html>"#,
         project_label = html_escape(project_label),
         n = n,
         scan_strip = scan_strip,
@@ -10975,8 +10834,8 @@ async fn trend_report_handler(
     .tr-modal-backdrop{{display:none;position:fixed;inset:0;z-index:9000;background:rgba(40,24,12,0.34);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);align-items:center;justify-content:center;padding:24px;animation:tr-fade .16s ease;}}
     @keyframes tr-fade{{from{{opacity:0;}}to{{opacity:1;}}}}
     .tr-modal{{background:var(--surface);border:1px solid var(--line-strong);border-radius:18px;box-shadow:0 28px 70px rgba(40,24,12,0.32),0 4px 14px rgba(40,24,12,0.16);width:100%;max-height:92vh;overflow-y:auto;animation:tr-pop .18s cubic-bezier(.2,.9,.3,1.2);}}
-    .tr-modal{{background:rgba(255,255,255,0.97);}}
-    body.dark-theme .tr-modal{{background:#261c17;}}
+    .tr-modal{{background:rgba(255,255,255,0.90);}}
+    body.dark-theme .tr-modal{{background:rgba(38,28,23,0.90);}}
     @keyframes tr-pop{{from{{transform:translateY(14px) scale(.97);opacity:0;}}to{{transform:none;opacity:1;}}}}
     .tr-modal-head{{display:flex;align-items:center;gap:14px;padding:24px 30px 18px;border-bottom:1px solid var(--line);}}
     .tr-modal-icon{{flex:none;width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#e07b3a,#b85028);box-shadow:0 4px 12px rgba(184,80,40,0.32);}}
@@ -11108,7 +10967,7 @@ async fn trend_report_handler(
         <label>X Axis:
           <select class="chart-select" id="x-sel">
             <option value="time">By Time</option>
-            <option value="commit">By Commit</option>
+            <option value="commit" selected>By Commit</option>
             <option value="release">By Release</option>
             <option value="tag">Tagged Commits</option>
           </select>
@@ -11622,12 +11481,16 @@ async fn trend_report_handler(
     function exportXLSX(){{
       if(!allData||!allData.length){{alert('No data to export yet.');return;}}
       var sorted=allData.slice().sort(function(a,b){{return b.timestamp.localeCompare(a.timestamp);}});
+      // X-axis is the git commit. Dedupe by project+commit, keeping the latest scan
+      // (sorted is newest-first), so a given project/commit appears at most once.
+      var seenPC={{}},dedup=[];
+      sorted.forEach(function(d){{var k=(d.project_label||'')+'|'+(d.commit||'');if(!seenPC[k]){{seenPC[k]=1;dedup.push(d);}}}});
       var s1H=['Date','Project','Commit','Branch','Tags','Code Lines','Comment Lines','Blank Lines','Physical Lines','Files Analyzed','Report URL'];
-      var s1R=sorted.map(function(d){{
-        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',d.commit||'',d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||''];
+      var s1R=dedup.map(function(d){{
+        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',(d.commit||'').substring(0,7),d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||''];
       }});
       var pm={{}};
-      sorted.forEach(function(d){{var p=d.project_label||'Unknown';if(!pm[p])pm[p]=[];pm[p].push(d);}});
+      dedup.forEach(function(d){{var p=d.project_label||'Unknown';if(!pm[p])pm[p]=[];pm[p].push(d);}});
       var s2H=['Project','Scan Count','First Scan','Latest Scan','Latest Code Lines','Latest Comment Lines','Latest Blank Lines','Latest Physical Lines','Latest Files','Min Code Lines','Max Code Lines','Avg Code Lines'];
       var s2R=Object.keys(pm).map(function(p){{
         var sc=pm[p].slice().sort(function(a,b){{return a.timestamp.localeCompare(b.timestamp);}});
@@ -11677,6 +11540,7 @@ async fn trend_report_handler(
         var sn="'Scan History'";
         var nr=rows.length,er=nr+1;
         var sd=[{{name:'Code Lines',col:'F',di:5,clr:'C45C10'}},{{name:'Comment Lines',col:'G',di:6,clr:'4472C4'}},{{name:'Blank Lines',col:'H',di:7,clr:'70AD47'}},{{name:'Physical Lines',col:'I',di:8,clr:'7030A0'}}];
+        var catCol='C',catIdx=2;
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
         x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart>';
@@ -11687,8 +11551,8 @@ async fn trend_report_handler(
           x+='<c:tx><c:strRef><c:f>'+sn+'!$'+s.col+'$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>'+xe(s.name)+'</c:v></c:pt></c:strCache></c:strRef></c:tx>';
           x+='<c:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr>';
           x+='<c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr></c:marker>';
-          x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
-          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
+          x+='<c:cat><c:strRef><c:f>'+sn+'!$'+catCol+'$2:$'+catCol+'$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
+          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[catIdx]))+'</c:v></c:pt>';}});
           x+='</c:strCache></c:strRef></c:cat>';
           x+='<c:val><c:numRef><c:f>'+sn+'!$'+s.col+'$2:$'+s.col+'$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
           rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[s.di])+'</c:v></c:pt>';}});
@@ -11704,6 +11568,7 @@ async fn trend_report_handler(
         var sn="'By Project'";
         var nr=rows.length,er=nr+1;
         var sd=[{{name:'Latest Code Lines',col:'E',di:4,clr:'C45C10'}},{{name:'Latest Comment Lines',col:'F',di:5,clr:'4472C4'}},{{name:'Latest Blank Lines',col:'G',di:6,clr:'70AD47'}},{{name:'Latest Physical Lines',col:'H',di:7,clr:'7030A0'}}];
+        var catCol='A',catIdx=0;
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
         x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart>';
@@ -11714,8 +11579,8 @@ async fn trend_report_handler(
           x+='<c:tx><c:strRef><c:f>'+sn+'!$'+s.col+'$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>'+xe(s.name)+'</c:v></c:pt></c:strCache></c:strRef></c:tx>';
           x+='<c:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr>';
           x+='<c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="'+s.clr+'"/></a:solidFill></a:ln></c:spPr></c:marker>';
-          x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
-          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
+          x+='<c:cat><c:strRef><c:f>'+sn+'!$'+catCol+'$2:$'+catCol+'$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
+          rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[catIdx]))+'</c:v></c:pt>';}});
           x+='</c:strCache></c:strRef></c:cat>';
           x+='<c:val><c:numRef><c:f>'+sn+'!$'+s.col+'$2:$'+s.col+'$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
           rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[s.di])+'</c:v></c:pt>';}});
@@ -11730,6 +11595,7 @@ async fn trend_report_handler(
       function buildChartXML3(rows){{
         var sn="'Scan History'";
         var nr=rows.length,er=nr+1;
+        var catCol='C',catIdx=2;
         var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
         x+='<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
         x+='<c:date1904 val="0"/><c:lang val="en-US"/><c:chart><c:autoTitleDeleted val="0"/><c:plotArea>';
@@ -11739,8 +11605,8 @@ async fn trend_report_handler(
         x+='<c:spPr><a:ln w="31750"><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill></a:ln></c:spPr>';
         x+='<c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="C45C10"/></a:solidFill></a:ln></c:spPr></c:marker>';
         x+='<c:dLbls><c:numFmt formatCode="General" sourceLinked="0"/><c:spPr/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/><c:dLblPos val="t"/></c:dLbls>';
-        x+='<c:cat><c:strRef><c:f>'+sn+'!$A$2:$A$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
-        rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[0]))+'</c:v></c:pt>';}});
+        x+='<c:cat><c:strRef><c:f>'+sn+'!$'+catCol+'$2:$'+catCol+'$'+er+'</c:f><c:strCache><c:ptCount val="'+nr+'"/>';
+        rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+xe(String(r[catIdx]))+'</c:v></c:pt>';}});
         x+='</c:strCache></c:strRef></c:cat>';
         x+='<c:val><c:numRef><c:f>'+sn+'!$M$2:$M$'+er+'</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="'+nr+'"/>';
         rows.forEach(function(r,ri){{x+='<c:pt idx="'+ri+'"><c:v>'+Number(r[5])+'</c:v></c:pt>';}});
@@ -11940,8 +11806,13 @@ async fn trend_report_handler(
       var svgStr=new XMLSerializer().serializeToString(svgEl);
       var statsEl=document.getElementById('trend-stats');
       var statsHtml=statsEl?statsEl.innerHTML:'';
-      var tableEl=document.getElementById('data-table-wrap');
-      var tableHtml=tableEl?tableEl.innerHTML:'';
+      var yK=document.getElementById('y-sel').value;
+      var yLabels={{code_lines:'Code Lines',comment_lines:'Comment Lines',blank_lines:'Blank Lines',physical_lines:'Physical Lines',files_analyzed:'Files Analyzed'}};
+      var yL=yLabels[yK]||yK;
+      var rowsDesc=allData.slice().sort(function(a,b){{return b.timestamp.localeCompare(a.timestamp);}});
+      var tableHtml='<div class="chart-section-header">SCAN HISTORY</div><table><thead><tr><th>Scan Date</th><th>Project</th><th>Commit</th><th>Branch</th><th>Tags</th><th style="text-align:right">'+esc(yL)+'</th></tr></thead><tbody>';
+      rowsDesc.forEach(function(d){{tableHtml+='<tr><td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td><td>'+esc(d.project_label||'')+'</td><td>'+esc((d.commit||'').substring(0,7))+'</td><td>'+esc(d.branch||'')+'</td><td>'+esc((d.tags||[]).join(', '))+'</td><td style="text-align:right">'+fmtFull(Number(d[yK])||0)+'</td></tr>';}});
+      tableHtml+='</tbody></table>';
       var btn=document.getElementById('export-pdf-btn');
       var origBtn=btn?btn.innerHTML:'';
       if(btn){{btn.disabled=true;btn.textContent='Generating PDF\u2026';}}
@@ -13046,7 +12917,23 @@ async fn test_metrics_handler(
     </div>
 
     <div class="panel" id="viz-panel">
-      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">Visualizations</div>
+      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;display:flex;align-items:center;justify-content:space-between;">
+        <span>Visualizations</span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="export-btn" id="tm-export-xlsx-btn" title="Download test metrics as Excel workbook (.xlsx)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export Excel
+          </button>
+          <button type="button" class="export-btn" id="tm-export-png-btn" title="Save charts as PNG image">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Export PNG
+          </button>
+          <button type="button" class="export-btn" id="tm-export-pdf-btn" title="Export printable PDF report">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>
+            Export PDF
+          </button>
+        </div>
+      </div>
 
       <div class="chart-box" style="margin-bottom:18px;">
         <div class="chart-box-header">
@@ -14094,6 +13981,146 @@ async fn test_metrics_handler(
         }});
       }}, 80);
     }});
+
+    // ── Export helpers (Excel / PNG / PDF) ───────────────────────────────────
+    var TM_FONT = 'Inter,ui-sans-serif,system-ui,-apple-system,sans-serif';
+    function tmExportMeta() {{
+      var sel = document.getElementById('scope-sel');
+      var proj = sel && sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : 'All projects';
+      if (!proj || proj === '__all__') proj = 'All projects';
+      var now = new Date(); function p2(n) {{ return (n<10?'0':'')+n; }}
+      var dstr = now.getFullYear()+'-'+p2(now.getMonth()+1)+'-'+p2(now.getDate())+' '+p2(now.getHours())+':'+p2(now.getMinutes());
+      return {{ proj: proj, date: dstr }};
+    }}
+
+    function exportTmXLSX() {{
+      var D = currentLangTests;
+      if (!D || !D.length) {{ alert('No test data to export yet.'); return; }}
+      var t = tmExportMeta();
+      function s2b(s) {{ return new TextEncoder().encode(s); }}
+      function xe(s) {{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
+      function col2l(n) {{ var s=''; while(n>0){{var r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26);}} return s; }}
+      function crc32(d) {{
+        if(!crc32.t){{crc32.t=new Uint32Array(256);for(var i=0;i<256;i++){{var c=i;for(var j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);crc32.t[i]=c;}}}}
+        var c=0xFFFFFFFF;for(var i=0;i<d.length;i++)c=crc32.t[(c^d[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0;
+      }}
+      function buildSheet(hdr, rows) {{
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>';
+        x+='<row r="1">';hdr.forEach(function(h,ci){{x+='<c r="'+col2l(ci+1)+'1" t="inlineStr" s="1"><is><t>'+xe(h)+'</t></is></c>';}});x+='</row>';
+        rows.forEach(function(row,ri){{var rn=ri+2;x+='<row r="'+rn+'">';row.forEach(function(cell,ci){{var addr=col2l(ci+1)+rn;if(typeof cell==='number'){{x+='<c r="'+addr+'"><v>'+cell+'</v></c>';}}else{{x+='<c r="'+addr+'" t="inlineStr"><is><t>'+xe(String(cell))+'</t></is></c>';}}}}); x+='</row>';}});
+        return x+'</sheetData></worksheet>';
+      }}
+      var totTests=D.reduce(function(a,d){{return a+d.tests;}},0);
+      var totAssert=D.reduce(function(a,d){{return a+(d.assertions||0);}},0);
+      var totSuites=D.reduce(function(a,d){{return a+(d.suites||0);}},0);
+      var totCode=D.reduce(function(a,d){{return a+d.code;}},0);
+      var totFiles=D.reduce(function(a,d){{return a+d.files;}},0);
+      var s1H=['Language','Test Functions','Assertions','Test Suites','Code Lines','Files','Density (per 1K)'];
+      var s1R=D.map(function(d){{return[d.lang,d.tests,d.assertions||0,d.suites||0,d.code,d.files,d.density];}});
+      s1R.push(['TOTAL',totTests,totAssert,totSuites,totCode,totFiles,totCode>0?Math.round(totTests/totCode*10000)/10:0]);
+      var s2H=['Metric','Value'];
+      var s2R=[['Project / Scope',t.proj],['Test Functions',totTests],['Assertions',totAssert],['Test Suites',totSuites],['Languages with Tests',D.length],['Total Code Lines',totCode],['Generated',t.date]];
+      var sheets=[{{name:'Summary',headers:s2H,rows:s2R}},{{name:'Language Breakdown',headers:s1H,rows:s1R}}];
+      var styl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
+      var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
+      sheets.forEach(function(s,i){{ct+='<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}});
+      ct+='<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
+      var dotrels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+      var wbr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+      sheets.forEach(function(s,i){{wbr+='<Relationship Id="rId'+(i+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}});
+      wbr+='<Relationship Id="rId'+(sheets.length+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+      var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>';
+      sheets.forEach(function(s,i){{wbx+='<sheet name="'+xe(s.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}});
+      wbx+='</sheets></workbook>';
+      var files=[
+        {{name:'[Content_Types].xml',data:s2b(ct)}},
+        {{name:'_rels/.rels',data:s2b(dotrels)}},
+        {{name:'xl/workbook.xml',data:s2b(wbx)}},
+        {{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},
+        {{name:'xl/styles.xml',data:s2b(styl)}}
+      ];
+      sheets.forEach(function(s,i){{files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(buildSheet(s.headers,s.rows))}});}});
+      var parts=[],offsets=[],total=0;
+      files.forEach(function(f){{offsets.push(total);var nb=s2b(f.name),crc=crc32(f.data);var h=new DataView(new ArrayBuffer(30+nb.length));h.setUint32(0,0x04034B50,true);h.setUint16(4,20,true);h.setUint16(6,0,true);h.setUint16(8,0,true);h.setUint16(10,0,true);h.setUint16(12,0,true);h.setUint32(14,crc,true);h.setUint32(18,f.data.length,true);h.setUint32(22,f.data.length,true);h.setUint16(26,nb.length,true);h.setUint16(28,0,true);for(var i=0;i<nb.length;i++)h.setUint8(30+i,nb[i]);parts.push(new Uint8Array(h.buffer));parts.push(f.data);total+=30+nb.length+f.data.length;}});
+      var cdStart=total;
+      files.forEach(function(f,fi){{var nb=s2b(f.name),crc=crc32(f.data);var cd=new DataView(new ArrayBuffer(46+nb.length));cd.setUint32(0,0x02014B50,true);cd.setUint16(4,20,true);cd.setUint16(6,20,true);cd.setUint16(8,0,true);cd.setUint16(10,0,true);cd.setUint16(12,0,true);cd.setUint16(14,0,true);cd.setUint32(16,crc,true);cd.setUint32(20,f.data.length,true);cd.setUint32(24,f.data.length,true);cd.setUint16(28,nb.length,true);cd.setUint16(30,0,true);cd.setUint16(32,0,true);cd.setUint16(34,0,true);cd.setUint16(36,0,true);cd.setUint32(38,0,true);cd.setUint32(42,offsets[fi],true);for(var i=0;i<nb.length;i++)cd.setUint8(46+i,nb[i]);parts.push(new Uint8Array(cd.buffer));total+=46+nb.length;}});
+      var cdSz=total-cdStart;var eocd=new DataView(new ArrayBuffer(22));eocd.setUint32(0,0x06054B50,true);eocd.setUint16(4,0,true);eocd.setUint16(6,0,true);eocd.setUint16(8,files.length,true);eocd.setUint16(10,files.length,true);eocd.setUint32(12,cdSz,true);eocd.setUint32(16,cdStart,true);eocd.setUint16(20,0,true);parts.push(new Uint8Array(eocd.buffer));
+      var sz=parts.reduce(function(a,p){{return a+p.length;}},0);var out=new Uint8Array(sz);var off=0;parts.forEach(function(p){{out.set(p,off);off+=p.length;}});
+      var a=document.createElement('a');a.download='oxide-sloc-test-metrics.xlsx';
+      a.href=URL.createObjectURL(new Blob([out.buffer],{{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}}));
+      a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},1000);
+    }}
+
+    function exportTmPNG() {{
+      var ids=['canvas-trend','canvas-tests','canvas-density','canvas-assertions','canvas-suites','canvas-files','canvas-composition'];
+      var canvases=ids.map(function(id){{return document.getElementById(id);}}).filter(function(c){{return c&&c.width>0&&c.style.display!=='none';}});
+      if(!canvases.length){{alert('No charts rendered yet. Run a scan first.');return;}}
+      var t=tmExportMeta();
+      var cols=2,CW=640,CH=320,headerH=90,footerH=34,gap=10;
+      var rows=Math.ceil(canvases.length/cols);
+      var W=cols*(CW+gap),H=headerH+rows*(CH+gap)+footerH;
+      var out=document.createElement('canvas');out.width=W;out.height=H;
+      var ctx=out.getContext('2d');
+      var cs=getComputedStyle(document.body);
+      var bg=cs.getPropertyValue('--bg').trim()||'#f5efe8';
+      var oxide=cs.getPropertyValue('--oxide').trim()||'#C45C10';
+      var muted=cs.getPropertyValue('--muted').trim()||'#7b675b';
+      ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+      ctx.fillStyle=oxide;ctx.font='800 20px '+TM_FONT;ctx.textBaseline='alphabetic';ctx.textAlign='left';
+      ctx.fillText('Test Metrics — '+t.proj,18,36);
+      ctx.fillStyle=muted;ctx.font='600 12px '+TM_FONT;
+      ctx.fillText('oxide-sloc v{version}  ·  Generated '+t.date,18,60);
+      ctx.strokeStyle=oxide;ctx.globalAlpha=0.45;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(18,72);ctx.lineTo(W-18,72);ctx.stroke();ctx.globalAlpha=1;
+      canvases.forEach(function(c,i){{
+        var row=Math.floor(i/cols),col=i%cols;
+        var x=col*(CW+gap),y=headerH+row*(CH+gap);
+        var surf=document.createElement('canvas');surf.width=CW;surf.height=CH;
+        var sc=surf.getContext('2d');sc.fillStyle=bg;sc.fillRect(0,0,CW,CH);
+        sc.drawImage(c,0,0,CW,CH);
+        ctx.drawImage(surf,x,y);
+      }});
+      ctx.fillStyle=muted;ctx.font='600 10px '+TM_FONT;ctx.textAlign='center';
+      ctx.fillText('© 2026 OxideSLOC  ·  oxide-sloc v{version}  ·  AGPL-3.0-or-later',W/2,H-10);
+      var a=document.createElement('a');a.download='oxide-sloc-test-metrics.png';a.href=out.toDataURL('image/png');a.click();
+    }}
+
+    function exportTmPDF() {{
+      var D=currentLangTests;
+      var t=tmExportMeta();
+      var btn=document.getElementById('tm-export-pdf-btn');
+      var origHtml=btn?btn.innerHTML:'';
+      if(btn){{btn.disabled=true;btn.textContent='Generating…';}}
+      var strips=document.querySelectorAll('.summary-strip');
+      var statsHtml='';strips.forEach(function(s){{statsHtml+=s.outerHTML;}});
+      var rows='';
+      (D||[]).forEach(function(d){{
+        rows+='<tr><td><strong>'+d.lang+'</strong></td><td>'+Number(d.tests).toLocaleString()+'</td><td>'+(Number(d.assertions||0)).toLocaleString()+'</td><td>'+(Number(d.suites||0)).toLocaleString()+'</td><td>'+Number(d.code).toLocaleString()+'</td><td>'+Number(d.files).toLocaleString()+'</td><td>'+Number(d.density).toFixed(2)+'</td></tr>';
+      }});
+      var tableHtml='<table><thead><tr><th>Language</th><th>Test Fns</th><th>Assertions</th><th>Suites</th><th>Code Lines</th><th>Files</th><th>Density/1K</th></tr></thead><tbody>'+rows+'</tbody></table>';
+      var css='<style>*{{box-sizing:border-box;}}body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;margin:0;padding:30px 34px;background:#fff;}}.rep-head{{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #C45C10;padding-bottom:14px;margin-bottom:18px;}}.rep-title{{font-size:23px;font-weight:900;margin:0;color:#241813;}}.rep-sub{{font-size:13px;color:#7b675b;margin:6px 0 0;}}.rep-brand{{font-size:14px;font-weight:800;color:#C45C10;text-align:right;white-space:nowrap;}}.rep-brand small{{display:block;font-weight:600;color:#7b675b;font-size:11px;margin-top:2px;}}.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 14px;}}.stat-chip{{border:1px solid #e6d0bf;border-radius:12px;padding:12px 14px;position:relative;}}.stat-chip-tip,.stat-chip-exact{{display:none!important;}}.stat-chip-val{{font-size:18px;font-weight:900;color:#C45C10;}}.stat-chip-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;margin-top:4px;}}.chart-section-header{{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#C45C10;margin:18px 0 10px;}}table{{border-collapse:collapse;width:100%;font-size:11px;}}th,td{{border:1px solid #e6d0bf;padding:5px 8px;text-align:left;}}th{{background:#f5efe8;font-weight:800;}}.rep-foot{{margin-top:24px;border-top:1px solid #e6d0bf;padding-top:12px;font-size:11px;color:#7b675b;text-align:center;}}</style>';
+      var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Test Metrics</title>'+css+'</head><body>'
+        +'<div class="rep-head"><div><h1 class="rep-title">Test Metrics Report</h1><p class="rep-sub">Scope: '+t.proj+'</p></div>'
+        +'<div class="rep-brand">OxideSLOC<small>Test Metrics</small></div></div>'
+        +statsHtml
+        +'<div class="chart-section-header">Language Breakdown</div>'
+        +tableHtml
+        +'<div class="rep-foot">© 2026 OxideSLOC · oxide-sloc v{version} · local code metrics workbench · AGPL-3.0-or-later · Generated '+t.date+'</div>'
+        +'</body></html>';
+      fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-test-metrics.pdf'}})}})
+        .then(function(r){{if(!r.ok)throw new Error('server returned '+r.status);return r.blob();}})
+        .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='oxide-sloc-test-metrics.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},300);}})
+        .catch(function(e){{alert('PDF export failed: '+e.message+'. A Chromium-based browser (Chrome/Edge/Brave) must be installed on the server for PDF rendering.');}})
+        .finally(function(){{if(btn){{btn.disabled=false;btn.innerHTML=origHtml;}}}});
+    }}
+
+    (function() {{
+      var xBtn=document.getElementById('tm-export-xlsx-btn');
+      var pngBtn=document.getElementById('tm-export-png-btn');
+      var pdfBtn=document.getElementById('tm-export-pdf-btn');
+      if(xBtn)xBtn.addEventListener('click',exportTmXLSX);
+      if(pngBtn)pngBtn.addEventListener('click',exportTmPNG);
+      if(pdfBtn)pdfBtn.addEventListener('click',exportTmPDF);
+    }})();
 
     applyScope();
   }})();
@@ -21374,7 +21401,7 @@ struct ScanSetupTemplate {
     @media(max-width:720px){.r-chart-grid-2{grid-template-columns:1fr;}}
     @media print{.r-chart-controls,.r-chart-tab-bar{display:none!important;}}
     #r-tt{display:none;position:fixed;background:rgba(15,10,6,.95);color:#fff;border-radius:10px;padding:8px 13px;font-size:12px;line-height:1.5;pointer-events:none;z-index:10001;box-shadow:0 4px 20px rgba(0,0,0,.32);border:1px solid rgba(255,255,255,.1);max-width:240px;white-space:nowrap;}
-    .r-lang-overview{display:flex;gap:40px;align-items:flex-start;justify-content:center;flex-wrap:wrap;padding:8px 0 16px;}
+    .r-lang-overview{display:flex;gap:40px;align-items:center;justify-content:center;flex-wrap:wrap;padding:8px 0 16px;}
     .r-lang-overview-cell{display:flex;flex-direction:column;align-items:center;gap:8px;flex:1 1 280px;max-width:480px;}
     .r-lang-overview-cell p{margin:0;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-2);text-align:center;}
     .r-viz-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:stretch;}
@@ -22515,19 +22542,23 @@ struct ScanSetupTemplate {
 
         // Horizontal stacked-bar chart — fills container width
         var maxT=Math.max.apply(null,D.map(function(d){return d.physical||d.code+d.comments+d.blanks;}))||1;
-        var LW=108,BW=260,rHb=28,bH=20,SH=D.length*rHb+32,svgW=LW+BW+68;
+        var LW=108,BW=260,svgW=LW+BW+68;
+        var barRhb=Math.min(48,Math.max(28,Math.floor((DH-32)/D.length)));
+        var barBH=Math.min(32,Math.round(barRhb*0.7));
+        var SH=DH;
+        var barTopPad=Math.max(6,Math.round((SH-D.length*barRhb-18)/2));
         var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         D.forEach(function(d,i){
-          var y=6+i*rHb,x=LW;
+          var y=barTopPad+i*barRhb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
-          var lmid=y+bH/2+4;
+          var lmid=y+barBH/2+4;
           bs+='<g class="lang-bar-row">';
-          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+bH+'" fill="transparent"/>';
+          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'" rx="0"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
-          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'" rx="0"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
-          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'" rx="0"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'" rx="0"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'" rx="0"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'" rx="0"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
           bs+='<text x="'+px(LW+phys/maxT*BW+5)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
@@ -22731,7 +22762,7 @@ struct ScanSetupTemplate {
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
           var n=SCAT_D.length;
-          var legW=132,H=hOvr||224,PL=52,PB=36,PT=44,PR=8;
+          var legW=132,H=hOvr||224,PL=52,PB=36,PT=44,PR=22;
           var W=Math.max(320,el.offsetWidth||480);
           var cW=W-PL-PR-legW,cH=H-PT-PB;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
@@ -22777,7 +22808,7 @@ struct ScanSetupTemplate {
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75">Files Analyzed</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
           // Legend column (right side — colour-coded circle + name per language)
-          var legX=PL+cW+PR+6;
+          var legX=PL+cW+PR+14;
           var legItemH=Math.min(22,Math.max(14,Math.floor(cH/n)));
           var legTotalH=n*legItemH;
           var legY0=PT+Math.max(0,Math.floor((cH-legTotalH)/2));
@@ -27279,7 +27310,7 @@ struct CompareSelectTemplate {
         </div>
         <div class="ic-card">
           <div class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</div>
-          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#93C5FD"></span><span style="color:#2563EB;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#C4B5FD"></span><span style="color:#7C3AED;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#6EE7B7"></span><span style="color:#0D9488;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
+          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#E3A876"></span><span style="color:#C45C10;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#9FC3AE"></span><span style="color:#2A6846;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#E0C58A"></span><span style="color:#BE8A2E;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
           <div id="ic-c1"></div>
         </div>
         <div class="ic-card" id="ic-lang-card">
@@ -27943,7 +27974,7 @@ struct CompareSelectTemplate {
       }
 
       // ── Chart 1: Baseline vs Current grouped bars ────────────────────────
-      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#93C5FD',cc:'#2563EB'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#C4B5FD',cc:'#7C3AED'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#6EE7B7',cc:'#0D9488'}];
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#E3A876',cc:'#C45C10'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#9FC3AE',cc:'#2A6846'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#E0C58A',cc:'#BE8A2E'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
       var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14;
       var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
@@ -27953,18 +27984,18 @@ struct CompareSelectTemplate {
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
         c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
         c1+='<rect class="cb" x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"'+barTT(m.l,'Current: '+fmt(m.c))+'/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">After</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#999">Before</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">After</text>';
       });
       c1+='</svg>';
 
       // ── Chart 2: Delta by Metric ─────────────────────────────────────────
-      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#2563EB'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#7C3AED'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#0D9488'}];
+      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#C45C10'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#2A6846'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#BE8A2E'}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
       var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18;
       var cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
@@ -27974,13 +28005,13 @@ struct CompareSelectTemplate {
         var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2);
         var col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw;
         var sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
         c2+='<rect class="cb" x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3"'+barTT(m.l,'Delta: '+vStr)+'/>';
         if(bw>=52){
-          c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';
+          c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';
         }else{
           var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';
-          c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';
+          c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';
         }
       });
       c2+='</svg>';
@@ -27998,15 +28029,15 @@ struct CompareSelectTemplate {
           var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2);
           var col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw;
           var sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
-          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
+          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="#444">'+esc(l)+'</text>';
           c3+='<rect class="cb" x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"'+barTT(l,'Delta: '+vStr+' code lines \u2022 '+e.f+' file'+(e.f!==1?'s':''))+'/>';
           if(bw>=48){
-            c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';
+            c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';
           }else{
             var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';
-            c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';
+            c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';
           }
-          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
+          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
         });
         c3+='</svg>';
       }
@@ -28026,12 +28057,12 @@ struct CompareSelectTemplate {
         c4+='<path class="cb" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"'+barTT(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+'/>';
         ang+=sw;
       });
-      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#333">'+fmt(tot)+'</text>';
-      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="22" font-weight="bold" fill="#333">'+fmt(tot)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" fill="#888">total files</text>';
       segs.forEach(function(s,i){
         var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
         c4+='<rect x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2"/>';
-        c4+='<text x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+        c4+='<text x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="#555">'+esc(s.l)+': '+fmt(s.v)+'</text>';
       });
       c4+='</svg>';
 
@@ -28065,9 +28096,9 @@ struct CompareSelectTemplate {
         '<div class="two-col">'+
         '<div class="card"><h2>Code Metrics &mdash; Baseline vs Current<\/h2>'+
         '<div class="leg">'+
-        '<span><span class="dot" style="background:#93C5FD"><\/span><span style="color:#2563EB;font-weight:600">Code Lines<\/span><\/span>'+
-        '<span><span class="dot" style="background:#C4B5FD"><\/span><span style="color:#7C3AED;font-weight:600">Files<\/span><\/span>'+
-        '<span><span class="dot" style="background:#6EE7B7"><\/span><span style="color:#0D9488;font-weight:600">Comments<\/span><\/span>'+
+        '<span><span class="dot" style="background:#E3A876"><\/span><span style="color:#C45C10;font-weight:600">Code Lines<\/span><\/span>'+
+        '<span><span class="dot" style="background:#9FC3AE"><\/span><span style="color:#2A6846;font-weight:600">Files<\/span><\/span>'+
+        '<span><span class="dot" style="background:#E0C58A"><\/span><span style="color:#BE8A2E;font-weight:600">Comments<\/span><\/span>'+
         '<span style="font-size:10px;color:#888">&nbsp;(faded&nbsp;=&nbsp;before)<\/span><\/div>'+c1+'<\/div>'+
         (langs.length?'<div class="card"><h2>Language Code Delta<\/h2>'+c3+'<\/div>':'<div><\/div>')+
         '<\/div>'+
@@ -28097,9 +28128,9 @@ struct CompareSelectTemplate {
         '<p class="sub">'+esc(proj)+'&nbsp;&middot;&nbsp;'+esc(sd.bts||'')+' \u2192 '+esc(sd.cts||'')+'<\/p>'+
         '<div class="two-col">'+
         '<div class="card"><h2>Code Metrics \u2014 Baseline vs Current<\/h2>'+
-        '<div class="leg"><span><span class="dot" style="background:#93C5FD"><\/span><span style="color:#2563EB;font-weight:600">Code Lines<\/span><\/span>'+
-        '<span><span class="dot" style="background:#C4B5FD"><\/span><span style="color:#7C3AED;font-weight:600">Files<\/span><\/span>'+
-        '<span><span class="dot" style="background:#6EE7B7"><\/span><span style="color:#0D9488;font-weight:600">Comments<\/span><\/span><\/div>'+c1h+'<\/div>'+
+        '<div class="leg"><span><span class="dot" style="background:#E3A876"><\/span><span style="color:#C45C10;font-weight:600">Code Lines<\/span><\/span>'+
+        '<span><span class="dot" style="background:#9FC3AE"><\/span><span style="color:#2A6846;font-weight:600">Files<\/span><\/span>'+
+        '<span><span class="dot" style="background:#E0C58A"><\/span><span style="color:#BE8A2E;font-weight:600">Comments<\/span><\/span><\/div>'+c1h+'<\/div>'+
         (c3h?'<div class="card"><h2>Language Code Delta<\/h2>'+c3h+'<\/div>':'<div><\/div>')+
         '<\/div>'+
         '<div class="two-col">'+
@@ -28128,7 +28159,7 @@ struct CompareSelectTemplate {
       dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
       var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
       // Chart 1: Baseline vs Current grouped bars
-      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#93C5FD',cc:'#2563EB'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#C4B5FD',cc:'#7C3AED'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#6EE7B7',cc:'#0D9488'}];
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#E3A876',cc:'#C45C10'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#9FC3AE',cc:'#2A6846'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#E0C58A',cc:'#BE8A2E'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
       var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
@@ -28137,27 +28168,27 @@ struct CompareSelectTemplate {
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
         c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
         c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="#999">Before</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="9" fill="'+m.cc+'">After</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#999">Before</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">After</text>';
       });
       c1+='</svg>';
       // Chart 2: Delta by Metric
-      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#2563EB'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#7C3AED'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#0D9488'}];
+      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#C45C10'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#2A6846'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#BE8A2E'}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
       var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){
         var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
         c2+='<rect'+btt(m.l,'Delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3"/>';
-        if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
-        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,Calibri,Arial" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+        if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
+        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
       });
       c2+='</svg>';
       // Chart 3: Language Code Delta
@@ -28169,11 +28200,11 @@ struct CompareSelectTemplate {
         c3+='<line x1="'+cx3+'" y1="0" x2="'+cx3+'" y2="'+C3H+'" stroke="'+LGY+'" stroke-width="1.5"/>';
         langs.forEach(function(l,i){
           var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
-          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="11" fill="#444">'+esc(l)+'</text>';
+          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="#444">'+esc(l)+'</text>';
           c3+='<rect'+btt(l,'Delta: '+vStr+' code lines \u2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
-          if(bw>=48){c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
-          else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,Calibri,Arial" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
-          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,Calibri,Arial" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
+          if(bw>=48){c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
+          else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
         });
         c3+='</svg>';
       }
@@ -28194,12 +28225,12 @@ struct CompareSelectTemplate {
           ang+=sw;
         });
       }
-      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="22" font-weight="bold" fill="#444">'+fmt(tot)+'</text>';
-      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,Calibri,Arial" font-size="10" fill="#888">total files</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="22" font-weight="bold" fill="#444">'+fmt(tot)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" fill="#888">total files</text>';
       segs.forEach(function(s,i){
         var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
         c4+='<rect'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,Calibri,Arial" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+        c4+='<text'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
       });
       c4+='</svg>';
       var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=c1;addTT(e1);}
