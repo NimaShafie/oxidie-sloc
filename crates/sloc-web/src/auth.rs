@@ -25,6 +25,41 @@ use askama::Template as _;
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
+/// 503 response returned when server mode is active but no API key is configured.
+/// Fails closed: browsers get an explanatory HTML page, API clients get a plain 503.
+fn unconfigured_server_mode_response(req: &Request<Body>) -> Response {
+    tracing::warn!(
+        event = "auth_unconfigured_server_mode",
+        path = %req.uri().path(),
+        "Rejected request: server mode requires SLOC_API_KEY or SLOC_API_KEYS"
+    );
+    if is_browser_request(req) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Html(
+                r#"<!doctype html><html><head><meta charset="utf-8">
+<title>Authentication Required — OxideSLOC</title>
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}
+h1{color:#b85d33}p{line-height:1.6}code{background:#f3e9e0;padding:2px 6px;border-radius:4px}</style>
+</head><body>
+<h1>Authentication not configured</h1>
+<p>This server is running in network mode but <code>SLOC_API_KEY</code> is not set.</p>
+<p>Restart with <code>SLOC_API_KEY=&lt;secret&gt;</code> or <code>SLOC_API_KEYS=&lt;k1,k2&gt;</code>
+to enable access.</p>
+</body></html>"#
+                    .to_owned(),
+            ),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
+        "503 Service Unavailable — set SLOC_API_KEY to enable server-mode access\n",
+    )
+        .into_response()
+}
+
 pub(crate) async fn require_api_key(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -35,36 +70,7 @@ pub(crate) async fn require_api_key(
         // be publicly accessible. Fail closed so operators must opt in.
         // Desktop mode (server_mode = false) keeps the open-by-default behaviour.
         if state.server_mode {
-            tracing::warn!(
-                event = "auth_unconfigured_server_mode",
-                path = %req.uri().path(),
-                "Rejected request: server mode requires SLOC_API_KEY or SLOC_API_KEYS"
-            );
-            if is_browser_request(&req) {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Html(
-                        r#"<!doctype html><html><head><meta charset="utf-8">
-<title>Authentication Required — OxideSLOC</title>
-<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 24px;color:#2f241c}
-h1{color:#b85d33}p{line-height:1.6}code{background:#f3e9e0;padding:2px 6px;border-radius:4px}</style>
-</head><body>
-<h1>Authentication not configured</h1>
-<p>This server is running in network mode but <code>SLOC_API_KEY</code> is not set.</p>
-<p>Restart with <code>SLOC_API_KEY=&lt;secret&gt;</code> or <code>SLOC_API_KEYS=&lt;k1,k2&gt;</code>
-to enable access.</p>
-</body></html>"#
-                            .to_owned(),
-                    ),
-                )
-                    .into_response();
-            }
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
-                "503 Service Unavailable — set SLOC_API_KEY to enable server-mode access\n",
-            )
-                .into_response();
+            return unconfigured_server_mode_response(&req);
         }
         return next.run(req).await;
     }

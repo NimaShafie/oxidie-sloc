@@ -102,7 +102,7 @@ async fn delete(app: Router, uri: &str) -> StatusCode {
 
 /// GET with the server-mode API key included (needed since server mode now
 /// requires authentication even in tests — the router is configured with
-/// TEST_SERVER_MODE_API_KEY, so all requests to it must include it).
+/// `TEST_SERVER_MODE_API_KEY`, so all requests to it must include it).
 async fn get_server(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     let resp = app
         .oneshot(
@@ -463,7 +463,7 @@ async fn badge_code_lines_no_data_returns_svg_with_no_data() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<svg"), "must return SVG");
     assert!(
-        body.contains("no data") || body.contains("0"),
+        body.contains("no data") || body.contains('0'),
         "empty registry badge body: {body}"
     );
 }
@@ -791,8 +791,7 @@ async fn pick_directory_server_mode_returns_cancelled_or_404() {
         status == StatusCode::NOT_FOUND
             || (status == StatusCode::OK
                 && serde_json::from_str::<serde_json::Value>(&body)
-                    .map(|v| v["cancelled"] == true)
-                    .unwrap_or(false)),
+                    .is_ok_and(|v| v["cancelled"] == true)),
         "server-mode pick-directory must return 404 or cancelled=true, got {status}: {body}"
     );
 }
@@ -818,8 +817,7 @@ async fn pick_file_server_mode_returns_cancelled_or_404() {
         status == StatusCode::NOT_FOUND
             || (status == StatusCode::OK
                 && serde_json::from_str::<serde_json::Value>(&body)
-                    .map(|v| v["cancelled"] == true)
-                    .unwrap_or(false)),
+                    .is_ok_and(|v| v["cancelled"] == true)),
         "server-mode pick-file must return 404 or cancelled=true, got {status}: {body}"
     );
 }
@@ -959,7 +957,7 @@ async fn multi_compare_with_one_run_shows_error() {
 #[tokio::test]
 async fn multi_compare_with_twenty_one_runs_shows_limit_error() {
     let ids: Vec<String> = (1u32..=21)
-        .map(|n| format!("00000000-0000-0000-0000-{:012}", n))
+        .map(|n| format!("00000000-0000-0000-0000-{n:012}"))
         .collect();
     let runs_csv = ids.join(",");
     let uri = format!("/multi-compare?runs={runs_csv}");
@@ -1744,7 +1742,7 @@ async fn api_confluence_post_no_config_returns_error() {
 
 #[tokio::test]
 async fn api_confluence_test_no_config_returns_error() {
-    let (status, _) = post_json(make_test_router(), "/api/confluence/test", r#"{}"#).await;
+    let (status, _) = post_json(make_test_router(), "/api/confluence/test", r"{}").await;
     assert!(
         status.as_u16() < 500,
         "confluence test without config must not 5xx, got {status}"

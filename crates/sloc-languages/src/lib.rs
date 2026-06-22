@@ -3251,21 +3251,43 @@ const fn classify_line(raw: &mut RawLineCounts, facts: &LineFacts, trimmed: &str
     }
 }
 
-fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64, u64, u64) {
-    let hit = |pats: &[&str]| u64::from(pats.iter().any(|p| trimmed.starts_with(p)));
-    // For return-type-led languages (C/C++): match prefix AND `(` present AND no `=` sits
-    // between the prefix start and the first `(` (guards against `void* p = malloc(n)`).
-    let fn_pp = if patterns.functions_prefix_paren.is_empty() {
-        0
-    } else if let Some(paren_pos) = trimmed.find('(') {
-        if trimmed[..paren_pos].contains('=') {
-            0
-        } else {
-            hit(patterns.functions_prefix_paren)
-        }
-    } else {
-        0
+/// True (as 0/1) when `trimmed` starts with any of the prefixes in `pats`.
+fn prefix_hit(pats: &[&str], trimmed: &str) -> u64 {
+    u64::from(pats.iter().any(|p| trimmed.starts_with(p)))
+}
+
+/// Match a return-type-led function prefix (C/C++): prefix AND `(` present AND no `=` sits
+/// between the prefix start and the first `(` (guards against `void* p = malloc(n)`).
+fn fn_prefix_paren_hit(patterns: &SymbolPatterns, trimmed: &str) -> u64 {
+    if patterns.functions_prefix_paren.is_empty() {
+        return 0;
+    }
+    let Some(paren_pos) = trimmed.find('(') else {
+        return 0;
     };
+    if trimmed[..paren_pos].contains('=') {
+        0
+    } else {
+        prefix_hit(patterns.functions_prefix_paren, trimmed)
+    }
+}
+
+/// Complement of `functions_prefix_paren`: same type keywords, but triggered when there is no
+/// unguarded `(` on the line (i.e. not a function definition).
+fn var_prefix_no_paren_hit(patterns: &SymbolPatterns, trimmed: &str) -> u64 {
+    if patterns.variables_prefix_no_paren.is_empty()
+        || prefix_hit(patterns.variables_prefix_no_paren, trimmed) == 0
+    {
+        return 0;
+    }
+    trimmed
+        .find('(')
+        .map_or(1, |pp| u64::from(trimmed[..pp].contains('=')))
+}
+
+fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64, u64, u64) {
+    let hit = |pats: &[&str]| prefix_hit(pats, trimmed);
+    let fn_pp = fn_prefix_paren_hit(patterns, trimmed);
     let test_hit = hit(patterns.tests);
     // Lines matching a test pattern count as tests, not as plain functions or classes.
     // This prevents double-counting in Python (`def test_` / `class Test`) and Go
@@ -3283,23 +3305,7 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     } else {
         0
     };
-    // Complement of `functions_prefix_paren`: same type keywords, but triggered when
-    // there is no unguarded `(` on the line (i.e. not a function definition).
-    let var_pnp: u64 = if !patterns.variables_prefix_no_paren.is_empty()
-        && hit(patterns.variables_prefix_no_paren) != 0
-    {
-        if let Some(pp) = trimmed.find('(') {
-            if trimmed[..pp].contains('=') {
-                1
-            } else {
-                0
-            }
-        } else {
-            1
-        }
-    } else {
-        0
-    };
+    let var_pnp = var_prefix_no_paren_hit(patterns, trimmed);
     (
         fn_hit,
         class_hit,
