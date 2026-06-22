@@ -43,10 +43,23 @@ impl McpConfig {
     }
 
     /// Validate that `path` is inside one of the configured allowed roots.
-    /// If `allowed_roots` is empty this check passes (no restriction configured).
+    ///
+    /// Fails closed: if `allowed_roots` is empty the call is rejected unless
+    /// `SLOC_MCP_UNRESTRICTED=1` is explicitly set (trusted local use only).
+    /// Configure roots with `SLOC_MCP_ALLOWED_ROOTS=/path/to/project`.
     pub fn check_path_allowed(&self, path: &str) -> anyhow::Result<()> {
         if self.allowed_roots.is_empty() {
-            return Ok(());
+            // Explicit opt-out for fully-trusted local single-user setups.
+            if std::env::var("SLOC_MCP_UNRESTRICTED").as_deref() == Ok("1") {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "SLOC_MCP_ALLOWED_ROOTS is not configured. \
+                 Set it to a colon-separated list of directories the MCP server may scan, \
+                 e.g. SLOC_MCP_ALLOWED_ROOTS=/home/user/projects. \
+                 To disable path restrictions entirely (trusted local use only), \
+                 set SLOC_MCP_UNRESTRICTED=1."
+            );
         }
         let canonical = std::fs::canonicalize(path)
             .map_err(|e| anyhow::anyhow!("cannot resolve path {path:?}: {e}"))?;
@@ -195,12 +208,35 @@ mod tests {
 
     // ── check_path_allowed ────────────────────────────────────────────────────
 
+    // `SLOC_MCP_UNRESTRICTED` is process-global env state, so the two tests that
+    // read it must not run concurrently. Serialize them with a shared mutex.
+    static UNRESTRICTED_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
-    fn check_path_allowed_no_roots_always_passes() {
+    fn check_path_allowed_no_roots_fails_closed() {
+        let _guard = UNRESTRICTED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = cfg_no_roots();
-        // Any string passes when allowed_roots is empty
-        assert!(cfg.check_path_allowed("/arbitrary/path").is_ok());
-        assert!(cfg.check_path_allowed(".").is_ok());
+        // Without SLOC_MCP_UNRESTRICTED=1 an empty roots list must be rejected.
+        std::env::remove_var("SLOC_MCP_UNRESTRICTED");
+        assert!(cfg.check_path_allowed("/arbitrary/path").is_err());
+        assert!(cfg.check_path_allowed(".").is_err());
+    }
+
+    #[test]
+    fn check_path_allowed_no_roots_unrestricted_env_passes() {
+        let _guard = UNRESTRICTED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = cfg_no_roots();
+        // With SLOC_MCP_UNRESTRICTED=1 the empty-roots bypass is active.
+        std::env::set_var("SLOC_MCP_UNRESTRICTED", "1");
+        let result_a = cfg.check_path_allowed("/arbitrary/path");
+        let result_b = cfg.check_path_allowed(".");
+        std::env::remove_var("SLOC_MCP_UNRESTRICTED");
+        assert!(result_a.is_ok());
+        assert!(result_b.is_ok());
     }
 
     #[test]

@@ -11,11 +11,6 @@ use crate::{GitCommit, GitRef, GitRefKind, RepoRefs};
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
-    // Opt-in SSL bypass for corporate/internal repos with self-signed certificates.
-    // Set SLOC_GIT_SSL_NO_VERIFY=1 in the environment to enable.
-    if std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some() {
-        cmd.args(["-c", "http.sslVerify=false"]);
-    }
     let out = cmd
         .args(args)
         .current_dir(repo)
@@ -132,7 +127,8 @@ fn try_normalize_bitbucket_cloud(scheme: &str, host: &str, path: &str) -> Option
 
 fn validate_clone_url(url: &str) -> Result<()> {
     let lower = url.to_lowercase();
-    // http:// is excluded to prevent SSRF against plaintext internal HTTP services.
+    // http:// excluded: prevents SSRF against plaintext internal HTTP services.
+    // file:// excluded: prevents local filesystem access.
     let allowed = ["https://", "git://", "ssh://", "git@"];
     if !allowed.iter().any(|p| lower.starts_with(p)) {
         bail!(
@@ -140,18 +136,90 @@ fn validate_clone_url(url: &str) -> Result<()> {
              permitted (got {url:?})"
         );
     }
-    // Block cloud instance metadata endpoints and link-local addresses.
-    let blocked = [
-        "169.254.",
-        "metadata.google.internal",
-        "100.100.100.",
-        "[fd",
-        "[fe80",
-    ];
-    if blocked.iter().any(|b| lower.contains(b)) {
-        bail!("git URL rejected: link-local and metadata service addresses are not permitted");
+    // SSRF protection: block loopback, link-local, and cloud-metadata hosts.
+    // RFC 1918 private ranges are intentionally ALLOWED so the tool can scan
+    // internal/corporate git servers (10.x, 192.168.x, 172.16-31.x); the real
+    // threat is cloud-metadata and loopback, not "any private IP".
+    // The check is host-scoped (not a whole-URL substring match) so legitimate
+    // paths/tags such as "release-v10.2" are never mistaken for an IP.
+    if let Some(host) = host_of_git_url(url) {
+        if is_ssrf_blocked_host(&host) {
+            bail!(
+                "git URL rejected: loopback, link-local, and cloud-metadata \
+                 addresses are not permitted (host {host:?})"
+            );
+        }
     }
     Ok(())
+}
+
+/// Extract the host (lowercased, brackets stripped) from a git clone URL.
+/// Handles `git@host:path`, `scheme://[user@]host[:port]/path`, and IPv6 literals.
+fn host_of_git_url(url: &str) -> Option<String> {
+    let u = url.trim();
+    // scp-like syntax: git@host:path (no scheme)
+    if let Some(rest) = u.strip_prefix("git@") {
+        let host = rest.split(':').next().unwrap_or(rest);
+        return Some(host.to_lowercase());
+    }
+    // scheme://[user@]host[:port]/path
+    let after_scheme = u.split("://").nth(1)?;
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip any userinfo (user[:pass]@).
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    // IPv6 literal: [::1]:port → ::1
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped).to_string()
+    } else {
+        authority.split(':').next().unwrap_or(authority).to_string()
+    };
+    Some(host.to_lowercase())
+}
+
+/// Known cloud-metadata / instance-data hostnames that must never be reachable.
+const BLOCKED_METADATA_HOSTNAMES: &[&str] = &[
+    "metadata.google.internal",
+    "metadata.internal",
+    "instance-data",
+];
+
+/// Returns true when `host` (a hostname or IP literal) is an SSRF-sensitive
+/// loopback, link-local, unspecified, multicast, or cloud-metadata target.
+/// RFC 1918 / IPv6 unique-local private ranges are NOT blocked.
+fn is_ssrf_blocked_host(host: &str) -> bool {
+    let h = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_lowercase();
+    if h == "localhost" || BLOCKED_METADATA_HOSTNAMES.contains(&h.as_str()) {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(ip) => is_ssrf_blocked_ip(ip),
+        Err(_) => false,
+    }
+}
+
+/// IP-level SSRF classification. Blocks loopback, link-local, unspecified,
+/// broadcast, multicast, and the Alibaba metadata IP. Allows RFC 1918 / ULA.
+fn is_ssrf_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.octets() == [100, 100, 100, 200] // Alibaba Cloud metadata
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
 }
 
 /// Clone `url` into `dest`, or fetch all refs if the repo already exists.
@@ -502,11 +570,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_ipv6_fd_prefix_rejected() {
-        assert!(validate_clone_url("https://[fd12:3456:789a::1]/repo").is_err());
-    }
-
-    #[test]
     fn validate_ipv6_fe80_link_local_rejected() {
         assert!(validate_clone_url("https://[fe80::1]/repo").is_err());
     }
@@ -519,6 +582,81 @@ mod tests {
     #[test]
     fn validate_empty_string_rejected() {
         assert!(validate_clone_url("").is_err());
+    }
+
+    #[test]
+    fn validate_rfc1918_10_allowed() {
+        // RFC 1918 private ranges are allowed (internal corporate git servers).
+        assert!(validate_clone_url("https://10.0.0.1/repo.git").is_ok());
+    }
+
+    #[test]
+    fn validate_rfc1918_192_168_allowed() {
+        assert!(validate_clone_url("https://192.168.1.1/repo.git").is_ok());
+    }
+
+    #[test]
+    fn validate_rfc1918_172_16_allowed() {
+        assert!(validate_clone_url("https://172.16.0.1/repo.git").is_ok());
+    }
+
+    #[test]
+    fn validate_rfc1918_172_31_allowed() {
+        assert!(validate_clone_url("https://172.31.255.255/repo.git").is_ok());
+    }
+
+    #[test]
+    fn validate_ipv6_ula_fd_allowed() {
+        // IPv6 unique-local (fc00::/7) is the private-range equivalent — allowed.
+        assert!(validate_clone_url("https://[fd12:3456:789a::1]/repo").is_ok());
+    }
+
+    #[test]
+    fn validate_loopback_127_rejected() {
+        assert!(validate_clone_url("https://127.0.0.1/repo.git").is_err());
+    }
+
+    #[test]
+    fn validate_localhost_rejected() {
+        assert!(validate_clone_url("https://localhost/repo.git").is_err());
+    }
+
+    #[test]
+    fn validate_unspecified_0_0_0_0_rejected() {
+        assert!(validate_clone_url("https://0.0.0.0/repo.git").is_err());
+    }
+
+    // ── host_of_git_url ───────────────────────────────────────────────────────
+
+    #[test]
+    fn host_of_git_url_https_with_port_and_creds() {
+        assert_eq!(
+            host_of_git_url("https://user:pw@gitlab.corp.com:8443/team/repo.git").as_deref(),
+            Some("gitlab.corp.com")
+        );
+    }
+
+    #[test]
+    fn host_of_git_url_scp_syntax() {
+        assert_eq!(
+            host_of_git_url("git@github.com:owner/repo.git").as_deref(),
+            Some("github.com")
+        );
+    }
+
+    #[test]
+    fn host_of_git_url_ipv6_literal() {
+        assert_eq!(
+            host_of_git_url("https://[fe80::1]:443/repo").as_deref(),
+            Some("fe80::1")
+        );
+    }
+
+    #[test]
+    fn validate_clone_url_path_with_version_number_not_blocked() {
+        // Regression: a path/tag containing "10." must not be mistaken for an IP.
+        assert!(validate_clone_url("https://github.com/acme/release-v10.2.git").is_ok());
+        assert!(validate_clone_url("https://github.com/foo/bar-127-baz.git").is_ok());
     }
 
     // ── try_normalize_bitbucket_server ────────────────────────────────────────

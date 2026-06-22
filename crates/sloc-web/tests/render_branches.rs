@@ -23,7 +23,7 @@ use axum::{
 use http_body_util::BodyExt;
 use sloc_web::{
     make_test_router, make_test_router_exhausted_semaphore, make_test_router_server_mode,
-    make_test_router_tight_rate_limit, make_test_router_with_key,
+    make_test_router_tight_rate_limit, make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
 };
 use tower::ServiceExt;
 
@@ -42,6 +42,24 @@ use sloc_languages::{Language, ParseMode, RawLineCounts};
 async fn get_with(app: Router, uri: &str) -> (StatusCode, String) {
     let resp = app
         .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn get_server_with(app: Router, uri: &str) -> (StatusCode, String) {
+    let resp = app
+        .oneshot(
+            Request::get(uri)
+                .header(
+                    "Authorization",
+                    format!("Bearer {TEST_SERVER_MODE_API_KEY}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = resp.status();
@@ -940,7 +958,7 @@ async fn exhausted_semaphore_analyze_returns_503() {
 #[tokio::test]
 async fn trend_report_server_mode_shows_locked_watched_bar() {
     let app = make_test_router_server_mode();
-    let (st, body) = get_with(app, "/trend-reports").await;
+    let (st, body) = get_server_with(app, "/trend-reports").await;
     assert!(
         st.as_u16() < 500,
         "/trend-reports (server mode) must not 5xx, got {st}"
