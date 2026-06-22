@@ -8,7 +8,88 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 // duration so parallel test threads cannot observe each other's env changes.
 static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+    ENV_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        // Recover from poisoning: a single panicking env test should report as
+        // one failure, not cascade into PoisonError on every later test.
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Every environment variable that a supported CI provider may set and that
+/// sloc-core's CI detection reads, directly or indirectly. Tests that assert on
+/// a specific provider must clear all of these first so the ambient CI
+/// environment (e.g. Jenkins running this very suite, which exports JENKINS_HOME,
+/// NODE_NAME, BUILD_NUMBER, …) cannot leak in and win the precedence check.
+const KNOWN_CI_ENV_VARS: &[&str] = &[
+    // Jenkins / Hudson
+    "JENKINS_URL",
+    "JENKINS_HOME",
+    "BUILD_URL",
+    "NODE_NAME",
+    "BUILD_NUMBER",
+    "BUILD_ID",
+    "BUILD_TAG",
+    "EXECUTOR_NUMBER",
+    "HUDSON_HOME",
+    "HUDSON_URL",
+    "WORKSPACE",
+    "BRANCH_NAME",
+    "GIT_BRANCH",
+    // GitHub Actions
+    "GITHUB_ACTIONS",
+    "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "RUNNER_NAME",
+    // GitLab CI
+    "GITLAB_CI",
+    "CI_COMMIT_BRANCH",
+    "CI_RUNNER_DESCRIPTION",
+    // CircleCI
+    "CIRCLECI",
+    "CIRCLE_BRANCH",
+    // Travis CI
+    "TRAVIS",
+    "TRAVIS_BRANCH",
+    // Azure DevOps
+    "TF_BUILD",
+    "BUILD_SOURCEBRANCH",
+    // TeamCity
+    "TEAMCITY_VERSION",
+    // Generic
+    "CI",
+];
+
+/// RAII guard that snapshots every known CI env var, clears them all on
+/// construction, and restores their original values (or absence) on drop —
+/// including when the test panics while unwinding. Construct it *after* taking
+/// `env_lock()` so the snapshot/restore is serialized with other env tests.
+struct CiEnvIsolation {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl CiEnvIsolation {
+    fn new() -> Self {
+        let saved: Vec<(&'static str, Option<String>)> = KNOWN_CI_ENV_VARS
+            .iter()
+            .map(|&k| (k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for CiEnvIsolation {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
 }
 
 use chrono::Utc;
@@ -1415,35 +1496,15 @@ fn analyze_walks_deeply_nested_directories() {
 fn analyze_ci_name_set_when_github_actions_env_present() {
     let _guard = env_lock();
     // Isolate from the ambient CI environment (this suite itself runs under Jenkins,
-    // which sets JENKINS_URL/BUILD_URL and would otherwise win the precedence check).
-    let saved: Vec<(&str, Option<String>)> = [
-        "JENKINS_URL",
-        "JENKINS_HOME",
-        "BUILD_URL",
-        "GITLAB_CI",
-        "CI",
-        "GITHUB_ACTIONS",
-    ]
-    .iter()
-    .map(|k| (*k, std::env::var(k).ok()))
-    .collect();
-    for (k, _) in &saved {
-        std::env::remove_var(k);
-    }
+    // which exports JENKINS_HOME/BUILD_URL/etc. that would otherwise win the
+    // precedence check). The guard restores the original env on drop, even on panic.
+    let _ci = CiEnvIsolation::new();
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
     std::env::set_var("GITHUB_ACTIONS", "true");
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
-
-    // Restore the original environment before asserting so a panic can't leak state.
-    for (k, v) in saved {
-        match v {
-            Some(val) => std::env::set_var(k, val),
-            None => std::env::remove_var(k),
-        }
-    }
 
     assert_eq!(
         run.environment.ci_name.as_deref(),
@@ -1456,27 +1517,13 @@ fn analyze_ci_name_set_when_github_actions_env_present() {
 fn analyze_sets_git_branch_from_github_ref_when_no_git_dir() {
     let _guard = env_lock();
     // Isolate from ambient CI environment to avoid cross-test env pollution.
-    let saved: Vec<(&str, Option<String>)> =
-        ["GITHUB_REF", "GITHUB_REF_NAME", "BRANCH_NAME", "GIT_BRANCH"]
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
-    for (k, _) in &saved {
-        std::env::remove_var(k);
-    }
+    let _ci = CiEnvIsolation::new();
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn g() {}\n").unwrap();
     std::env::set_var("GITHUB_REF", "refs/heads/feature-branch");
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
-
-    for (k, v) in saved {
-        match v {
-            Some(val) => std::env::set_var(k, val),
-            None => std::env::remove_var(k),
-        }
-    }
 
     // If a .git dir was found, git_branch might come from git; otherwise from env
     if run.git_branch.is_some() {
@@ -2054,17 +2101,8 @@ fn analyze_respects_cancel_signal() {
 #[test]
 fn analysis_run_environment_ci_name_travis() {
     let _lock = env_lock();
-    // Clear other CI vars first to avoid false positives
-    for v in &[
-        "JENKINS_URL",
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "CIRCLECI",
-        "TF_BUILD",
-        "TEAMCITY_VERSION",
-    ] {
-        std::env::remove_var(v);
-    }
+    // Clear all known CI vars first to avoid false positives from the ambient env.
+    let _ci = CiEnvIsolation::new();
     std::env::set_var("TRAVIS", "true");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
@@ -2080,16 +2118,7 @@ fn analysis_run_environment_ci_name_travis() {
 #[test]
 fn analysis_run_environment_ci_name_azure_devops() {
     let _lock = env_lock();
-    for v in &[
-        "JENKINS_URL",
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "CIRCLECI",
-        "TRAVIS",
-        "TEAMCITY_VERSION",
-    ] {
-        std::env::remove_var(v);
-    }
+    let _ci = CiEnvIsolation::new();
     std::env::set_var("TF_BUILD", "true");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("b.rs"), "fn g() {}\n").unwrap();
@@ -2104,16 +2133,7 @@ fn analysis_run_environment_ci_name_azure_devops() {
 #[test]
 fn analysis_run_environment_ci_name_teamcity() {
     let _lock = env_lock();
-    for v in &[
-        "JENKINS_URL",
-        "GITHUB_ACTIONS",
-        "GITLAB_CI",
-        "CIRCLECI",
-        "TRAVIS",
-        "TF_BUILD",
-    ] {
-        std::env::remove_var(v);
-    }
+    let _ci = CiEnvIsolation::new();
     std::env::set_var("TEAMCITY_VERSION", "2024.1");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("c.rs"), "fn h() {}\n").unwrap();
@@ -2128,7 +2148,10 @@ fn analysis_run_environment_ci_name_teamcity() {
 #[test]
 fn analysis_run_git_branch_from_github_ref_name() {
     let _lock = env_lock();
-    // Use GITHUB_REF_NAME env var as ci_branch fallback for detached HEAD
+    // Use GITHUB_REF_NAME env var as ci_branch fallback for detached HEAD.
+    // Clear ambient CI branch vars first so a Jenkins-provided BRANCH_NAME/GIT_BRANCH
+    // can't take precedence over the value under test.
+    let _ci = CiEnvIsolation::new();
     std::env::set_var("GITHUB_REF_NAME", "my-feature-branch");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("d.rs"), "fn i() {}\n").unwrap();
