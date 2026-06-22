@@ -50,7 +50,7 @@ async fn get_shared(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMa
     (status, headers, body)
 }
 
-/// GET against a server-mode router (includes auth header for TEST_SERVER_MODE_API_KEY).
+/// GET against a server-mode router (includes auth header for `TEST_SERVER_MODE_API_KEY`).
 async fn get_server_shared(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     let resp = app
         .oneshot(

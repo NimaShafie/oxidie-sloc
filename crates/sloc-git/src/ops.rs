@@ -168,11 +168,10 @@ fn host_of_git_url(url: &str) -> Option<String> {
     // Strip any userinfo (user[:pass]@).
     let authority = authority.rsplit('@').next().unwrap_or(authority);
     // IPv6 literal: [::1]:port → ::1
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        stripped.split(']').next().unwrap_or(stripped).to_string()
-    } else {
-        authority.split(':').next().unwrap_or(authority).to_string()
-    };
+    let host = authority.strip_prefix('[').map_or_else(
+        || authority.split(':').next().unwrap_or(authority).to_string(),
+        |stripped| stripped.split(']').next().unwrap_or(stripped).to_string(),
+    );
     Some(host.to_lowercase())
 }
 
@@ -195,10 +194,7 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
     if h == "localhost" || BLOCKED_METADATA_HOSTNAMES.contains(&h.as_str()) {
         return true;
     }
-    match h.parse::<std::net::IpAddr>() {
-        Ok(ip) => is_ssrf_blocked_ip(ip),
-        Err(_) => false,
-    }
+    h.parse::<std::net::IpAddr>().is_ok_and(is_ssrf_blocked_ip)
 }
 
 /// IP-level SSRF classification. Blocks loopback, link-local, unspecified,
