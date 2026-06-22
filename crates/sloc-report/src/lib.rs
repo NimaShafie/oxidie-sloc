@@ -2057,6 +2057,38 @@ fn pdf_render_tc_inline(ctx: &PdfCtx<'_>, run: &AnalysisRun, y_start: f32, foote
     y
 }
 
+/// Build the right-aligned per-page header metadata string shown on every continuation
+/// page so each printed sheet is self-identifying: Run ID, git commit, and scan time.
+fn pdf_page_header_meta(run: &AnalysisRun) -> String {
+    let mut parts = vec![format!(
+        "Run ID: {}",
+        pdf_safe_str(&run.tool.run_id[..run.tool.run_id.len().min(20)])
+    )];
+    if let Some(ref c) = run.git_commit_short {
+        parts.push(format!("Commit: {}", pdf_safe_str(c)));
+    }
+    parts.push(to_pt_hhmm(run.tool.timestamp_utc));
+    parts.join("  \u{00B7}  ")
+}
+
+/// Draw `text` right-aligned (gray, 6.5 pt) inside a navy page-header bar whose text
+/// baseline sits at `baseline_y`. Uses exact Helvetica advance widths for precise
+/// right-edge alignment against the page margin.
+fn pdf_draw_header_meta(
+    layer: &printpdf::PdfLayerReference,
+    font: &printpdf::IndirectFontRef,
+    w: f32,
+    margin: f32,
+    baseline_y: f32,
+    text: &str,
+) {
+    use printpdf::{Color, Mm, Rgb};
+    let tw = helvetica_width_mm(text, 6.5, false);
+    let x = (w - margin - tw).max(margin + 60.0);
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    layer.use_text(text, 6.5, Mm(x), Mm(baseline_y), font);
+}
+
 /// Create a dedicated "Tests & Coverage" page, render its content inline, and return the
 /// `(page, layer, y_bottom)` tuple so `pdf_render_per_file_pages` can continue on this page.
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
@@ -2103,11 +2135,19 @@ fn pdf_render_tests_coverage_page(
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
     ctx.layer.use_text(
-        pdf_trunc(&pdf_safe_str(title), 55),
+        pdf_trunc(&pdf_safe_str(title), 45),
         7.5,
         Mm(46.0),
         Mm(h - 5.5),
         ctx.font_reg,
+    );
+    pdf_draw_header_meta(
+        ctx.layer,
+        ctx.font_reg,
+        w,
+        margin,
+        h - 5.5,
+        &pdf_page_header_meta(run),
     );
 
     // T&C content inline
@@ -2241,6 +2281,7 @@ fn pdf_draw_perfile_header(
     page_idx: usize,
     page_count: usize,
     banner: Option<&str>,
+    meta: &str,
 ) -> (printpdf::PdfLayerReference, f32) {
     use printpdf::{Color, Mm, Rgb};
     if use_continuation {
@@ -2275,13 +2316,15 @@ fn pdf_draw_perfile_header(
             Mm(hdr_top + 2.5),
             ctx.font_reg,
         );
-        layer.use_text(
-            format!("Page {} of {}", page_idx + 2, page_count + 1),
-            7.0,
-            Mm(ctx.w - 40.0),
-            Mm(hdr_top + 2.5),
-            ctx.font_reg,
+        // Right-aligned: Run ID / commit / scan time, then the page counter.
+        let right = format!(
+            "{meta}  \u{00B7}  Page {} of {}",
+            page_idx + 2,
+            page_count + 1
         );
+        let right_w = helvetica_width_mm(&right, 6.5, false);
+        let right_x = (ctx.w - ctx.margin - right_w).max(ctx.margin + 60.0);
+        layer.use_text(right, 6.5, Mm(right_x), Mm(hdr_top + 2.5), ctx.font_reg);
         if let Some(text) = banner {
             let safe = pdf_trunc(&pdf_safe_str(text), 40);
             let text_x = (ctx.w / 2.0 - safe.len() as f32 * 0.97).max(80.0);
@@ -2425,6 +2468,7 @@ fn pdf_render_per_file_pages(
         h,
         margin,
     };
+    let header_meta = pdf_page_header_meta(run);
 
     for page_idx in 0..page_count {
         let use_continuation = page_idx == 0 && first_page.is_some();
@@ -2435,6 +2479,7 @@ fn pdf_render_per_file_pages(
             page_idx,
             page_count,
             banner,
+            &header_meta,
         );
 
         // Sub-bar — dark navy, matching TESTS & COVERAGE / SUBMODULES section headers.
@@ -2939,11 +2984,19 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         c2_layer.use_text("oxide-sloc", 9.0, PdfMm(MARGIN), PdfMm(H - 5.5), &font_bold);
         c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
         c2_layer.use_text(
-            pdf_trunc(&pdf_safe_str(&title), 55),
+            pdf_trunc(&pdf_safe_str(&title), 45),
             7.5,
             PdfMm(46.0),
             PdfMm(H - 5.5),
             &font_reg,
+        );
+        pdf_draw_header_meta(
+            &c2_layer,
+            &font_reg,
+            W,
+            MARGIN,
+            H - 5.5,
+            &pdf_page_header_meta(run),
         );
         let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
         // Render T&C inline on the same page immediately after COCOMO — no blank gap.
@@ -4096,12 +4149,11 @@ struct WarningOpportunityRow {
     .tz-select:focus{border-color:var(--oxide);}
     .page { max-width: 1720px; margin: 0 auto; padding: 32px 24px 40px; }
     @media (max-width: 1920px) { .top-nav-inner { max-width: 1500px; } .page { max-width: 1500px; } }
-    /* Flex layout so the hero metric cards always fill exactly two rows on screen:
-       JS sets a per-card flex-basis of 1/ceil(n/2); flex-grow lets a short final
-       row stretch its cards to fill the width (no empty trailing cell). The print
-       media query below overrides this back to a fixed grid for PDF export. */
-    .summary-grid { display:flex; flex-wrap:wrap; gap:10px; align-items:stretch; }
-    .summary-grid > .metric { flex:1 1 140px; }
+    /* Uniform grid: every card is the same width and columns line up across both
+       rows. JS sets the column count to ceil(n/2) so the cards always occupy
+       exactly two rows; when the count is odd the last card spans two columns so
+       there is no empty trailing cell while all other columns stay aligned. */
+    .summary-grid { display:grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap:10px; align-items:stretch; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
     .metric { padding: 11px 12px 20px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 70px; }
@@ -4341,7 +4393,7 @@ struct WarningOpportunityRow {
       .search { min-width: 100%; width: 100%; }
     }
     @media (max-width: 640px) {
-      .summary-grid > .metric { flex-basis: calc(50% - 5px); }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     /* ── Report header / footer identification banner ─────────────────── */
     .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: center; height: 27px; padding: 0 16px; position: fixed; top: 0; left: 0; right: 0; z-index: 32; }
@@ -4616,7 +4668,7 @@ struct WarningOpportunityRow {
       position: relative;
       z-index: 1;
     }
-    .report-footer { margin-top: 32px; padding: 14px 24px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .report-footer { margin-top: 16px; padding: 14px 24px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; font-weight: 600; }
 
     /* ── Chart controls & containers ───────────────────────────────────── */
     .chart-section { }
@@ -4973,37 +5025,37 @@ struct WarningOpportunityRow {
         </div>
         <div class="delta-card-row">
           <div class="delta-card-inline {% if delta_code_added > 0 %}pos{% endif %}">
-            <div class="delta-card-val pos">+{{ delta_code_added }}</div>
+            <div class="delta-card-val pos">+{{ delta_code_added|commas }}</div>
             <div class="delta-card-lbl">Lines added</div>
             <div class="delta-card-tip">Code lines added since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline {% if delta_code_removed > 0 %}neg{% endif %}">
-            <div class="delta-card-val neg">&minus;{{ delta_code_removed }}</div>
+            <div class="delta-card-val neg">&minus;{{ delta_code_removed|commas }}</div>
             <div class="delta-card-lbl">Lines removed</div>
             <div class="delta-card-tip">Code lines removed since {{ prev_scan_label }}</div>
           </div>
-          <div class="delta-card-inline" data-raw="{{ delta_unmodified_lines }}">
-            <div class="delta-card-val">{{ delta_unmodified_lines }}</div>
+          <div class="delta-card-inline">
+            <div class="delta-card-val">{{ delta_unmodified_lines|commas }}</div>
             <div class="delta-card-lbl">Unmodified lines</div>
             <div class="delta-card-tip">Code lines unchanged since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline {% if delta_files_modified > 0 %}mod{% endif %}">
-            <div class="delta-card-val mod">{{ delta_files_modified }}</div>
+            <div class="delta-card-val mod">{{ delta_files_modified|commas }}</div>
             <div class="delta-card-lbl">Files modified</div>
             <div class="delta-card-tip">Files with at least one line changed</div>
           </div>
           <div class="delta-card-inline {% if delta_files_added > 0 %}pos{% endif %}">
-            <div class="delta-card-val pos">{{ delta_files_added }}</div>
+            <div class="delta-card-val pos">{{ delta_files_added|commas }}</div>
             <div class="delta-card-lbl">Files added</div>
             <div class="delta-card-tip">New files added since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline {% if delta_files_removed > 0 %}neg{% endif %}">
-            <div class="delta-card-val neg">{{ delta_files_removed }}</div>
+            <div class="delta-card-val neg">{{ delta_files_removed|commas }}</div>
             <div class="delta-card-lbl">Files removed</div>
             <div class="delta-card-tip">Files deleted since {{ prev_scan_label }}</div>
           </div>
           <div class="delta-card-inline">
-            <div class="delta-card-val">{{ delta_files_unchanged }}</div>
+            <div class="delta-card-val">{{ delta_files_unchanged|commas }}</div>
             <div class="delta-card-lbl">Files unchanged</div>
             <div class="delta-card-tip">Files with no changes since {{ prev_scan_label }}</div>
           </div>
@@ -6253,13 +6305,15 @@ struct WarningOpportunityRow {
       (function(){
         var g=document.querySelector('.summary-grid');if(!g)return;
         var items=Array.prototype.slice.call(g.querySelectorAll('.metric'));var n=items.length;if(!n)return;
+        var last=items[n-1];
         function upd(){
-          // Desktop: pack all cards into exactly two rows (ceil(n/2) per row).
-          // Mobile: two per row. flex-grow stretches a short final row to full width.
+          // Desktop: ceil(n/2) equal columns so the cards occupy exactly two rows
+          // with every column aligned. When n is odd the last card spans two
+          // columns to fill the trailing cell (no empty gap, no uneven sizing).
           var perRow=window.innerWidth<=640?2:Math.ceil(n/2);
-          var gap=10;
-          var basis='calc((100% - '+((perRow-1)*gap)+'px) / '+perRow+' - 0.02px)';
-          items.forEach(function(el){el.style.flexBasis=basis;el.style.flexGrow='1';el.style.flexShrink='1';});
+          g.style.gridTemplateColumns='repeat('+perRow+',minmax(0,1fr))';
+          items.forEach(function(el){el.style.gridColumn='';});
+          if(window.innerWidth>640&&perRow*2!==n){last.style.gridColumn='span 2';}
         }
         upd();window.addEventListener('resize',upd);
       })();
@@ -6668,7 +6722,7 @@ struct WarningOpportunityRow {
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
             ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(PALETTE[i%PALETTE.length])+'" stroke="white" stroke-width="2"/>';
-            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=PALETTE[i%PALETTE.length],cx2=Math.max(8,Math.min(legX-12,cx+(Ro+20)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+20)*Math.sin(mAng)));ds+='<line x1="'+px(cx+Ro*Math.cos(mAng))+'" y1="'+px(cy+Ro*Math.sin(mAng))+'" x2="'+px(cx2)+'" y2="'+px(cy2)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
+            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=PALETTE[i%PALETTE.length],ax=cx+Ro*Math.cos(mAng),ay=cy+Ro*Math.sin(mAng),cx2=Math.max(8,Math.min(legX-12,cx+(Ro+24)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+24)*Math.sin(mAng))),lex=ax+(cx2-ax)*0.58,ley=ay+(cy2-ay)*0.58;ds+='<line x1="'+px(ax)+'" y1="'+px(ay)+'" x2="'+px(lex)+'" y2="'+px(ley)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
             ang+=sw;
           });
         }
@@ -6703,10 +6757,10 @@ struct WarningOpportunityRow {
           bs+='<g class="lang-bar-row">';
           bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
-          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
-          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
-          bs+='<text x="'+px(LW+phys/maxT*BW+5)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'"/>';if(cW>=fmt(d.code).length*6.5+10)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'"/>';if(cmW>=fmt(d.comments).length*6.5+10)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'"/>';if(blW>=fmt(d.blanks).length*6.5+10)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          bs+='<text x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
         var ly=SH-14;
@@ -6955,9 +7009,9 @@ struct WarningOpportunityRow {
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=28)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=28)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=28)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+Math.round((d.code||0)/t2*100)+'%</text>';
             });
           } else {
@@ -6967,9 +7021,9 @@ struct WarningOpportunityRow {
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=28)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=28)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=28)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var phys=d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0);
               s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
             });
@@ -7101,8 +7155,10 @@ struct WarningOpportunityRow {
 
       // ── Submodule breakdown ──────────────────────────────────────────────────
       // Plugin: dim non-hovered rows to create a spotlight "pop" effect on bar hover.
+      // Use afterDatasetsDraw (not afterDraw) so the dim overlay paints before the
+      // built-in tooltip's afterDraw — otherwise it repaints over the tooltip text.
       var rowDimPlugin = {
-        afterDraw: function(chart) {
+        afterDatasetsDraw: function(chart) {
           var active = chart.getActiveElements();
           if (!active.length) return;
           var activeIdx = active[0].index;
@@ -7127,8 +7183,10 @@ struct WarningOpportunityRow {
       };
       // Plugin: spotlight + scaleY(1.22) jump for single-dataset horizontal bars.
       // Dims non-active rows and redraws the active bar enlarged with a drop-shadow.
+      // Use afterDatasetsDraw (not afterDraw) so the spotlight paints before the
+      // built-in tooltip's afterDraw — otherwise it repaints over the tooltip text.
       var barJumpPlugin = {
-        afterDraw: function(chart) {
+        afterDatasetsDraw: function(chart) {
           var active = chart.getActiveElements();
           if (!active.length) return;
           var activeIdx = active[0].index;
@@ -8825,7 +8883,7 @@ struct WarningOpportunityRow {
     window.addEventListener('afterprint',function(){overlay.remove();});
   }());
   </script>
-  <footer class="report-footer">oxide-sloc v{{ tool_version }}</footer>
+  <footer class="report-footer">local code analysis &mdash; metrics, history and reports &nbsp;&middot;&nbsp; oxide-sloc v{{ tool_version }} &nbsp;&middot;&nbsp; AGPL-3.0-or-later &nbsp;&middot;&nbsp; offline / air-gapped build</footer>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
