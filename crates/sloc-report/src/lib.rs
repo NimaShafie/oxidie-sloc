@@ -4104,6 +4104,9 @@ struct WarningOpportunityRow {
     .brand-logo { width: 42px; height: 46px; object-fit: contain; flex: 0 0 auto; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.22)); }
     .background-watermarks { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
     .background-watermarks img { position: absolute; opacity: 0.15; filter: blur(0.3px); user-select: none; max-width: none; }
+    .code-particles { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+    .code-particle { position: absolute; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; color: var(--oxide); opacity: 0; white-space: nowrap; user-select: none; animation: floatCode linear infinite; }
+    @keyframes floatCode { 0% { opacity: 0; transform: translateY(0) rotate(var(--rot)); } 10% { opacity: var(--op); } 85% { opacity: var(--op); } 100% { opacity: 0; transform: translateY(-200px) rotate(var(--rot)); } }
     .brand-copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
     .brand-title { margin: 0; color: #fff; font-size: 17px; font-weight: 800; line-height: 1.1; letter-spacing: -0.01em; }
     .brand-subtitle { color: rgba(255,255,255,0.72); font-size: 11px; line-height: 1.2; margin-top: 2px; letter-spacing: 0.01em; }
@@ -4423,7 +4426,7 @@ struct WarningOpportunityRow {
       body.has-report-banner { padding-bottom: 0 !important; }
       /* Hide interactive UI-chrome; keep section heading text visible */
       .top-nav, .hero-actions,
-      .background-watermarks,
+      .background-watermarks, #code-particles,
       .header-button, .theme-toggle,
       .nav-dropdown-wrap, .config-actions,
       .warnings-show-link, .warning-console-actions,
@@ -4867,6 +4870,7 @@ struct WarningOpportunityRow {
     <img src="{{ logo_text_uri }}" alt="" />
     <img src="{{ logo_text_uri }}" alt="" />
   </div>
+  <div class="code-particles" id="code-particles" aria-hidden="true"></div>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
@@ -6269,6 +6273,32 @@ struct WarningOpportunityRow {
         img.style.cssText = 'width:' + sz + 'px;top:' + pos[0].toFixed(1) + '%;left:' + pos[1].toFixed(1) + '%;transform:rotate(' + rot + 'deg);opacity:' + op + ';';
       });
     })();
+
+    (function spawnCodeParticles() {
+      var container = document.getElementById('code-particles');
+      if (!container) return;
+      var snippets = ['1,247 sloc', 'fn analyze()', 'code_lines', '0 mixed', 'blanks: 312', '// comment', 'pub fn run', 'use std::fs', 'Result<()>', 'let mut n = 0', 'git main', '#[derive]', 'impl Scan', '3,841 physical', 'files: 60', '450 comments', 'cargo build', 'Ok(run)', 'Vec<String>', 'match lang', 'fn main() {', '.rs .go .py', 'sloc_core', 'render_html', '2,163 code'];
+      for (var i = 0; i < 38; i++) {
+        (function (idx) {
+          var el = document.createElement('span');
+          el.className = 'code-particle';
+          el.textContent = snippets[idx % snippets.length];
+          var left = Math.random() * 94 + 2;
+          var top = Math.random() * 88 + 6;
+          var dur = (Math.random() * 10 + 9).toFixed(1);
+          var delay = (Math.random() * 18).toFixed(1);
+          var rot = (Math.random() * 26 - 13).toFixed(1);
+          var op = (Math.random() * 0.09 + 0.06).toFixed(3);
+          el.style.left = left.toFixed(1) + '%';
+          el.style.top = top.toFixed(1) + '%';
+          el.style.setProperty('--rot', rot + 'deg');
+          el.style.setProperty('--op', op);
+          el.style.animationDuration = dur + 's';
+          el.style.animationDelay = '-' + delay + 's';
+          container.appendChild(el);
+        })(i);
+      }
+    })();
     // ── Metric number formatting ─────────────────────────────────────────────
     (function () {
       function fmtBig(n) {
@@ -6749,6 +6779,10 @@ struct WarningOpportunityRow {
         var SH=DH;
         var barTopPad=Math.max(6,Math.round((SH-D.length*barRhb-18)/2));
         var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+        // Largest font size (<=10) at which `t` fits in a `w`-wide segment, or 0 if
+        // it cannot fit legibly even at the 6.5 floor (labels shrink to fit instead
+        // of disappearing; the SVG scales up in Full View so small fonts stay legible).
+        function fitFs(t,w){var fs=Math.min(10,(w-4)/((String(t).length||1)*0.58));return fs>=6.5?Math.round(fs*10)/10:0;}
         D.forEach(function(d,i){
           var y=barTopPad+i*barRhb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
@@ -6757,9 +6791,9 @@ struct WarningOpportunityRow {
           bs+='<g class="lang-bar-row">';
           bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'"/>';if(cW>=fmt(d.code).length*6.5+10)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
-          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'"/>';if(cmW>=fmt(d.comments).length*6.5+10)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
-          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'"/>';if(blW>=fmt(d.blanks).length*6.5+10)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'"/>';var _fc=fitFs(fmt(d.code),cW);if(_fc)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'"/>';var _fm=fitFs(fmt(d.comments),cmW);if(_fm)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'"/>';var _fb=fitFs(fmt(d.blanks),blW);if(_fb)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
           bs+='<text x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
@@ -6806,6 +6840,35 @@ struct WarningOpportunityRow {
       }
       function legendCursorOn(e) { var t=e.native&&e.native.target; if(t)t.style.cursor='pointer'; }
       function legendCursorOff(e){ var t=e.native&&e.native.target; if(t)t.style.cursor='default'; }
+      // Pushes a right-positioned legend away from the plot by `gap` px. Chart.js
+      // (v4) places a right legend flush against the plot area: fit() reserves the
+      // legend box width and _draw() lays items out from `this.left + padding`, so
+      // the column hugs the bubbles. We reserve `gap` extra width in fit() (which
+      // shrinks the plot by `gap`), then translate the canvas right by `gap` while
+      // the legend draws so the column lands in that reserved space — clear of the
+      // plot. The legendHitBoxes (used only for hover hit-testing, not drawing) are
+      // shifted by the same `gap` so hover targets stay aligned with what's drawn.
+      function legendGapPlugin(gap) {
+        return {
+          id: 'legendGap',
+          beforeInit: function(chart) {
+            var lg = chart.legend; if (!lg) return;
+            var origFit = lg.fit, origDraw = lg.draw;
+            lg.fit = function() { origFit.call(this); this.width += gap; this._needGap = true; };
+            lg.draw = function() {
+              if (this._needGap && this.legendHitBoxes) {
+                this.legendHitBoxes.forEach(function(h){ h.left += gap; });
+                this._needGap = false;
+              }
+              var ctx = this.ctx;
+              ctx.save();
+              ctx.translate(gap, 0);
+              origDraw.call(this);
+              ctx.restore();
+            };
+          }
+        };
+      }
 
       // ── Project Overview bar ─────────────────────────────────────────────────
       var projChart = null;
@@ -6987,6 +7050,10 @@ struct WarningOpportunityRow {
         function cEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
         function cPx(n){return Math.round(n);}
         function cTT(l,v){return ' class="rchit" data-ttl="'+String(l).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" data-ttv="'+String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"';}
+        // Largest font size (<=10) at which `t` fits in a `w`-wide segment, or 0 if it
+        // cannot fit legibly even at the 6.5 floor (labels shrink to fit rather than
+        // disappear; the SVG scales up in Full View so small fonts stay legible).
+        function cFitFs(t,w){var fs=Math.min(10,(w-4)/((String(t).length||1)*0.58));return fs>=6.5?Math.round(fs*10)/10:0;}
         function cLT(l,v){return ' data-ttl="'+l+'" data-ttv="'+v.replace(/"/g,'&quot;')+'"';}
         function renderCompSVG() {
           var isPct = cMode === 'pct';
@@ -7009,9 +7076,9 @@ struct WarningOpportunityRow {
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';var _fc=cFitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';var _fm=cFitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';var _fb=cFitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+Math.round((d.code||0)/t2*100)+'%</text>';
             });
           } else {
@@ -7021,9 +7088,9 @@ struct WarningOpportunityRow {
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';var _fc=cFitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';var _fm=cFitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';var _fb=cFitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var phys=d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0);
               s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
             });
@@ -7057,6 +7124,7 @@ struct WarningOpportunityRow {
         var canvas = document.getElementById('canvas-scatter');
         if (!canvas || !SCAT_D || !SCAT_D.length) return;
         var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
+        var maxFx = Math.max.apply(null, SCAT_D.map(function(d){return d.files;})) || 1;
         var c = clr();
         var chart = new Chart(canvas, {
           type: 'bubble',
@@ -7075,9 +7143,9 @@ struct WarningOpportunityRow {
             responsive: true, maintainAspectRatio: false,
             onHover: chartCursor,
             animation: { duration: 500, easing: 'easeOutQuart' },
-            layout: { padding: { top: 44, right: 52 } },
+            layout: { padding: { top: 44, right: 12 } },
             scales: {
-              x: { type: 'logarithmic', min: 0.8,
+              x: { type: 'logarithmic', min: 0.8, max: maxFx * 2.6,
                    grid: { color: c.grid },
                    ticks: { color: c.text, font: { size: 11 }, maxTicksLimit: 6, callback: function(v){ return fmt(v); } },
                    title: { display: true, text: 'Files Analyzed', color: c.text, font: { size: 11 } } },
@@ -7129,7 +7197,7 @@ struct WarningOpportunityRow {
               }
             }
           },
-          plugins: [(function(){return{afterDatasetsDraw:function(chart){
+          plugins: [legendGapPlugin(36), (function(){return{afterDatasetsDraw:function(chart){
             var ctx=chart.ctx,tc=clr().text,ca=chart.chartArea;
             chart.data.datasets.forEach(function(ds,di){
               var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
@@ -7154,86 +7222,11 @@ struct WarningOpportunityRow {
       })();
 
       // ── Submodule breakdown ──────────────────────────────────────────────────
-      // Plugin: dim non-hovered rows to create a spotlight "pop" effect on bar hover.
-      // Use afterDatasetsDraw (not afterDraw) so the dim overlay paints before the
-      // built-in tooltip's afterDraw — otherwise it repaints over the tooltip text.
-      var rowDimPlugin = {
-        afterDatasetsDraw: function(chart) {
-          var active = chart.getActiveElements();
-          if (!active.length) return;
-          var activeIdx = active[0].index;
-          var ctx = chart.ctx, ca = chart.chartArea;
-          var dark = document.body.classList.contains('dark-theme');
-          var dimColor = dark ? 'rgba(18,12,8,0.58)' : 'rgba(245,239,232,0.65)';
-          var nDs = chart.data.datasets.length;
-          var lastMeta = chart.getDatasetMeta(nDs - 1);
-          chart.data.labels.forEach(function(_, idx) {
-            if (idx === activeIdx) return;
-            var bar = lastMeta.data[idx]; if (!bar) return;
-            try {
-              var props = bar.getProps(['y','height'], false);
-              var bh = Math.abs(props.height || 0);
-              ctx.save();
-              ctx.fillStyle = dimColor;
-              ctx.fillRect(ca.left, props.y - bh/2, ca.right - ca.left + 80, bh);
-              ctx.restore();
-            } catch(e) {}
-          });
-        }
-      };
-      // Plugin: spotlight + scaleY(1.22) jump for single-dataset horizontal bars.
-      // Dims non-active rows and redraws the active bar enlarged with a drop-shadow.
-      // Use afterDatasetsDraw (not afterDraw) so the spotlight paints before the
-      // built-in tooltip's afterDraw — otherwise it repaints over the tooltip text.
-      var barJumpPlugin = {
-        afterDatasetsDraw: function(chart) {
-          var active = chart.getActiveElements();
-          if (!active.length) return;
-          var activeIdx = active[0].index;
-          var ctx = chart.ctx, ca = chart.chartArea;
-          var dark = document.body.classList.contains('dark-theme');
-          var dimColor = dark ? 'rgba(18,12,8,0.58)' : 'rgba(245,239,232,0.65)';
-          var nDs = chart.data.datasets.length;
-          var lastMeta = chart.getDatasetMeta(nDs - 1);
-          // Dim non-active rows
-          chart.data.labels.forEach(function(_, idx) {
-            if (idx === activeIdx) return;
-            var bar = lastMeta.data[idx]; if (!bar) return;
-            try {
-              var p = bar.getProps(['y','height'], false);
-              var bh = Math.abs(p.height || 0);
-              ctx.save();
-              ctx.fillStyle = dimColor;
-              ctx.fillRect(ca.left, p.y - bh/2, ca.right - ca.left + 80, bh);
-              ctx.restore();
-            } catch(e) {}
-          });
-          // Redraw active bar enlarged (scaleY 1.22) + drop-shadow to simulate a "pop"
-          chart.data.datasets.forEach(function(ds, di) {
-            var meta = chart.getDatasetMeta(di);
-            if (meta.hidden) return;
-            var bar = meta.data[activeIdx]; if (!bar) return;
-            try {
-              var p = bar.getProps(['x','y','base','height'], false);
-              var bh = Math.abs(p.height || 0);
-              if (!bh) return;
-              var grow = Math.max(4, Math.round(bh * 0.22));
-              var x0 = Math.min(p.x, p.base || 0);
-              var w = Math.abs(p.x - (p.base || 0));
-              if (w < 1) return;
-              var bg = ds.hoverBackgroundColor || ds.backgroundColor || OX;
-              ctx.save();
-              ctx.shadowColor = 'rgba(0,0,0,0.22)';
-              ctx.shadowBlur = 8;
-              ctx.shadowOffsetX = 0;
-              ctx.shadowOffsetY = 3;
-              ctx.fillStyle = bg;
-              ctx.fillRect(x0, p.y - 1 - (bh + grow) / 2, w, bh + grow);
-              ctx.restore();
-            } catch(e) {}
-          });
-        }
-      };
+      // No-op plugins: hover row-dimming was removed because the flashing row
+      // background looked out of place vs. every other chart. Kept as empty stubs
+      // so the (inline + Full View) chart configs that reference them stay valid.
+      var rowDimPlugin = {};
+      var barJumpPlugin = {};
       var subChart = null;
       (function() {
         if (!SUB_D || !SUB_D.length) return;
@@ -7749,6 +7742,7 @@ struct WarningOpportunityRow {
             var canvas = makeOverlay('File Count vs SLOC \u2014 Full View', undefined, 'File count vs SLOC per language');
             if(!canvas) return;
             var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
+            var maxFx = Math.max.apply(null, SCAT_D.map(function(d){return d.files;})) || 1;
             var c = clr();
             new Chart(canvas, {
               type: 'bubble',
@@ -7767,9 +7761,9 @@ struct WarningOpportunityRow {
                 responsive: true, maintainAspectRatio: false,
                 onHover: chartCursor,
                 animation: { duration: 500, easing: 'easeOutQuart' },
-                layout: { padding: { top: 44, right: 52 } },
+                layout: { padding: { top: 44, right: 12 } },
                 scales: {
-                  x: { type: 'logarithmic', min: 0.8, grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, maxTicksLimit: 6, callback: function(v){ return fmt(v); } }, title: { display: true, text: 'Files Analyzed', color: c.text, font: { size: 11 } } },
+                  x: { type: 'logarithmic', min: 0.8, max: maxFx * 2.6, grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, maxTicksLimit: 6, callback: function(v){ return fmt(v); } }, title: { display: true, text: 'Files Analyzed', color: c.text, font: { size: 11 } } },
                   y: { grid: { color: c.grid }, ticks: { color: c.text, font: { size: 11 }, callback: function(v){return fmt(v);} }, title: { display: true, text: 'Code Lines', color: c.text, font: { size: 11 } } }
                 },
                 plugins: {
@@ -7811,7 +7805,7 @@ struct WarningOpportunityRow {
                   }}
                 }
               },
-              plugins: [(function(){return{afterDatasetsDraw:function(chart){
+              plugins: [legendGapPlugin(36), (function(){return{afterDatasetsDraw:function(chart){
                 var ctx=chart.ctx,tc=clr().text,ca=chart.chartArea;
                 chart.data.datasets.forEach(function(ds,di){
                   var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
