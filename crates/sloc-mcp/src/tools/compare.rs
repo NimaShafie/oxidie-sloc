@@ -159,7 +159,8 @@ mod tests {
             server_url: None,
             bin_path: bin.to_str().unwrap().to_owned(),
             api_key: None,
-            allowed_roots: vec![],
+            // Allow the system temp dir so the fail-closed check passes for these JSON files.
+            allowed_roots: vec![std::env::temp_dir()],
         };
         let result = compare_runs(
             baseline.to_str().unwrap().to_owned(),

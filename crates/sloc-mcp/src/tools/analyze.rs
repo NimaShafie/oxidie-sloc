@@ -238,7 +238,8 @@ mod tests {
             server_url: None,
             bin_path: bin.to_str().unwrap().to_owned(),
             api_key: None,
-            allowed_roots: vec![],
+            // Explicitly allow the temp dir so the fail-closed check passes.
+            allowed_roots: vec![dir.path().to_path_buf()],
         };
         let result = analyze_path(dir.path().to_str().unwrap().to_owned(), None, &cfg).await;
         assert!(result.is_ok(), "analyze_path must succeed: {result:?}");
@@ -269,7 +270,7 @@ mod tests {
             server_url: None,
             bin_path: bin.to_str().unwrap().to_owned(),
             api_key: None,
-            allowed_roots: vec![],
+            allowed_roots: vec![dir.path().to_path_buf()],
         };
         // Exercises the `if let Some(cf)` branch inside analyze_path
         let result = analyze_path(

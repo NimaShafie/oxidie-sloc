@@ -383,6 +383,50 @@ fn format_test_density(code_lines: u64, test_count: u64) -> String {
     }
 }
 
+/// Insert thousands separators into the integer portion of a number's textual form.
+///
+/// Works for plain integers (`"50789"` → `"50,789"`), signed values, and
+/// pre-formatted decimal strings (`"11.2"` → `"11.2"`). Input whose integer part
+/// is not all ASCII digits (e.g. `"—"`) is returned unchanged.
+fn group_thousands(s: &str) -> String {
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'-') => ("-", &s[1..]),
+        Some(b'+') => ("+", &s[1..]),
+        _ => ("", s),
+    };
+    let (int_part, frac_part) = match rest.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (rest, None),
+    };
+    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return s.to_string();
+    }
+    let bytes = int_part.as_bytes();
+    let len = bytes.len();
+    let mut grouped = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(b as char);
+    }
+    match frac_part {
+        Some(f) => format!("{sign}{grouped}.{f}"),
+        None => format!("{sign}{grouped}"),
+    }
+}
+
+/// Custom Askama filters available to templates in this crate.
+mod filters {
+    use askama::{Result, Values};
+
+    /// `{{ value|commas }}` — render any `Display` value with thousands separators.
+    #[askama::filter_fn]
+    pub fn commas<T: core::fmt::Display>(value: T, _: &dyn Values) -> Result<String> {
+        Ok(super::group_thousands(&value.to_string()))
+    }
+}
+
 // ── Main renderer ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)] // large HTML renderer; splitting would obscure the template structure
@@ -668,7 +712,11 @@ pub fn write_html_with_pdf_link(
         .with_context(|| format!("failed to write HTML report to {}", output_path.display()))
 }
 
-/// Launch a headless Chromium browser, falling back to `--no-sandbox` when the sandbox fails.
+/// Launch a headless Chromium browser.
+/// When `no_sandbox` is true (set via `SLOC_BROWSER_NOSANDBOX=1`) the browser
+/// runs without the namespace sandbox — required in containers that drop SYS_ADMIN.
+/// Otherwise the sandbox is always enabled with no automatic fallback, so failures
+/// surface as clear errors rather than silently removing a security boundary.
 fn launch_cdp_browser(
     browser_path: std::path::PathBuf,
     no_sandbox: bool,
@@ -686,29 +734,22 @@ fn launch_cdp_browser(
         .context("failed to launch browser via CDP (no-sandbox)");
     }
 
-    // Try with sandbox first; on VMs/containers without user namespaces, retry without.
-    match Browser::new(LaunchOptions {
+    // Sandboxed only — no automatic fallback to --no-sandbox.
+    // If this fails in a container, set SLOC_BROWSER_NOSANDBOX=1 to opt in explicitly.
+    Browser::new(LaunchOptions {
         headless: true,
-        path: Some(browser_path.clone()),
+        path: Some(browser_path),
         window_size: Some((1122, 794)),
         sandbox: true,
         ..Default::default()
-    }) {
-        Ok(b) => Ok(b),
-        Err(e) => {
-            eprintln!(
-                "[oxide-sloc][pdf] sandboxed launch failed ({e:#}), retrying with --no-sandbox"
-            );
-            Browser::new(LaunchOptions {
-                headless: true,
-                path: Some(browser_path),
-                window_size: Some((1122, 794)),
-                sandbox: false,
-                ..Default::default()
-            })
-            .context("failed to launch browser via CDP (sandboxed and no-sandbox both failed)")
-        }
-    }
+    })
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Browser launch failed with sandbox enabled: {e:#}\n\
+             If running in a container without user namespaces (e.g. Docker with cap_drop:ALL), \
+             set SLOC_BROWSER_NOSANDBOX=1 to opt into --no-sandbox mode."
+        )
+    })
 }
 
 /// If a JS chart error was recorded on the page, print it to stderr.
@@ -3977,7 +4018,12 @@ struct WarningOpportunityRow {
     .tz-select:focus{border-color:var(--oxide);}
     .page { max-width: 1720px; margin: 0 auto; padding: 32px 24px 40px; }
     @media (max-width: 1920px) { .top-nav-inner { max-width: 1500px; } .page { max-width: 1500px; } }
-    .summary-grid { display:grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap:10px; }
+    /* Flex layout so the hero metric cards always fill exactly two rows on screen:
+       JS sets a per-card flex-basis of 1/ceil(n/2); flex-grow lets a short final
+       row stretch its cards to fill the width (no empty trailing cell). The print
+       media query below overrides this back to a fixed grid for PDF export. */
+    .summary-grid { display:flex; flex-wrap:wrap; gap:10px; align-items:stretch; }
+    .summary-grid > .metric { flex:1 1 140px; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
     .metric { padding: 11px 12px 20px; position: relative; cursor: help; transition: transform 0.15s ease, box-shadow 0.15s ease; min-height: 70px; }
@@ -4217,7 +4263,7 @@ struct WarningOpportunityRow {
       .search { min-width: 100%; width: 100%; }
     }
     @media (max-width: 640px) {
-      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-grid > .metric { flex-basis: calc(50% - 5px); }
     }
     /* ── Report header / footer identification banner ─────────────────── */
     .report-id-banner { background: var(--nav); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: center; height: 27px; padding: 0 16px; position: fixed; top: 0; left: 0; right: 0; z-index: 32; }
@@ -4516,9 +4562,9 @@ struct WarningOpportunityRow {
     .charts-grid > .panel { margin:0; display:flex; flex-direction:column; }
     .charts-grid .chart-section > div { display:flex; flex-direction:column; flex:1; }
     .charts-grid .chart-container { flex:1; min-height:180px; }
-    .chart-pre { min-height:100px; }
+    .chart-pre { min-height:72px; }
     @media (max-width:820px) { .charts-grid { grid-template-columns:1fr; } }
-    .r-lang-overview { display:flex; gap:40px; align-items:flex-start; justify-content:center; flex-wrap:wrap; padding:8px 0 16px; }
+    .r-lang-overview { display:flex; gap:40px; align-items:center; justify-content:center; flex-wrap:wrap; padding:8px 0 16px; }
     .r-lang-overview-cell { display:flex; flex-direction:column; align-items:center; gap:8px; flex:1 1 280px; max-width:480px; }
     .r-lang-overview-cell p { margin:0; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:var(--muted-2); text-align:center; }
     .r-lang-overview svg { display:block; max-width:100%; height:auto; }
@@ -4926,7 +4972,7 @@ struct WarningOpportunityRow {
               <button class="chart-expand-btn" id="overview-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <div class="chart-pre">
-            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.6;">A configurable cartesian view of your codebase. Choose what to show on each axis. Historical modes (commits, tags, releases) require the web UI.</p>
+            <p style="margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.6;">A configurable cartesian view of your codebase. Choose what to show on each axis.</p>
             <div class="chart-controls">
               <label>Y Axis:
                 <select class="chart-select" id="overview-y-axis">
@@ -4970,7 +5016,7 @@ struct WarningOpportunityRow {
               <button type="button" class="chart-tab" data-comp-tab="pct">Composition %</button>
             </div>
             </div>
-            <div id="composition-chart" class="chart-container" style="overflow:hidden;"><div id="comp-svg-container"></div></div>
+            <div id="composition-chart" class="chart-container" style="overflow:hidden;display:flex;align-items:center;justify-content:center;"><div id="comp-svg-container" style="width:100%;"></div></div>
           </div>
         </section>
       </div>
@@ -5049,25 +5095,25 @@ struct WarningOpportunityRow {
           </div>
           <div class="summary-strip">
             <div class="stat-chip">
-              <div class="stat-chip-val" data-fmt="{{ run.summary_totals.test_count }}">{{ run.summary_totals.test_count }}</div>
+              <div class="stat-chip-val" data-fmt="{{ run.summary_totals.test_count }}">{{ run.summary_totals.test_count|commas }}</div>
               <div class="stat-chip-label">Test Functions</div>
               <div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div>
-              <span class="stat-chip-exact">{{ run.summary_totals.test_count }}</span>
+              <span class="stat-chip-exact">{{ run.summary_totals.test_count|commas }}</span>
             </div>
             <div class="stat-chip">
-              <div class="stat-chip-val" data-fmt="{{ test_assertion_count }}">{{ test_assertion_count }}</div>
+              <div class="stat-chip-val" data-fmt="{{ test_assertion_count }}">{{ test_assertion_count|commas }}</div>
               <div class="stat-chip-label">Assertions</div>
               <div class="stat-chip-tip">Test assertion call lines (ASSERT_EQ, EXPECT_TRUE, assertEquals, Assert.AreEqual, assert_eq!, etc.)</div>
-              <span class="stat-chip-exact">{{ test_assertion_count }}</span>
+              <span class="stat-chip-exact">{{ test_assertion_count|commas }}</span>
             </div>
             <div class="stat-chip">
-              <div class="stat-chip-val" data-fmt="{{ test_suite_count }}">{{ test_suite_count }}</div>
+              <div class="stat-chip-val" data-fmt="{{ test_suite_count }}">{{ test_suite_count|commas }}</div>
               <div class="stat-chip-label">Test Suites</div>
               <div class="stat-chip-tip">Test suite / fixture / group declarations (TEST_GROUP, BOOST_AUTO_TEST_SUITE, [TestClass], etc.)</div>
-              <span class="stat-chip-exact">{{ test_suite_count }}</span>
+              <span class="stat-chip-exact">{{ test_suite_count|commas }}</span>
             </div>
             <div class="stat-chip">
-              <div class="stat-chip-val">{{ test_files_count }} / {{ run.summary_totals.files_analyzed }}</div>
+              <div class="stat-chip-val">{{ test_files_count|commas }} / {{ run.summary_totals.files_analyzed|commas }}</div>
               <div class="stat-chip-label">Test Files</div>
               <div class="stat-chip-tip">Files containing at least one detected test definition out of total analyzed files</div>
             </div>
@@ -5136,9 +5182,9 @@ struct WarningOpportunityRow {
                 {% if row.test_count > 0 || row.test_assertion_count > 0 %}
                 <tr>
                   <td>{{ row.language }}</td>
-                  <td>{{ row.test_count }}</td>
-                  <td>{{ row.test_assertion_count }}</td>
-                  <td>{{ row.test_suite_count }}</td>
+                  <td>{{ row.test_count|commas }}</td>
+                  <td>{{ row.test_assertion_count|commas }}</td>
+                  <td>{{ row.test_suite_count|commas }}</td>
                   <td>{{ row.test_density_str }}</td>
                 </tr>
                 {% endif %}
@@ -5331,23 +5377,23 @@ struct WarningOpportunityRow {
         <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
           <div class="stat-chip">
             <div class="stat-chip-label">Person-months</div>
-            <div class="stat-chip-val">{{ cocomo_effort_str }}</div>
+            <div class="stat-chip-val">{{ cocomo_effort_str|commas }}</div>
             <div class="stat-chip-tip">Total estimated developer effort to build this codebase from scratch. One person-month = one developer working full-time for one calendar month. Computed as 2.4 &times; KSLOC^1.05 (Organic mode).</div>
           </div>
           <div class="stat-chip">
             <div class="stat-chip-label">Schedule (months)</div>
-            <div class="stat-chip-val">{{ cocomo_duration_str }}</div>
+            <div class="stat-chip-val">{{ cocomo_duration_str|commas }}</div>
             <div class="stat-chip-tip">Estimated calendar duration assuming an optimally sized team. Computed as 2.5 &times; effort^0.38. Adding more people beyond this optimum rarely shortens the timeline.</div>
           </div>
           <div class="stat-chip">
             <div class="stat-chip-label">Avg. Team Size</div>
-            <div class="stat-chip-val">{{ cocomo_staff_str }}</div>
+            <div class="stat-chip-val">{{ cocomo_staff_str|commas }}</div>
             <div class="stat-chip-tip">Average number of engineers working in parallel, derived as effort &divide; schedule. Actual headcount may peak higher during intensive phases of the project.</div>
           </div>
           <div class="stat-chip">
             <div class="stat-chip-label">Input KSLOC</div>
-            <div class="stat-chip-val">{{ cocomo_ksloc_str }}K</div>
-            <div class="stat-chip-tip">KSLOC = Kilo Source Lines of Code (1 KSLOC = 1,000 lines). This is the primary input to the COCOMO model. Only executable code lines are counted &mdash; blank lines and comments are excluded. ({{ run.summary_totals.code_lines }} total code lines)</div>
+            <div class="stat-chip-val">{{ cocomo_ksloc_str|commas }}K</div>
+            <div class="stat-chip-tip">KSLOC = Kilo Source Lines of Code (1 KSLOC = 1,000 lines). This is the primary input to the COCOMO model. Only executable code lines are counted &mdash; blank lines and comments are excluded. ({{ run.summary_totals.code_lines|commas }} total code lines)</div>
           </div>
         </div>
         <p style="font-size:13px;color:var(--muted);padding:8px 4px 0;line-height:1.6;white-space:nowrap;">COCOMO I (Constructive Cost Model) is a 1981 algorithmic model by Barry Boehm that converts SLOC into effort, schedule, and team-size estimates.<br>These are ballpark figures &mdash; actual outcomes vary widely by team experience, toolchain maturity, and domain complexity.</p>
@@ -5385,19 +5431,19 @@ struct WarningOpportunityRow {
                 {% for row in language_rows %}
                 <tr>
                   <td title="{{ row.language }}">{{ row.language }}</td>
-                  <td class="num-col">{{ row.files }}</td>
-                  <td class="num-col">{{ row.total_physical_lines }}</td>
-                  <td class="num-col">{{ row.code_lines }}</td>
-                  <td class="num-col">{{ row.comment_lines }}</td>
-                  <td class="num-col">{{ row.blank_lines }}</td>
-                  <td class="num-col">{{ row.mixed_lines_separate }}</td>
-                  <td class="num-col">{{ row.functions }}</td>
-                  <td class="num-col">{{ row.classes }}</td>
-                  <td class="num-col">{{ row.variables }}</td>
-                  <td class="num-col">{{ row.imports }}</td>
-                  <td class="num-col">{{ row.test_count }}</td>
-                  <td class="num-col">{{ row.test_assertion_count }}</td>
-                  <td class="num-col">{{ row.test_suite_count }}</td>
+                  <td class="num-col">{{ row.files|commas }}</td>
+                  <td class="num-col">{{ row.total_physical_lines|commas }}</td>
+                  <td class="num-col">{{ row.code_lines|commas }}</td>
+                  <td class="num-col">{{ row.comment_lines|commas }}</td>
+                  <td class="num-col">{{ row.blank_lines|commas }}</td>
+                  <td class="num-col">{{ row.mixed_lines_separate|commas }}</td>
+                  <td class="num-col">{{ row.functions|commas }}</td>
+                  <td class="num-col">{{ row.classes|commas }}</td>
+                  <td class="num-col">{{ row.variables|commas }}</td>
+                  <td class="num-col">{{ row.imports|commas }}</td>
+                  <td class="num-col">{{ row.test_count|commas }}</td>
+                  <td class="num-col">{{ row.test_assertion_count|commas }}</td>
+                  <td class="num-col">{{ row.test_suite_count|commas }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -5762,7 +5808,10 @@ struct WarningOpportunityRow {
       }
 
       function detectType(value) {
-        return /^-?\d+(?:\.\d+)?$/.test(value.trim()) ? parseFloat(value) : value.toLowerCase();
+        // Strip thousands separators so comma-formatted numbers (e.g. "121,542")
+        // still sort numerically rather than lexicographically.
+        var v = value.trim().replace(/,/g, '');
+        return /^-?\d+(?:\.\d+)?$/.test(v) ? parseFloat(v) : value.trim().toLowerCase();
       }
 
       document.querySelectorAll('[data-sort-table]').forEach(function (table) {
@@ -6123,7 +6172,19 @@ struct WarningOpportunityRow {
         if (big) big.textContent = pct.toFixed(1) + '%';
         if (exact) exact.textContent = '';
       }
-      (function(){var g=document.querySelector('.summary-grid');if(!g)return;var n=g.querySelectorAll('.metric').length;if(!n)return;function upd(){if(window.innerWidth>=640){g.style.gridTemplateColumns='repeat('+Math.ceil(n/2)+',minmax(0,1fr))';}else{g.style.gridTemplateColumns='';}}upd();window.addEventListener('resize',upd);})();
+      (function(){
+        var g=document.querySelector('.summary-grid');if(!g)return;
+        var items=Array.prototype.slice.call(g.querySelectorAll('.metric'));var n=items.length;if(!n)return;
+        function upd(){
+          // Desktop: pack all cards into exactly two rows (ceil(n/2) per row).
+          // Mobile: two per row. flex-grow stretches a short final row to full width.
+          var perRow=window.innerWidth<=640?2:Math.ceil(n/2);
+          var gap=10;
+          var basis='calc((100% - '+((perRow-1)*gap)+'px) / '+perRow+' - 0.02px)';
+          items.forEach(function(el){el.style.flexBasis=basis;el.style.flexGrow='1';el.style.flexShrink='1';});
+        }
+        upd();window.addEventListener('resize',upd);
+      })();
       (function(){var ov=document.getElementById('rpt-loading-overlay');if(ov){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},450);}})();
     })();
     // ── Info chip interactivity ───────────────────────────────────────────────
@@ -6550,19 +6611,23 @@ struct WarningOpportunityRow {
         ds+='</svg>';
         // Horizontal stacked-bar chart
         var maxT=Math.max.apply(null,D.map(function(d){return d.physical||d.code+d.comments+d.blanks;}))||1;
-        var LW=108,BW=260,rHb=28,bH=20,SH=D.length*rHb+32,svgW=LW+BW+68;
+        var LW=108,BW=260,svgW=LW+BW+68;
+        var barRhb=Math.min(48,Math.max(28,Math.floor((DH-32)/D.length)));
+        var barBH=Math.min(32,Math.round(barRhb*0.7));
+        var SH=DH;
+        var barTopPad=Math.max(6,Math.round((SH-D.length*barRhb-18)/2));
         var bs='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
         D.forEach(function(d,i){
-          var y=6+i*rHb,x=LW;
+          var y=barTopPad+i*barRhb,x=LW;
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
-          var lmid=y+bH/2+4;
+          var lmid=y+barBH/2+4;
           bs+='<g class="lang-bar-row">';
-          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+bH+'" fill="transparent"/>';
+          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
-          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
-          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
           bs+='<text x="'+px(LW+phys/maxT*BW+5)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
@@ -6798,9 +6863,12 @@ struct WarningOpportunityRow {
           var totBl=cData.reduce(function(a,d){return a+(d.blanks||0);},0);
           var totAll=totC+totCm+totBl||1;
           var svgW=Math.max(320,el.offsetWidth||540);
-          var LW=108,legendH=24,topPad=4,bH=18,rHb=26;
+          var LW=108,legendH=24,topPad=4;
+          var MIN_SVG_H=220;
+          var rHb=Math.min(80,Math.max(26,Math.floor((MIN_SVG_H-legendH-topPad-10)/cData.length)));
+          var bH=Math.min(38,Math.round(rHb*0.68));
           var BW=Math.max(120,svgW-LW-84);
-          var SH=cData.length*rHb+legendH+topPad+10;
+          var SH=Math.max(MIN_SVG_H,cData.length*rHb+legendH+topPad+10);
           var s='<svg viewBox="0 0 '+svgW+' '+SH+'" width="'+svgW+'" height="'+SH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
           if(isPct){
             cData.forEach(function(d,i){

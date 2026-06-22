@@ -168,7 +168,6 @@ mod tests {
     #[tokio::test]
     async fn ingest_result_json_path_succeeds() {
         let (base, _h) = spawn_ingest_server().await;
-        let cfg = live_cfg(&base);
 
         let tmp = tempfile::tempdir().unwrap();
         let json_file = tmp.path().join("run.json");
@@ -177,6 +176,14 @@ mod tests {
             r#"{"run_id":"from-file","summary_totals":{"code_lines":50}}"#,
         )
         .unwrap();
+
+        // Supply the temp dir as an allowed root so the fail-closed check passes.
+        let cfg = McpConfig {
+            server_url: Some(base.clone()),
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![tmp.path().to_path_buf()],
+        };
 
         let result = ingest_result(
             None,

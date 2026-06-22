@@ -14,19 +14,36 @@ use axum::{
 use http_body_util::BodyExt;
 use sloc_web::{
     make_test_router, make_test_router_server_mode, make_test_router_tight_auth_lockout,
-    make_test_router_with_key,
+    make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
 };
 use tower::ServiceExt;
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
+//
+// These helpers attach the server-mode bearer token to every request. The
+// keyless local-mode router ignores the header (auth middleware short-circuits
+// when no key is configured), while the server-mode router — which now requires
+// authentication — validates it. Auth-specific tests below craft their own
+// requests directly via `.oneshot()` and do not use these helpers.
 
-async fn request_status(app: Router, req: Request<Body>) -> StatusCode {
+fn bearer() -> String {
+    format!("Bearer {TEST_SERVER_MODE_API_KEY}")
+}
+
+async fn request_status(app: Router, mut req: Request<Body>) -> StatusCode {
+    if !req.headers().contains_key("authorization") {
+        req.headers_mut().insert(
+            "authorization",
+            bearer().parse().expect("valid header value"),
+        );
+    }
     app.oneshot(req).await.unwrap().status()
 }
 
 async fn post_json(app: Router, uri: &str, body: &str) -> (StatusCode, String) {
     let req = Request::post(uri)
         .header("content-type", "application/json")
+        .header("authorization", bearer())
         .body(Body::from(body.to_owned()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -43,6 +60,7 @@ async fn post_raw(
 ) -> (StatusCode, String) {
     let req = Request::post(uri)
         .header("content-type", content_type)
+        .header("authorization", bearer())
         .body(Body::from(body))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -407,7 +425,12 @@ async fn auth_lockout_expires_after_window() {
 async fn scan_page_server_mode_returns_html() {
     let app = make_test_router_server_mode();
     let resp = app
-        .oneshot(Request::get("/scan").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/scan")
+                .header("authorization", bearer())
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -420,7 +443,12 @@ async fn scan_page_server_mode_returns_html() {
 async fn view_reports_server_mode_returns_html() {
     let app = make_test_router_server_mode();
     let resp = app
-        .oneshot(Request::get("/view-reports").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/view-reports")
+                .header("authorization", bearer())
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -433,7 +461,12 @@ async fn view_reports_server_mode_returns_html() {
 async fn trend_reports_server_mode_returns_html() {
     let app = make_test_router_server_mode();
     let resp = app
-        .oneshot(Request::get("/trend-reports").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/trend-reports")
+                .header("authorization", bearer())
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = resp.status();
@@ -449,7 +482,12 @@ async fn trend_reports_server_mode_returns_html() {
 async fn test_metrics_server_mode_returns_html() {
     let app = make_test_router_server_mode();
     let resp = app
-        .oneshot(Request::get("/test-metrics").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/test-metrics")
+                .header("authorization", bearer())
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert!(resp.status().as_u16() < 500);

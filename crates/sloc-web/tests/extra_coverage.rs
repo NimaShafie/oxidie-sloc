@@ -40,7 +40,7 @@ use axum::{
 use http_body_util::BodyExt;
 use sloc_web::{
     make_test_router, make_test_router_exhausted_semaphore, make_test_router_server_mode,
-    make_test_router_with_key,
+    make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
 };
 use tower::ServiceExt;
 
@@ -59,6 +59,7 @@ async fn get(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, Stri
         .oneshot(Request::get(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
+
     let status = resp.status();
     let headers = resp.headers().clone();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -97,6 +98,47 @@ async fn delete(app: Router, uri: &str) -> StatusCode {
         .await
         .unwrap();
     resp.status()
+}
+
+/// GET with the server-mode API key included (needed since server mode now
+/// requires authentication even in tests — the router is configured with
+/// TEST_SERVER_MODE_API_KEY, so all requests to it must include it).
+async fn get_server(app: Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let resp = app
+        .oneshot(
+            Request::get(uri)
+                .header(
+                    "Authorization",
+                    format!("Bearer {TEST_SERVER_MODE_API_KEY}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+async fn post_form_server(app: Router, uri: &str, body: &str) -> (StatusCode, String) {
+    let req = Request::post(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "Authorization",
+            format!("Bearer {TEST_SERVER_MODE_API_KEY}"),
+        )
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 // ── minimal AnalysisRun fixture ───────────────────────────────────────────────
@@ -708,7 +750,8 @@ async fn open_path_headless_returns_headless_json() {
 
 #[tokio::test]
 async fn open_path_server_mode_returns_disabled_message() {
-    let (status, _, body) = get(make_test_router_server_mode(), "/open-path?path=/tmp").await;
+    let (status, _, body) =
+        get_server(make_test_router_server_mode(), "/open-path?path=/tmp").await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     assert_eq!(
@@ -742,7 +785,7 @@ async fn pick_directory_headless_returns_cancelled() {
 async fn pick_directory_server_mode_returns_cancelled_or_404() {
     // The non-native-dialog build (feature flag off) returns 200+cancelled regardless
     // of server_mode. Only the native-dialog build gates on server_mode.
-    let (status, _, body) = get(make_test_router_server_mode(), "/pick-directory").await;
+    let (status, _, body) = get_server(make_test_router_server_mode(), "/pick-directory").await;
     // Accept 404 (native-dialog feature enabled) or 200 with cancelled=true (fallback stub)
     assert!(
         status == StatusCode::NOT_FOUND
@@ -770,7 +813,7 @@ async fn pick_file_headless_returns_cancelled() {
 #[tokio::test]
 async fn pick_file_server_mode_returns_cancelled_or_404() {
     // Same as pick-directory: only the native-dialog build gates on server_mode.
-    let (status, _, body) = get(make_test_router_server_mode(), "/pick-file").await;
+    let (status, _, body) = get_server(make_test_router_server_mode(), "/pick-file").await;
     assert!(
         status == StatusCode::NOT_FOUND
             || (status == StatusCode::OK
@@ -793,7 +836,7 @@ async fn preview_default_path_smoke_test() {
 #[tokio::test]
 async fn preview_server_mode_upload_tmp_path_rejected() {
     // server_mode with a non-upload-tmp path that is not in allowed roots
-    let (status, _, body) = get(
+    let (status, _, body) = get_server(
         make_test_router_server_mode(),
         "/preview?path=/tmp/no-such-proj",
     )
@@ -1151,7 +1194,7 @@ async fn import_config_invalid_toml_returns_error() {
 
 #[tokio::test]
 async fn add_watched_dir_server_mode_returns_404() {
-    let (status, _) = post_form(
+    let (status, _) = post_form_server(
         make_test_router_server_mode(),
         "/watched-dirs/add",
         "folder_path=/tmp&redirect_to=/view-reports",
@@ -1166,7 +1209,7 @@ async fn add_watched_dir_server_mode_returns_404() {
 
 #[tokio::test]
 async fn remove_watched_dir_server_mode_returns_404() {
-    let (status, _) = post_form(
+    let (status, _) = post_form_server(
         make_test_router_server_mode(),
         "/watched-dirs/remove",
         "folder_path=/tmp&redirect_to=/view-reports",
@@ -1177,7 +1220,7 @@ async fn remove_watched_dir_server_mode_returns_404() {
 
 #[tokio::test]
 async fn refresh_watched_dirs_server_mode_returns_404() {
-    let (status, _) = post_form(
+    let (status, _) = post_form_server(
         make_test_router_server_mode(),
         "/watched-dirs/refresh",
         "redirect_to=/view-reports",
@@ -1251,7 +1294,7 @@ async fn refresh_watched_dirs_local_mode_redirects() {
 
 #[tokio::test]
 async fn locate_reports_dir_server_mode_returns_404() {
-    let (status, _) = post_form(
+    let (status, _) = post_form_server(
         make_test_router_server_mode(),
         "/locate-reports-dir",
         "folder_path=/tmp",
@@ -1283,7 +1326,7 @@ async fn locate_reports_dir_nonexistent_redirects_with_error() {
 
 #[tokio::test]
 async fn relocate_scan_server_mode_returns_404() {
-    let (status, _) = post_form(
+    let (status, _) = post_form_server(
         make_test_router_server_mode(),
         "/relocate-scan",
         "run_id=abc123&folder_path=/tmp&redirect_url=/compare-scans",
