@@ -156,6 +156,9 @@ jobs:
 
       - name: Upload CI reports
         if: always()
+        # Diagnostic artifact only — a transient FinalizeArtifact ECONNRESET from
+        # GitHub's blob storage must not fail the smoke-test job after all checks pass.
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ci-reports-${{ github.run_number }}
