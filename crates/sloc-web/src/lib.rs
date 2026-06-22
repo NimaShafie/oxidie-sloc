@@ -21309,12 +21309,11 @@ struct ScanSetupTemplate {
     /* Stat chips (matches HTML report) */
     .summary-strip { display:grid; grid-template-columns:repeat(8,1fr); gap:10px; margin-top:18px; }
     @media(max-width:640px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
-    /* Hero stat strip: flex so the cards always fill exactly two rows. JS sets a
-       per-card flex-basis of 1/ceil(n/2); flex-grow lets a short final row stretch
-       its cards to full width so there is never an empty trailing cell. */
-    .summary-strip-hero { display:flex !important; flex-wrap:wrap; align-items:stretch; }
-    .summary-strip-hero > .stat-chip { flex:1 1 150px; }
-    @media(max-width:640px){.summary-strip-hero > .stat-chip{flex-basis:calc(50% - 5px);}}
+    /* Hero stat strip: uniform grid where every card is the same width and the
+       columns line up across both rows. JS sets the column count to ceil(n/2) so
+       the cards always occupy exactly two rows; when the count is odd the last
+       card spans two columns to fill the trailing cell with no empty gap. */
+    .summary-strip-hero { align-items:stretch; }
     .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; overflow:visible; }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
@@ -21722,37 +21721,37 @@ struct ScanSetupTemplate {
           {% if delta_lines_added.is_some() %}
           <div class="delta-cards-inline">
             <div class="delta-card-inline">
-              <div class="delta-card-val pos">{% if let Some(v) = delta_lines_added %}+{{ v }}{% else %}—{% endif %}</div>
+              <div class="delta-card-val pos">{% if let Some(v) = delta_lines_added %}+{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">lines added</div>
               <div class="delta-card-tip">Code lines added since the previous scan</div>
             </div>
             <div class="delta-card-inline">
-              <div class="delta-card-val neg">{% if let Some(v) = delta_lines_removed %}&minus;{{ v }}{% else %}—{% endif %}</div>
+              <div class="delta-card-val neg">{% if let Some(v) = delta_lines_removed %}&minus;{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">lines removed</div>
               <div class="delta-card-tip">Code lines removed since the previous scan</div>
             </div>
-            <div class="delta-card-inline" data-raw="{% if let Some(v) = delta_unmodified_lines %}{{ v }}{% endif %}">
-              <div class="delta-card-val">{% if let Some(v) = delta_unmodified_lines %}{{ v }}{% else %}—{% endif %}</div>
+            <div class="delta-card-inline">
+              <div class="delta-card-val">{% if let Some(v) = delta_unmodified_lines %}{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">unmodified lines</div>
               <div class="delta-card-tip">Code lines unchanged since the previous scan</div>
             </div>
             <div class="delta-card-inline">
-              <div class="delta-card-val mod">{% if let Some(v) = delta_files_modified %}{{ v }}{% else %}—{% endif %}</div>
+              <div class="delta-card-val mod">{% if let Some(v) = delta_files_modified %}{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files modified</div>
               <div class="delta-card-tip">Files with at least one line changed</div>
             </div>
             <div class="delta-card-inline">
-              <div class="delta-card-val pos">{% if let Some(v) = delta_files_added %}{{ v }}{% else %}—{% endif %}</div>
+              <div class="delta-card-val pos">{% if let Some(v) = delta_files_added %}{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files added</div>
               <div class="delta-card-tip">New files added since the previous scan</div>
             </div>
             <div class="delta-card-inline">
-              <div class="delta-card-val neg">{% if let Some(v) = delta_files_removed %}{{ v }}{% else %}—{% endif %}</div>
+              <div class="delta-card-val neg">{% if let Some(v) = delta_files_removed %}{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files removed</div>
               <div class="delta-card-tip">Files deleted since the previous scan</div>
             </div>
             <div class="delta-card-inline">
-              <div class="delta-card-val">{% if let Some(v) = delta_files_unchanged %}{{ v }}{% else %}—{% endif %}</div>
+              <div class="delta-card-val">{% if let Some(v) = delta_files_unchanged %}{{ v|commas }}{% else %}—{% endif %}</div>
               <div class="delta-card-lbl">files unchanged</div>
               <div class="delta-card-tip">Files with no changes since the previous scan</div>
             </div>
@@ -22520,7 +22519,7 @@ struct ScanSetupTemplate {
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
             ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
-            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=COLS[i%COLS.length],cx2=Math.max(8,Math.min(legX-12,cx+(Ro+20)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+20)*Math.sin(mAng)));ds+='<line x1="'+px(cx+Ro*Math.cos(mAng))+'" y1="'+px(cy+Ro*Math.sin(mAng))+'" x2="'+px(cx2)+'" y2="'+px(cy2)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
+            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=COLS[i%COLS.length],ax=cx+Ro*Math.cos(mAng),ay=cy+Ro*Math.sin(mAng),cx2=Math.max(8,Math.min(legX-12,cx+(Ro+24)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+24)*Math.sin(mAng))),lex=ax+(cx2-ax)*0.58,ley=ay+(cy2-ay)*0.58;ds+='<line x1="'+px(ax)+'" y1="'+px(ay)+'" x2="'+px(lex)+'" y2="'+px(ley)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
             ang+=sw;
           });
         }
@@ -22556,10 +22555,10 @@ struct ScanSetupTemplate {
           bs+='<g class="lang-bar-row">';
           bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
           bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
-          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'" rx="0"/>';if(cW>=28)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
-          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'" rx="0"/>';if(cmW>=28)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
-          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'" rx="0"/>';if(blW>=28)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
-          bs+='<text x="'+px(LW+phys/maxT*BW+5)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+          if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'" rx="0"/>';if(cW>=fmt(d.code).length*6.5+10)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
+          if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'" rx="0"/>';if(cmW>=fmt(d.comments).length*6.5+10)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
+          if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'" rx="0"/>';if(blW>=fmt(d.blanks).length*6.5+10)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
+          bs+='<text x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
         var ly=SH-14;
@@ -22683,9 +22682,9 @@ struct ScanSetupTemplate {
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=28)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=28)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=28)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var pct=Math.round((d.code||0)/tot2*100);
               s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+pct+'%</text>';
             });
@@ -22696,9 +22695,9 @@ struct ScanSetupTemplate {
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
               s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
-              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=28)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
-              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=28)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
-              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=28)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
+              if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';if(cW>=fmt(d.code||0).length*6.5+10)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
+              if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';if(cmW>=fmt(d.comments||0).length*6.5+10)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
+              if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';if(blW>=fmt(d.blanks||0).length*6.5+10)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
@@ -23394,7 +23393,7 @@ struct ScanSetupTemplate {
     setInterval(doPing,5000);
     if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
-  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip-hero');if(!s)return;var items=Array.prototype.slice.call(s.querySelectorAll('.stat-chip'));var n=items.length;if(!n)return;function upd(){var perRow=window.innerWidth<=640?2:Math.ceil(n/2);var gap=10;var basis='calc((100% - '+((perRow-1)*gap)+'px) / '+perRow+' - 0.02px)';items.forEach(function(el){el.style.flexBasis=basis;el.style.flexGrow='1';el.style.flexShrink='1';});}upd();window.addEventListener('resize',upd);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip-hero');if(!s)return;var items=Array.prototype.slice.call(s.querySelectorAll('.stat-chip'));var n=items.length;if(!n)return;var last=items[n-1];function upd(){var perRow=window.innerWidth<=640?2:Math.ceil(n/2);s.style.gridTemplateColumns='repeat('+perRow+',minmax(0,1fr))';items.forEach(function(el){el.style.gridColumn='';});if(window.innerWidth>640&&perRow*2!==n){last.style.gridColumn='span 2';}}upd();window.addEventListener('resize',upd);})();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
