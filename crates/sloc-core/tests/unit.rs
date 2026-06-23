@@ -13,14 +13,14 @@ fn env_lock() -> MutexGuard<'static, ()> {
         .lock()
         // Recover from poisoning: a single panicking env test should report as
         // one failure, not cascade into PoisonError on every later test.
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Every environment variable that a supported CI provider may set and that
 /// sloc-core's CI detection reads, directly or indirectly. Tests that assert on
 /// a specific provider must clear all of these first so the ambient CI
-/// environment (e.g. Jenkins running this very suite, which exports JENKINS_HOME,
-/// NODE_NAME, BUILD_NUMBER, …) cannot leak in and win the precedence check.
+/// environment (e.g. Jenkins running this very suite, which exports `JENKINS_HOME`,
+/// `NODE_NAME`, `BUILD_NUMBER`, …) cannot leak in and win the precedence check.
 const KNOWN_CI_ENV_VARS: &[&str] = &[
     // Jenkins / Hudson
     "JENKINS_URL",
