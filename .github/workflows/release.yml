@@ -61,7 +61,7 @@ jobs:
             binary: oxide-sloc
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
@@ -275,7 +275,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
@@ -299,7 +299,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
@@ -620,7 +620,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Detect pre-release
         id: pre
@@ -816,7 +816,7 @@ jobs:
     container:
       image: ubuntu:22.04
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install prerequisites (curl, openssl, ca-certificates)
         run: |
@@ -883,7 +883,7 @@ jobs:
       (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
       !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc')
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
