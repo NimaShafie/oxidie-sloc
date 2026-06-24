@@ -70,7 +70,7 @@ enum Commands {
     Serve(ServeArgs),
     /// Generate a starter .oxide-sloc.toml config file
     Init(InitArgs),
-    /// Validate a scan result against a golden corpus (not yet implemented)
+    /// Validate a config file: parse TOML, check paths/globs, logo, accent colour, and profiles
     Validate(ValidateArgs),
     /// Deliver a saved report via SMTP or webhook
     Send(Box<SendArgs>),
@@ -241,6 +241,11 @@ struct AnalyzeArgs {
     /// Supported values: 80, 100, 120 — controls the "N-Col Compliant" chip in reports.
     #[arg(long, value_name = "N")]
     style_col_threshold: Option<u16>,
+
+    /// Attach per-file git activity over the last N days (one `git log` pass) and surface
+    /// a Hotspots ranking (code lines × recent commits). Off by default; requires a git repo.
+    #[arg(long, value_name = "DAYS")]
+    activity_window: Option<u32>,
 
     /// Write scan configuration JSON to this path (records the effective settings used
     /// for this run — identical to the scan-config_*.json produced by the web UI).
@@ -1643,6 +1648,9 @@ fn apply_analysis_cli_args(config: &mut AppConfig, args: &AnalyzeArgs) {
     }
     if let Some(threshold) = args.style_col_threshold {
         config.analysis.style_col_threshold = threshold;
+    }
+    if let Some(window) = args.activity_window {
+        config.analysis.activity_window_days = Some(window);
     }
 }
 

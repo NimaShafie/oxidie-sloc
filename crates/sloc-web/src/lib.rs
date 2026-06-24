@@ -1849,6 +1849,8 @@ struct AnalyzeForm {
     complexity_alert: Option<String>,
     /// Whether to exclude duplicate files from displayed SLOC totals.
     exclude_duplicates: Option<String>,
+    /// Git activity window in days for the hotspots view. Empty/0 = disabled.
+    activity_window: Option<String>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -4172,6 +4174,13 @@ fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm
         let scope = v.trim();
         if scope == "c_family" || scope == "all" {
             config.analysis.style_lang_scope = scope.to_string();
+        }
+    }
+    if let Some(w) = form.activity_window.as_deref() {
+        if let Ok(days) = w.trim().parse::<u32>() {
+            if days > 0 {
+                config.analysis.activity_window_days = Some(days);
+            }
         }
     }
 }
@@ -12014,12 +12023,12 @@ async fn trend_report_handler(
         +'.rep-sub{{font-size:13px;color:#7b675b;margin:6px 0 0;}}'
         +'.rep-brand{{font-size:14px;font-weight:800;color:#C45C10;text-align:right;white-space:nowrap;}}'
         +'.rep-brand small{{display:block;font-weight:600;color:#7b675b;font-size:11px;margin-top:2px;}}'
-        +'.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 22px;}}'
-        +'.stat-chip{{border:1px solid #e6d0bf;border-radius:12px;padding:12px 14px;position:relative;background:#fcf8f3;}}'
+        +'.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 0 22px;}}'
+        +'.stat-chip{{border:1px solid #e6d0bf;border-radius:11px;padding:9px 12px;position:relative;background:#fcf8f3;overflow:hidden;}}'
         +'.stat-chip-tip{{display:none!important;}}'
-        +'.stat-chip-val{{font-size:20px;font-weight:900;color:#C45C10;}}'
-        +'.stat-chip-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;margin-top:4px;}}'
-        +'.stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:11px;color:#7b675b;}}'
+        +'.stat-chip-val{{font-size:16px;font-weight:900;color:#C45C10;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}'
+        +'.stat-chip-label{{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#7b675b;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}'
+        +'.stat-chip-exact{{position:absolute;bottom:5px;right:9px;font-size:9px;color:#7b675b;}}'
         +'.stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}'
         +'.rep-chart{{text-align:center;margin:0 0 22px;}}'
         +'.rep-chart svg{{max-width:100%;height:auto;}}'
@@ -12986,9 +12995,8 @@ async fn test_metrics_handler(
     .chart-select:focus{{border-color:var(--accent);}}
     .empty-state{{padding:32px;text-align:center;color:var(--muted);font-size:14px;border:1px dashed var(--line-strong);border-radius:12px;}}
     .trend-canvas-wrap{{position:relative;height:260px;}}
-    .trend-controls-bar{{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0 0 12px;padding:8px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;}}
-    .trend-controls-bar label{{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap;}}
-    .trend-controls-bar .chart-select{{font-size:12px;padding:4px 8px;}}
+    .trend-controls-bar{{display:flex;justify-content:center;align-items:center;gap:20px;flex-wrap:wrap;padding:13px 0 15px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:16px;}}
+    .trend-controls-bar label{{font-size:13px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:7px;}}
     .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
     .site-footer a{{color:var(--muted);}}
     body.dark-theme .chart-box{{border-color:var(--line-strong);}}
@@ -17994,6 +18002,21 @@ int main() { … }   ← code
 # 100 = flag any file with &gt; 100 branch points
 # Files above the threshold are highlighted
 # in the result page metric strip.</div>
+                  </div>
+                </div>
+                <div class="preset-inline-row">
+                  <div class="toggle-card" style="margin:0;">
+                    <div class="field-help-title">Git hotspots</div>
+                    <h4 style="margin:6px 0 12px;font-size:16px;">Activity window (days)</h4>
+                    <input type="number" name="activity_window" id="activity_window" min="0" max="3650" placeholder="e.g. 90 — leave blank to disable" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;" />
+                  </div>
+                  <div class="explainer-card prominent" style="margin:0;">
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> When set, oxide-sloc runs a single <code>git log</code> pass over the last N days and ranks files by <strong>code&nbsp;lines&nbsp;&times;&nbsp;recent&nbsp;commits</strong> in a Git Hotspots table — large files that change often are the strongest refactoring candidates.<br /><strong>Requires</strong> the scanned path to be a git repository. This is distinct from the scan-to-scan churn rate shown on the Compare page.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># blank or 0 = disabled (default)
+# 30  = last month of activity
+# 90  = last quarter (a common choice)
+# 365 = last year
+# Adds Commits + Last-changed columns to CSV.</div>
                   </div>
                 </div>
                 <div class="preset-inline-row">
@@ -30779,6 +30802,7 @@ mod form_config_tests {
             cocomo_mode: None,
             complexity_alert: None,
             exclude_duplicates: None,
+            activity_window: None,
         }
     }
 
@@ -30786,6 +30810,30 @@ mod form_config_tests {
         let mut cfg = sloc_config::AppConfig::default();
         apply_form_to_config(&mut cfg, form);
         cfg
+    }
+
+    // ── activity_window (git hotspots) ──
+
+    #[test]
+    fn activity_window_unset_leaves_none() {
+        let cfg = apply(&blank_form());
+        assert!(cfg.analysis.activity_window_days.is_none());
+    }
+
+    #[test]
+    fn activity_window_sets_days_when_positive() {
+        let mut form = blank_form();
+        form.activity_window = Some("90".to_string());
+        let cfg = apply(&form);
+        assert_eq!(cfg.analysis.activity_window_days, Some(90));
+    }
+
+    #[test]
+    fn activity_window_zero_stays_disabled() {
+        let mut form = blank_form();
+        form.activity_window = Some("0".to_string());
+        let cfg = apply(&form);
+        assert!(cfg.analysis.activity_window_days.is_none());
     }
 
     // ── python_docstrings_as_comments (checkbox, no value attr → sends "on") ──

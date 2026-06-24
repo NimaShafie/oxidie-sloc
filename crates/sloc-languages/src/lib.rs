@@ -1021,8 +1021,22 @@ const SP_SOLIDITY: SymbolPatterns = SymbolPatterns {
     classes: &["contract ", "interface ", "library ", "struct ", "enum "],
     variables: &[],
     imports: &["import "],
-    tests: &[],
-    assertions: &[],
+    // Foundry / DSTest / Forge-std: test functions are `function test...`, fuzz
+    // tests `function testFuzz...`, and assertions are the `assert*`/`expect*` cheats.
+    tests: &["function test", "function testFuzz", "function invariant"],
+    assertions: &[
+        "assertEq(",
+        "assertEq0(",
+        "assertTrue(",
+        "assertFalse(",
+        "assertGt(",
+        "assertLt(",
+        "assertGe(",
+        "assertLe(",
+        "assertApproxEq",
+        "vm.expectRevert(",
+        "vm.expectEmit(",
+    ],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -1084,7 +1098,8 @@ const SP_TCL: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &[],
     imports: &["source ", "package require "],
-    tests: &[],
+    // tcltest: each case is introduced by the `test` command.
+    tests: &["test "],
     assertions: &[],
     test_suites: &[],
     variables_prefix_no_paren: &[],
@@ -1096,8 +1111,15 @@ const SP_PASCAL: SymbolPatterns = SymbolPatterns {
     classes: &["type ", "class ", "record "],
     variables: &[],
     imports: &["uses "],
-    tests: &[],
-    assertions: &[],
+    // DUnit / FPCUnit: test methods are `procedure Test...`; checks are the assertions.
+    tests: &["procedure Test"],
+    assertions: &[
+        "Check(",
+        "CheckEquals(",
+        "CheckTrue(",
+        "CheckFalse(",
+        "CheckNotNull(",
+    ],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -1115,9 +1137,10 @@ const SP_VB: SymbolPatterns = SymbolPatterns {
     classes: &["Class ", "Module ", "Structure "],
     variables: &[],
     imports: &["Imports "],
-    tests: &[],
-    assertions: &[],
-    test_suites: &[],
+    // MSTest attributes on their own line; Assert.* calls for assertions.
+    tests: &["<TestMethod>", "<TestMethod("],
+    assertions: &["Assert.", "CollectionAssert.", "StringAssert."],
+    test_suites: &["<TestClass>", "<TestClass("],
     variables_prefix_no_paren: &[],
 };
 
@@ -1127,8 +1150,9 @@ const SP_LISP: SymbolPatterns = SymbolPatterns {
     classes: &["(defclass ", "(defstruct "],
     variables: &[],
     imports: &["(require ", "(import ", "(use-package "],
-    tests: &[],
-    assertions: &[],
+    // FiveAM (Common Lisp): `(test name ...)` cases with `(is ...)` checks.
+    tests: &["(test ", "(deftest "],
+    assertions: &["(is ", "(is-true ", "(is-false ", "(signals "],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -1152,7 +1176,8 @@ const SP_CRYSTAL: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "module ", "struct ", "enum "],
     variables: &[],
     imports: &["require "],
-    tests: &[],
+    // Crystal Spec (RSpec-style): describe/it/context groups, pending stubs.
+    tests: &["it ", "it(", "describe ", "context ", "pending "],
     assertions: &[],
     test_suites: &[],
     variables_prefix_no_paren: &[],
@@ -1164,8 +1189,9 @@ const SP_D: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "struct ", "interface ", "enum ", "template "],
     variables: &[],
     imports: &["import "],
-    tests: &[],
-    assertions: &[],
+    // D built-in unittest blocks; `assert` is the in-language check.
+    tests: &["unittest"],
+    assertions: &["assert(", "assertThrown", "assertNotThrown"],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -1188,8 +1214,9 @@ const SP_ELM: SymbolPatterns = SymbolPatterns {
     classes: &["type "],
     variables: &[],
     imports: &["import "],
-    tests: &[],
-    assertions: &[],
+    // elm-test: test/describe/fuzz cases, with `Expect.*` checks.
+    tests: &["test ", "describe ", "fuzz "],
+    assertions: &["Expect."],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -1713,7 +1740,8 @@ const SP_SHELL: SymbolPatterns = SymbolPatterns {
     classes: &[],
     variables: &["declare ", "local ", "export "],
     imports: &["source ", ". "],
-    tests: &[],
+    // Bats (Bash Automated Testing System): each case is a `@test "name" {` block.
+    tests: &["@test "],
     assertions: &[],
     test_suites: &[],
     variables_prefix_no_paren: &[],
@@ -1945,8 +1973,18 @@ const SP_ERLANG: SymbolPatterns = SymbolPatterns {
     classes: &["-module("],
     variables: &[],
     imports: &["-import(", "-include(", "-include_lib("],
+    // EUnit: test names end in `_test`/`_test_` (suffix — not prefix-matchable), so we
+    // only count the `?assert*` macro family, which is line-prefixable.
     tests: &[],
-    assertions: &[],
+    assertions: &[
+        "?assert(",
+        "?assertEqual(",
+        "?assertNotEqual(",
+        "?assertMatch(",
+        "?assertError(",
+        "?assertThrow(",
+        "?assertException(",
+    ],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -1989,7 +2027,9 @@ const SP_HASKELL: SymbolPatterns = SymbolPatterns {
     classes: &["class ", "data ", "newtype ", "type "],
     variables: &[],
     imports: &["import "],
-    tests: &[],
+    // Hspec (describe/it) and QuickCheck (prop_) conventions. Hspec expectations
+    // (`x `shouldBe` y`) are infix/mid-line, so they are not prefix-countable here.
+    tests: &["describe ", "it ", "prop_"],
     assertions: &[],
     test_suites: &[],
     variables_prefix_no_paren: &[],
@@ -2059,8 +2099,15 @@ const SP_OCAML: SymbolPatterns = SymbolPatterns {
     classes: &["type ", "module ", "class "],
     variables: &[],
     imports: &["open "],
-    tests: &[],
-    assertions: &[],
+    // OUnit (`let test_... >:: `, `assert_*`) and Alcotest (`test_case`) conventions.
+    tests: &["let test_", "test_case "],
+    assertions: &[
+        "assert_equal ",
+        "assert_bool ",
+        "assert_raises ",
+        "assert_failure ",
+        "OUnit.assert",
+    ],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };
@@ -2071,8 +2118,19 @@ const SP_PERL: SymbolPatterns = SymbolPatterns {
     classes: &["package "],
     variables: &["my ", "our ", "local "],
     imports: &["use ", "require "],
-    tests: &[],
-    assertions: &[],
+    // Test::More / Test2: subtests group cases; ok/is/like/etc. are the assertions.
+    tests: &["subtest "],
+    assertions: &[
+        "ok(",
+        "is(",
+        "isnt(",
+        "like(",
+        "unlike(",
+        "cmp_ok(",
+        "is_deeply(",
+        "isa_ok(",
+        "can_ok(",
+    ],
     test_suites: &[],
     variables_prefix_no_paren: &[],
 };

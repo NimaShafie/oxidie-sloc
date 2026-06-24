@@ -195,6 +195,8 @@ fn make_file_record(path: &str, code: u64) -> FileRecord {
         style_analysis: None,
         cyclomatic_complexity: None,
         lsloc: None,
+        commit_count: None,
+        last_commit_date: None,
         content_hash: 0,
     }
 }

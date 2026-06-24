@@ -17,7 +17,7 @@ pub use history::{
     WatchedDirsStore,
 };
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -259,6 +259,14 @@ pub struct FileRecord {
     /// Logical SLOC estimate; `None` when the language does not support lexical LSLOC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsloc: Option<u32>,
+    /// Git commit-count in the configured activity window that touched this file.
+    /// `None` unless `analysis.activity_window_days` is set and the root is a git repo.
+    /// Powers the hotspots view; distinct from the web layer's scan-to-scan churn rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_count: Option<u32>,
+    /// ISO-8601 date of the most recent commit touching this file within the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_commit_date: Option<String>,
     /// SHA-256 (first 8 bytes as u64) of raw file bytes — used for duplicate detection.
     /// Not serialized; consumed in-process during `assemble_run`.
     #[serde(skip)]
@@ -628,6 +636,69 @@ fn run_git_cmd(dir: &Path, args: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+/// Per-file git activity (commit-count + last-change date) over `window_days`, computed
+/// with a single `git log --name-status` pass. Keys are paths relative to `project_path`
+/// (via `--relative`), matching `FileRecord::relative_path`. Best-effort: returns an empty
+/// map when git is unavailable or the path is not a repository — a scan never fails on this.
+fn detect_file_activity(
+    project_path: &Path,
+    window_days: u32,
+) -> HashMap<String, (u32, Option<String>)> {
+    let since = format!("--since={window_days} days ago");
+    // `--relative` limits output to (and reports paths relative to) the scan directory, so
+    // the keys line up with FileRecord::relative_path even when scanning a repo subdirectory.
+    // %x00 prefixes each commit header with a NUL, distinguishing it from name-status lines.
+    let out = run_git_cmd(
+        project_path,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "log",
+            since.as_str(),
+            "--no-merges",
+            "--name-status",
+            "--relative",
+            "--pretty=format:%x00%aI",
+        ],
+    );
+    out.map(|s| parse_activity_log(&s)).unwrap_or_default()
+}
+
+/// Parse `git log --name-status` output (NUL-prefixed commit headers) into a
+/// path → (`commit_count`, `last_commit_date`) map. `git log` emits newest-first, so the
+/// first time a path appears is its most recent change. Renames are attributed to the new path.
+fn parse_activity_log(out: &str) -> HashMap<String, (u32, Option<String>)> {
+    let mut map: HashMap<String, (u32, Option<String>)> = HashMap::new();
+    let mut current_date: Option<String> = None;
+    for line in out.lines() {
+        if let Some(date) = line.strip_prefix('\u{0}') {
+            let d = date.trim();
+            current_date = (!d.is_empty()).then(|| d.to_owned());
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        // name-status line: "STATUS\tpath" or "Rxxx\told\tnew" / "Cxxx\told\tnew".
+        let mut fields = line.split('\t');
+        let status = fields.next().unwrap_or("");
+        let path = if status.starts_with('R') || status.starts_with('C') {
+            fields.next_back()
+        } else {
+            fields.next()
+        };
+        let Some(path) = path.map(str::trim).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let entry = map.entry(path.to_owned()).or_insert((0, None));
+        entry.0 += 1;
+        if entry.1.is_none() {
+            entry.1.clone_from(&current_date);
+        }
+    }
+    map
 }
 
 /// Return the name of the CI system if the process is running inside one.
@@ -1029,7 +1100,7 @@ fn find_duplicate_groups(analyzed: &[FileRecord]) -> Vec<Vec<String>> {
 fn assemble_run(
     config: &AppConfig,
     runtime_mode: &str,
-    analyzed: Vec<FileRecord>,
+    mut analyzed: Vec<FileRecord>,
     skipped: Vec<FileRecord>,
     warnings: Vec<String>,
     submodule_summaries: Vec<SubmoduleSummary>,
@@ -1057,6 +1128,21 @@ fn assemble_run(
         .as_deref()
         .map(detect_git_for_run)
         .unwrap_or_default();
+
+    // Opt-in per-file git activity for the hotspots view (single `git log` pass, best-effort).
+    if let (Some(window), Some(root)) =
+        (config.analysis.activity_window_days, first_root.as_deref())
+    {
+        let activity = detect_file_activity(root, window);
+        if !activity.is_empty() {
+            for rec in &mut analyzed {
+                if let Some((count, date)) = activity.get(&rec.relative_path) {
+                    rec.commit_count = Some(*count);
+                    rec.last_commit_date.clone_from(date);
+                }
+            }
+        }
+    }
 
     let now = Utc::now();
     let run_id = {
@@ -1620,6 +1706,8 @@ fn analyze_candidate_file(
         style_analysis: analysis.style_analysis,
         cyclomatic_complexity,
         lsloc,
+        commit_count: None,
+        last_commit_date: None,
         content_hash,
     }))
 }
@@ -1802,6 +1890,8 @@ fn skipped_record(
         style_analysis: None,
         cyclomatic_complexity: None,
         lsloc: None,
+        commit_count: None,
+        last_commit_date: None,
         content_hash: 0,
     }
 }
@@ -2551,6 +2641,38 @@ mod tests {
         assert!((est.effort_person_months - 0.0).abs() < 0.01);
     }
 
+    // ── parse_activity_log (git hotspots) ─────────────────────────────────────
+
+    #[test]
+    fn parse_activity_log_counts_and_dates_per_file() {
+        let out = "\u{0}2024-03-02T10:00:00+00:00\n\
+                   M\tsrc/a.rs\n\
+                   A\tsrc/b.rs\n\
+                   \u{0}2024-03-01T09:00:00+00:00\n\
+                   M\tsrc/a.rs\n";
+        let map = parse_activity_log(out);
+        assert_eq!(map["src/a.rs"].0, 2, "a.rs touched in two commits");
+        assert_eq!(map["src/b.rs"].0, 1, "b.rs touched once");
+        // Newest-first: a.rs keeps the most recent date.
+        assert_eq!(
+            map["src/a.rs"].1.as_deref(),
+            Some("2024-03-02T10:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn parse_activity_log_attributes_rename_to_new_path() {
+        let out = "\u{0}2024-03-02T10:00:00+00:00\nR100\tsrc/old.rs\tsrc/new.rs\n";
+        let map = parse_activity_log(out);
+        assert_eq!(map["src/new.rs"].0, 1);
+        assert!(!map.contains_key("src/old.rs"));
+    }
+
+    #[test]
+    fn parse_activity_log_empty_is_empty() {
+        assert!(parse_activity_log("").is_empty());
+    }
+
     // ── Path / git helpers ────────────────────────────────────────────────────
 
     #[test]
@@ -2658,6 +2780,8 @@ mod tests {
             style_analysis: None,
             cyclomatic_complexity: None,
             lsloc: None,
+            commit_count: None,
+            last_commit_date: None,
             content_hash: hash,
         };
         let analyzed = vec![make_rec(111, "a.rs"), make_rec(222, "b.rs")];
@@ -2687,6 +2811,8 @@ mod tests {
             style_analysis: None,
             cyclomatic_complexity: None,
             lsloc: None,
+            commit_count: None,
+            last_commit_date: None,
             content_hash: hash,
         };
         let analyzed = vec![
@@ -2721,6 +2847,8 @@ mod tests {
             style_analysis: None,
             cyclomatic_complexity: None,
             lsloc: None,
+            commit_count: None,
+            last_commit_date: None,
             content_hash: hash,
         };
         // hash=0 means "not computed" — must be excluded from duplicate detection
@@ -2807,6 +2935,8 @@ mod tests {
                 style_analysis: None,
                 cyclomatic_complexity: None,
                 lsloc: None,
+                commit_count: None,
+                last_commit_date: None,
                 content_hash: 0,
             }],
             skipped_file_records: vec![],
