@@ -1361,6 +1361,7 @@ async fn add_security_headers(
     let nonce = uuid::Uuid::new_v4().to_string().replace('-', "");
     req.extensions_mut().insert(CspNonce(nonce.clone()));
     let mut resp = next.run(req).await;
+    inject_loading_overlay_into_html(&mut resp, &nonce).await;
     let h = resp.headers_mut();
     h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
     h.insert(
@@ -1411,6 +1412,82 @@ async fn add_security_headers(
         );
     }
     resp
+}
+
+/// Inline branded loading overlay shown over every HTML page until `window.load`
+/// fires, so large/slow pages display a "Loading…" screen instead of a
+/// half-rendered, unstyled flash. Mirrors the HTML report's `#rpt-loading-overlay`.
+fn loading_overlay_html(nonce: &str) -> String {
+    const OVERLAY: &str = r##"<style>
+#rpt-loading-overlay{position:fixed;inset:0;z-index:99999;background:var(--bg,#f5f0eb);display:flex;align-items:center;justify-content:center;transition:opacity .55s cubic-bezier(.4,0,.2,1);}
+#rpt-loading-overlay.fade-out{opacity:0;pointer-events:none;}
+.rpt-load-card{display:flex;flex-direction:column;align-items:center;gap:26px;padding:50px 90px;background:linear-gradient(155deg,rgba(255,254,251,.96) 0%,rgba(255,246,236,.9) 100%);border:1px solid rgba(196,110,40,.13);border-radius:28px;box-shadow:0 0 0 1px rgba(255,255,255,.75) inset,0 8px 72px rgba(150,80,20,.09),0 2px 16px rgba(0,0,0,.06);animation:rpt-card-in .5s cubic-bezier(.22,.68,0,1.12) both;}
+@keyframes rpt-card-in{from{opacity:0;transform:translateY(14px) scale(.95);}to{opacity:1;transform:none;}}
+.rpt-load-logo{width:50px;height:50px;object-fit:contain;filter:drop-shadow(0 3px 10px rgba(150,80,20,.22));animation:rpt-logo-bounce 1.8s cubic-bezier(.36,.07,.19,.97) .3s infinite;}
+@keyframes rpt-logo-bounce{0%,100%{transform:translateY(0) scale(1);}40%{transform:translateY(-10px) scale(1.05);}70%{transform:translateY(0) scale(.97);}}
+.rpt-spinner-wrap{position:relative;width:58px;height:58px;}
+.rpt-spinner-track{position:absolute;inset:0;border-radius:50%;border:3px solid rgba(196,92,16,.1);}
+.rpt-spinner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(196,92,16,0) 0%,rgba(196,92,16,.2) 38%,#c45c10 100%);animation:rpt-spin 1.1s linear infinite;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#fff calc(100% - 3px));mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#fff calc(100% - 3px));}
+@keyframes rpt-spin{to{transform:rotate(360deg);}}
+.rpt-load-divider{width:36px;height:1px;background:linear-gradient(90deg,transparent,rgba(196,92,16,.18),transparent);}
+.rpt-loading-text{font-size:13px;font-weight:500;color:var(--muted,#8a7060);letter-spacing:.06em;}
+.rpt-dot{display:inline-block;animation:rpt-bounce 1.7s ease-in-out infinite;opacity:0;}
+.rpt-dot:nth-child(2){animation-delay:.28s;}
+.rpt-dot:nth-child(3){animation-delay:.56s;}
+@keyframes rpt-bounce{0%,60%,100%{opacity:0;transform:translateY(0);}30%{opacity:1;transform:translateY(-4px);}}
+body.dark-theme #rpt-loading-overlay{background:var(--bg,#1a1410);}
+body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(40,21,10,.9) 0%,rgba(28,13,4,.94) 100%);border-color:rgba(200,120,50,.13);box-shadow:0 0 0 1px rgba(255,200,140,.04) inset,0 8px 72px rgba(0,0,0,.48);}
+</style>
+<div id="rpt-loading-overlay" aria-hidden="true"><div class="rpt-load-card"><img class="rpt-load-logo" src="/images/logo/small-logo.png" alt=""><div class="rpt-spinner-wrap"><div class="rpt-spinner-track"></div><div class="rpt-spinner"></div></div><div class="rpt-load-divider"></div><div class="rpt-loading-text">Loading<span class="rpt-dot">.</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span></div></div></div>"##;
+    const JS: &str = r#"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}function d(){var o=document.getElementById('rpt-loading-overlay');if(!o)return;o.classList.add('fade-out');setTimeout(function(){if(o.parentNode)o.parentNode.removeChild(o);},650);}if(document.readyState==='complete'){setTimeout(d,150);}else{window.addEventListener('load',function(){setTimeout(d,150);});}setTimeout(d,15000);})();"#;
+    format!("{OVERLAY}<script nonce=\"{nonce}\">{JS}</script>")
+}
+
+/// Buffer an HTML response body and splice the loading overlay in right after the
+/// opening `<body>` tag. No-op for non-HTML responses or pages that already carry
+/// an `#rpt-loading-overlay` (e.g. the standalone HTML report).
+async fn inject_loading_overlay_into_html(resp: &mut Response, nonce: &str) {
+    let is_html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("text/html"))
+        .unwrap_or(false);
+    if !is_html {
+        return;
+    }
+    let body = std::mem::replace(resp.body_mut(), Body::empty());
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let html = match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(e) => {
+            *resp.body_mut() = Body::from(e.into_bytes());
+            return;
+        }
+    };
+    if html.contains("id=\"rpt-loading-overlay\"") {
+        *resp.body_mut() = Body::from(html);
+        return;
+    }
+    let lower = html.to_ascii_lowercase();
+    let insert_at = lower
+        .find("<body")
+        .and_then(|bi| lower[bi..].find('>').map(|g| bi + g + 1));
+    let new_html = match insert_at {
+        Some(at) => {
+            let mut out = String::with_capacity(html.len() + 2800);
+            out.push_str(&html[..at]);
+            out.push_str(&loading_overlay_html(nonce));
+            out.push_str(&html[at..]);
+            out
+        }
+        None => html,
+    };
+    resp.headers_mut().remove(header::CONTENT_LENGTH);
+    *resp.body_mut() = Body::from(new_html);
 }
 
 async fn rate_limit(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
@@ -1944,8 +2021,8 @@ async fn pick_directory_handler(
         let result = if is_coverage {
             dialog
                 .add_filter(
-                    "Coverage files (LCOV, Cobertura XML, JaCoCo XML)",
-                    &["info", "lcov", "xml"],
+                    "Coverage files (LCOV, Cobertura/JaCoCo XML, coverage.py/Istanbul JSON)",
+                    &["info", "lcov", "xml", "json"],
                 )
                 .pick_file()
         } else {
@@ -3844,6 +3921,9 @@ async fn api_suggest_coverage(Query(query): Query<SuggestCoverageQuery>) -> impl
         "build/reports/jacoco/test/jacocoTestReport.xml",
         "build/reports/jacoco/jacocoTestReport.xml",
         "build/jacoco/jacoco.xml",
+        // coverage.py native JSON — `coverage json`
+        "coverage.json",
+        "coverage/coverage.json",
     ];
     let root = resolve_input_path(query.path.as_deref().unwrap_or(""));
     let found = CANDIDATES
@@ -11922,8 +12002,8 @@ async fn trend_report_handler(
       var css='<style>'
         +'*{{box-sizing:border-box;}}'
         +'html,body{{margin:0;padding:0;}}'
-        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
-        +'.rep-masthead{{background:#191c26;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:15px 34px;}}'
+        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;padding-top:54px;padding-bottom:58px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
+        +'.rep-masthead{{position:fixed;top:0;left:0;right:0;z-index:10;background:#191c26;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:15px 34px;}}'
         +'.rep-mast-left{{display:flex;align-items:baseline;gap:14px;}}'
         +'.rep-mast-brand{{font-size:19px;font-weight:900;letter-spacing:-.01em;}}'
         +'.rep-mast-sub{{font-size:12.5px;color:rgba(255,255,255,0.65);font-weight:600;}}'
@@ -11950,7 +12030,8 @@ async fn trend_report_handler(
         +'th{{background:#f0e9e0;font-weight:800;}}'
         +'.sort-icon,.col-resize-handle{{display:none!important;}}'
         +'.pagination,.table-pager,.sh-pager{{display:none!important;}}'
-        +'.rep-foot{{background:#191c26;color:rgba(255,255,255,0.72);margin-top:26px;padding:13px 34px;font-size:11px;font-weight:600;text-align:center;}}'
+        +'.rep-foot{{position:fixed;bottom:0;left:0;right:0;z-index:10;background:#191c26;color:rgba(255,255,255,0.72);padding:9px 34px;font-size:11px;font-weight:600;text-align:center;line-height:1.5;}}'
+        +'.rep-foot-gen{{margin-top:2px;color:rgba(255,255,255,0.55);}}'
         +'</style>';
       var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Trend Report</title>'+css+'</head><body>'
         +'<div class="rep-masthead"><div class="rep-mast-left"><span class="rep-mast-brand">oxide-sloc</span><span class="rep-mast-sub">Code Metrics Report \u00b7 Trend</span></div><div class="rep-mast-ts">Generated '+tp.date+'</div></div>'
@@ -11961,7 +12042,7 @@ async fn trend_report_handler(
         +'<div class="rep-chart">'+svgStr+'</div>'
         +tableHtml
         +'</div>'
-        +'<div class="rep-foot">\u00a9 2026 OxideSLOC \u00b7 oxide-sloc v{version} \u00b7 local code metrics workbench \u00b7 AGPL-3.0-or-later \u00b7 github.com/oxide-sloc/oxide-sloc \u00b7 Generated '+tp.date+'</div>'
+        +'<div class="rep-foot"><div>\u00a9 2026 OxideSLOC \u00b7 oxide-sloc v{version} \u00b7 local code metrics workbench \u00b7 AGPL-3.0-or-later \u00b7 github.com/oxide-sloc/oxide-sloc</div><div class="rep-foot-gen">Generated '+tp.date+'</div></div>'
         +'</body></html>';
       fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-trend-report.pdf'}})}})
         .then(function(r){{if(!r.ok)throw new Error('server returned '+r.status);return r.blob();}})
@@ -12763,6 +12844,10 @@ async fn test_metrics_handler(
   <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>Cobertura XML</strong></span>
   <span style="color:var(--muted);font-size:12px;">&middot;</span>
   <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>JaCoCo XML</strong></span>
+  <span style="color:var(--muted);font-size:12px;">&middot;</span>
+  <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>coverage.py JSON</strong></span>
+  <span style="color:var(--muted);font-size:12px;">&middot;</span>
+  <span style="background:var(--surface-2);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;font-size:12px;white-space:nowrap;"><strong>Istanbul JSON</strong></span>
 </div>
 <div style="font-size:12px;color:var(--muted);">Provide the file via the web scan form or <code>--coverage-file</code> CLI flag.</div>
 </div>"#,
@@ -12901,6 +12986,9 @@ async fn test_metrics_handler(
     .chart-select:focus{{border-color:var(--accent);}}
     .empty-state{{padding:32px;text-align:center;color:var(--muted);font-size:14px;border:1px dashed var(--line-strong);border-radius:12px;}}
     .trend-canvas-wrap{{position:relative;height:260px;}}
+    .trend-controls-bar{{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0 0 12px;padding:8px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;}}
+    .trend-controls-bar label{{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap;}}
+    .trend-controls-bar .chart-select{{font-size:12px;padding:4px 8px;}}
     .site-footer{{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}}
     .site-footer a{{color:var(--muted);}}
     body.dark-theme .chart-box{{border-color:var(--line-strong);}}
@@ -13049,8 +13137,34 @@ async fn test_metrics_handler(
             <button class="chart-expand-btn" id="trend-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
         </div>
-        <p style="font-size:13px;color:var(--muted);margin:0 0 14px;">Test definition count across all saved scans for the selected scope. Use <strong>Multi-Timeline</strong> to compare all scans side-by-side.</p>
-        <div class="chart-canvas-wrap trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">Test metric trends across all saved scans for the selected scope. Use <strong>Multi-Timeline</strong> to compare scans side-by-side.</p>
+        <div class="trend-controls-bar">
+          <label>Y Metric:
+            <select class="chart-select" id="tm-trend-y">
+              <option value="test_count" selected>Test Definitions</option>
+              <option value="code_lines">Code Lines</option>
+            </select>
+          </label>
+          <label>X Axis:
+            <select class="chart-select" id="tm-trend-x">
+              <option value="commit" selected>By Commit</option>
+              <option value="time">By Time</option>
+            </select>
+          </label>
+          <label id="tm-sub-label" style="display:none;">Submodule:
+            <select class="chart-select" id="tm-trend-sub">
+              <option value="">All (project total)</option>
+            </select>
+          </label>
+          <label>Chart Size:
+            <select class="chart-select" id="tm-trend-size">
+              <option value="200">Compact</option>
+              <option value="260" selected>Normal</option>
+              <option value="360">Large</option>
+            </select>
+          </label>
+        </div>
+        <div class="chart-canvas-wrap trend-canvas-wrap" id="trend-canvas-wrap"><canvas id="canvas-trend"></canvas></div>
         <div id="trend-empty" class="empty-state" style="display:none;">No historical test data found. Run more scans to see trends.</div>
       </div>
 
@@ -13846,12 +13960,56 @@ async fn test_metrics_handler(
       applyScope();
     }});
 
+    var allTrendData = [];
+
+    var TM_Y_META = {{
+      test_count: {{ label: 'Test Definitions', color: '#C45C10', tooltip: ' test defs' }},
+      code_lines:  {{ label: 'Code Lines',       color: '#2A6846', tooltip: ' code lines' }}
+    }};
+
+    function getTrendControls() {{
+      var ySel    = document.getElementById('tm-trend-y');
+      var xSel    = document.getElementById('tm-trend-x');
+      var sizeSel = document.getElementById('tm-trend-size');
+      var subSel  = document.getElementById('tm-trend-sub');
+      return {{
+        yKey:    ySel    ? ySel.value    : 'test_count',
+        xMode:   xSel    ? xSel.value    : 'commit',
+        height:  sizeSel ? parseInt(sizeSel.value, 10) : 260,
+        submod:  subSel  ? subSel.value  : ''
+      }};
+    }}
+
+    function makeTrendLabel(d, xMode) {{
+      if (xMode === 'commit') {{
+        return d.commit ? d.commit.substring(0, 7) : (d.run_id_short || '?');
+      }}
+      return d.timestamp ? d.timestamp.slice(0, 10) : d.run_id_short;
+    }}
+
     function buildTrend(data) {{
+      allTrendData = data || [];
+      renderTrend();
+    }}
+
+    function renderTrend() {{
+      var data = allTrendData;
+      var ctrl = getTrendControls();
       var trendCanvas = document.getElementById('canvas-trend');
+      var trendWrap   = document.getElementById('trend-canvas-wrap');
       var trendEmpty  = document.getElementById('trend-empty');
-      var pts = data.filter(function(d){{ return d.test_count > 0 || data.some(function(x){{ return x.test_count > 0; }}); }});
-      pts = pts.slice().reverse();
+
+      // Apply chart size
+      if (trendWrap) trendWrap.style.height = ctrl.height + 'px';
+
+      // Filter by submodule if selected (entries from project_label match)
+      var pts = data.slice().reverse();
+      if (ctrl.submod) {{
+        pts = pts.filter(function(d) {{ return d.project_label === ctrl.submod; }});
+      }}
+
       currentTrendPts = pts;
+
       if (!pts.length) {{
         if (trendCanvas) trendCanvas.style.display = 'none';
         if (trendEmpty) trendEmpty.style.display = '';
@@ -13859,25 +14017,28 @@ async fn test_metrics_handler(
       }}
       if (trendCanvas) trendCanvas.style.display = '';
       if (trendEmpty) trendEmpty.style.display = 'none';
+
       trendChart = destroyChart(trendChart);
       if (!trendCanvas) return;
+
+      var meta = TM_Y_META[ctrl.yKey] || TM_Y_META['test_count'];
       trendChart = new Chart(trendCanvas, {{
         type: 'line',
         data: {{
-          labels: pts.map(function(d){{ return d.timestamp ? d.timestamp.slice(0,10) : d.run_id_short; }}),
+          labels: pts.map(function(d){{ return makeTrendLabel(d, ctrl.xMode); }}),
           datasets: [{{
-            label: 'Test Definitions',
-            data: pts.map(function(d){{ return d.test_count; }}),
-            borderColor: '#C45C10',
-            backgroundColor: 'rgba(196,92,16,0.10)',
-            pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : '#C45C10'; }}),
+            label: meta.label,
+            data: pts.map(function(d){{ return Number(d[ctrl.yKey]) || 0; }}),
+            borderColor: meta.color,
+            backgroundColor: meta.color.replace(')', ',0.10)').replace('rgb(', 'rgba('),
+            pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : meta.color; }}),
             pointRadius: 5, fill: true, tension: 0.3
           }}]
         }},
         options: {{
           responsive: true, maintainAspectRatio: false,
           layout: {{ padding: {{ top: 22 }} }},
-          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
+          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + meta.tooltip; }} }} }} }},
           scales: {{
             x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
             y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
@@ -13886,6 +14047,22 @@ async fn test_metrics_handler(
         plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
       }});
       ALL_CHARTS.push(trendChart);
+
+      // Populate submodule selector from unique project_labels
+      var subSel = document.getElementById('tm-trend-sub');
+      var subLabel = document.getElementById('tm-sub-label');
+      if (subSel && data.length) {{
+        var projects = [];
+        data.forEach(function(d) {{ if (d.project_label && projects.indexOf(d.project_label) < 0) projects.push(d.project_label); }});
+        if (projects.length > 1) {{
+          var curVal = subSel.value;
+          subSel.innerHTML = '<option value="">All (project total)</option>';
+          projects.forEach(function(p) {{ subSel.innerHTML += '<option value="'+p.replace(/"/g,'&quot;')+'"'+(p===curVal?' selected':'')+'>'+p+'</option>'; }});
+          if (subLabel) subLabel.style.display = '';
+        }} else {{
+          if (subLabel) subLabel.style.display = 'none';
+        }}
+      }}
     }}
 
     // ── Full View expand buttons ──────────────────────────────────────────────
@@ -13955,25 +14132,28 @@ async fn test_metrics_handler(
       btn.addEventListener('click', function() {{
         var pts = currentTrendPts;
         if (!pts || !pts.length) return;
-        var canvas = makeTmOverlay('Test Count Trend \u2014 Full View', pts.length + ' scan' + (pts.length !== 1 ? 's' : ''), 420);
+        var ctrl = getTrendControls();
+        var meta = TM_Y_META[ctrl.yKey] || TM_Y_META['test_count'];
+        var title = meta.label + ' Trend \u2014 Full View';
+        var canvas = makeTmOverlay(title, pts.length + ' scan' + (pts.length !== 1 ? 's' : ''), 440);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'line',
           data: {{
-            labels: pts.map(function(d){{ return d.timestamp ? d.timestamp.slice(0,10) : d.run_id_short; }}),
+            labels: pts.map(function(d){{ return makeTrendLabel(d, ctrl.xMode); }}),
             datasets: [{{
-              label: 'Test Definitions',
-              data: pts.map(function(d){{ return d.test_count; }}),
-              borderColor: '#C45C10',
-              backgroundColor: 'rgba(196,92,16,0.10)',
-              pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : '#C45C10'; }}),
+              label: meta.label,
+              data: pts.map(function(d){{ return Number(d[ctrl.yKey]) || 0; }}),
+              borderColor: meta.color,
+              backgroundColor: meta.color.replace(')', ',0.10)').replace('rgb(', 'rgba('),
+              pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : meta.color; }}),
               pointRadius: 5, fill: true, tension: 0.3
             }}]
           }},
           options: {{
             responsive: true, maintainAspectRatio: false,
             layout: {{ padding: {{ top: 22 }} }},
-            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + ' test defs'; }} }} }} }},
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + meta.tooltip; }} }} }} }},
             scales: {{
               x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, maxRotation:35 }} }},
               y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
@@ -14043,6 +14223,14 @@ async fn test_metrics_handler(
           }},
           plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
         }});
+      }});
+    }})();
+
+    // Wire trend control selectors — re-render without re-fetching
+    (function() {{
+      ['tm-trend-y','tm-trend-x','tm-trend-size','tm-trend-sub'].forEach(function(id) {{
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('change', function() {{ renderTrend(); }});
       }});
     }})();
 
@@ -14365,13 +14553,14 @@ async fn test_metrics_handler(
         +'<td class="n"><strong>'+avgDensity+'</strong></td></tr>';
       var tableHtml='<table><thead><tr><th>Language</th><th class="n">Test Fns</th><th class="n">Assertions</th><th class="n">Suites</th><th class="n">Code Lines</th><th class="n">Files</th><th class="n">Density/1K</th></tr></thead><tbody>'+rows+totRow+'</tbody></table>';
       var css='<style>*{{box-sizing:border-box;margin:0;padding:0;}}'
-        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;}}'
+        +'html,body{{height:100%;margin:0;}}'
+        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;display:flex;flex-direction:column;min-height:100vh;}}'
         +'.rep-header{{background:#C45C10;color:#fff;padding:18px 32px 16px;display:flex;justify-content:space-between;align-items:flex-start;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
         +'.rep-header h1{{font-size:22px;font-weight:900;margin:0;color:#fff;}}'
         +'.rep-header .sub{{font-size:12px;margin:5px 0 0;color:rgba(255,255,255,0.85);}}'
         +'.rep-brand{{font-size:14px;font-weight:800;color:#fff;text-align:right;}}'
         +'.rep-brand small{{display:block;font-weight:500;font-size:11px;opacity:.85;margin-top:2px;}}'
-        +'.rep-body{{padding:20px 32px;}}'
+        +'.rep-body{{padding:20px 32px;flex:1;}}'
         +'.summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 0 12px;}}'
         +'.stat-chip{{border:1px solid #e6d0bf;border-radius:10px;padding:10px 12px;position:relative;}}'
         +'.stat-chip-tip,.stat-chip-exact{{display:none!important;}}'
@@ -16731,6 +16920,16 @@ struct SubmoduleRow {
     .wizard-actions { display:flex; justify-content:space-between; align-items:center; gap: 12px; margin-top: 22px; padding-top: 18px; border-top:1px solid var(--line); }
     .section + .wizard-actions { border-top: none; padding-top: 0; }
     .wizard-actions .left, .wizard-actions .right { display:flex; gap: 10px; flex-wrap:wrap; }
+    .default-path-overlay { position: fixed; inset: 0; z-index: 9000; background: rgba(0,0,0,0.52); display: flex; align-items: center; justify-content: center; padding: 24px; opacity: 0; pointer-events: none; transition: opacity .18s ease; }
+    .default-path-overlay.open { opacity: 1; pointer-events: auto; }
+    .default-path-modal { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; max-width: 460px; width: 100%; box-shadow: 0 24px 60px rgba(0,0,0,0.32); padding: 24px 26px 22px; transform: translateY(8px); transition: transform .18s ease; }
+    .default-path-overlay.open .default-path-modal { transform: translateY(0); }
+    .default-path-modal h3 { margin: 0 0 10px; font-size: 18px; color: var(--text); display: flex; align-items: center; gap: 9px; }
+    .default-path-modal h3 svg { width: 22px; height: 22px; flex-shrink: 0; color: var(--accent); }
+    .default-path-modal p { margin: 0 0 8px; font-size: 13.5px; line-height: 1.55; color: var(--muted); }
+    .default-path-modal p code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; color: var(--text); }
+    body.dark-theme .default-path-modal p code { background: rgba(255,255,255,0.10); }
+    .default-path-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
     .field-help-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
     .field-help-grid.coupled-help { margin-top: 12px; }
     .field-help-grid.preset-grid { align-items: start; }
@@ -17495,6 +17694,9 @@ dotnet test --collect:"XPlat Code Coverage"
 # Python — pytest-cov (Cobertura XML)
 pytest --cov --cov-report=xml
 
+# Python — coverage.py native JSON
+coverage run -m pytest && coverage json   # writes coverage.json
+
 # Java / Kotlin — Gradle + JaCoCo (JaCoCo XML)
 ./gradlew jacocoTestReport</div>
                   </div>
@@ -17505,6 +17707,21 @@ pytest --cov --cov-report=xml
                 <div class="left"></div>
                 <div class="right">
                   <button type="button" class="secondary next-step" data-next="2">Next: Counting rules</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="default-path-overlay" id="default-path-overlay" role="dialog" aria-modal="true" aria-labelledby="default-path-title">
+              <div class="default-path-modal">
+                <h3 id="default-path-title">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+                  Proceed with the default sample test?
+                </h3>
+                <p>The <strong>Project path</strong> is still set to the bundled sample <code>tests/fixtures/basic</code>. You haven&#39;t selected your own project yet.</p>
+                <p>Make sure to fill out the <strong>Project path</strong> with your repository and confirm it uploads successfully before scanning.</p>
+                <div class="default-path-actions">
+                  <button type="button" class="secondary prev-step" id="default-path-cancel">Fill in project path</button>
+                  <button type="button" class="secondary next-step" id="default-path-proceed">Proceed with sample</button>
                 </div>
               </div>
             </div>
@@ -17968,7 +18185,7 @@ int main() { … }   ← code
             </div>
             {% if server_mode %}
             <input type="file" id="dir-upload-input" webkitdirectory multiple style="display:none" aria-hidden="true">
-            <input type="file" id="cov-upload-input" accept=".info,.lcov,.xml" style="display:none" aria-hidden="true">
+            <input type="file" id="cov-upload-input" accept=".info,.lcov,.xml,.json" style="display:none" aria-hidden="true">
             {% endif %}
           </form>
         </div>
@@ -19445,24 +19662,76 @@ int main() { … }   ← code
         });
       });
 
+      // True when the project path is untouched from the bundled sample default.
+      function isDefaultSamplePath() {
+        return !GIT_MODE && pathInput && pathInput.value.trim() === "tests/fixtures/basic";
+      }
+
+      var defaultPathOverlay = document.getElementById("default-path-overlay");
+      function closeDefaultPathModal() {
+        if (defaultPathOverlay) defaultPathOverlay.classList.remove("open");
+      }
+      function openDefaultPathModal() {
+        if (defaultPathOverlay) defaultPathOverlay.classList.add("open");
+      }
+
       Array.prototype.slice.call(document.querySelectorAll(".next-step")).forEach(function (button) {
+        // Skip buttons that aren't real wizard navigation (e.g. modal action buttons
+        // that borrow the .next-step style class but carry no data-next target).
+        if (!button.hasAttribute("data-next")) return;
         button.addEventListener("click", function () {
+          // Guard step 1 → 2: warn when the project path is still the sample default.
+          if (button.getAttribute("data-next") === "2" && isDefaultSamplePath()) {
+            openDefaultPathModal();
+            return;
+          }
           updateReview();
           setStep(Number(button.getAttribute("data-next")));
         });
       });
 
       Array.prototype.slice.call(document.querySelectorAll(".prev-step")).forEach(function (button) {
+        if (!button.hasAttribute("data-prev")) return;
         button.addEventListener("click", function () {
           setStep(Number(button.getAttribute("data-prev")));
         });
+      });
+
+      // Default-sample-path confirmation modal wiring.
+      var defaultPathProceed = document.getElementById("default-path-proceed");
+      if (defaultPathProceed) {
+        defaultPathProceed.addEventListener("click", function () {
+          closeDefaultPathModal();
+          updateReview();
+          setStep(2);
+        });
+      }
+      var defaultPathCancel = document.getElementById("default-path-cancel");
+      if (defaultPathCancel) {
+        defaultPathCancel.addEventListener("click", function () {
+          closeDefaultPathModal();
+          if (pathInput) { pathInput.focus(); pathInput.select(); }
+        });
+      }
+      if (defaultPathOverlay) {
+        defaultPathOverlay.addEventListener("click", function (e) {
+          if (e.target === defaultPathOverlay) closeDefaultPathModal();
+        });
+      }
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape" && defaultPathOverlay && defaultPathOverlay.classList.contains("open")) {
+          closeDefaultPathModal();
+        }
       });
 
       document.addEventListener("keydown", function (e) {
         var tag = (document.activeElement || {}).tagName || "";
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
         if (e.altKey || e.ctrlKey || e.metaKey) return;
-        if (e.key === "ArrowRight" && currentStep < 4) { updateReview(); setStep(currentStep + 1); }
+        if (e.key === "ArrowRight" && currentStep < 4) {
+          if (currentStep === 1 && isDefaultSamplePath()) { openDefaultPathModal(); return; }
+          updateReview(); setStep(currentStep + 1);
+        }
         else if (e.key === "ArrowLeft" && currentStep > 1) { setStep(currentStep - 1); }
       });
 
@@ -19666,10 +19935,10 @@ int main() { … }   ← code
         } else if (state === "hint") {
           var tb2 = opts.tool ? '<span class="cov-scan-tool">' + escapeHtml(opts.tool) + '</span>' : '';
           html += '<div class="cov-scan-title">' + tb2 + ' project &mdash; no coverage report found yet</div>';
-          html += '<div class="cov-scan-sub">Generate a report with your test framework\'s coverage tool, then browse to the output file. Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML</div>';
+          html += '<div class="cov-scan-sub">Generate a report with your test framework\'s coverage tool, then browse to the output file. Supported: LCOV .info &middot; Cobertura XML &middot; JaCoCo XML &middot; coverage.py JSON &middot; Istanbul JSON</div>';
         } else if (state === "none") {
           html += '<div class="cov-scan-title">No coverage files detected in this project</div>';
-          html += '<div class="cov-scan-sub">Supported: LCOV\u00a0.info &middot; Cobertura\u00a0XML &middot; JaCoCo\u00a0XML</div>';
+          html += '<div class="cov-scan-sub">Supported: LCOV\u00a0.info &middot; Cobertura\u00a0XML &middot; JaCoCo\u00a0XML &middot; coverage.py\u00a0JSON &middot; Istanbul\u00a0JSON</div>';
         }
         html += '</div></div>';
         covScanStatus.innerHTML = html;
@@ -28289,24 +28558,26 @@ struct CompareSelectTemplate {
         return ' onmouseover="oxTT(event,\''+jsq(label)+'\',\''+jsq(val)+'\')" onmouseout="oxHT()" onmousemove="oxMT(event)"';
       }
 
-      // ── Chart 1: Baseline vs Current grouped bars ────────────────────────
+      // ── Chart 1: Baseline vs Current grouped bars (height fills the card to
+      //    match the Language Code Delta column height) ────────────
       var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#E3A876',cc:'#C45C10'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#9FC3AE',cc:'#2A6846'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#E0C58A',cc:'#BE8A2E'}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
-      var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14;
-      var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
+      var FONT_C="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif";
+      var C1W=600,c1mt=36,c1mb=30,c1ml=14,c1mr=14,c1bw=56,c1gap=10,C1H=380;
+      var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
       c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
-        c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
-        c1+='<rect class="cb" x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"'+barTT(m.l,'Current: '+fmt(m.c))+'/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#999">Before</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">After</text>';
+        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="'+FONT_C+'" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="5"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<rect class="cb" x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="5"'+barTT(m.l,'Current: '+fmt(m.c))+'/>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="#999">Before</text>';
+        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="'+m.cc+'">After</text>';
       });
       c1+='</svg>';
 
@@ -30314,7 +30585,7 @@ Content-Disposition: attachment; filename="sloc-run-&lt;run_id&gt;.zip"
           <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
         <div class="ep-body">
-          <p class="ep-desc-full">Scans a local project root for common coverage report files (LCOV, Cobertura XML, JaCoCo XML) and returns the first one found, along with a hint for how to generate it if not present.</p>
+          <p class="ep-desc-full">Scans a local project root for common coverage report files (LCOV, Cobertura XML, JaCoCo XML, coverage.py JSON) and returns the first one found, along with a hint for how to generate it if not present.</p>
           <p class="params-heading">Query Parameters</p>
           <table class="params">
             <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
