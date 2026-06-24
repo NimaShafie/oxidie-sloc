@@ -175,6 +175,12 @@ pub struct AnalysisConfig {
     /// `"c_family"` = C / C++ / Objective-C only (fast, backwards-compatible).
     #[serde(default = "default_style_lang_scope")]
     pub style_lang_scope: String,
+    /// Opt-in git activity window in days. When set (e.g. 90), oxide-sloc runs a single
+    /// `git log --since` pass and attaches per-file commit-count + last-change date to each
+    /// `FileRecord`, enabling the hotspots view. `None` (default) skips all git activity work.
+    /// This is distinct from the scan-to-scan "churn rate" shown in the web UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_window_days: Option<u32>,
 }
 
 const fn default_true() -> bool {
@@ -285,6 +291,7 @@ impl Default for AnalysisConfig {
             style_analysis_enabled: true,
             style_score_threshold: 0,
             style_lang_scope: "all".into(),
+            activity_window_days: None,
         }
     }
 }

@@ -191,6 +191,8 @@ fn make_parent_run_with_submodule() -> (AnalysisRun, SubmoduleSummary) {
                 style_analysis: None,
                 cyclomatic_complexity: None,
                 lsloc: None,
+                commit_count: None,
+                last_commit_date: None,
                 content_hash: 12345,
             },
             FileRecord {
@@ -223,6 +225,8 @@ fn make_parent_run_with_submodule() -> (AnalysisRun, SubmoduleSummary) {
                 style_analysis: None,
                 cyclomatic_complexity: None,
                 lsloc: None,
+                commit_count: None,
+                last_commit_date: None,
                 content_hash: 67890,
             },
         ],
