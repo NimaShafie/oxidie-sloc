@@ -12906,6 +12906,9 @@ async fn test_metrics_handler(
     body.dark-theme .chart-box{{border-color:var(--line-strong);}}
     .btn{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .13s;}}
     .btn:hover{{background:var(--surface-2);}}
+    .export-btn{{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .12s ease;text-decoration:none;}}
+    .export-btn:hover{{background:var(--line);}}
+    .export-btn svg{{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.2;}}
     .scope-bar{{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:14px;position:relative;z-index:1;flex-wrap:wrap;}}
     .scope-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
     .scope-sel-wrap{{display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap;}}
@@ -14112,57 +14115,89 @@ async fn test_metrics_handler(
         if(!crc32.t){{crc32.t=new Uint32Array(256);for(var i=0;i<256;i++){{var c=i;for(var j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);crc32.t[i]=c;}}}}
         var c=0xFFFFFFFF;for(var i=0;i<d.length;i++)c=crc32.t[(c^d[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0;
       }}
-      // All cells stored as inlineStr so Excel left-aligns columns consistently.
+      // Store all cells as strings so Excel left-aligns uniformly.
       function cs(addr, val, bold) {{
         return '<c r="'+addr+'" t="inlineStr"'+(bold?' s="1"':'')+"><is><t>"+xe(String(val))+'</t></is></c>';
       }}
-      function buildSummarySheet(rows) {{
-        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="28" customWidth="1"/><col min="2" max="2" width="22" customWidth="1"/></cols><sheetData>';
-        x+='<row r="1">'+cs('A1','Metric',true)+cs('B1','Value',true)+'</row>';
-        rows.forEach(function(row,ri){{var rn=ri+2;x+='<row r="'+rn+'">'+cs('A'+rn,row[0],row[2])+cs('B'+rn,row[1],row[2])+'</row>';}});
-        return x+'</sheetData></worksheet>';
+      // Build an Excel Table XML definition for a given sheet range and columns.
+      function makeTableXml(tblId, name, ref, cols) {{
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        x+='<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+        x+=' id="'+tblId+'" name="'+name+'" displayName="'+name+'" ref="'+ref+'" headerRowCount="1">';
+        x+='<autoFilter ref="'+ref+'"/>';
+        x+='<tableColumns count="'+cols.length+'">';
+        cols.forEach(function(col,i){{x+='<tableColumn id="'+(i+1)+'" name="'+xe(col)+'"/>';}});
+        x+='</tableColumns>';
+        x+='<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>';
+        return x+'</table>';
       }}
-      function buildLangSheet(hdr, rows, totRow) {{
-        var cw='<cols><col min="1" max="1" width="22" customWidth="1"/><col min="2" max="7" width="15" customWidth="1"/></cols>';
-        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+cw+'<sheetData>';
+      // Worksheet XML with optional Excel Table part reference.
+      function buildSheet(hdr, rows, totRow, colWidths, tblRid) {{
+        var ns='xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+        if(tblRid)ns+=' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+        var cw='<cols>';colWidths.forEach(function(w,i){{cw+='<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+w+'" customWidth="1"/>';}});cw+='</cols>';
+        var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet '+ns+'>'+cw+'<sheetData>';
         x+='<row r="1">';hdr.forEach(function(h,ci){{x+=cs(col2l(ci+1)+'1',h,true);}});x+='</row>';
         rows.forEach(function(row,ri){{var rn=ri+2;x+='<row r="'+rn+'">';row.forEach(function(cell,ci){{x+=cs(col2l(ci+1)+rn,cell,false);}});x+='</row>';}});
         if(totRow){{var rn=rows.length+2;x+='<row r="'+rn+'">';totRow.forEach(function(cell,ci){{x+=cs(col2l(ci+1)+rn,cell,true);}});x+='</row>';}}
-        return x+'</sheetData></worksheet>';
+        x+='</sheetData>';
+        if(tblRid)x+='<tableParts count="1"><tablePart r:id="'+tblRid+'"/></tableParts>';
+        return x+'</worksheet>';
       }}
+
       var totTests=D.reduce(function(a,d){{return a+d.tests;}},0);
       var totAssert=D.reduce(function(a,d){{return a+(d.assertions||0);}},0);
       var totSuites=D.reduce(function(a,d){{return a+(d.suites||0);}},0);
       var totCode=D.reduce(function(a,d){{return a+d.code;}},0);
       var totFiles=D.reduce(function(a,d){{return a+d.files;}},0);
       var avgDensity=totCode>0?(totTests/totCode*1000).toFixed(2):'0.00';
-      var s2R=[
-        ['Project / Scope', t.proj, false],
-        ['Export Date', t.full, false],
-        ['Test Functions', Number(totTests).toLocaleString(), false],
-        ['Assertions', Number(totAssert).toLocaleString(), false],
-        ['Test Suites', Number(totSuites).toLocaleString(), false],
-        ['Languages with Tests', String(D.length), false],
-        ['Total Code Lines', Number(totCode).toLocaleString(), false],
-        ['Average Density (per 1K)', String(avgDensity), false],
+
+      // Sheet 1: Summary
+      var sumHdr=['Metric','Value'];
+      var sumRows=[
+        ['Project / Scope', t.proj],
+        ['Export Date', t.full],
+        ['Test Functions', Number(totTests).toLocaleString()],
+        ['Assertions', Number(totAssert).toLocaleString()],
+        ['Test Suites', Number(totSuites).toLocaleString()],
+        ['Languages with Tests', String(D.length)],
+        ['Total Code Lines', Number(totCode).toLocaleString()],
+        ['Average Density (per 1K)', String(avgDensity)],
       ];
-      var s1H=['Language','Test Functions','Assertions','Test Suites','Code Lines','Files','Density (per 1K)'];
-      var s1R=D.map(function(d){{return[d.lang,Number(d.tests).toLocaleString(),Number(d.assertions||0).toLocaleString(),Number(d.suites||0).toLocaleString(),Number(d.code).toLocaleString(),Number(d.files).toLocaleString(),Number(d.density).toFixed(2)];}});
+      var sumRef='A1:B'+(sumRows.length+1);
+      var sumTblXml=makeTableXml(1,'Summary',sumRef,sumHdr);
+      var sumSheetXml=buildSheet(sumHdr,sumRows,null,[28,22],'rId1');
+
+      // Sheet 2: Language Breakdown
+      var langHdr=['Language','Test Functions','Assertions','Test Suites','Code Lines','Files','Density (per 1K)'];
+      var langRows=D.map(function(d){{return[d.lang,Number(d.tests).toLocaleString(),Number(d.assertions||0).toLocaleString(),Number(d.suites||0).toLocaleString(),Number(d.code).toLocaleString(),Number(d.files).toLocaleString(),Number(d.density).toFixed(2)];}});
       var totRow=['TOTAL',Number(totTests).toLocaleString(),Number(totAssert).toLocaleString(),Number(totSuites).toLocaleString(),Number(totCode).toLocaleString(),Number(totFiles).toLocaleString(),String(avgDensity)];
-      var sheets=[{{name:'Summary',xml:buildSummarySheet(s2R)}},{{name:'Language Breakdown',xml:buildLangSheet(s1H,s1R,totRow)}}];
+      // Table covers header + data only (TOTAL row excluded from table, sits just below)
+      var langDataRows=langRows.length;
+      var langTblRef='A1:G'+(langDataRows+1);
+      var langTblXml=makeTableXml(2,'LangBreakdown',langTblRef,langHdr);
+      var langSheetXml=buildSheet(langHdr,langRows,totRow,[22,15,15,15,15,12,15],'rId1');
+
       var styl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
-      var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
-      sheets.forEach(function(s,i){{ct+='<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';}});
-      ct+='<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
+      var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/><Override PartName="/xl/tables/table2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
       var dotrels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
-      var wbr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
-      sheets.forEach(function(s,i){{wbr+='<Relationship Id="rId'+(i+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';}});
-      wbr+='<Relationship Id="rId'+(sheets.length+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
-      var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>';
-      sheets.forEach(function(s,i){{wbx+='<sheet name="'+xe(s.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';}});
-      wbx+='</sheets></workbook>';
-      var files=[{{name:'[Content_Types].xml',data:s2b(ct)}},{{name:'_rels/.rels',data:s2b(dotrels)}},{{name:'xl/workbook.xml',data:s2b(wbx)}},{{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},{{name:'xl/styles.xml',data:s2b(styl)}}];
-      sheets.forEach(function(s,i){{files.push({{name:'xl/worksheets/sheet'+(i+1)+'.xml',data:s2b(s.xml)}});}});
+      var wbr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+      var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="Language Breakdown" sheetId="2" r:id="rId2"/></sheets></workbook>';
+      var sh1rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>';
+      var sh2rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table2.xml"/></Relationships>';
+      var files=[
+        {{name:'[Content_Types].xml',data:s2b(ct)}},
+        {{name:'_rels/.rels',data:s2b(dotrels)}},
+        {{name:'xl/workbook.xml',data:s2b(wbx)}},
+        {{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},
+        {{name:'xl/styles.xml',data:s2b(styl)}},
+        {{name:'xl/worksheets/sheet1.xml',data:s2b(sumSheetXml)}},
+        {{name:'xl/worksheets/sheet2.xml',data:s2b(langSheetXml)}},
+        {{name:'xl/worksheets/_rels/sheet1.xml.rels',data:s2b(sh1rels)}},
+        {{name:'xl/worksheets/_rels/sheet2.xml.rels',data:s2b(sh2rels)}},
+        {{name:'xl/tables/table1.xml',data:s2b(sumTblXml)}},
+        {{name:'xl/tables/table2.xml',data:s2b(langTblXml)}},
+      ];
       var parts=[],offsets=[],total=0;
       files.forEach(function(f){{offsets.push(total);var nb=s2b(f.name),crc=crc32(f.data);var h=new DataView(new ArrayBuffer(30+nb.length));h.setUint32(0,0x04034B50,true);h.setUint16(4,20,true);h.setUint16(6,0,true);h.setUint16(8,0,true);h.setUint16(10,0,true);h.setUint16(12,0,true);h.setUint32(14,crc,true);h.setUint32(18,f.data.length,true);h.setUint32(22,f.data.length,true);h.setUint16(26,nb.length,true);h.setUint16(28,0,true);for(var i=0;i<nb.length;i++)h.setUint8(30+i,nb[i]);parts.push(new Uint8Array(h.buffer));parts.push(f.data);total+=30+nb.length+f.data.length;}});
       var cdStart=total;files.forEach(function(f,fi){{var nb=s2b(f.name),crc=crc32(f.data);var cd=new DataView(new ArrayBuffer(46+nb.length));cd.setUint32(0,0x02014B50,true);cd.setUint16(4,20,true);cd.setUint16(6,20,true);cd.setUint16(8,0,true);cd.setUint16(10,0,true);cd.setUint16(12,0,true);cd.setUint16(14,0,true);cd.setUint32(16,crc,true);cd.setUint32(20,f.data.length,true);cd.setUint32(24,f.data.length,true);cd.setUint16(28,nb.length,true);cd.setUint16(30,0,true);cd.setUint16(32,0,true);cd.setUint16(34,0,true);cd.setUint16(36,0,true);cd.setUint32(38,0,true);cd.setUint32(42,offsets[fi],true);for(var i=0;i<nb.length;i++)cd.setUint8(46+i,nb[i]);parts.push(new Uint8Array(cd.buffer));total+=46+nb.length;}});
@@ -14175,22 +14210,32 @@ async fn test_metrics_handler(
     }}
 
     function exportTmPNG() {{
+      // Map canvas IDs to display titles
+      var CHART_TITLES = {{
+        'canvas-trend':       'TEST COUNT TREND',
+        'canvas-tests':       'TEST DEFINITIONS BY LANGUAGE',
+        'canvas-density':     'TEST DENSITY (PER 1,000 CODE LINES)',
+        'canvas-assertions':  'ASSERTIONS BY LANGUAGE',
+        'canvas-suites':      'TEST SUITES BY LANGUAGE',
+        'canvas-files':       'TEST FILES BREAKDOWN',
+        'canvas-composition': 'TEST COMPOSITION'
+      }};
       var ids=['canvas-trend','canvas-tests','canvas-density','canvas-assertions','canvas-suites','canvas-files','canvas-composition'];
       var canvases=ids.map(function(id){{return document.getElementById(id);}}).filter(function(c){{return c&&c.width>0&&c.style.display!=='none';}});
       if(!canvases.length){{alert('No charts rendered yet. Run a scan first.');return;}}
       var t=tmExportMeta();
-      var COLW=760, GAP=16, HEADER_H=102, FOOTER_H=40, ROW_PAD=12;
+      var COLW=760, GAP=16, HEADER_H=102, FOOTER_H=40, ROW_PAD=18, TITLE_H=26;
       var trendCanvas=document.getElementById('canvas-trend');
       var hasTrend=trendCanvas&&trendCanvas.width>0&&trendCanvas.style.display!=='none';
       var gridCanvases=canvases.filter(function(c){{return c.id!=='canvas-trend';}});
       var TOTAL_W=COLW*2+GAP;
       var TREND_H=hasTrend?Math.round(TOTAL_W*(trendCanvas.height/Math.max(trendCanvas.width,1))):0;
-      TREND_H=Math.min(Math.max(220,TREND_H),360);
-      // For each 2-col row, compute height from tallest canvas in that row
+      TREND_H=Math.min(Math.max(200,TREND_H),340);
+      // Per-row chart heights (2-col grid)
       var gridRows=Math.ceil(gridCanvases.length/2);
       var rowHeights=[];
       for(var ri=0;ri<gridRows;ri++){{
-        var rh=260;
+        var rh=240;
         for(var ci=0;ci<2;ci++){{
           var cv=gridCanvases[ri*2+ci];
           if(cv&&cv.width>0){{
@@ -14200,53 +14245,89 @@ async fn test_metrics_handler(
         }}
         rowHeights.push(rh);
       }}
-      var gridH=rowHeights.reduce(function(a,b){{return a+b+ROW_PAD;}},0);
-      var TOTAL_H=HEADER_H+(hasTrend?TREND_H+ROW_PAD:0)+gridH+FOOTER_H;
+      var gridH=rowHeights.reduce(function(a,b){{return a+TITLE_H+b+ROW_PAD;}},0);
+      var trendSection=hasTrend?TITLE_H+TREND_H+ROW_PAD:0;
+      var TOTAL_H=HEADER_H+trendSection+gridH+FOOTER_H;
       var out=document.createElement('canvas');out.width=TOTAL_W;out.height=TOTAL_H;
       var ctx=out.getContext('2d');
       var cs2=getComputedStyle(document.body);
       var bg=cs2.getPropertyValue('--bg').trim()||'#f5efe8';
       var oxide=cs2.getPropertyValue('--oxide').trim()||'#C45C10';
       var muted=cs2.getPropertyValue('--muted').trim()||'#7b675b';
+
+      // Background
       ctx.fillStyle=bg;ctx.fillRect(0,0,TOTAL_W,TOTAL_H);
-      // Header block
+
+      // Orange header block
       ctx.fillStyle=oxide;ctx.fillRect(0,0,TOTAL_W,HEADER_H-8);
       ctx.fillStyle='#fff';ctx.font='800 24px '+TM_FONT;ctx.textBaseline='alphabetic';ctx.textAlign='left';
       ctx.fillText('Test Metrics — '+t.proj,22,42);
       ctx.fillStyle='rgba(255,255,255,0.82)';ctx.font='600 13px '+TM_FONT;
       ctx.fillText('oxide-sloc v{version}  ·  Generated '+t.full,22,70);
       ctx.fillStyle=bg;ctx.fillRect(0,HEADER_H-8,TOTAL_W,TOTAL_H-(HEADER_H-8));
+
+      // Helper: draw a section title label
+      function drawTitle(label, x, y, w) {{
+        ctx.save();
+        ctx.fillStyle=oxide;
+        ctx.font='700 11px '+TM_FONT;
+        ctx.textBaseline='middle';
+        ctx.textAlign='left';
+        ctx.letterSpacing='0.07em';
+        ctx.fillText(label, x+2, y+TITLE_H/2);
+        // Underline
+        ctx.strokeStyle=oxide;ctx.globalAlpha=0.35;ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(x,y+TITLE_H-2);ctx.lineTo(x+w,y+TITLE_H-2);ctx.stroke();
+        ctx.globalAlpha=1;
+        ctx.restore();
+      }}
+
       var yOff=HEADER_H;
+
       // Trend chart (full width)
       if(hasTrend){{
+        drawTitle(CHART_TITLES['canvas-trend']||'TEST COUNT TREND', 4, yOff, TOTAL_W-8);
+        yOff+=TITLE_H;
         var surf=document.createElement('canvas');surf.width=TOTAL_W;surf.height=TREND_H;
         var sc=surf.getContext('2d');sc.fillStyle=bg;sc.fillRect(0,0,TOTAL_W,TREND_H);
         sc.drawImage(trendCanvas,0,0,TOTAL_W,TREND_H);
         ctx.drawImage(surf,0,yOff);
         yOff+=TREND_H+ROW_PAD;
       }}
-      // Grid charts (2-col)
+
+      // Grid charts (2-col), each cell gets title + chart
       for(var gi=0;gi<gridRows;gi++){{
         var rh2=rowHeights[gi];
+        // Draw row titles and charts
         for(var gci=0;gci<2;gci++){{
           var idx2=gi*2+gci;
           if(idx2>=gridCanvases.length)continue;
           var gcv=gridCanvases[idx2];
           var gx=gci*(COLW+GAP);
-          var natW=gcv.width,natH=gcv.height;
+          drawTitle(CHART_TITLES[gcv.id]||gcv.id.replace('canvas-','').toUpperCase(), gx+4, yOff, COLW-8);
+        }}
+        yOff+=TITLE_H;
+        for(var gci2=0;gci2<2;gci2++){{
+          var idx3=gi*2+gci2;
+          if(idx3>=gridCanvases.length)continue;
+          var gcv2=gridCanvases[idx3];
+          var gx2=gci2*(COLW+GAP);
+          var natW=gcv2.width,natH=gcv2.height;
           var scale=Math.min(COLW/Math.max(natW,1),rh2/Math.max(natH,1));
           var dw=Math.round(natW*scale),dh=Math.round(natH*scale);
           var surf2=document.createElement('canvas');surf2.width=COLW;surf2.height=rh2;
           var sc2=surf2.getContext('2d');sc2.fillStyle=bg;sc2.fillRect(0,0,COLW,rh2);
-          sc2.drawImage(gcv,Math.round((COLW-dw)/2),Math.round((rh2-dh)/2),dw,dh);
-          ctx.drawImage(surf2,gx,yOff);
+          sc2.drawImage(gcv2,Math.round((COLW-dw)/2),Math.round((rh2-dh)/2),dw,dh);
+          ctx.drawImage(surf2,gx2,yOff);
         }}
         yOff+=rh2+ROW_PAD;
       }}
-      // Footer
+
+      // Dark footer
       ctx.fillStyle='#43342d';ctx.fillRect(0,TOTAL_H-FOOTER_H,TOTAL_W,FOOTER_H);
       ctx.fillStyle='rgba(255,255,255,0.72)';ctx.font='600 11px '+TM_FONT;ctx.textAlign='center';
       ctx.fillText('© 2026 OxideSLOC  ·  oxide-sloc v{version}  ·  AGPL-3.0-or-later',TOTAL_W/2,TOTAL_H-FOOTER_H+24);
+
       var proj3=t.proj.replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').substring(0,30)||'all';
       var a=document.createElement('a');a.download='oxide-sloc-test-metrics-'+proj3+'-'+t.slug+'.png';a.href=out.toDataURL('image/png');a.click();
     }}
