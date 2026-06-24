@@ -456,6 +456,8 @@ fn render_html_inner(
 
     let totals = &run.summary_totals;
 
+    let hotspot_rows = build_hotspot_rows(run);
+
     let template = ReportTemplate {
         // Empty nonce for disk-saved reports; patch_html_nonce replaces it
         // with the request nonce when serving from the web server.
@@ -671,9 +673,50 @@ fn render_html_inner(
             .dryness_pct
             .map_or(String::new(), |d| format!("{d:.1}")),
         duplicate_group_count: run.duplicate_groups.len(),
+        has_hotspots: !hotspot_rows.is_empty(),
+        hotspot_rows,
     };
 
     template.render().context("failed to render HTML report")
+}
+
+/// One row of the Git Hotspots table: a file ranked by `code_lines × recent commits`.
+struct HotspotRow {
+    path: String,
+    code_lines: u64,
+    commit_count: u32,
+    last_commit_date: String,
+    score: u64,
+}
+
+/// Build the top-15 git hotspots from per-file activity (only files that carry a
+/// `commit_count` from an `--activity-window` scan). Ranked by `code_lines × commits`.
+fn build_hotspot_rows(run: &AnalysisRun) -> Vec<HotspotRow> {
+    let mut rows: Vec<HotspotRow> = run
+        .per_file_records
+        .iter()
+        .filter_map(|r| {
+            let commits = r.commit_count?;
+            let code = r.effective_counts.code_lines;
+            Some(HotspotRow {
+                path: r.relative_path.clone(),
+                code_lines: code,
+                commit_count: commits,
+                // Show the calendar date only (strip the time component of the ISO date).
+                last_commit_date: r.last_commit_date.as_deref().map_or_else(String::new, |d| {
+                    d.split('T').next().unwrap_or(d).to_string()
+                }),
+                score: code.saturating_mul(u64::from(commits)),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then(b.commit_count.cmp(&a.commit_count))
+    });
+    rows.truncate(15);
+    rows
 }
 
 /// Render an HTML report and write it to `output_path`.
@@ -5534,6 +5577,33 @@ struct WarningOpportunityRow {
       </section>
       {% endif %}
 
+      {% if has_hotspots %}
+      <section class="panel" id="hotspots-section">
+        <div class="toolbar"><div class="toolbar-left"><h2>Git Hotspots</h2></div></div>
+        <p style="font-size:13px;color:var(--muted);padding:4px 4px 10px;line-height:1.6;">Files ranked by <strong>code lines &times; recent commits</strong> over the configured git activity window. Large files that change often are the strongest refactoring candidates.</p>
+        <table style="width:100%;border-collapse:collapse;">
+          <thead><tr>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">File</th>
+            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Code lines</th>
+            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Commits</th>
+            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Hotspot score</th>
+            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Last changed</th>
+          </tr></thead>
+          <tbody>
+          {% for h in hotspot_rows %}
+            <tr>
+              <td style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">{{ h.path }}</td>
+              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);">{{ h.code_lines|commas }}</td>
+              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);">{{ h.commit_count }}</td>
+              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);font-weight:700;color:var(--oxide);">{{ h.score|commas }}</td>
+              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);color:var(--muted);">{{ h.last_commit_date }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
+
       <section class="panel stack">
         <div>
           <div class="toolbar"><div class="toolbar-left"><h2>Language Breakdown</h2></div><button class="chart-expand-btn" id="lang-overview-expand-btn" title="View full chart" aria-label="Expand charts">&#x2922; Full View</button></div>
@@ -8995,6 +9065,10 @@ struct ReportTemplate<'a> {
     dryness_pct_str: String,
     /// Number of duplicate file groups detected.
     duplicate_group_count: usize,
+    /// True when an `--activity-window` scan attached per-file git activity.
+    has_hotspots: bool,
+    /// Top-N files by `code_lines × recent commits` (empty unless activity was collected).
+    hotspot_rows: Vec<HotspotRow>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9085,14 +9159,23 @@ pub fn write_csv(run: &AnalysisRun, path: &Path) -> Result<()> {
 
     // ── Section 3: Per-file detail (if present) ─────────────────────────────
     if !run.per_file_records.is_empty() {
+        // Only emit the git-activity columns when an --activity-window scan populated them.
+        let has_activity = run
+            .per_file_records
+            .iter()
+            .any(|r| r.commit_count.is_some());
         out.push_str("\r\n# Per File\r\n");
         out.push_str(
-            "Path,Language,Size (bytes),Code Lines,Comment Lines,Blank Lines,Physical Lines,Generated,Minified,Vendor\r\n",
+            "Path,Language,Size (bytes),Code Lines,Comment Lines,Blank Lines,Physical Lines,Generated,Minified,Vendor",
         );
+        if has_activity {
+            out.push_str(",Commits,Last Changed");
+        }
+        out.push_str("\r\n");
         for rec in &run.per_file_records {
             let _ = write!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{}\r\n",
+                "{},{},{},{},{},{},{},{},{},{}",
                 csv_escape(&rec.relative_path),
                 csv_escape(
                     &rec.language
@@ -9108,6 +9191,15 @@ pub fn write_csv(run: &AnalysisRun, path: &Path) -> Result<()> {
                 rec.minified,
                 rec.vendor,
             );
+            if has_activity {
+                let _ = write!(
+                    out,
+                    ",{},{}",
+                    rec.commit_count.map(|c| c.to_string()).unwrap_or_default(),
+                    csv_escape(rec.last_commit_date.as_deref().unwrap_or("")),
+                );
+            }
+            out.push_str("\r\n");
         }
     }
 

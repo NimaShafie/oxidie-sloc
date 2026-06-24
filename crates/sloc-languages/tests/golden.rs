@@ -186,6 +186,52 @@ fn javascript_entities() {
     assert_eq!(r.test_assertion_count, 2, "assertion calls");
 }
 
+// ─── Broadened test detection (frameworks beyond the original set) ──────────────
+
+#[test]
+fn perl_test_more_entities() {
+    let text = corpus("perl/tests.pl");
+    let r = &analyze_text(Language::Perl, &text, AnalysisOptions::default()).raw;
+    // one `subtest` block opener
+    assert_eq!(r.test_count, 1, "subtest group");
+    // ok(, is(, is_deeply(
+    assert_eq!(r.test_assertion_count, 3, "Test::More assertion calls");
+}
+
+#[test]
+fn erlang_eunit_entities() {
+    let text = corpus("erlang/tests.erl");
+    let r = &analyze_text(Language::Erlang, &text, AnalysisOptions::default()).raw;
+    // EUnit names are suffix-based (`_test`), so only the ?assert* macros are counted
+    assert_eq!(r.test_count, 0, "no prefix-matchable test names");
+    assert_eq!(r.test_assertion_count, 2, "?assertEqual + ?assert");
+}
+
+#[test]
+fn haskell_hspec_entities() {
+    let text = corpus("haskell/tests.hs");
+    let r = &analyze_text(Language::Haskell, &text, AnalysisOptions::default()).raw;
+    // describe + two it blocks
+    assert_eq!(r.test_count, 3, "Hspec describe/it openers");
+}
+
+#[test]
+fn ocaml_ounit_entities() {
+    let text = corpus("ocaml/tests.ml");
+    let r = &analyze_text(Language::Ocaml, &text, AnalysisOptions::default()).raw;
+    // let test_add, let test_bool (let suite is a plain function)
+    assert_eq!(r.test_count, 2, "OUnit test functions");
+    assert_eq!(r.test_assertion_count, 2, "assert_equal + assert_bool");
+}
+
+#[test]
+fn shell_bats_entities() {
+    let text = corpus("shell/tests.sh");
+    let r = &analyze_text(Language::Shell, &text, AnalysisOptions::default()).raw;
+    // two @test blocks
+    assert_eq!(r.test_count, 2, "bats @test blocks");
+}
+
 // ─── Empty file ───────────────────────────────────────────────────────────────
 
 #[test]

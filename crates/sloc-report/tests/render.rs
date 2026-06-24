@@ -55,6 +55,8 @@ fn make_file_record(path: &str, lang: Language, code: u64) -> FileRecord {
         style_analysis: None,
         cyclomatic_complexity: None,
         lsloc: None,
+        commit_count: None,
+        last_commit_date: None,
         content_hash: 0,
     }
 }
@@ -1521,6 +1523,51 @@ fn render_html_cocomo_section_is_present() {
     assert!(
         html.to_lowercase().contains("cocomo") || html.contains("Person-months"),
         "COCOMO section should appear when cocomo data is present"
+    );
+}
+
+#[test]
+fn render_html_hotspots_section_present_with_activity() {
+    let mut run = make_run();
+    run.per_file_records[0].commit_count = Some(5);
+    run.per_file_records[0].last_commit_date = Some("2026-06-01T12:00:00+00:00".into());
+    let html = render_html(&run).unwrap();
+    assert!(
+        html.contains("Git Hotspots"),
+        "Hotspots section should appear when per-file activity is present"
+    );
+    assert!(html.contains("Hotspot score"));
+    // ISO date is rendered as the calendar day only.
+    assert!(html.contains("2026-06-01"));
+}
+
+#[test]
+fn render_html_no_hotspots_section_without_activity() {
+    let run = make_run();
+    let html = render_html(&run).unwrap();
+    assert!(
+        !html.contains("Git Hotspots"),
+        "Hotspots section must be omitted when no git activity was collected"
+    );
+}
+
+#[test]
+fn write_csv_includes_activity_columns_when_present() {
+    use std::io::Read as _;
+    let mut run = make_run();
+    run.per_file_records[0].commit_count = Some(3);
+    run.per_file_records[0].last_commit_date = Some("2026-06-01T12:00:00+00:00".into());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.csv");
+    sloc_report::write_csv(&run, &path).unwrap();
+    let mut csv = String::new();
+    std::fs::File::open(&path)
+        .unwrap()
+        .read_to_string(&mut csv)
+        .unwrap();
+    assert!(
+        csv.contains("Commits,Last Changed"),
+        "activity header present"
     );
 }
 
