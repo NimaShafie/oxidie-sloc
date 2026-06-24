@@ -1111,6 +1111,51 @@ fn parse_istanbul_total_key_skipped() {
     assert_eq!(map.len(), 1, "only /src/a.js, not total");
 }
 
+// ── parse_coverage_py ─────────────────────────────────────────────────────────
+
+const COVERAGE_PY_JSON: &str = r#"{
+  "meta": {"version": "7.4.0", "branch_coverage": true, "format": 3},
+  "files": {
+    "src/foo.py": {
+      "summary": {
+        "covered_lines": 10, "num_statements": 12, "percent_covered": 83.3,
+        "missing_lines": 2, "excluded_lines": 0,
+        "num_branches": 4, "num_partial_branches": 1,
+        "covered_branches": 3, "missing_branches": 1
+      }
+    },
+    "src/bar.py": {
+      "summary": {
+        "covered_lines": 5, "num_statements": 5, "percent_covered": 100.0,
+        "num_branches": 0, "covered_branches": 0
+      }
+    }
+  },
+  "totals": {"covered_lines": 15, "num_statements": 17, "percent_covered": 88.2}
+}"#;
+
+#[test]
+fn parse_coverage_py_basic() {
+    use sloc_core::coverage::parse_coverage_py;
+    let map = parse_coverage_py(COVERAGE_PY_JSON);
+    assert_eq!(map.len(), 2, "two source files, totals must not be a file");
+    let foo = map.get(std::path::Path::new("src/foo.py")).unwrap();
+    assert_eq!(foo.lines_found, 12);
+    assert_eq!(foo.lines_hit, 10);
+    assert_eq!(foo.branches_found, 4);
+    assert_eq!(foo.branches_hit, 3);
+    // coverage.py has no function-level coverage
+    assert_eq!(foo.functions_found, 0);
+    assert_eq!(foo.functions_hit, 0);
+}
+
+#[test]
+fn parse_coverage_py_empty_and_invalid() {
+    use sloc_core::coverage::parse_coverage_py;
+    assert!(parse_coverage_py("{}").is_empty());
+    assert!(parse_coverage_py("not valid json {{{").is_empty());
+}
+
 // ── parse_coverage_auto ───────────────────────────────────────────────────────
 
 #[test]
@@ -1156,6 +1201,19 @@ fn parse_coverage_auto_dispatches_istanbul_json() {
     let json = r#"{"/src/a.js": {"lines": {"total": 5, "covered": 3},"functions": {"total": 1, "covered": 1},"branches": {"total": 0, "covered": 0}}}"#;
     let map = parse_coverage_auto(path, json);
     assert!(!map.is_empty(), "istanbul JSON should be parsed");
+}
+
+#[test]
+fn parse_coverage_auto_dispatches_coverage_py_json() {
+    use sloc_core::coverage::parse_coverage_auto;
+    let path = std::path::Path::new("coverage.json");
+    let map = parse_coverage_auto(path, COVERAGE_PY_JSON);
+    // The coverage.py `files`+`meta` signature must route to parse_coverage_py, not parse_istanbul.
+    let foo = map
+        .get(std::path::Path::new("src/foo.py"))
+        .expect("coverage.py JSON should be parsed");
+    assert_eq!(foo.lines_found, 12);
+    assert_eq!(foo.lines_hit, 10);
 }
 
 #[test]

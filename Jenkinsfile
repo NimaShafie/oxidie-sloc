@@ -28,6 +28,7 @@ pipeline {
 
     options {
         skipDefaultCheckout(true)
+        disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '5'))
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
@@ -431,7 +432,7 @@ pipeline {
         //   5. curl sh.rustup.rs                                       → requires internet
         stage('Setup') {
             steps {
-                script { h.runSetup() }
+                retry(2) { script { h.runSetup() } }
             }
         }
 
