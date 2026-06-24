@@ -119,6 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -155,16 +156,43 @@ jobs:
           } > toolchain/checksums.sha256
           cat toolchain/checksums.sha256
 
-      - name: Commit and push
+      # Main is a protected branch (PRs + "Quality gates" check required), so a
+      # direct push is rejected.  peter-evans/create-pull-request pushes the
+      # updated toolchain/ files to a new unprotected branch and opens a PR in
+      # one atomic step using GITHUB_TOKEN — no extra secret needed.  The PR is
+      # a no-op (and is skipped) when the toolchain archives are unchanged.
+      - name: Resolve Rust version
+        id: rust
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase --autostash origin main
-          git add toolchain/
-          if git diff --cached --quiet; then
-            echo "Toolchain archives unchanged — nothing to commit."
-          else
-            RUST_VER=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/' | tr -d '[:space:]')
-            git commit -m "chore: update bundled Rust toolchain (${RUST_VER})"
-            git push origin main
-          fi
+          RUST_VER=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/' | tr -d '[:space:]')
+          echo "version=$RUST_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR with updated toolchain archives
+        id: cpr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          token: ${{ github.token }}
+          branch: chore/update-toolchain-${{ github.run_id }}
+          base: main
+          add-paths: toolchain/
+          commit-message: "chore: update bundled Rust toolchain (${{ steps.rust.outputs.version }})"
+          title: "chore: update bundled Rust toolchain (${{ steps.rust.outputs.version }})"
+          body: |
+            Automated toolchain bundle update from workflow run ${{ github.run_id }}.
+
+            Updates the split, gzip-compressed Rust toolchain archives in `toolchain/`
+            (and `toolchain/checksums.sha256`) for Rust ${{ steps.rust.outputs.version }}.
+            This PR was opened automatically because main is a protected branch.
+            Auto-merge is enabled — it lands on main as soon as Quality gates passes.
+          labels: "automated,toolchain"
+          delete-branch: true
+
+      # Land on main automatically once Quality gates passes.  The PR is the only
+      # way past branch protection; auto-merge means no human has to click Merge.
+      # Requires "Allow auto-merge" to be enabled in the repository settings.
+      - name: Enable auto-merge
+        if: steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.cpr.outputs.pull-request-number }}
+        run: gh pr merge --auto --squash "$PR"
