@@ -32,7 +32,7 @@ bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 
 - **CLI + web UI** — `analyze / report / diff / serve / send / init` commands; guided 4-step web flow with Quick Scan
 - **IEEE 1045-1992 physical SLOC** — configurable mixed-line, continuation-line, compiler-directive, and blank-in-comment policies; symbol counting (functions, classes, variables, imports)
-- **Test Metrics** — lexical test function detection across 60 languages; test-to-code density; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, Istanbul/NYC JSON)
+- **Test Metrics** — lexical test function detection across 60 languages; test-to-code density; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, coverage.py JSON, Istanbul/NYC JSON)
 - **Flexible output** — HTML reports, PDF, CSV, and 4-sheet Excel export; re-render any saved JSON
 - **Git integration** — branch/tag/commit browser, GitHub/GitLab/Bitbucket webhooks and polling, submodule breakdown
 - **CI/CD** — GitHub Actions, Jenkins, GitLab CI; JSON metrics API, SVG badge endpoint, embeddable widget, SMTP/webhook delivery

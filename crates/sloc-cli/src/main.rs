@@ -230,8 +230,9 @@ struct AnalyzeArgs {
     #[arg(long, value_name = "PCT")]
     max_delta_pct: Option<f64>,
 
-    /// Path to an LCOV .info file (from lcov, gcov, cargo-llvm-cov, etc.) to attach
-    /// per-file line and function coverage data to the analysis output.
+    /// Path to a coverage report to attach per-file line/function/branch coverage to the
+    /// analysis output. Format is auto-detected: LCOV .info (lcov, gcov, cargo-llvm-cov),
+    /// Cobertura XML, JaCoCo XML, coverage.py JSON, or Istanbul/NYC JSON.
     /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[arg(long, value_name = "FILE")]
     coverage_file: Option<PathBuf>,

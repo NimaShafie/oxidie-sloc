@@ -152,8 +152,9 @@ pub struct AnalysisConfig {
     /// any threshold is exceeded. Configured under `[analysis.budget]` in the TOML.
     #[serde(default)]
     pub budget: Option<BudgetConfig>,
-    /// Path to an LCOV `.info` file produced by lcov, gcov, cargo-llvm-cov, etc.
-    /// When set, oxide-sloc attaches per-file line/function coverage to each `FileRecord`.
+    /// Path to a coverage report; format is auto-detected (LCOV `.info` from lcov/gcov/
+    /// cargo-llvm-cov, Cobertura XML, JaCoCo XML, coverage.py JSON, or Istanbul/NYC JSON).
+    /// When set, oxide-sloc attaches per-file line/function/branch coverage to each `FileRecord`.
     /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage_file: Option<PathBuf>,

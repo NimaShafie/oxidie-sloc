@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Per-file coverage metrics parsed from an LCOV `.info` file.
+/// Per-file coverage metrics parsed from a coverage report.
+///
+/// Supported source formats (see `parse_coverage_auto`): LCOV `.info` (lcov, gcov,
+/// cargo-llvm-cov), Cobertura XML, JaCoCo XML, Istanbul/NYC `json-summary`, and coverage.py
+/// native JSON (`coverage json`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileCoverage {
     pub lines_found: u32,
@@ -159,7 +163,8 @@ pub fn aggregate_line_coverage(records: &[&FileCoverage]) -> Option<f64> {
 }
 
 /// Auto-detect coverage file format from path extension and content, then dispatch to the
-/// appropriate parser. Falls back to LCOV for unknown extensions.
+/// appropriate parser. `.xml` is sniffed for Cobertura vs JaCoCo; `.json` is sniffed for
+/// coverage.py native JSON vs Istanbul `json-summary`. Falls back to LCOV for unknown extensions.
 #[must_use]
 pub fn parse_coverage_auto(path: &Path, content: &str) -> HashMap<PathBuf, FileCoverage> {
     let ext = path
@@ -182,8 +187,16 @@ pub fn parse_coverage_auto(path: &Path, content: &str) -> HashMap<PathBuf, FileC
             }
         }
         "json" => {
-            tracing::debug!(path = %path.display(), format = "istanbul", bytes = content.len(), "parsing coverage file");
-            parse_istanbul(content)
+            // coverage.py's native `coverage json` output nests files under a top-level `files`
+            // object alongside a `meta` block; Istanbul's `json-summary` keys files at the top
+            // level. Sniff for the coverage.py signature before falling back to Istanbul.
+            if content.contains("\"files\"") && content.contains("\"meta\"") {
+                tracing::debug!(path = %path.display(), format = "coverage.py", bytes = content.len(), "parsing coverage file");
+                parse_coverage_py(content)
+            } else {
+                tracing::debug!(path = %path.display(), format = "istanbul", bytes = content.len(), "parsing coverage file");
+                parse_istanbul(content)
+            }
         }
         _ => {
             tracing::debug!(path = %path.display(), format = "lcov", bytes = content.len(), "parsing coverage file");
@@ -422,6 +435,50 @@ pub fn parse_istanbul(content: &str) -> HashMap<PathBuf, FileCoverage> {
                 functions_hit: fn_covered,
                 branches_found: br_total,
                 branches_hit: br_covered,
+            },
+        );
+    }
+
+    result
+}
+
+/// Parse a coverage.py native JSON report (`coverage json`) into a per-file coverage map.
+///
+/// coverage.py's own JSON schema differs from Istanbul's `json-summary`: it nests per-file data
+/// under a top-level `files` object, with line/branch counts in each file's `summary` block.
+/// coverage.py does not track function-level coverage, so `functions_*` are always zero.
+#[must_use]
+pub fn parse_coverage_py(content: &str) -> HashMap<PathBuf, FileCoverage> {
+    let mut result: HashMap<PathBuf, FileCoverage> = HashMap::new();
+
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(content) else {
+        return result;
+    };
+    let Some(files) = root.get("files").and_then(serde_json::Value::as_object) else {
+        return result;
+    };
+
+    for (path_str, file_val) in files {
+        let summary = &file_val["summary"];
+        // Line/branch counts are always small; truncation is not possible in practice.
+        #[allow(clippy::cast_possible_truncation)]
+        let lines_found: u32 = summary["num_statements"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let lines_hit: u32 = summary["covered_lines"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let br_found: u32 = summary["num_branches"].as_u64().unwrap_or(0) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let br_hit: u32 = summary["covered_branches"].as_u64().unwrap_or(0) as u32;
+
+        result.insert(
+            PathBuf::from(path_str.replace('\\', "/")),
+            FileCoverage {
+                lines_found,
+                lines_hit,
+                functions_found: 0,
+                functions_hit: 0,
+                branches_found: br_found,
+                branches_hit: br_hit,
             },
         );
     }
