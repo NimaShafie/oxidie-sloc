@@ -1129,11 +1129,11 @@ fn assemble_run(
         .map(detect_git_for_run)
         .unwrap_or_default();
 
-    // Opt-in per-file git activity for the hotspots view (single `git log` pass, best-effort).
-    if let (Some(window), Some(root)) =
-        (config.analysis.activity_window_days, first_root.as_deref())
-    {
-        let activity = detect_file_activity(root, window);
+    // Per-file git activity for the hotspots view (on by default, single `git log` pass,
+    // best-effort). A window of 0 (or None) disables it; a non-git path yields an empty result.
+    let activity_window = config.analysis.activity_window_days.unwrap_or(0);
+    if let (true, Some(root)) = (activity_window > 0, first_root.as_deref()) {
+        let activity = detect_file_activity(root, activity_window);
         if !activity.is_empty() {
             for rec in &mut analyzed {
                 if let Some((count, date)) = activity.get(&rec.relative_path) {
