@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 /// Per-file coverage metrics parsed from a coverage report.
 ///
 /// Supported source formats (see `parse_coverage_auto`): LCOV `.info` (lcov, gcov,
-/// cargo-llvm-cov), Cobertura XML, JaCoCo XML, Istanbul/NYC `json-summary`, and coverage.py
+/// cargo-llvm-cov), Cobertura XML, `JaCoCo` XML, Istanbul/NYC `json-summary`, and coverage.py
 /// native JSON (`coverage json`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileCoverage {
@@ -163,8 +163,10 @@ pub fn aggregate_line_coverage(records: &[&FileCoverage]) -> Option<f64> {
 }
 
 /// Auto-detect coverage file format from path extension and content, then dispatch to the
-/// appropriate parser. `.xml` is sniffed for Cobertura vs JaCoCo; `.json` is sniffed for
-/// coverage.py native JSON vs Istanbul `json-summary`. Falls back to LCOV for unknown extensions.
+/// appropriate parser.
+///
+/// `.xml` is sniffed for Cobertura vs `JaCoCo`; `.json` is sniffed for coverage.py native JSON
+/// vs Istanbul `json-summary`. Falls back to LCOV for unknown extensions.
 #[must_use]
 pub fn parse_coverage_auto(path: &Path, content: &str) -> HashMap<PathBuf, FileCoverage> {
     let ext = path

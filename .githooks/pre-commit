@@ -11,6 +11,25 @@
 CARGO_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'Cargo\.(toml|lock)$' || true)
 VENDOR_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'vendor\.tar\.xz(\.sha256)?$' || true)
 
+# ── Hard block: never allow private-key / cert-bundle material to be committed ──
+# (F-01) Matches by extension and by filename anywhere in the tree. This is a
+# blocking check — unlike the vendor warning below — because a leaked signing key
+# cannot be un-leaked once pushed.
+KEY_MATERIAL=$(git diff --cached --name-only --diff-filter=AM 2>/dev/null \
+    | grep -E '\.(key|pem|pfx|p12|jks|keystore|asc)$|(^|/)id_rsa($|\.)|(^|/)id_ed25519($|\.)' \
+    || true)
+if [ -n "$KEY_MATERIAL" ]; then
+    echo "" >&2
+    echo "  ✗ COMMIT BLOCKED — private-key / certificate material is staged:" >&2
+    echo "$KEY_MATERIAL" | sed 's/^/      /' >&2
+    echo "" >&2
+    echo "  Key material must never be committed. Move it outside the repo tree" >&2
+    echo "  (e.g. ~/.sloc-signing/) or store it in a KMS/HSM. If this is a test" >&2
+    echo "  fixture that is genuinely safe, commit with: git commit --no-verify" >&2
+    echo "" >&2
+    exit 1
+fi
+
 if [ -n "$CARGO_CHANGED" ] && [ -z "$VENDOR_CHANGED" ]; then
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────┐"

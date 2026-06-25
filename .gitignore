@@ -32,6 +32,19 @@ sonarqube-manual-setup.md
 # Signing cert generation output — private keys and PFX bundles, never committed
 /_signing/
 
+# Private-key / cert-bundle material anywhere in the tree (defence-in-depth; the
+# pre-commit hook also hard-blocks these). Test fixtures under vendor/ are exempt
+# because they are crate sources, not real keys.
+*.key
+*.pfx
+*.p12
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+!vendor/**/*.pem
+!vendor/**/*.key
+
 # Local test output (not for commit)
 out/
 out.7z

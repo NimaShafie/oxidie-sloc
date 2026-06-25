@@ -1,10 +1,18 @@
 name: Auto-approve owner PRs
 
+# SEPARATION OF DUTIES (F-08): auto-approval bypasses independent human review.
+# It is intentionally retained for the solo-maintainer OSS workflow, but is now
+# scoped so that PRs touching security-sensitive paths are NEVER auto-approved —
+# those always require a manual approval. For an accredited (ATO) deployment with
+# more than one maintainer, disable this workflow and enforce 2-person review via
+# branch-protection required reviewers.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
+  contents: read
   pull-requests: write
 
 jobs:
@@ -14,7 +22,26 @@ jobs:
     # Only approve PRs opened by the repo owner — all other contributors go through normal review
     if: github.actor == 'NimaShafie'
     steps:
+      - name: Detect security-sensitive changes
+        id: sensitive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Sensitive paths require manual review even from the owner.
+          PATTERN='^(\.github/workflows/|crates/sloc-web/src/auth\.rs|crates/sloc-web/src/git_webhook\.rs|crates/sloc-git/src/(ops|webhook)\.rs|Dockerfile|docker-compose\.yml|deny\.toml|_signing/|action\.yml|scripts/)'
+          FILES=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)
+          if echo "$FILES" | grep -qE "$PATTERN"; then
+            echo "Security-sensitive files changed — skipping auto-approval:"
+            echo "$FILES" | grep -E "$PATTERN" | sed 's/^/    /'
+            echo "sensitive=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sensitive=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Approve PR
+        if: steps.sensitive.outputs.sensitive == 'false'
         uses: hmarr/auto-approve-action@f0939ea97e9205ef24d872e76833fa908a770363  # v4.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

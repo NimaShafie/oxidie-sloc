@@ -232,7 +232,7 @@ struct AnalyzeArgs {
 
     /// Path to a coverage report to attach per-file line/function/branch coverage to the
     /// analysis output. Format is auto-detected: LCOV .info (lcov, gcov, cargo-llvm-cov),
-    /// Cobertura XML, JaCoCo XML, coverage.py JSON, or Istanbul/NYC JSON.
+    /// Cobertura XML, `JaCoCo` XML, coverage.py JSON, or Istanbul/NYC JSON.
     /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[arg(long, value_name = "FILE")]
     coverage_file: Option<PathBuf>,
@@ -1994,10 +1994,9 @@ fn truncate(input: &str, width: usize) -> String {
 fn open_path(path: &Path) {
     #[cfg(target_os = "windows")]
     {
-        let path_str = path.to_string_lossy();
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", "", path_str.as_ref()])
-            .spawn();
+        // Use explorer.exe, which receives the path as a single, non-shell argument.
+        // `cmd /c start` is shell-parsed and mishandles `&`, `%`, `^` in paths.
+        let _ = std::process::Command::new("explorer").arg(path).spawn();
     }
     #[cfg(target_os = "macos")]
     {
