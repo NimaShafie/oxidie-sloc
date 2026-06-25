@@ -144,6 +144,14 @@ pipeline {
                           'Supported values: 80, 100, 120. Controls the "N-Col Compliant" chip ' +
                           'in HTML/PDF reports and the style_col_compliant_pct metric in CI output.'
         )
+        string(
+            name:         'ACTIVITY_WINDOW',
+            defaultValue: '90',
+            description:  'Git Hotspots activity window in days (on by default). oxide-sloc runs one ' +
+                          'git log pass over the last N days and ranks files by code lines x recent ' +
+                          'commits in a Git Hotspots section (HTML/PDF) plus Commits/Last-changed ' +
+                          'columns in CSV. Set 0 to disable. Requires SCAN_PATH to be a git checkout.'
+        )
         booleanParam(
             name:         'FOLLOW_SYMLINKS',
             defaultValue: false,

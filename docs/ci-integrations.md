@@ -366,6 +366,7 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `OUTPUT_SUBDIR` | `ci-out` | Sub-directory for all generated artifacts (relative to workspace). Created automatically. Contains `report.html`, `result.json`, `report.pdf`, and trend CSVs. |
 | `CI_PRESET` | `default` | CI configuration preset loaded from `ci/`: `default` (balanced, mirrors web UI) / `none` (no preset) / `strict` (fail on binary files) / `full-scope` (count everything including vendor). |
 | `MIXED_LINE_POLICY` | `code-only` | How lines with inline comments are classified. |
+| `ACTIVITY_WINDOW` | `90` | Git Hotspots window in days (on by default). Ranks files by code lines × recent commits in the HTML/PDF report and adds Commits/Last-changed CSV columns. Set `0` to disable. Needs `SCAN_PATH` to be a git checkout. |
 | `DOCSTRINGS_AS_CODE` | false | Count Python triple-quoted docstrings as code instead of comments. |
 | `SUBMODULE_BREAKDOWN` | true | Detect `.gitmodules` and emit per-submodule stats in the report. |
 | `FOLLOW_SYMLINKS` | false | Follow symbolic links during file discovery. |

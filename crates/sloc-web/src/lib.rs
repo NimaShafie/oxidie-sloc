@@ -1422,12 +1422,29 @@ async fn add_security_headers(
 /// by `inject_page_fade_into_html`. The early dark-theme apply prevents a
 /// light-mode flash for dark-theme users.
 fn page_fade_html(nonce: &str) -> String {
+    // Fade only the main content (`.page` + footer), leaving the top nav bar, ambient
+    // watermarks, and code particles persistent across navigation. A plain CSS fade-in
+    // with NO `fill-mode` and NO JS gating: we must not hold the content at `opacity:0`
+    // before the animation starts. An `animation: ... both` (or a JS-added `opacity:0`
+    // class) keeps it invisible from the moment this style parses — at the top of <body> —
+    // through the entire body parse, which reads as a delay before navigation "begins"
+    // and then a blink. Without a fill-mode the animation starts at first paint and plays
+    // 0 -> 1 cleanly, with no pre-paint hold.
     const STYLE: &str = r##"<style>
 @keyframes sloc-page-fade-in{from{opacity:0;}to{opacity:1;}}
-body{animation:sloc-page-fade-in .26s ease-out both;}
-@media (prefers-reduced-motion:reduce){body{animation:none;}}
+.page,.site-footer{animation:sloc-page-fade-in .3s ease-out;}
+body.sloc-leaving .page,body.sloc-leaving .site-footer{opacity:0;transition:opacity .16s ease-in;animation:none;}
+@media (prefers-reduced-motion:reduce){.page,.site-footer{animation:none;}body.sloc-leaving .page,body.sloc-leaving .site-footer{opacity:1;transition:none;}}
 </style>"##;
-    const JS: &str = r#"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}})();"#;
+    // `dark`: apply the saved dark theme before paint to avoid a light flash.
+    // The click handler gives immediate feedback by fading the *content* out the moment a
+    // same-origin nav link is clicked, while the top nav stays put. It does NOT call
+    // preventDefault or delay navigation — the browser navigates instantly and the fade
+    // plays opportunistically during the natural fetch window, so no latency is added.
+    // Skips new-tab/modified clicks, downloads, hashes, external links, and same-page
+    // links. A safety timer + `pageshow` clear the class so content can't get stuck hidden
+    // if the click was actually a download (no unload) or the page is restored from bfcache.
+    const JS: &str = r#"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}function leave(e){if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;if(a.target&&a.target!=='_self')return;if(a.hasAttribute('download'))return;var href=a.getAttribute('href');if(!href||href.charAt(0)==='#')return;if(/^(mailto:|tel:|javascript:)/i.test(href))return;var u;try{u=new URL(a.href,location.href);}catch(_){return;}if(u.origin!==location.origin)return;if(u.pathname===location.pathname&&u.search===location.search)return;var b=document.body;if(!b)return;b.classList.add('sloc-leaving');setTimeout(function(){b.classList.remove('sloc-leaving');},1400);}document.addEventListener('click',leave);window.addEventListener('pageshow',function(){if(document.body)document.body.classList.remove('sloc-leaving');});})();"#;
     format!("{STYLE}<script nonce=\"{nonce}\">{JS}</script>")
 }
 
@@ -1461,13 +1478,21 @@ async fn inject_page_fade_into_html(resp: &mut Response, nonce: &str) {
         *resp.body_mut() = Body::from(html);
         return;
     }
-    let lower = html.to_ascii_lowercase();
-    let insert_at = lower
+    // Cheap path: our pages always emit a lowercase `<body` tag, so a direct search
+    // avoids allocating a lowercased copy of the whole document on every request.
+    // Fall back to a case-insensitive scan only if that fails (rare/never).
+    let insert_at = html
         .find("<body")
-        .and_then(|bi| lower[bi..].find('>').map(|g| bi + g + 1));
+        .and_then(|bi| html[bi..].find('>').map(|g| bi + g + 1))
+        .or_else(|| {
+            let lower = html.to_ascii_lowercase();
+            lower
+                .find("<body")
+                .and_then(|bi| lower[bi..].find('>').map(|g| bi + g + 1))
+        });
     let new_html = match insert_at {
         Some(at) => {
-            let mut out = String::with_capacity(html.len() + 2800);
+            let mut out = String::with_capacity(html.len() + 1024);
             out.push_str(&html[..at]);
             out.push_str(&page_fade_html(nonce));
             out.push_str(&html[at..]);
@@ -1606,6 +1631,11 @@ async fn index(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
             exclude_duplicates: query.exclude_duplicates.as_deref() == Some("enabled"),
+            activity_window: query
+                .activity_window
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(90),
         };
         serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string())
     } else {
@@ -1882,6 +1912,13 @@ struct ScanConfig {
     complexity_alert: u32,
     #[serde(default)]
     exclude_duplicates: bool,
+    /// Git hotspots activity window in days (on by default; 0 = disabled).
+    #[serde(default = "default_activity_window")]
+    activity_window: u32,
+}
+
+const fn default_activity_window() -> u32 {
+    90
 }
 
 fn default_each_physical_line() -> String {
@@ -1933,6 +1970,7 @@ struct IndexQuery {
     cocomo_mode: Option<String>,
     complexity_alert: Option<String>,
     exclude_duplicates: Option<String>,
+    activity_window: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4165,9 +4203,12 @@ fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm
             config.analysis.style_lang_scope = scope.to_string();
         }
     }
+    // Git hotspots window. On by default (config default 90). A parsed value overrides it —
+    // including 0, which disables hotspots. A blank/unparseable field keeps the default.
     if let Some(w) = form.activity_window.as_deref() {
-        if let Ok(days) = w.trim().parse::<u32>() {
-            if days > 0 {
+        let w = w.trim();
+        if !w.is_empty() {
+            if let Ok(days) = w.parse::<u32>() {
                 config.analysis.activity_window_days = Some(days);
             }
         }
@@ -4835,6 +4876,11 @@ fn save_scan_config_json(
         cocomo_mode: cocomo_mode.to_string(),
         complexity_alert,
         exclude_duplicates,
+        activity_window: run
+            .effective_configuration
+            .analysis
+            .activity_window_days
+            .unwrap_or(0),
     };
     if let Ok(json) = serde_json::to_string_pretty(&scan_cfg) {
         let _ = std::fs::write(cfg_path, json);
@@ -5255,7 +5301,7 @@ fn build_lang_chart_json(run: &AnalysisRun) -> String {
     langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
     let entries: Vec<String> = langs
         .into_iter()
-        .take(12)
+        .take(16)
         .map(|l| {
             let name = json_escape(l.language.display_name());
             format!(
@@ -5635,6 +5681,7 @@ fn render_result_page(
         scan_time_display,
         os_display,
         test_count,
+        test_assertion_count: run.summary_totals.test_assertion_count,
         current_scan_number: prev_scan_count + 1,
         prev_scan_count,
         submodule_rows: run
@@ -10908,18 +10955,22 @@ async fn trend_report_handler(
     .chart-select:focus{{border-color:var(--accent);}}
     .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
     @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
-    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}}
+    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);}}
     .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
-    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-7px);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
-    .stat-chip:hover .stat-chip-tip{{opacity:1;}}
+    .stat-chip:hover .stat-chip-tip{{opacity:1;transform:translateX(-50%) translateY(0);}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
     .stat-delta-up{{color:#2a6846;}}.stat-delta-down{{color:#b23030;}}
     body.dark-theme .stat-delta-up{{color:#5aba8a;}}body.dark-theme .stat-delta-down{{color:#e07070;}}
     .chart-wrap{{width:100%;overflow-x:auto;}} .chart-wrap svg{{display:block;margin:0 auto;}}
     .empty-state{{padding:32px;text-align:center;color:var(--muted);font-size:14px;border:1px dashed var(--line-strong);border-radius:12px;}}
+    .tr-expand-btn{{background:none;border:1px solid var(--line-strong);border-radius:6px;cursor:pointer;color:var(--muted);padding:4px 10px;font-size:13px;line-height:1;transition:background .13s,color .13s;white-space:nowrap;}}
+    .tr-expand-btn:hover{{background:var(--surface-2);color:var(--text);}}
+    .tr-chart-full-modal{{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}}
+    .tr-chart-full-inner{{background:var(--bg);border-radius:16px;padding:24px 28px;max-width:1600px;width:100%;max-height:90vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}}
     .chart-hint-inline{{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap;margin-top:8px;}}
     .chart-hint-inline svg{{width:12px;height:12px;stroke:var(--muted-2);fill:none;stroke-width:2;flex:0 0 auto;}}
     .chart-hint-inline .dot{{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin:0 1px;}}
@@ -11152,6 +11203,7 @@ async fn trend_report_handler(
             <option value="1.38">Large</option>
           </select>
         </label>
+        <button class="tr-expand-btn" id="tr-chart-fv-btn">&#x2922; Full View</button>
       </div>
 
       <div id="chart-wrap" class="chart-wrap"><div class="loading-state"><div class="loading-spinner"></div>Loading scan history\u2026</div></div>
@@ -11259,7 +11311,7 @@ async fn trend_report_handler(
 
     // Tooltip
     var tt = document.createElement('div');
-    tt.style.cssText = 'display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:9999;max-width:280px;color:var(--text);';
+    tt.style.cssText = 'display:none;position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:9px 13px;font-family:'+FONT+';font-size:12px;line-height:1.6;box-shadow:0 4px 18px rgba(0,0,0,0.15);z-index:100000;max-width:280px;color:var(--text);';
     document.body.appendChild(tt);
     function showTT(e,html){{tt.innerHTML=html;tt.style.display='block';moveTT(e);}}
     function moveTT(e){{var x=e.clientX+16,y=e.clientY-10,r=tt.getBoundingClientRect();if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-8;if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-8;tt.style.left=x+'px';tt.style.top=y+'px';}}
@@ -11359,12 +11411,22 @@ async fn trend_report_handler(
 
       var scaleEl=document.getElementById('scale-sel');
       var sc=scaleEl?parseFloat(scaleEl.value)||1:1;
-      var W=Math.round(900*sc),H=Math.round(380*sc),PL=Math.round(80*sc),PR=Math.round(40*sc),PT=Math.round(30*sc),PB=Math.round(60*sc),CW=W-PL-PR,CH=H-PT-PB;
+      renderTrendInto(wrap, pts, yKey, xMode, sc);
+      renderTable(pts, yKey);
+    }}
+
+    // Draw the trend area+line chart (with points and tooltips) into `wrap` at scale `sc`.
+    // Shared by the inline chart and the Full View modal so both render identically.
+    function renderTrendInto(wrap, pts, yKey, xMode, sc){{
+      // Fill the container width (like the Chart.js charts) instead of a fixed 900px
+      // canvas centered with empty margins; Chart Size (sc) drives height + detail.
+      var availW=Math.round(wrap.clientWidth||wrap.offsetWidth||900*sc);
+      var W=Math.max(600,availW),H=Math.round(380*sc),PL=Math.round(80*sc),PR=Math.round(40*sc),PT=Math.round(30*sc),PB=Math.round(60*sc),CW=W-PL-PR,CH=H-PT-PB;
       var maxY = Math.max.apply(null,pts.map(function(d){{return Number(d[yKey])||0;}}))||1;
 
       var Y_LABELS={{code_lines:'Code Lines',comment_lines:'Comment Lines',blank_lines:'Blank Lines',physical_lines:'Physical Lines',files_analyzed:'Files Analyzed'}};
 
-      var svg='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;overflow:visible;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+      var svg='<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="display:block;overflow:visible;max-width:100%;cursor:default;" xmlns="http://www.w3.org/2000/svg">';
       svg+='<defs><linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#C45C10" stop-opacity="0.18"/><stop offset="100%" stop-color="#C45C10" stop-opacity="0"/></linearGradient></defs>';
 
       var fs=Math.round(10*sc),fsS=Math.round(9*sc),fsL=Math.round(11*sc);
@@ -11424,6 +11486,48 @@ async fn trend_report_handler(
       svg+='</svg>';
       wrap.innerHTML=svg;
 
+      // Pixel Y of the line at chart-space x (straight segments → linear interpolation).
+      function lineYAt(mx){{
+        var n=pts.length;
+        if(n===0)return PT+CH;
+        if(n===1)return PT+CH-Math.round((Number(pts[0][yKey])||0)/maxY*CH);
+        var fx=(mx-PL)/Math.max(CW,1)*(n-1);
+        if(fx<0)fx=0; if(fx>n-1)fx=n-1;
+        var i0=Math.floor(fx),i1=Math.min(i0+1,n-1),t=fx-i0;
+        var y0=PT+CH-(Number(pts[i0][yKey])||0)/maxY*CH;
+        var y1=PT+CH-(Number(pts[i1][yKey])||0)/maxY*CH;
+        return y0+t*(y1-y0);
+      }}
+
+      // SVG-level mousemove: show the value tooltip only when the pointer is over the
+      // gradient fill (inside the chart and at/below the line) — never in the empty
+      // space above the line. Cursor follows the same rule.
+      (function(){{
+        var svgEl=wrap.querySelector('svg');
+        if(!svgEl)return;
+        svgEl.addEventListener('mousemove',function(e){{
+          if(e.target&&e.target.classList&&e.target.classList.contains('trend-pt'))return; // circle handles its own tooltip
+          var rect=svgEl.getBoundingClientRect();
+          var scaleX=W/Math.max(rect.width,1);
+          var scaleY=H/Math.max(rect.height,1);
+          var mouseX=(e.clientX-rect.left)*scaleX;
+          var mouseY=(e.clientY-rect.top)*scaleY;
+          var ly=lineYAt(mouseX);
+          if(mouseX<PL||mouseX>PL+CW||mouseY<ly-6*sc||mouseY>PT+CH){{hideTT();svgEl.style.cursor='default';return;}}
+          svgEl.style.cursor='pointer';
+          var idx=Math.max(0,Math.min(pts.length-1,Math.round((mouseX-PL)/Math.max(CW,1)*(pts.length-1))));
+          var d=pts[idx];
+          var val=Number(d[yKey]);
+          var lbl=xMode==='commit'&&d.commit?d.commit.substring(0,7):d.timestamp.substring(0,10);
+          showTT(e,
+            '<strong style="display:block;font-size:13px;margin-bottom:3px;">'+esc(lbl)+'</strong>'+
+            (Y_LABELS[yKey]||yKey)+': <strong>'+fmtFull(val)+'</strong>'+
+            '<br><span style="font-size:11px;color:var(--muted);">'+d.timestamp.substring(0,10)+'</span>'
+          );
+        }});
+        svgEl.addEventListener('mouseleave',function(){{hideTT();svgEl.style.cursor='default';}});
+      }})();
+
       // Attach point tooltips
       wrap.querySelectorAll('.trend-pt').forEach(function(c){{
         c.addEventListener('mouseover',function(e){{
@@ -11445,8 +11549,6 @@ async fn trend_report_handler(
           if(d.html_url) window.open(d.html_url,'_blank');
         }});
       }});
-
-      renderTable(pts, yKey);
     }}
 
     var shData=[], shSortCol=null, shSortOrder='asc', shPage=1, shPerPage=25;
@@ -12053,11 +12155,49 @@ async fn trend_report_handler(
       var el=document.getElementById(id);
       if(el)el.addEventListener('change',function(){{render(allData);updateStats(allData);}});
     }});
+    // Reflow the width-filling SVG chart when the window resizes (debounced), so it
+    // tracks the container like the responsive Chart.js charts do.
+    var _rsT=null;
+    window.addEventListener('resize',function(){{
+      if(_rsT)clearTimeout(_rsT);
+      _rsT=setTimeout(function(){{ if(allData&&allData.length)render(allData); }},150);
+    }});
     rootSel.addEventListener('change',function(){{
       populateSubmodules(rootSel.value);
       loadAndRender();
     }});
     if(subSel)subSel.addEventListener('change',loadAndRender);
+
+    // ── Full View modal: re-render the trend chart larger using the same drawing code ──
+    (function(){{
+      var fvBtn=document.getElementById('tr-chart-fv-btn');
+      if(!fvBtn)return;
+      function closeFv(ov){{ if(ov&&ov.parentNode)ov.parentNode.removeChild(ov); hideTT(); }}
+      fvBtn.addEventListener('click',function(){{
+        if(!allData||!allData.length){{alert('No chart to expand yet.');return;}}
+        var yKey=document.getElementById('y-sel').value;
+        var xMode=document.getElementById('x-sel').value;
+        var pts=allData;
+        if(xMode==='tag')pts=allData.filter(function(d){{return d.tags&&d.tags.length>0;}});
+        pts=pts.slice().sort(function(a,b){{return a.timestamp.localeCompare(b.timestamp);}});
+        if(!pts.length){{alert('No scan data found for the selected filters.');return;}}
+        var tp=trendTitleParts();
+        var ov=document.createElement('div');
+        ov.className='tr-chart-full-modal';
+        ov.innerHTML='<div class="tr-chart-full-inner">'
+          +'<button type="button" class="settings-close" style="position:absolute;top:16px;right:18px;" aria-label="Close">'
+          +'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
+          +'<div style="font-size:18px;font-weight:900;color:var(--oxide);margin:0 40px 2px 0;">'+esc(tp.title)+'</div>'
+          +'<div style="font-size:12.5px;color:var(--muted);margin-bottom:16px;">'+esc(tp.sub)+'</div>'
+          +'<div id="tr-fv-chart-wrap" class="chart-wrap"></div></div>';
+        document.body.appendChild(ov);
+        var fvWrap=ov.querySelector('#tr-fv-chart-wrap');
+        renderTrendInto(fvWrap, pts, yKey, xMode, 1.7);
+        ov.addEventListener('click',function(e){{ if(e.target===ov)closeFv(ov); }});
+        ov.querySelector('.settings-close').addEventListener('click',function(){{closeFv(ov);}});
+        document.addEventListener('keydown',function esc2(e){{ if(e.key==='Escape'){{closeFv(ov);document.removeEventListener('keydown',esc2);}} }});
+      }});
+    }})();
 
     var xlsxBtn=document.getElementById('export-xlsx-btn');
     if(xlsxBtn)xlsxBtn.addEventListener('click',exportXLSX);
@@ -12943,14 +13083,14 @@ async fn test_metrics_handler(
     .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
     .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
     @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
-    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}}
+    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);}}
     .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
-    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-7px);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:200;}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
-    .stat-chip:hover .stat-chip-tip{{opacity:1;}}
+    .stat-chip:hover .stat-chip-tip{{opacity:1;transform:translateX(-50%) translateY(0);}}
     .section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
     .section-header:first-child{{margin-top:0;padding-top:0;border-top:none;}}
     .chart-row{{display:grid;gap:18px;grid-template-columns:1fr 1fr;margin-bottom:18px;}}
@@ -12971,7 +13111,7 @@ async fn test_metrics_handler(
     .density-bar-wrap{{display:flex;align-items:center;gap:8px;}}
     .density-bar{{height:6px;border-radius:3px;background:var(--oxide);opacity:0.75;min-width:2px;flex-shrink:0;}}
     .cov-gauge-row{{display:grid!important;grid-template-columns:repeat(3,1fr)!important;gap:16px;margin-bottom:18px;}}
-    .cov-gauge-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);min-width:0;}}
+    .cov-gauge-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);min-width:0;}}
     .cov-gauge-card:hover{{transform:translateY(-3px);box-shadow:0 10px 28px rgba(77,44,20,0.15);}}
     .cov-gauge-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);}}
     .cov-gauge-val{{font-size:32px;font-weight:900;line-height:1;}}
@@ -13964,6 +14104,109 @@ async fn test_metrics_handler(
       code_lines:  {{ label: 'Code Lines',       color: '#2A6846', tooltip: ' code lines' }}
     }};
 
+    // Parse a hex color (#RRGGBB) into "r,g,b" for building rgba() gradient stops.
+    function hexRgb(hex) {{
+      var h = String(hex).replace('#', '');
+      if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+      var n = parseInt(h, 16);
+      return ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255);
+    }}
+    // Vertical area-fill gradient matching the inline trend chart: fades from a soft
+    // tint at the top to transparent at the bottom (no flat solid block).
+    function tmTrendGradient(ctx2, chartArea, color) {{
+      var rgb = hexRgb(color);
+      var g = ctx2.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+      g.addColorStop(0,   'rgba(' + rgb + ',0.28)');
+      g.addColorStop(0.5, 'rgba(' + rgb + ',0.10)');
+      g.addColorStop(1,   'rgba(' + rgb + ',0)');
+      return g;
+    }}
+
+    // Pixel Y of the trend line at canvas-space x (tension 0 → straight segments,
+    // so linear interpolation between adjacent points matches the drawn line).
+    function tmLineYAt(chart, px) {{
+      var meta = chart.getDatasetMeta(0);
+      if (!meta || !meta.data || !meta.data.length) return null;
+      var d = meta.data;
+      if (px <= d[0].x) return d[0].y;
+      for (var i = 1; i < d.length; i++) {{
+        if (px <= d[i].x) {{
+          var span = d[i].x - d[i - 1].x;
+          var t = span > 0 ? (px - d[i - 1].x) / span : 0;
+          return d[i - 1].y + t * (d[i].y - d[i - 1].y);
+        }}
+      }}
+      return d[d.length - 1].y;
+    }}
+
+    // Plugin: only show the tooltip / finger cursor when the pointer is over the
+    // gradient fill (inside the plot and at/below the line) — never in the empty
+    // space above the line. Outside the fill we retype the event as 'mouseout' so
+    // the core interaction dismisses any active tooltip on its own.
+    var tmFillGuard = {{
+      id: 'tmFillGuard',
+      beforeEvent: function(chart, args) {{
+        var e = args.event;
+        if (!e || e.type !== 'mousemove') return;
+        var ca = chart.chartArea;
+        if (!ca) return;
+        var inFill = false;
+        if (e.x >= ca.left && e.x <= ca.right) {{
+          var ly = tmLineYAt(chart, e.x);
+          if (ly != null && e.y >= ly - 6 && e.y <= ca.bottom) inFill = true;
+        }}
+        if (chart.canvas) chart.canvas.style.cursor = inFill ? 'pointer' : 'default';
+        if (!inFill) {{ e.type = 'mouseout'; }}
+      }}
+    }};
+
+    // Single source of truth for the test-metrics trend chart config so the inline
+    // chart and the Full View modal render identically (straight segments, gradient
+    // fill, white-ringed points, gradient-only interactivity).
+    function buildTmTrendConfig(pts, ctrl, meta) {{
+      return {{
+        type: 'line',
+        data: {{
+          labels: pts.map(function(d){{ return makeTrendLabel(d, ctrl.xMode); }}),
+          datasets: [{{
+            label: meta.label,
+            data: pts.map(function(d){{ return Number(d[ctrl.yKey]) || 0; }}),
+            borderColor: meta.color,
+            borderWidth: 2.5,
+            backgroundColor: function(context) {{
+              var ca = context.chart.chartArea;
+              if (!ca) return 'rgba(' + hexRgb(meta.color) + ',0.15)';
+              return tmTrendGradient(context.chart.ctx, ca, meta.color);
+            }},
+            pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : meta.color; }}),
+            pointBorderColor: '#fff',
+            pointBorderWidth: 2,
+            pointRadius: 6,
+            pointHoverRadius: 9,
+            pointHoverBorderWidth: 2.5,
+            fill: true, tension: 0
+          }}]
+        }},
+        options: {{
+          responsive: true, maintainAspectRatio: false,
+          layout: {{ padding: {{ top: 22 }} }},
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            legend: {{ display: false }},
+            tooltip: {{
+              mode: 'index', intersect: false,
+              callbacks: {{ label: function(ctx2){{ return ' ' + fmtFull(ctx2.parsed.y) + meta.tooltip; }} }}
+            }}
+          }},
+          scales: {{
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, maxRotation:35 }} }},
+            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+          }}
+        }},
+        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top'), tmFillGuard]
+      }};
+    }}
+
     function getTrendControls() {{
       var ySel    = document.getElementById('tm-trend-y');
       var xSel    = document.getElementById('tm-trend-x');
@@ -14020,94 +14263,8 @@ async fn test_metrics_handler(
 
       var meta = TM_Y_META[ctrl.yKey] || TM_Y_META['test_count'];
 
-      // Gradient fill matching trend-reports: opaque-ish at top → transparent at bottom
-      function makeTrendGradient(ctx2, chartArea) {{
-        var g = ctx2.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
-        g.addColorStop(0,   'rgba(196,92,16,0.28)');
-        g.addColorStop(0.5, 'rgba(196,92,16,0.10)');
-        g.addColorStop(1,   'rgba(196,92,16,0)');
-        return g;
-      }}
-
-      // Crosshair plugin: draws a vertical dashed line at the hovered x position
-      var tmCrosshairPlugin = {{
-        afterDraw: function(chart) {{
-          if (chart._tmCrosshairX == null) return;
-          var ctx2 = chart.ctx, ca = chart.chartArea;
-          ctx2.save();
-          ctx2.strokeStyle = isDark() ? 'rgba(245,236,230,0.45)' : 'rgba(67,52,45,0.35)';
-          ctx2.lineWidth = 1.5;
-          ctx2.setLineDash([5, 4]);
-          ctx2.beginPath();
-          ctx2.moveTo(chart._tmCrosshairX, ca.top);
-          ctx2.lineTo(chart._tmCrosshairX, ca.bottom);
-          ctx2.stroke();
-          ctx2.restore();
-        }}
-      }};
-
-      trendChart = new Chart(trendCanvas, {{
-        type: 'line',
-        data: {{
-          labels: pts.map(function(d){{ return makeTrendLabel(d, ctrl.xMode); }}),
-          datasets: [{{
-            label: meta.label,
-            data: pts.map(function(d){{ return Number(d[ctrl.yKey]) || 0; }}),
-            borderColor: meta.color,
-            borderWidth: 2.5,
-            backgroundColor: function(context) {{
-              var chart = context.chart;
-              var ca = chart.chartArea;
-              if (!ca) return 'rgba(196,92,16,0.15)';
-              return makeTrendGradient(chart.ctx, ca);
-            }},
-            pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : meta.color; }}),
-            pointBorderColor: '#fff',
-            pointBorderWidth: 2,
-            pointRadius: 6,
-            pointHoverRadius: 9,
-            pointHoverBorderWidth: 2.5,
-            fill: true, tension: 0.3
-          }}]
-        }},
-        options: {{
-          responsive: true, maintainAspectRatio: false,
-          layout: {{ padding: {{ top: 22 }} }},
-          interaction: {{ mode: 'index', intersect: false }},
-          onHover: function(e, els) {{
-            var t = e.native && e.native.target;
-            if (!t) return;
-            var ca = trendChart && trendChart.chartArea;
-            if (!ca) {{ t.style.cursor = 'default'; return; }}
-            var rect = t.getBoundingClientRect();
-            var mouseX = (e.native.clientX - rect.left) * (t.width / rect.width);
-            if (mouseX >= ca.left && mouseX <= ca.right) {{
-              t.style.cursor = 'crosshair';
-              if (trendChart) {{ trendChart._tmCrosshairX = mouseX; trendChart.draw(); }}
-            }} else {{
-              t.style.cursor = 'default';
-              if (trendChart) {{ trendChart._tmCrosshairX = null; trendChart.draw(); }}
-            }}
-          }},
-          plugins: {{
-            legend: {{ display: false }},
-            tooltip: {{
-              mode: 'index', intersect: false,
-              callbacks: {{ label: function(ctx2){{ return ' ' + fmtFull(ctx2.parsed.y) + meta.tooltip; }} }}
-            }}
-          }},
-          scales: {{
-            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
-            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
-          }}
-        }},
-        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top'), tmCrosshairPlugin]
-      }});
-      // Reset crosshair on mouse leave
-      trendCanvas.addEventListener('mouseleave', function() {{
-        if (trendChart) {{ trendChart._tmCrosshairX = null; trendChart.draw(); }}
-        trendCanvas.style.cursor = 'default';
-      }});
+      trendChart = new Chart(trendCanvas, buildTmTrendConfig(pts, ctrl, meta));
+      trendCanvas.addEventListener('mouseleave', function() {{ trendCanvas.style.cursor = 'default'; }});
       ALL_CHARTS.push(trendChart);
 
       // Populate submodule selector from unique project_labels
@@ -14199,30 +14356,9 @@ async fn test_metrics_handler(
         var title = meta.label + ' Trend \u2014 Full View';
         var canvas = makeTmOverlay(title, pts.length + ' scan' + (pts.length !== 1 ? 's' : ''), 440);
         if (!canvas) return;
-        new Chart(canvas, {{
-          type: 'line',
-          data: {{
-            labels: pts.map(function(d){{ return makeTrendLabel(d, ctrl.xMode); }}),
-            datasets: [{{
-              label: meta.label,
-              data: pts.map(function(d){{ return Number(d[ctrl.yKey]) || 0; }}),
-              borderColor: meta.color,
-              backgroundColor: meta.color.replace(')', ',0.10)').replace('rgb(', 'rgba('),
-              pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : meta.color; }}),
-              pointRadius: 5, fill: true, tension: 0.3
-            }}]
-          }},
-          options: {{
-            responsive: true, maintainAspectRatio: false,
-            layout: {{ padding: {{ top: 22 }} }},
-            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + meta.tooltip; }} }} }} }},
-            scales: {{
-              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, maxRotation:35 }} }},
-              y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
-            }}
-          }},
-          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
-        }});
+        // Reuse the exact inline-chart config so Full View matches the default view
+        // (straight segments + gradient-only interactivity), just larger.
+        new Chart(canvas, buildTmTrendConfig(pts, ctrl, meta));
       }});
     }})();
 
@@ -15165,6 +15301,7 @@ fn generate_offline_index(
             run.environment.operating_system, run.environment.architecture
         ),
         test_count: run.summary_totals.test_count,
+        test_assertion_count: run.summary_totals.test_assertion_count,
         current_scan_number: prev_scan_count + 1,
         prev_scan_count,
         submodule_rows,
@@ -16981,18 +17118,18 @@ struct SubmoduleRow {
     button.prev-step:hover { background: linear-gradient(180deg, var(--nav), var(--nav-2)); color: #fff; border-color: transparent; }
     .wizard-actions { display:flex; justify-content:space-between; align-items:center; gap: 12px; margin-top: 22px; padding-top: 18px; border-top:1px solid var(--line); }
     .section + .wizard-actions { border-top: none; padding-top: 0; }
-    .wizard-actions .left, .wizard-actions .right { display:flex; gap: 10px; flex-wrap:wrap; }
+    .wizard-actions .left, .wizard-actions .right { display:flex; gap: 10px; flex-wrap:wrap; align-items:center; }
     .default-path-overlay { position: fixed; inset: 0; z-index: 9000; background: rgba(0,0,0,0.52); display: flex; align-items: center; justify-content: center; padding: 24px; opacity: 0; pointer-events: none; transition: opacity .18s ease; }
     .default-path-overlay.open { opacity: 1; pointer-events: auto; }
-    .default-path-modal { background: var(--surface); border: 1px solid var(--line); border-radius: 28px; max-width: 760px; width: 100%; box-shadow: 0 36px 96px rgba(0,0,0,0.36); padding: 44px 48px 40px; transform: translateY(12px); transition: transform .18s ease; }
+    .default-path-modal { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; max-width: 682px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.34); padding: 33px 37px 29px; transform: translateY(10px); transition: transform .18s ease; }
     .default-path-overlay.open .default-path-modal { transform: translateY(0); }
-    .default-path-modal h3 { margin: 0 0 20px; font-size: 30px; color: var(--text); display: flex; align-items: center; gap: 16px; }
-    .default-path-modal h3 svg { width: 38px; height: 38px; flex-shrink: 0; color: var(--accent); }
-    .default-path-modal p { margin: 0 0 15px; font-size: 19px; line-height: 1.55; color: var(--muted); }
-    .default-path-modal p code { background: rgba(0,0,0,0.06); padding: 2px 9px; border-radius: 7px; font-size: 17px; color: var(--text); }
+    .default-path-modal h3 { margin: 0 0 15px; font-size: 22px; color: var(--text); display: flex; align-items: center; gap: 12px; }
+    .default-path-modal h3 svg { width: 26px; height: 26px; flex-shrink: 0; color: var(--accent); }
+    .default-path-modal p { margin: 0 0 11px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+    .default-path-modal p code { background: rgba(0,0,0,0.06); padding: 1px 6px; border-radius: 5px; font-size: 11.5px; color: var(--text); }
     body.dark-theme .default-path-modal p code { background: rgba(255,255,255,0.10); }
-    .default-path-actions { display: flex; justify-content: flex-end; gap: 18px; margin-top: 34px; }
-    .default-path-actions button { font-size: 18px; padding: 14px 26px; border-radius: 12px; }
+    .default-path-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+    .default-path-actions button { font-size: 10.5px; padding: 6px 13px; border-radius: 8px; }
     .field-help-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
     .field-help-grid.coupled-help { margin-top: 12px; }
     .field-help-grid.preset-grid { align-items: start; }
@@ -17162,6 +17299,14 @@ struct SubmoduleRow {
     .preview-loading { display:flex; align-items:center; gap:12px; padding:14px 16px; border-radius:12px; background:var(--surface-2); border:1px solid var(--line); }
     .preview-spinner { width:18px; height:18px; border:2.5px solid var(--line); border-top-color:var(--oxide); border-radius:50%; animation:prevSpin 0.75s linear infinite; flex:0 0 18px; }
     @keyframes prevSpin { to { transform:rotate(360deg); } }
+    .preview-gate-status { display:flex; align-items:center; gap:9px; font-size:13px; font-weight:600; color:var(--muted); margin-right:18px; }
+    .preview-gate-spinner { width:15px; height:15px; border:2.5px solid var(--line); border-top-color:var(--oxide); border-radius:50%; animation:prevSpin 0.75s linear infinite; flex:0 0 15px; }
+    .preview-gate-info { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; padding:0; border:none; background:transparent; color:var(--oxide); cursor:pointer; border-radius:50%; flex:0 0 18px; transition:transform .15s ease, color .15s ease; }
+    .preview-gate-info:hover { transform:scale(1.15); color:var(--nav); }
+    .preview-gate-info svg { width:16px; height:16px; }
+    .preview-panel-flash { animation:previewPanelFlash 1.4s ease; border-radius:12px; }
+    @keyframes previewPanelFlash { 0%,100% { box-shadow:0 0 0 0 rgba(196,93,42,0); } 25% { box-shadow:0 0 0 4px rgba(196,93,42,0.45); } }
+    button.next-step.is-blocked { opacity:0.55; cursor:not-allowed; pointer-events:none; box-shadow:none; transform:none; }
     .preview-loading-text { flex:1; min-width:0; }
     .preview-loading-msg { font-size:13px; color:var(--text); font-weight:600; }
     .preview-loading-elapsed { font-size:11px; color:var(--muted); margin-top:2px; }
@@ -17204,6 +17349,9 @@ struct SubmoduleRow {
     .cov-scan-none .cov-scan-title { color:var(--muted); font-weight:500; }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
+    /* Lock page scroll while the analysis modal is open so the removed scrollbar
+       gutter doesn't pull the centered card slightly left of true center. */
+    body.modal-open { overflow: hidden; }
     .loading-card { position:relative; overflow:hidden; width: min(840px, calc(100vw - 40px)); border-radius: 20px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 24px 56px rgba(0,0,0,0.26); padding: 42px 48px; }
     /* Pulsating gradient sheen behind the modal content — replaces the old "Analysis running" pill */
     .loading-card::before { content:''; position:absolute; inset:0; z-index:0; pointer-events:none; border-radius:inherit; opacity:0; background: radial-gradient(130% 95% at 18% 0%, rgba(211,122,76,0.22), transparent 58%), radial-gradient(120% 90% at 100% 100%, rgba(37,99,235,0.16), transparent 55%), radial-gradient(140% 120% at 50% 120%, rgba(184,93,51,0.14), transparent 60%); transition: opacity .4s ease; }
@@ -17217,10 +17365,10 @@ struct SubmoduleRow {
     .lc-title { font-size:1.44rem;font-weight:800;margin:0 0 6px; }
     .lc-sub { color:var(--muted);font-size:0.9rem;margin:0 0 18px; }
     .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:18px;display:flex;align-items:center;gap:10px; }
-    .lc-metrics { display:flex;gap:12px;margin-bottom:16px; }
-    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:14px 18px;flex:1 1 0;min-width:0; }
-    .lc-metric-label { font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px; }
-    .lc-metric-value { font-size:1.2rem;font-weight:800;color:var(--text); }
+    .lc-metrics { display:flex;gap:10px;margin-bottom:16px; }
+    .lc-metric { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;flex:1 1 0;min-width:0; }
+    .lc-metric-label { font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+    .lc-metric-value { font-size:1rem;font-weight:800;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
     .lc-stage-desc { font-size:12px;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin-bottom:18px;line-height:1.5;transition:opacity .3s; }
     .lc-steps { display:flex;align-items:center;gap:0;margin-bottom:18px; }
     .lc-step { display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;color:var(--muted);border:1.5px solid transparent;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;transition:all .25s; }
@@ -17265,9 +17413,9 @@ struct SubmoduleRow {
     .submodule-preview-chip { appearance:none; display:inline-flex; align-items:center; padding:3px 11px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(37,99,235,0.09); border:1px solid rgba(37,99,235,0.22); color:var(--accent-2); cursor:pointer; position:relative; transition:background .15s ease, box-shadow .15s ease; }
     .submodule-preview-chip:hover { background:rgba(37,99,235,0.18); }
     .submodule-preview-chip.active { background:rgba(37,99,235,0.22); box-shadow:0 0 0 2px rgba(37,99,235,0.35); }
-    .submodule-chip-tooltip { position:absolute; bottom:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:5px 10px; border-radius:7px; font-size:11px; font-weight:600; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .18s ease; z-index:300; }
+    .submodule-chip-tooltip { position:absolute; bottom:calc(100% + 8px); left:50%; transform:translateX(-50%) translateY(7px); background:var(--text); color:var(--bg); padding:5px 10px; border-radius:7px; font-size:11px; font-weight:600; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:300; }
     .submodule-chip-tooltip::after { content:''; position:absolute; top:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-top-color:var(--text); }
-    .submodule-preview-chip:hover .submodule-chip-tooltip { opacity:1; }
+    .submodule-preview-chip:hover .submodule-chip-tooltip { opacity:1; transform:translateX(-50%) translateY(0); }
     .submodule-base-repo-btn { appearance:none; display:inline-flex; align-items:center; gap:5px; padding:3px 11px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(77,44,20,0.1); border:1px solid rgba(77,44,20,0.25); color:var(--text); cursor:pointer; transition:background .15s ease; }
     .submodule-base-repo-btn:hover { background:rgba(77,44,20,0.18); }
     .path-info-row { display:flex; align-items:center; gap:6px; margin-top:6px; border-bottom:none; padding:0; }
@@ -17344,7 +17492,7 @@ struct SubmoduleRow {
       <div class="nav-status">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -17768,7 +17916,14 @@ coverage run -m pytest && coverage json   # writes coverage.json
               <div class="wizard-actions">
                 <div class="left"></div>
                 <div class="right">
-                  <button type="button" class="secondary next-step" data-next="2">Next: Counting rules</button>
+                  <div id="preview-gate-status" class="preview-gate-status" aria-live="polite" style="display:none;">
+                    <span class="preview-gate-spinner" aria-hidden="true"></span>
+                    <span class="preview-gate-text">Scanning project scope&hellip;</span>
+                    <button type="button" class="preview-gate-info" id="preview-gate-info" title="What is this? Jump up to the live scope preview" aria-label="Show what is being scanned — jump to the scope preview">
+                      <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                    </button>
+                  </div>
+                  <button type="button" class="secondary next-step" id="step1-next" data-next="2">Next: Counting rules</button>
                 </div>
               </div>
             </div>
@@ -17779,7 +17934,8 @@ coverage run -m pytest && coverage json   # writes coverage.json
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
                   Proceed with the default sample test?
                 </h3>
-                <p>The <strong>Project path</strong> is still set to the bundled sample <code>tests/fixtures/basic</code>. You haven&#39;t selected your own project yet.</p>
+                <p>The <strong>Project path</strong> is still set to the bundled sample <code>tests/fixtures/basic</code></p>
+                <p>You haven&#39;t selected your own project yet.</p>
                 <p>Make sure to fill out the <strong>Project path</strong> with your repository and confirm it uploads successfully before scanning.</p>
                 <div class="default-path-actions">
                   <button type="button" class="secondary prev-step" id="default-path-cancel">Fill in project path</button>
@@ -18062,14 +18218,14 @@ int main() { … }   ← code
                   <div class="toggle-card" style="margin:0;">
                     <div class="field-help-title">Git hotspots</div>
                     <h4 style="margin:6px 0 12px;font-size:16px;">Activity window (days)</h4>
-                    <input type="number" name="activity_window" id="activity_window" min="0" max="3650" placeholder="e.g. 90 — leave blank to disable" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;" />
+                    <input type="number" name="activity_window" id="activity_window" min="0" max="3650" value="90" placeholder="e.g. 90 — set 0 to disable" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;" />
                   </div>
                   <div class="explainer-card prominent" style="margin:0;">
-                    <div class="advanced-rule-description"><strong>Purpose:</strong> When set, oxide-sloc runs a single <code>git log</code> pass over the last N days and ranks files by <strong>code&nbsp;lines&nbsp;&times;&nbsp;recent&nbsp;commits</strong> in a Git Hotspots table — large files that change often are the strongest refactoring candidates.<br /><strong>Requires</strong> the scanned path to be a git repository. This is distinct from the scan-to-scan churn rate shown on the Compare page.</div>
-                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># blank or 0 = disabled (default)
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> <strong>On by default (90 days).</strong> oxide-sloc runs a single <code>git log</code> pass over the last N days and ranks files by <strong>code&nbsp;lines&nbsp;&times;&nbsp;recent&nbsp;commits</strong> in a Git Hotspots table — large files that change often are the strongest refactoring candidates.<br /><strong>Requires</strong> the scanned path to be a git repository. This is distinct from the scan-to-scan churn rate shown on the Compare page.</div>
+                    <div class="code-sample" style="margin-top:10px;font-size:12px;"># 90  = last quarter (default)
 # 30  = last month of activity
-# 90  = last quarter (a common choice)
 # 365 = last year
+# 0   = disable the hotspots table
 # Adds Commits + Last-changed columns to CSV.</div>
                   </div>
                 </div>
@@ -18420,10 +18576,43 @@ int main() { … }   ← code
       var currentStep = 1;
       var previewTimer = null;
       var _previewGen = 0;
+      // True while the scope preview (local) / project upload (server mode) is in
+      // flight. The step 1 -> 2 "Next" button is blocked until it settles so the
+      // user can't advance past a project whose scope/upload isn't ready yet.
+      var previewLoading = false;
+      function setPreviewLoading(loading) {
+        previewLoading = !!loading;
+        var nextBtn = document.getElementById("step1-next");
+        var gate = document.getElementById("preview-gate-status");
+        if (nextBtn) {
+          nextBtn.classList.toggle("is-blocked", previewLoading);
+          nextBtn.setAttribute("aria-disabled", previewLoading ? "true" : "false");
+        }
+        if (gate) {
+          var txt = gate.querySelector(".preview-gate-text");
+          if (txt) txt.textContent = SERVER_MODE
+            ? "Uploading & scanning project…"
+            : "Scanning project scope…";
+          gate.style.display = previewLoading ? "flex" : "none";
+        }
+      }
+      // Info button on the gate: scroll up to the live scope preview so the user
+      // can see exactly what is being scanned (elapsed time + rotating status).
+      var previewGateInfo = document.getElementById("preview-gate-info");
+      if (previewGateInfo) {
+        previewGateInfo.addEventListener("click", function () {
+          var target = document.getElementById("preview-panel");
+          if (!target) return;
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          target.classList.add("preview-panel-flash");
+          setTimeout(function () { target.classList.remove("preview-panel-flash"); }, 1400);
+        });
+      }
       var quickScanBtn = document.getElementById("quick-scan-btn");
 
       function dismissAnalysisModal() {
         if (loading) loading.classList.remove("active");
+        document.body.classList.remove("modal-open");
         ["lc-err","lc-warn","lc-actions","lc-cancelled"].forEach(function(id) {
           var el = document.getElementById(id);
           if (el) el.classList.add("hidden");
@@ -18476,6 +18665,7 @@ int main() { … }   ← code
         var sc0=document.getElementById("lc-speed-card");if(sc0)sc0.classList.add("hidden");
 
         if (loading) loading.classList.add("active");
+        document.body.classList.add("modal-open");
 
         var startTime = Date.now();
         var elapsedTimer = setInterval(function() {
@@ -19295,6 +19485,7 @@ int main() { … }   ← code
         if (!previewPanel || !pathInput) return;
         if (GIT_MODE) {
           previewPanel.innerHTML = '<div class="preview-error" style="color:var(--muted);font-style:italic;">Preview is not available for remote git refs. The scan will check out the source at runtime.</div>';
+          setPreviewLoading(false);
           return;
         }
         var path = pathInput.value.trim();
@@ -19302,6 +19493,7 @@ int main() { … }   ← code
         if (!path) {
           previewPanel.innerHTML = '<div class="preview-hint">Enter a project path above to preview the files that will be in scope.</div>';
           if (zeroWarn) zeroWarn.style.display = 'none';
+          setPreviewLoading(false);
           return;
         }
         var includeValue = includeGlobsInput ? includeGlobsInput.value : "";
@@ -19339,6 +19531,7 @@ int main() { … }   ← code
           var el = document.getElementById('ple');
           if (el) el.textContent = Math.round((Date.now() - _prevStart) / 1000) + 's elapsed';
         }, 1000);
+        setPreviewLoading(true);
         var previewUrl = "/preview?path=" + encodeURIComponent(path)
           + "&include_globs=" + encodeURIComponent(includeValue)
           + "&exclude_globs=" + encodeURIComponent(excludeValue);
@@ -19348,6 +19541,7 @@ int main() { … }   ← code
             if (myGen !== _previewGen) return;
             clearInterval(window._previewInterval); window._previewInterval = null;
             clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null;
+            setPreviewLoading(false);
             previewPanel.innerHTML = html;
             attachPreviewInteractions();
             syncPythonVisibility();
@@ -19387,6 +19581,7 @@ int main() { … }   ← code
             if (myGen !== _previewGen) return;
             clearInterval(window._previewInterval); window._previewInterval = null;
             clearInterval(window._previewElapsedTimer); window._previewElapsedTimer = null;
+            setPreviewLoading(false);
             previewPanel.innerHTML = '<div class="preview-error">Preview request failed: ' + String(err) + '</div>';
           });
       }
@@ -19730,13 +19925,18 @@ int main() { … }   ← code
 
       stepButtons.forEach(function (button) {
         button.addEventListener("click", function () {
-          setStep(Number(button.getAttribute("data-step-target")));
+          var target = Number(button.getAttribute("data-step-target"));
+          // Block jumping forward off step 1 while the preview / upload is running.
+          if (previewLoading && currentStep === 1 && target > 1) return;
+          setStep(target);
         });
       });
 
       Array.prototype.slice.call(document.querySelectorAll(".jump-step")).forEach(function (button) {
         button.addEventListener("click", function () {
-          setStep(Number(button.getAttribute("data-step-target")) || 1);
+          var target = Number(button.getAttribute("data-step-target")) || 1;
+          if (previewLoading && currentStep === 1 && target > 1) return;
+          setStep(target);
         });
       });
 
@@ -19758,6 +19958,8 @@ int main() { … }   ← code
         // that borrow the .next-step style class but carry no data-next target).
         if (!button.hasAttribute("data-next")) return;
         button.addEventListener("click", function () {
+          // Guard step 1 → 2: block while the scope preview / upload is still running.
+          if (button.getAttribute("data-next") === "2" && previewLoading) return;
           // Guard step 1 → 2: warn when the project path is still the sample default.
           if (button.getAttribute("data-next") === "2" && isDefaultSamplePath()) {
             openDefaultPathModal();
@@ -19807,6 +20009,7 @@ int main() { … }   ← code
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
         if (e.altKey || e.ctrlKey || e.metaKey) return;
         if (e.key === "ArrowRight" && currentStep < 4) {
+          if (currentStep === 1 && previewLoading) return;
           if (currentStep === 1 && isDefaultSamplePath()) { openDefaultPathModal(); return; }
           updateReview(); setStep(currentStep + 1);
         }
@@ -20382,6 +20585,7 @@ int main() { … }   ← code
       if (raw.coverage_file) setVal('coverage_file', raw.coverage_file);
       if (raw.cocomo_mode) setSelect('cocomo_mode', raw.cocomo_mode);
       if (raw.complexity_alert) setVal('complexity_alert', String(raw.complexity_alert));
+      if (raw.activity_window !== undefined && raw.activity_window !== null) setVal('activity_window', String(raw.activity_window));
       setSelect('exclude_duplicates', raw.exclude_duplicates ? 'enabled' : 'disabled');
       // Trigger dynamic UI updates after pre-fill.
       setTimeout(function () {
@@ -21410,7 +21614,7 @@ struct SplashTemplate {
         <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">local code analysis - metrics, history and reports</div></div>
       </a>
       <div class="nav-right">
-        <a class="nav-pill" href="/" style="background:rgba(255,255,255,0.22);">Home</a>
+        <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
@@ -21626,6 +21830,7 @@ struct SplashTemplate {
         if (cfg.coverage_file) p.set('coverage_file', cfg.coverage_file);
         if (cfg.cocomo_mode) p.set('cocomo_mode', cfg.cocomo_mode);
         if (cfg.complexity_alert) p.set('complexity_alert', String(cfg.complexity_alert));
+        if (cfg.activity_window !== undefined && cfg.activity_window !== null) p.set('activity_window', String(cfg.activity_window));
         if (cfg.exclude_duplicates) p.set('exclude_duplicates', 'enabled');
         return p;
       }
@@ -21863,16 +22068,16 @@ struct ScanSetupTemplate {
     .delta-chip.pos { background:var(--pos-bg); color:var(--pos); }
     .delta-chip.neg { background:var(--neg-bg); color:var(--neg); }
     .delta-cards-inline { display:grid; grid-template-columns:repeat(7,1fr); gap:8px; flex:1 1 auto; }
-    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; position:relative; cursor:default; transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1); }
+    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; position:relative; cursor:default; transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1); }
     .delta-card-inline:hover { transform:translateY(-3px); box-shadow:0 8px 20px rgba(77,44,20,0.18); z-index:10; }
     .delta-card-val { font-size:16px; font-weight:800; }
     .delta-card-val.pos { color:#1e7e34; }
     .delta-card-val.neg { color:var(--neg); }
     .delta-card-val.mod { color:#b35428; }
     .delta-card-lbl { font-size:10px; color:var(--muted); margin-top:2px; }
-    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; }
+    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; }
     .delta-card-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
-    .delta-card-inline:hover .delta-card-tip { opacity:1; }
+    .delta-card-inline:hover .delta-card-tip { opacity:1; transform:translateX(-50%) translateY(0); }
     .compare-label { font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--info-text, #4467d8); }
     .compare-ts { font-size:13px; color:var(--muted); }
     .compare-banner-stats { display:flex; align-items:center; gap:10px; font-size:14px; flex-wrap:wrap; }
@@ -21943,9 +22148,9 @@ struct ScanSetupTemplate {
     .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
     a.commit-link-value { color:inherit; text-decoration:none; }
     a.commit-link-value:hover { color:var(--accent); text-decoration:underline; }
-    .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity 0.18s ease; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
+    .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
     .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
-    .run-id-chip:hover .chip-tooltip { opacity:1; }
+    .run-id-chip:hover .chip-tooltip { opacity:1; transform:translateX(-50%) translateY(0); }
     .chip-label-icon { display:inline-block; vertical-align:middle; opacity:0.8; flex:0 0 auto; }
     .run-id-short-badge { font-family:ui-monospace,monospace; font-size:13px; font-weight:700; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:2px 8px; letter-spacing:0.04em; white-space:nowrap; align-self:center; }
     body.dark-theme .run-id-short-badge { color:var(--muted-2); }
@@ -21970,22 +22175,22 @@ struct ScanSetupTemplate {
        the cards always occupy exactly two rows; when the count is odd the last
        card spans two columns to fill the trailing cell with no empty gap. */
     .summary-strip-hero { align-items:stretch; }
-    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1); overflow:visible; }
+    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1); overflow:visible; }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
-    .stat-chip:hover .stat-chip-tip { opacity:1; }
+    .stat-chip:hover .stat-chip-tip { opacity:1; transform:translateX(-50%) translateY(0); }
     .cocomo-box { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:20px 22px; }
     .cocomo-box-head { display:flex; align-items:center; gap:10px; margin-bottom:16px; padding-bottom:14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
     .cocomo-box-title { font-size:18px; font-weight:750; color:var(--text); letter-spacing:-0.01em; }
     .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
     .cocomo-mode-pill { display:inline-flex; align-items:center; padding:3px 10px; border-radius:999px; background:var(--surface-3); border:1px solid var(--line-strong); font-size:11px; font-weight:700; color:var(--muted); }
-    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; transform:translateY(-7px); background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .cocomo-mode-tip::before { content:''; position:absolute; bottom:100%; left:14px; border:5px solid transparent; border-bottom-color:var(--text); }
-    .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; }
+    .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; transform:translateY(0); }
     .cocomo-box-note { font-size:13px; color:var(--muted); margin-top:10px; line-height:1.6; }
     /* Submodule panel */
     .submodule-panel { margin-top: 18px; margin-bottom: 18px; padding: 18px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
@@ -22102,7 +22307,7 @@ struct ScanSetupTemplate {
       <div class="nav-status">
         <a class="nav-pill" href="/" style="text-decoration:none;">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -22354,6 +22559,15 @@ struct ScanSetupTemplate {
           <div class="stat-chip-tip">Groups of files with identical content detected. These may inflate SLOC counts. Enable "Exclude duplicates" in scan settings to remove them from totals.</div>
         </div>
         {% endif %}
+        <!-- Reserve "pad" card: revealed by JS only when the visible card count is
+             odd, so the strip always forms exactly two full rows with every column
+             aligned and every card the same width (no oversized card, no gap). -->
+        <div class="stat-chip stat-chip-pad" data-raw="{{ test_assertion_count }}" style="display:none;">
+          <div class="stat-chip-label">Assertions</div>
+          <div class="stat-chip-val">{{ test_assertion_count }}</div>
+          <div class="stat-chip-exact"></div>
+          <div class="stat-chip-tip">Best-effort count of test assertion call lines (assertEquals, EXPECT_*, etc.) detected across all test files.</div>
+        </div>
       </div>
 
       {% if let Some(prev_id) = prev_run_id %}{% if let Some(prev_ts) = prev_run_timestamp %}
@@ -23117,7 +23331,7 @@ struct ScanSetupTemplate {
             var l=t.getAttribute('data-ttl');
             if(l!==null){
               var v=t.getAttribute('data-ttv')||'';
-              rTT.s(e,'<strong>'+escH(l)+'</strong><br>'+escH(v));
+              rTT.s(e,'<strong>'+escH(l)+'</strong><br>'+escH(v).replace(/\n/g,'<br>'));
               return;
             }
             t=t.parentNode;
@@ -23183,24 +23397,22 @@ struct ScanSetupTemplate {
             if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){smalls.push({mAng:ang+sw/2,pct:pct,lang:d.lang,col:COLS[i%COLS.length]});}
             ang+=sw;
           });
-          // Small slices (<5%) get outside labels laid out as a de-overlapped fan of
-          // rows across the top, each showing "Lang pct%". Sequential packing
-          // guarantees no text overlap; leader lines connect each label to its slice.
-          // The whole SVG scales up in Full View, so these stay readable there too.
+          // Small slices (<5%) get outside labels positioned near each slice's own
+          // angular position (a slice on the left gets its label/leader on the left),
+          // then nudged apart horizontally so text never overlaps. Leader lines point
+          // from each slice to its label. Horizontal text keeps long names legible;
+          // the whole SVG scales up in Full View so these stay readable there too.
           if(smalls.length){
             smalls.sort(function(a,b){return a.mAng-b.mAng;});
-            var sPad=8,sRowY=11,sRowH=13,sAvail=DW-2*sPad;
-            smalls.forEach(function(sm){sm.txt=sm.lang+' '+sm.pct+'%';sm.w=sm.txt.length*5+10;});
-            var sRows=[[]],sCur=sRows[0],sCurW=0;
-            smalls.forEach(function(sm){if(sCurW+sm.w>sAvail&&sCur.length){sRows.push([]);sCur=sRows[sRows.length-1];sCurW=0;}sCur.push(sm);sCurW+=sm.w;});
-            sRows.forEach(function(row,ri){
-              var totW=row.reduce(function(a,s){return a+s.w;},0),xx=sPad+Math.max(0,(sAvail-totW)/2),yy=sRowY+ri*sRowH;
-              row.forEach(function(sm){
-                var lx=xx+sm.w/2,axx=cx+Ro*Math.cos(sm.mAng),ayy=cy+Ro*Math.sin(sm.mAng);
-                ds+='<line x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(lx)+'" y2="'+px(yy+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
-                ds+='<text x="'+px(lx)+'" y="'+px(yy)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="pointer-events:none;">'+esc(sm.txt)+'</text>';
-                xx+=sm.w;
-              });
+            var sPad=6,sRowY=11;
+            smalls.forEach(function(sm){sm.txt=sm.lang+' '+sm.pct+'%';sm.w=sm.txt.length*5+8;sm.x=Math.max(sPad+sm.w/2,Math.min(DW-sPad-sm.w/2,cx+(Ro+14)*Math.cos(sm.mAng)));});
+            for(var si=1;si<smalls.length;si++){var mnX=smalls[si-1].x+smalls[si-1].w/2+smalls[si].w/2+3;if(smalls[si].x<mnX)smalls[si].x=mnX;}
+            var sLast=smalls[smalls.length-1],sOver=sLast.x+sLast.w/2-(DW-sPad);
+            if(sOver>0)smalls.forEach(function(sm){sm.x-=sOver;});
+            smalls.forEach(function(sm){
+              var axx=cx+Ro*Math.cos(sm.mAng),ayy=cy+Ro*Math.sin(sm.mAng);
+              ds+='<line x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(sm.x)+'" y2="'+px(sRowY+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
+              ds+='<text x="'+px(sm.x)+'" y="'+px(sRowY)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="pointer-events:none;">'+esc(sm.txt)+'</text>';
             });
           }
         }
@@ -23233,13 +23445,19 @@ struct ScanSetupTemplate {
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
           var lmid=y+barBH/2+4;
+          // Combined breakdown shown when hovering the row, the language name, or the
+          // total at the bar end (\n becomes a line break in the tooltip).
+          var ttv='Code '+fmt(d.code)+'\nComments '+fmt(d.comments)+'\nBlank '+fmt(d.blanks)+'\nTotal '+fmt(phys);
           bs+='<g class="lang-bar-row">';
-          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
-          bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          // Hit area ends just past the total label so empty space to the right of the
+          // bar does not trigger the tooltip — only the name, bar and total are hot.
+          var hitW=px(LW+phys/maxT*BW+8+(String(fmt(phys)).length*6.8)+6);
+          bs+='<rect'+tt(d.lang,ttv)+' x="0" y="'+y+'" width="'+hitW+'" height="'+barBH+'" fill="transparent" style="cursor:pointer;"/>';
+          bs+='<text'+tt(d.lang,ttv)+' x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d" style="cursor:pointer;">'+esc(d.lang)+'</text>';
           if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'" rx="0"/>';var _fc=fitFs(fmt(d.code),cW);if(_fc)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
           if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'" rx="0"/>';var _fm=fitFs(fmt(d.comments),cmW);if(_fm)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
           if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'" rx="0"/>';var _fb=fitFs(fmt(d.blanks),blW);if(_fb)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
-          bs+='<text x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='<text'+tt(d.lang,ttv)+' x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b" style="cursor:pointer;">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
         var ly=SH-14;
@@ -23277,7 +23495,8 @@ struct ScanSetupTemplate {
           var paths=svg.querySelectorAll('path[data-lang]');
           function hl(lang){for(var i=0;i<paths.length;i++){if(paths[i].getAttribute('data-lang')===lang){paths[i].style.filter='brightness(1.18) drop-shadow(0 2px 8px rgba(0,0,0,.25))';paths[i].style.transform='scale(1.05)';paths[i].style.opacity='1';}else{paths[i].style.opacity='0.32';paths[i].style.filter='none';paths[i].style.transform='none';}}}
           function rst(){for(var i=0;i<paths.length;i++){paths[i].style.opacity='';paths[i].style.filter='';paths[i].style.transform='';}}
-          svg.addEventListener('mouseover',function(e){var t=e.target;while(t&&t!==svg){var l=t.getAttribute&&t.getAttribute('data-lang');if(l){hl(l);return;}t=t.parentNode;}});
+          svg.addEventListener('mouseover',function(e){var t=e.target;while(t&&t!==svg){var l=t.getAttribute&&t.getAttribute('data-lang');if(l){hl(l);return;}t=t.parentNode;}rst();});
+          svg.addEventListener('mousemove',function(e){var t=e.target;while(t&&t!==svg){if(t.getAttribute&&t.getAttribute('data-lang'))return;t=t.parentNode;}rst();});
           svg.addEventListener('mouseout',function(e){if(e.relatedTarget&&svg.contains(e.relatedTarget))return;rst();});
         }
         function wireMixLegend(svg){
@@ -23348,7 +23567,7 @@ struct ScanSetupTemplate {
         function renderCompositionInEl(el,mode,shOvr){
           if(!el||!LANG_D||!LANG_D.length)return;
           var OX='#C45C10',GN='#2A6846',GY='#BBBBBB';
-          var LW=110,SH=shOvr||224;
+          var LW=110,SH=shOvr||300;
           var svgW=Math.max(320,el.offsetWidth||480);
           var BW=Math.max(120,svgW-LW-80);
           var legendH=24,topPad=4;
@@ -23446,25 +23665,26 @@ struct ScanSetupTemplate {
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
           var n=SCAT_D.length;
-          var H=hOvr||224,PL=52,PB=36,PT=44;
+          var H=hOvr||300,PL=52,PB=36,PT=44;
           var W=Math.max(320,el.offsetWidth||480);
           var cH=H-PT-PB;
-          // Balanced multi-column legend: ~15 rows/col in Full View, 1–3 cols compact.
-          var legCols,legPerCol,legRowH,legColW;
-          if(hOvr){
-            legCols=Math.max(1,Math.ceil(n/15));
-            legPerCol=Math.ceil(n/legCols);
-            legRowH=Math.min(26,Math.max(16,Math.floor(cH/legPerCol)));
-            legColW=124;
-          }else{
-            legCols=n>26?3:(n>14?2:1);
-            legPerCol=Math.ceil(n/legCols);
-            legRowH=Math.min(20,Math.max(11,Math.floor(cH/legPerCol)));
-            legColW=108;
-          }
+          // Legend: max 2 columns, fills vertical space. The compact card shows the
+          // top languages by code lines plus a "+N more" row linking to Full View;
+          // Full View (hOvr set) shows every language across up to 2 tall columns.
+          var compact=!hOvr;
+          var availH=Math.max(120,H-24);
+          var rowsFit=Math.max(2,Math.floor(availH/18));
+          var legTrunc=compact&&(n>2*rowsFit);
+          var legShown=legTrunc?(2*rowsFit-1):n;
+          var legTotal=legTrunc?(2*rowsFit):n;
+          var legCols=legTotal>Math.min(rowsFit,18)?2:1;
+          var legPerCol=Math.ceil(legTotal/legCols);
+          var legRowH=Math.max(14,Math.min(30,Math.floor(availH/legPerCol)));
+          var legColW=hOvr?144:130;
           var LG=26;
           var legW=legCols*legColW;
           var cW=W-PL-LG-legW;
+          var legOrder=SCAT_D.map(function(_,i){return i;}).sort(function(a,b){return (SCAT_D[b].code||0)-(SCAT_D[a].code||0);});
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
           var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
@@ -23507,24 +23727,33 @@ struct ScanSetupTemplate {
           });
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75">Files Analyzed</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
-          // Legend (right side — balanced columns, colour-coded swatch + name)
+          // Legend (right side — top languages, max 2 columns, fills height)
           var legX=PL+cW+LG;
           var legBlockH=legPerCol*legRowH;
-          var legY0=PT+Math.max(0,Math.floor((cH-legBlockH)/2));
-          SCAT_D.forEach(function(d,i){
-            var col=COLS[i%COLS.length];
-            var cc=Math.floor(i/legPerCol),rr=i%legPerCol;
-            var lx=legX+cc*legColW;
-            var ly=legY0+rr*legRowH+Math.floor(legRowH/2);
-            s+='<g data-lang="'+esc(d.lang)+'" data-ttl="'+esc(d.lang)+'" data-ttv="'+esc(fmt(d.files)+' files · '+fmt(d.code)+' code lines')+'" style="cursor:pointer;">';
-            s+='<rect x="'+lx+'" y="'+(legY0+rr*legRowH)+'" width="'+(legColW-6)+'" height="'+legRowH+'" fill="transparent"/>';
-            s+='<rect x="'+lx+'" y="'+(ly-6)+'" width="22" height="12" rx="2" fill="'+col+'" opacity="0.88" style="pointer-events:none;"/>';
-            s+='<text x="'+(lx+28)+'" y="'+(ly+4)+'" font-family="'+FONT+'" font-size="12" font-weight="400" fill="currentColor" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+          var legY0=Math.max(8,Math.floor((H-legBlockH)/2));
+          function legXY(k){return {x:legX+Math.floor(k/legPerCol)*legColW,y:legY0+(k%legPerCol)*legRowH};}
+          for(var lk=0;lk<legShown;lk++){
+            var oi=legOrder[lk],ld=SCAT_D[oi],lcol=COLS[oi%COLS.length];
+            var lp=legXY(lk),ly=lp.y+Math.floor(legRowH/2);
+            s+='<g data-lang="'+esc(ld.lang)+'" data-ttl="'+esc(ld.lang)+'" data-ttv="'+esc(fmt(ld.files)+' files · '+fmt(ld.code)+' code lines')+'" style="cursor:pointer;">';
+            s+='<rect x="'+lp.x+'" y="'+lp.y+'" width="'+(legColW-6)+'" height="'+legRowH+'" fill="transparent"/>';
+            s+='<rect x="'+lp.x+'" y="'+(ly-6)+'" width="22" height="12" rx="2" fill="'+lcol+'" opacity="0.88" style="pointer-events:none;"/>';
+            s+='<text x="'+(lp.x+28)+'" y="'+(ly+4)+'" font-family="'+FONT+'" font-size="12" font-weight="400" fill="currentColor" style="pointer-events:none;">'+esc(ld.lang)+'</text>';
             s+='</g>';
-          });
+          }
+          if(legTrunc){
+            var pm=legXY(legShown),lym=pm.y+Math.floor(legRowH/2);
+            s+='<g data-more="1" style="cursor:pointer;">';
+            s+='<rect x="'+pm.x+'" y="'+pm.y+'" width="'+(legColW-6)+'" height="'+legRowH+'" fill="transparent"/>';
+            s+='<rect x="'+pm.x+'" y="'+(lym-6)+'" width="22" height="12" rx="2" fill="#9a8c82" opacity="0.45" style="pointer-events:none;"/>';
+            s+='<text x="'+(pm.x+28)+'" y="'+(lym+4)+'" font-family="'+FONT+'" font-size="12" font-style="italic" fill="currentColor" opacity="0.8" style="pointer-events:none;">+'+(n-legShown)+' more</text>';
+            s+='</g>';
+          }
           s+='</svg>';
           el.innerHTML=s;
           wireScatterLegend(el);
+          var moreEl=el.querySelector('g[data-more]');
+          if(moreEl)moreEl.addEventListener('click',function(){var b=document.getElementById('r-scatter-expand');if(b)b.click();});
         }
         renderScatterInEl(document.getElementById('r-scatter-chart'),0);
 
@@ -24095,7 +24324,7 @@ struct ScanSetupTemplate {
     setInterval(doPing,5000);
     if(fm){var isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';fm.textContent='oxide-sloc v{{ version }} \u2014 Mode: '+(isServer?'Network Server':'Local');}
   })();</script>
-  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip-hero');if(!s)return;var items=Array.prototype.slice.call(s.querySelectorAll('.stat-chip'));var n=items.length;if(!n)return;var last=items[n-1];function upd(){var perRow=window.innerWidth<=640?2:Math.ceil(n/2);s.style.gridTemplateColumns='repeat('+perRow+',minmax(0,1fr))';items.forEach(function(el){el.style.gridColumn='';});if(window.innerWidth>640&&perRow*2!==n){last.style.gridColumn='span 2';}}upd();window.addEventListener('resize',upd);})();</script>
+  <script nonce="{{ csp_nonce }}">(function(){var s=document.querySelector('.summary-strip-hero');if(!s)return;var pad=s.querySelector('.stat-chip-pad');var real=Array.prototype.slice.call(s.querySelectorAll('.stat-chip')).filter(function(el){return el!==pad;});if(!real.length)return;function upd(){var n=real.length;if(pad){if(n%2===1){pad.style.display='';n++;}else{pad.style.display='none';}}var perRow=window.innerWidth<=640?2:Math.ceil(n/2);s.style.gridTemplateColumns='repeat('+perRow+',minmax(0,1fr))';}upd();window.addEventListener('resize',upd);})();</script>
   {% if let Some(banner) = report_header_footer %}
   <div class="report-id-footer-banner" aria-label="Report identification">{{ banner|e }}</div>
   {% endif %}
@@ -24176,6 +24405,8 @@ struct ResultTemplate {
     scan_time_display: String,
     os_display: String,
     test_count: u64,
+    // reserve "pad" card, revealed by JS only when the visible card count is odd
+    test_assertion_count: u64,
     // history
     prev_scan_count: usize,
     current_scan_number: usize,
@@ -24334,7 +24565,7 @@ struct ResultTemplate {
         </div>
       </a>
       <div class="nav-right">
-        <a class="nav-pill" href="/" style="background:rgba(255,255,255,0.22);">Home</a>
+        <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
@@ -25097,7 +25328,7 @@ struct ErrorTemplate {
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -25724,13 +25955,13 @@ struct RelocateScanTemplate {
     .pg-btn:disabled{opacity:.35;cursor:default;}
     .summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
     @media(max-width:800px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
-    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}
+    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);}
     .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}
     .stat-chip-val{font-size:20px;font-weight:900;color:var(--oxide);}
     .stat-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
-    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
+    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-7px);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
-    .stat-chip:hover .stat-chip-tip{opacity:1;}
+    .stat-chip:hover .stat-chip-tip{opacity:1;transform:translateX(-50%) translateY(0);}
     .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
     .site-footer{text-align:center;padding:12px 24px;font-size:13px;color:var(--muted);position:relative;z-index:1;}
     .site-footer a{color:var(--muted);}
@@ -26766,13 +26997,13 @@ struct HistoryTemplate {
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
     @media(max-width:800px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
-    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}
+    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);}
     .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}
     .stat-chip-val{font-size:20px;font-weight:900;color:var(--oxide);}
     .stat-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
-    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
+    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-7px);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
-    .stat-chip:hover .stat-chip-tip{opacity:1;}
+    .stat-chip:hover .stat-chip-tip{opacity:1;transform:translateX(-50%) translateY(0);}
     .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
     .sel-count{font-size:11px;background:rgba(255,255,255,0.22);border-radius:999px;padding:1px 8px;font-weight:800;letter-spacing:.02em;margin-left:2px;}
     .instruction-bar{background:rgba(111,155,255,0.08);border:1px solid rgba(111,155,255,0.22);border-radius:10px;padding:8px 14px;font-size:13px;color:var(--accent-2);display:inline-flex;align-items:center;gap:8px;margin-bottom:14px;width:fit-content;max-width:100%;}
@@ -30905,28 +31136,30 @@ mod form_config_tests {
         cfg
     }
 
-    // ── activity_window (git hotspots) ──
+    // ── activity_window (git hotspots — on by default) ──
 
     #[test]
-    fn activity_window_unset_leaves_none() {
+    fn activity_window_defaults_on_when_field_blank() {
+        // Blank form field keeps the config default (90 days).
         let cfg = apply(&blank_form());
-        assert!(cfg.analysis.activity_window_days.is_none());
-    }
-
-    #[test]
-    fn activity_window_sets_days_when_positive() {
-        let mut form = blank_form();
-        form.activity_window = Some("90".to_string());
-        let cfg = apply(&form);
         assert_eq!(cfg.analysis.activity_window_days, Some(90));
     }
 
     #[test]
-    fn activity_window_zero_stays_disabled() {
+    fn activity_window_override_sets_days() {
+        let mut form = blank_form();
+        form.activity_window = Some("30".to_string());
+        let cfg = apply(&form);
+        assert_eq!(cfg.analysis.activity_window_days, Some(30));
+    }
+
+    #[test]
+    fn activity_window_zero_disables() {
+        // An explicit 0 from the form disables hotspots (overrides the default-on).
         let mut form = blank_form();
         form.activity_window = Some("0".to_string());
         let cfg = apply(&form);
-        assert!(cfg.analysis.activity_window_days.is_none());
+        assert_eq!(cfg.analysis.activity_window_days, Some(0));
     }
 
     // ── python_docstrings_as_comments (checkbox, no value attr → sends "on") ──

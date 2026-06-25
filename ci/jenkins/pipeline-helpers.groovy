@@ -230,6 +230,9 @@ def runAnalyze() {
             }
         }
     }
+    if (params.ACTIVITY_WINDOW?.trim() && !(params.ACTIVITY_WINDOW.trim() ==~ /^[0-9]{1,4}$/)) {
+        error("ACTIVITY_WINDOW must be a number of days (0-3650): ${params.ACTIVITY_WINDOW}")
+    }
 
     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
     sh "mkdir -p '${outDir}'"
@@ -268,6 +271,11 @@ def runAnalyze() {
     def submodArg    = params.SUBMODULE_BREAKDOWN ? '--submodule-breakdown'              : ''
     def styleColArg  = (params.STYLE_COL_THRESHOLD?.trim() && params.STYLE_COL_THRESHOLD.trim() != '80')
                         ? "--style-col-threshold '${params.STYLE_COL_THRESHOLD.trim()}'"
+                        : ''
+    // Git Hotspots window. On by default (the binary uses 90 when omitted); only emit the flag
+    // when the operator picked a non-default value, including 0 to disable.
+    def activityArg  = (params.ACTIVITY_WINDOW?.trim() && params.ACTIVITY_WINDOW.trim() != '90')
+                        ? "--activity-window '${params.ACTIVITY_WINDOW.trim()}'"
                         : ''
     // Outputs that mirror the web UI artifact layout: scan-config JSON and
     // per-submodule HTML reports (sub_<name>.html in the output directory).
@@ -309,7 +317,7 @@ def runAnalyze() {
             "${BINARY}" analyze "${SCAN_PATH}" \
                 --report-title "${REPORT_TITLE}" \
                 --mixed-line-policy "${MIXED_LINE_POLICY}" \
-                ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg} ${styleColArg}" + ''' \
+                ''' + "${configArg} ${docArg} ${symlinkArg} ${noIgnoreArg} ${submodArg} ${styleColArg} ${activityArg}" + ''' \
                 ''' + "${langArgs} ${includeArgs} ${excludeArgs} ${branchArg}" + ''' \
                 ''' + "${jsonArg} ${csvArg} ${xlsxArg} ${htmlArg} ${pdfArg}" + ''' \
                 ''' + "${scanConfigArg} ${subHtmlArg}" + '''
