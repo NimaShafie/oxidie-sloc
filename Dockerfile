@@ -5,7 +5,18 @@
 # "GLIBC_2.39 not found" at container startup.
 # Digest pinned to prevent silent base-image substitution.
 # To update: docker pull rust:1.95-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' rust:1.95-slim-bookworm
-FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
+#
+# Base images are build ARGs so a DoD/hardened build can substitute an approved
+# registry image (Iron Bank, Chainguard) WITHOUT editing this file, e.g.:
+#   docker build \
+#     --build-arg BUILDER_IMAGE=registry1.dso.mil/ironbank/rust/rust:1.95 \
+#     --build-arg RUNTIME_IMAGE=registry1.dso.mil/ironbank/redhat/ubi/ubi9-minimal:9.4 \
+#     --build-arg INSTALL_CHROMIUM=0 .
+# Defaults remain the digest-pinned Docker Hub images for the public build.
+# NOTE: ARGs used in FROM must be declared before the first FROM (global scope).
+ARG BUILDER_IMAGE=rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082
+ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+FROM ${BUILDER_IMAGE} AS builder
 
 # Upgrade base packages first to pull in any OS-level security fixes
 # that have landed since the image was published.
@@ -46,16 +57,23 @@ RUN cargo build --release -p oxide-sloc --no-default-features
 # Stage 2: minimal runtime image
 # Pin to a specific digest to prevent silent base-image substitution.
 # To update: docker pull debian:bookworm-slim && docker inspect --format '{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#
+# DoD / hardened deployments: override RUNTIME_IMAGE (declared at the top) with an
+# approved registry image (Iron Bank `registry1.dso.mil/ironbank/...`, Chainguard,
+# or distroless) and build with `--build-arg INSTALL_CHROMIUM=0` to drop the browser.
+FROM ${RUNTIME_IMAGE}
 
-# Install Chromium for PDF export (headless).
-# For a fully air-gapped Docker host, build this layer from a pre-populated
-# apt mirror or use a pre-built image that already contains chromium.
+# Chromium is a large, frequently-CVE'd attack surface. It is only needed for the
+# headless-Chromium PDF path; oxide-sloc has a pure-Rust PDF fallback, so hardened
+# images can omit it with `--build-arg INSTALL_CHROMIUM=0`.
+# For a fully air-gapped Docker host, build this layer from a pre-populated apt mirror.
+ARG INSTALL_CHROMIUM=1
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends \
-    chromium \
-    ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && if [ "$INSTALL_CHROMIUM" = "1" ]; then \
+         apt-get install -y --no-install-recommends chromium; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

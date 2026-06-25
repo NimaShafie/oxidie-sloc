@@ -792,6 +792,7 @@ fn build_router(state: AppState) -> Router {
             post(git_webhook::handle_bitbucket_webhook).layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
+        .layer(middleware::from_fn(csrf_protect))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             add_security_headers,
@@ -1205,9 +1206,13 @@ fn log_startup_url(url: &str, server_mode: bool) {
 
 /// Open the given URL in the default system browser.
 fn open_browser_tab(url: &str) {
+    // Windows: invoke the URL protocol handler directly via rundll32 rather than
+    // `cmd /c start`. `cmd.exe` special-cases `&`, `^`, `%` and `start` treats the
+    // first quoted token as a window title — both are fragile and shell-parsed. The
+    // url.dll handler receives the URL as a single, non-shell argument.
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", "", url])
+    let _ = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
@@ -1414,6 +1419,81 @@ async fn add_security_headers(
     resp
 }
 
+/// Anti-CSRF middleware (defence-in-depth beyond `SameSite=Strict`).
+///
+/// On state-changing methods, browser-driven cookie-authenticated requests must
+/// carry an `Origin` (or `Referer`) whose authority matches the server's `Host`.
+/// This blocks cross-site form/`fetch` POSTs that ride an ambient session cookie.
+///
+/// Deliberately exempt:
+/// * Safe methods (GET/HEAD/OPTIONS/TRACE) — never state-changing.
+/// * Requests bearing `Authorization: Bearer` / `X-API-Key` — token auth is not
+///   ambient, so it is not CSRF-exploitable.
+/// * `/webhooks/*` — authenticated by per-schedule HMAC and legitimately cross-origin.
+/// * Requests with neither `Origin` nor `Referer` — non-browser clients (curl, CI);
+///   a browser performing a CSRF attack always sends `Origin`.
+async fn csrf_protect(req: Request<Body>, next: Next) -> Response {
+    use axum::http::Method;
+
+    let is_state_changing = matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    let path = req.uri().path();
+    let has_token_auth = req.headers().contains_key("X-API-Key")
+        || req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("Bearer "));
+
+    if !is_state_changing || path.starts_with("/webhooks/") || has_token_auth {
+        return next.run(req).await;
+    }
+
+    let headers = req.headers();
+    let header_str = |name: &header::HeaderName| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let origin = header_str(&header::ORIGIN);
+    let referer = header_str(&header::REFERER);
+    let host = header_str(&header::HOST);
+
+    // Extract the authority (host[:port]) from an absolute Origin/Referer URL.
+    let authority_of = |url: &str| -> Option<String> {
+        url.split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or(rest).to_owned())
+    };
+
+    let source_authority = origin
+        .as_deref()
+        .and_then(authority_of)
+        .or_else(|| referer.as_deref().and_then(authority_of));
+
+    match (source_authority, host) {
+        // Neither Origin nor Referer present: treat as a non-browser client.
+        (None, _) => next.run(req).await,
+        (Some(src), Some(h)) if src == h => next.run(req).await,
+        (Some(src), host) => {
+            tracing::warn!(
+                event = "csrf_rejected",
+                path = %path,
+                origin = %src,
+                host = ?host,
+                "Cross-origin state-changing request rejected (CSRF guard)"
+            );
+            (
+                StatusCode::FORBIDDEN,
+                "403 Forbidden — cross-origin request rejected\n",
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Lightweight fade-in applied to ordinary web-UI pages (Home, Compare Scans,
 /// Test Metrics, …). These render instantly, so a full spinner "Loading…" screen
 /// is overkill — a short opacity fade gives a smooth page-to-page transition
@@ -1430,12 +1510,12 @@ fn page_fade_html(nonce: &str) -> String {
     // through the entire body parse, which reads as a delay before navigation "begins"
     // and then a blink. Without a fill-mode the animation starts at first paint and plays
     // 0 -> 1 cleanly, with no pre-paint hold.
-    const STYLE: &str = r##"<style>
+    const STYLE: &str = r"<style>
 @keyframes sloc-page-fade-in{from{opacity:0;}to{opacity:1;}}
 .page,.site-footer{animation:sloc-page-fade-in .3s ease-out;}
 body.sloc-leaving .page,body.sloc-leaving .site-footer{opacity:0;transition:opacity .16s ease-in;animation:none;}
 @media (prefers-reduced-motion:reduce){.page,.site-footer{animation:none;}body.sloc-leaving .page,body.sloc-leaving .site-footer{opacity:1;transition:none;}}
-</style>"##;
+</style>";
     // `dark`: apply the saved dark theme before paint to avoid a light flash.
     // The click handler gives immediate feedback by fading the *content* out the moment a
     // same-origin nav link is clicked, while the top nav stays put. It does NOT call
@@ -1444,7 +1524,7 @@ body.sloc-leaving .page,body.sloc-leaving .site-footer{opacity:0;transition:opac
     // Skips new-tab/modified clicks, downloads, hashes, external links, and same-page
     // links. A safety timer + `pageshow` clear the class so content can't get stuck hidden
     // if the click was actually a download (no unload) or the page is restored from bfcache.
-    const JS: &str = r#"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}function leave(e){if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;if(a.target&&a.target!=='_self')return;if(a.hasAttribute('download'))return;var href=a.getAttribute('href');if(!href||href.charAt(0)==='#')return;if(/^(mailto:|tel:|javascript:)/i.test(href))return;var u;try{u=new URL(a.href,location.href);}catch(_){return;}if(u.origin!==location.origin)return;if(u.pathname===location.pathname&&u.search===location.search)return;var b=document.body;if(!b)return;b.classList.add('sloc-leaving');setTimeout(function(){b.classList.remove('sloc-leaving');},1400);}document.addEventListener('click',leave);window.addEventListener('pageshow',function(){if(document.body)document.body.classList.remove('sloc-leaving');});})();"#;
+    const JS: &str = r"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}function leave(e){if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;if(a.target&&a.target!=='_self')return;if(a.hasAttribute('download'))return;var href=a.getAttribute('href');if(!href||href.charAt(0)==='#')return;if(/^(mailto:|tel:|javascript:)/i.test(href))return;var u;try{u=new URL(a.href,location.href);}catch(_){return;}if(u.origin!==location.origin)return;if(u.pathname===location.pathname&&u.search===location.search)return;var b=document.body;if(!b)return;b.classList.add('sloc-leaving');setTimeout(function(){b.classList.remove('sloc-leaving');},1400);}document.addEventListener('click',leave);window.addEventListener('pageshow',function(){if(document.body)document.body.classList.remove('sloc-leaving');});})();";
     format!("{STYLE}<script nonce=\"{nonce}\">{JS}</script>")
 }
 
@@ -1457,15 +1537,13 @@ async fn inject_page_fade_into_html(resp: &mut Response, nonce: &str) {
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.starts_with("text/html"))
-        .unwrap_or(false);
+        .is_some_and(|v| v.starts_with("text/html"));
     if !is_html {
         return;
     }
     let body = std::mem::replace(resp.body_mut(), Body::empty());
-    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(b) => b,
-        Err(_) => return,
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return;
     };
     let html = match String::from_utf8(bytes.to_vec()) {
         Ok(s) => s,
@@ -3883,24 +3961,38 @@ async fn preview_handler(
     }
 
     if state.server_mode {
-        let canonical = fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-        // Upload temp dirs and built-in sample/fixture paths are always safe to preview.
-        if !is_upload_tmp_path(&canonical) && !is_sample_path(&canonical) {
-            let config = &state.base_config;
-            if config.discovery.allowed_scan_roots.is_empty() {
-                return Html(
-                    r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
-                );
+        // Fail closed: a path that cannot be canonicalised must NOT fall back to the
+        // raw, un-normalised path for the allowlist check (a textual `starts_with` on
+        // `<root>/../../etc` would otherwise pass). On resolution failure, only known-safe
+        // sample/upload locations are permitted; everything else is rejected.
+        match fs::canonicalize(&resolved) {
+            Ok(canonical) => {
+                // Upload temp dirs and built-in sample/fixture paths are always safe.
+                if !is_upload_tmp_path(&canonical) && !is_sample_path(&canonical) {
+                    let config = &state.base_config;
+                    if config.discovery.allowed_scan_roots.is_empty() {
+                        return Html(
+                            r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
+                        );
+                    }
+                    let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
+                        fs::canonicalize(root)
+                            .ok()
+                            .is_some_and(|r| canonical.starts_with(&r))
+                    });
+                    if !allowed {
+                        return Html(
+                            r#"<div class="preview-error">Preview rejected: path is not within an allowed scan directory.</div>"#.to_string()
+                        );
+                    }
+                }
             }
-            let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
-                fs::canonicalize(root)
-                    .ok()
-                    .is_some_and(|r| canonical.starts_with(&r))
-            });
-            if !allowed {
-                return Html(
-                    r#"<div class="preview-error">Preview rejected: path is not within an allowed scan directory.</div>"#.to_string()
-                );
+            Err(_) => {
+                if !is_upload_tmp_path(&resolved) && !is_sample_path(&resolved) {
+                    return Html(
+                        r#"<div class="preview-error">Preview rejected: path could not be resolved to a real directory.</div>"#.to_string()
+                    );
+                }
             }
         }
     }
@@ -4015,7 +4107,32 @@ fn validate_server_scan_path(
         )
             .into_response());
     }
-    let canonical = fs::canonicalize(resolved_path).unwrap_or_else(|_| resolved_path.to_path_buf());
+    // Fail closed: if the path cannot be canonicalised (does not resolve to a real
+    // location) we must NOT fall back to the raw, un-normalised path — a textual
+    // `starts_with` on an unresolved `<root>/../../etc` would otherwise pass the
+    // allowlist. A non-resolvable scan target is rejected outright.
+    let Ok(canonical) = fs::canonicalize(resolved_path) else {
+        tracing::warn!(event = "path_rejected", path = %resolved_path.display(),
+            "Scan path does not resolve to a real location");
+        let template = ErrorTemplate {
+            message: "The requested path could not be resolved to a real directory.".to_string(),
+            last_report_url: None,
+            last_report_label: None,
+            run_id: None,
+            error_code: Some(403),
+            csp_nonce: csp_nonce.to_owned(),
+            version: env!("CARGO_PKG_VERSION"),
+        };
+        return Err((
+            StatusCode::FORBIDDEN,
+            Html(
+                template
+                    .render()
+                    .unwrap_or_else(|_| "<pre>Forbidden.</pre>".to_string()),
+            ),
+        )
+            .into_response());
+    };
     let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
         fs::canonicalize(root)
             .ok()
@@ -4182,6 +4299,14 @@ fn apply_report_opts(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
 }
 
 fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
+    apply_style_col_threshold(config, form);
+    apply_style_analysis_enabled(config, form);
+    apply_style_score_threshold(config, form);
+    apply_style_lang_scope(config, form);
+    apply_activity_window(config, form);
+}
+
+fn apply_style_col_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(threshold_str) = form.style_col_threshold.as_deref() {
         if let Ok(t) = threshold_str.parse::<u16>() {
             if t == 80 || t == 100 || t == 120 {
@@ -4189,20 +4314,32 @@ fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm
             }
         }
     }
+}
+
+fn apply_style_analysis_enabled(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(v) = form.style_analysis_enabled.as_deref() {
         config.analysis.style_analysis_enabled = v != "disabled";
     }
+}
+
+fn apply_style_score_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(v) = form.style_score_threshold.as_deref() {
         if let Ok(t) = v.parse::<u8>() {
             config.analysis.style_score_threshold = t.min(100);
         }
     }
+}
+
+fn apply_style_lang_scope(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     if let Some(v) = form.style_lang_scope.as_deref() {
         let scope = v.trim();
         if scope == "c_family" || scope == "all" {
             config.analysis.style_lang_scope = scope.to_string();
         }
     }
+}
+
+fn apply_activity_window(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
     // Git hotspots window. On by default (config default 90). A parsed value overrides it —
     // including 0, which disables hotspots. A blank/unparseable field keeps the default.
     if let Some(w) = form.activity_window.as_deref() {
@@ -5301,7 +5438,7 @@ fn build_lang_chart_json(run: &AnalysisRun) -> String {
     langs.sort_by_key(|l| std::cmp::Reverse(l.code_lines));
     let entries: Vec<String> = langs
         .into_iter()
-        .take(16)
+        .take(12)
         .map(|l| {
             let name = json_escape(l.language.display_name());
             format!(
@@ -23447,7 +23584,7 @@ struct ScanSetupTemplate {
           var lmid=y+barBH/2+4;
           // Combined breakdown shown when hovering the row, the language name, or the
           // total at the bar end (\n becomes a line break in the tooltip).
-          var ttv='Code '+fmt(d.code)+'\nComments '+fmt(d.comments)+'\nBlank '+fmt(d.blanks)+'\nTotal '+fmt(phys);
+          var ttv='Code: '+fmt(d.code)+'\nComments: '+fmt(d.comments)+'\nBlank: '+fmt(d.blanks)+'\nTotal: '+fmt(phys);
           bs+='<g class="lang-bar-row">';
           // Hit area ends just past the total label so empty space to the right of the
           // bar does not trigger the tooltip — only the name, bar and total are hot.
@@ -23585,12 +23722,13 @@ struct ScanSetupTemplate {
               var cW=(d.code||0)/tot2*BW,cmW=(d.comments||0)/tot2*BW,blW=(d.blanks||0)/tot2*BW;
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
-              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              var ttvc='Code: '+fmt(d.code||0)+'\nComments: '+fmt(d.comments||0)+'\nBlank: '+fmt(d.blanks||0)+'\nTotal: '+fmt(d.physical||tot2);
+              s+='<text'+tt(d.lang,ttvc)+' x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor" style="cursor:pointer;">'+esc(d.lang)+'</text>';
               if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';var _fc=fitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
               if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';var _fm=fitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
               if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';var _fb=fitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var pct=Math.round((d.code||0)/tot2*100);
-              s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+pct+'%</text>';
+              s+='<text'+tt(d.lang,ttvc)+' x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="cursor:pointer;">'+pct+'%</text>';
             });
           } else {
             var maxT=Math.max.apply(null,LANG_D.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);}))||1;
@@ -23598,11 +23736,12 @@ struct ScanSetupTemplate {
               var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
               var y=topPad+i*rowTotal+Math.floor((rowTotal-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
-              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor">'+esc(d.lang)+'</text>';
+              var ttvc='Code: '+fmt(d.code||0)+'\nComments: '+fmt(d.comments||0)+'\nBlank: '+fmt(d.blanks||0)+'\nTotal: '+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0));
+              s+='<text'+tt(d.lang,ttvc)+' x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="currentColor" style="cursor:pointer;">'+esc(d.lang)+'</text>';
               if(cW>0.5){s+='<rect'+tt(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+bH+'" fill="'+OX+'"/>';var _fc=fitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
               if(cmW>0.5){s+='<rect'+tt(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+bH+'" fill="'+GN+'"/>';var _fm=fitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
               if(blW>0.5){s+='<rect'+tt(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+bH+'" fill="'+GY+'"/>';var _fb=fitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
-              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
+              s+='<text'+tt(d.lang,ttvc)+' x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="currentColor" style="cursor:pointer;">'+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0))+'</text>';
             });
           }
           var ly=SH-legendH+4;

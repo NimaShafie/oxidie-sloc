@@ -32,6 +32,8 @@ bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 
 - **CLI + web UI** — `analyze / report / diff / serve / send / init` commands; guided 4-step web flow with Quick Scan
 - **IEEE 1045-1992 physical SLOC** — configurable mixed-line, continuation-line, compiler-directive, and blank-in-comment policies; symbol counting (functions, classes, variables, imports)
+- **Deep metrics** — COCOMO I effort/cost estimate, approximate cyclomatic complexity (branch-keyword count), ULOC / DRYness, and duplicate-file detection on every run
+- **Git Hotspots** — ranks refactor candidates by `code lines × commit activity` over a configurable window (90 days by default); per-file commit counts and last-changed dates from a single `git log` pass
 - **Test Metrics** — lexical test function detection across 60 languages; test-to-code density; multi-format coverage import (LCOV, Cobertura XML, JaCoCo XML, coverage.py JSON, Istanbul/NYC JSON)
 - **Flexible output** — HTML reports, PDF, CSV, and 4-sheet Excel export; re-render any saved JSON
 - **Git integration** — branch/tag/commit browser, GitHub/GitLab/Bitbucket webhooks and polling, submodule breakdown
@@ -48,11 +50,15 @@ bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 | Test function detection | ✓ | — | — | — |
 | Trend / history tracking | ✓ | — | — | — |
 | Coverage file import | ✓ | — | — | — |
+| Git Hotspots (churn × size) | ✓ | — | — | — |
+| COCOMO + complexity¹ + DRYness | ✓ | — | — | ✓ |
 | IEEE 1045-1992 compliance | ✓ | partial | — | — |
 | REST API + SVG badge | ✓ | — | — | — |
 | Git webhook integration | ✓ | — | — | — |
 | CI/CD marketplace action | ✓ | — | — | — |
 | Offline / air-gapped build | ✓ | — | — | — |
+
+¹ Complexity is a lexical approximation — a sum of branch/decision keywords (`if`, `for`, `while`, `||`, `&&`, …) per code line, not a control-flow-graph McCabe computation.
 
 cloc, tokei, and scc win on raw language count and throughput for pure line-counting pipelines.
 oxide-sloc is the right choice when you need analysis depth, visual reports, history, or
@@ -116,6 +122,7 @@ oxide-sloc analyze ./my-repo --per-file
 oxide-sloc analyze ./my-repo --fail-on-warnings --fail-below 10000
 oxide-sloc analyze ./my-repo --enabled-language rust --enabled-language python
 oxide-sloc analyze ./my-repo --submodule-breakdown
+oxide-sloc analyze ./my-repo --per-file --activity-window 90    # Git Hotspots (0 disables)
 
 # Other commands
 oxide-sloc report result.json -H report.html --pdf-out report.pdf
@@ -133,9 +140,9 @@ Run `oxide-sloc <command> --help` for the full flag list.
 oxide-sloc serve   # → http://127.0.0.1:4317
 ```
 
-A guided 4-step flow: select project → counting rules → outputs → review & run. **Quick Scan** submits from step 1 with all defaults.
+A guided 4-step flow: select project → counting rules → outputs → review & run. **Quick Scan** submits from step 1 with all defaults. Reports include a ranked **Git Hotspots** table (when run against a git repo) alongside the SLOC, complexity, and COCOMO breakdowns.
 
-Additional pages: **Test Metrics** (`/test-metrics`), **Trend Reports** (`/trend-reports`), **Compare Scans** (`/compare-scans`).
+Additional pages: **Test Metrics** (`/test-metrics`), **Trend Reports** (`/trend-reports`), **Compare Scans** (`/compare-scans`), and the **Git Browser** (`/git-browser`) for scanning any branch, tag, or commit.
 
 ### Configuration
 
@@ -227,12 +234,14 @@ cargo run -p oxide-sloc -- serve    # http://127.0.0.1:4317
 
 ```
 crates/
-  sloc-cli/         # CLI entry point and commands
+  sloc-cli/         # CLI entry point and commands (binary: oxide-sloc)
   sloc-config/      # Config schema and TOML parsing
-  sloc-core/        # File discovery, decoding, aggregation, delta engine
+  sloc-core/        # File discovery, decoding, aggregation, delta engine, COCOMO/hotspots
+  sloc-git/         # Git CLI wrappers, webhook parsing, scan-schedule store
   sloc-languages/   # Language detection, lexical analyzers, symbol counting
   sloc-report/      # HTML rendering, PDF/CSV/Excel export
   sloc-web/         # Axum web server, metrics API, badge endpoint
+  sloc-mcp/         # MCP stdio server for AI agent integration
 ci/                 # CI scripts + config presets
 docs/               # airgap.md, ci-integrations.md, server-deployment.md, openapi.yaml
 dist/               # Windows pre-built binary (committed by CI after each release)
@@ -257,7 +266,7 @@ cargo build -p sloc-mcp
 
 Available tools: `analyze_path` · `get_metrics_latest` · `get_metrics_history` · `get_run_metrics` · `compare_runs` · `health_check` · `ingest_result`
 
-Pre-built tool definitions for Claude API (`tool_use`) and OpenAI (`function_calling`): [`docs/mcp/`](./docs/mcp/).
+Pre-built tool definitions for Claude API (`tool_use`) and OpenAI (`function_calling`): [`docs/mcp/`](./docs/mcp/). A running server also exposes `GET /llms.txt` and `GET /llms-full.txt` for agent self-discovery.
 
 ---
 

@@ -1,0 +1,52 @@
+name: DAST (OWASP ZAP baseline)
+
+# Closes audit coverage gap F-09: dynamic scan of a running oxide-sloc instance.
+# Runs on demand and weekly (not on every PR — DAST is slow and noisy). Builds the
+# binary, starts `serve` in desktop mode (no API key) so ZAP can crawl all routes,
+# then runs the OWASP ZAP baseline (passive) scan and uploads the report.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "27 6 * * 1" # Mondays 06:27 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  zap-baseline:
+    name: ZAP baseline scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: cargo build --release -p oxide-sloc
+
+      - name: Start server
+        run: |
+          # Desktop mode (no SLOC_API_KEY, no --server) so auth is open-by-default and
+          # the scanner can reach every route. SLOC_BIND exposes it to the ZAP container.
+          SLOC_BIND=0.0.0.0:4317 ./target/release/oxide-sloc serve &
+          echo "SERVER_PID=$!" >> "$GITHUB_ENV"
+          # Wait for the health endpoint to come up (max ~30s).
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4317/healthz >/dev/null 2>&1; then
+              echo "server is up"; break
+            fi
+            sleep 1
+          done
+
+      - name: ZAP baseline scan
+        # TODO: pin to a commit SHA once resolvable (repo convention is SHA-pinned actions).
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: http://localhost:4317
+          # Non-blocking: report findings without failing the build. Flip to `false`
+          # (and curate the rules file) once the baseline is triaged.
+          fail_action: false
+          cmd_options: "-a"
+
+      - name: Stop server
+        if: always()
+        run: kill "${SERVER_PID}" 2>/dev/null || true

@@ -9,19 +9,77 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
 use axum::{
     body::Body,
     extract::{Form, Query, State},
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{Html, IntoResponse, Response},
 };
 
 use crate::{AppState, CspNonce, LoginTemplate};
 use askama::Template as _;
+
+// ── Trusted-proxy / client-IP resolution ───────────────────────────────────────
+
+/// Trusted reverse-proxy addresses parsed once from `SLOC_TRUSTED_PROXIES`
+/// (comma-separated IPs). Only when the direct peer is one of these do we believe
+/// the `X-Forwarded-For` header — never trust XFF from an arbitrary client.
+fn trusted_proxies() -> &'static [IpAddr] {
+    static TP: OnceLock<Vec<IpAddr>> = OnceLock::new();
+    TP.get_or_init(|| {
+        std::env::var("SLOC_TRUSTED_PROXIES")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+            .collect()
+    })
+}
+
+/// Resolve the real client IP for rate-limiting / lockout. When the transport peer
+/// is a configured trusted proxy, walk `X-Forwarded-For` from right to left and
+/// return the first address that is not itself a trusted proxy. Otherwise the
+/// transport peer IP is authoritative.
+fn client_ip_from(headers: &HeaderMap, peer_ip: IpAddr) -> IpAddr {
+    if !trusted_proxies().contains(&peer_ip) {
+        return peer_ip;
+    }
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        for entry in xff.split(',').rev() {
+            if let Ok(ip) = entry.trim().parse::<IpAddr>() {
+                if !trusted_proxies().contains(&ip) {
+                    return ip;
+                }
+            }
+        }
+    }
+    peer_ip
+}
+
+/// Whether session cookies must carry the `Secure` attribute. True when TLS is
+/// terminated in-process, or when `SLOC_SECURE_COOKIES` is set (for deployments
+/// behind a TLS-terminating reverse proxy).
+fn secure_cookies(state: &AppState) -> bool {
+    state.tls_enabled
+        || std::env::var("SLOC_SECURE_COOKIES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+/// Session cookie name. The `__Host-` prefix (Secure + Path=/ + no Domain) is used
+/// whenever cookies are Secure, giving the strongest browser binding; plain mode
+/// falls back to the unprefixed name (the prefix *requires* Secure).
+fn session_cookie_name(secure: bool) -> &'static str {
+    if secure {
+        "__Host-sloc_session"
+    } else {
+        "sloc_session"
+    }
+}
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
@@ -76,10 +134,11 @@ pub(crate) async fn require_api_key(
     }
 
     let keys = &state.api_keys;
-    let peer_ip = req
+    let conn_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |c| c.0.ip());
+    let peer_ip = client_ip_from(req.headers(), conn_ip);
 
     let auth_header = req
         .headers()
@@ -217,10 +276,12 @@ fn ct_eq(a: &str, b: &str) -> bool {
 }
 
 fn extract_session_cookie(cookie_header: &str) -> Option<&str> {
+    // Accept both the plain and the `__Host-`-prefixed (Secure) cookie names so a
+    // session survives regardless of which mode set it.
     cookie_header.split(';').find_map(|pair| {
         let pair = pair.trim();
         let (k, v) = pair.split_once('=')?;
-        if k.trim() == "sloc_session" {
+        if matches!(k.trim(), "sloc_session" | "__Host-sloc_session") {
             Some(v.trim())
         } else {
             None
@@ -321,9 +382,10 @@ pub(crate) async fn auth_login_get(
 pub(crate) async fn auth_login_post(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Form(form): Form<LoginFormData>,
 ) -> Response {
-    let peer_ip = peer_addr.ip();
+    let peer_ip = client_ip_from(&headers, peer_addr.ip());
     let next_url = form
         .next
         .as_deref()
@@ -349,9 +411,11 @@ pub(crate) async fn auth_login_post(
         sessions.retain(|_, &mut exp| exp > now);
         sessions.insert(session_id.clone(), expiry);
         drop(sessions);
-        let secure_flag = if state.tls_enabled { "; Secure" } else { "" };
+        let secure = secure_cookies(&state);
+        let secure_flag = if secure { "; Secure" } else { "" };
+        let name = session_cookie_name(secure);
         let cookie_value = format!(
-            "sloc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}{secure_flag}",
+            "{name}={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}{secure_flag}",
         );
         let location =
             HeaderValue::from_str(safe_next).unwrap_or_else(|_| HeaderValue::from_static("/"));
@@ -393,9 +457,12 @@ pub(crate) async fn auth_logout(State(state): State<AppState>, req: Request<Body
         sessions.remove(tok);
     }
 
-    // Expire the cookie on the client side regardless.
-    let expire_cookie =
+    // Expire the cookie on the client side regardless. We don't know which name was
+    // set (plain vs `__Host-` Secure), so expire both variants.
+    let expire_plain =
         "sloc_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    let expire_host =
+        "__Host-sloc_session=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
 
     let redirect_to = if state.api_keys.is_empty() {
         "/"
@@ -403,12 +470,15 @@ pub(crate) async fn auth_logout(State(state): State<AppState>, req: Request<Body
         "/auth/login"
     };
     let location = HeaderValue::from_str(redirect_to).unwrap_or(HeaderValue::from_static("/"));
-    let cookie_hv = HeaderValue::from_str(expire_cookie)
-        .unwrap_or_else(|_| HeaderValue::from_static("sloc_session=; Path=/; HttpOnly; Max-Age=0"));
 
     let mut resp = StatusCode::FOUND.into_response();
     resp.headers_mut().insert(header::LOCATION, location);
-    resp.headers_mut().insert(header::SET_COOKIE, cookie_hv);
+    if let Ok(hv) = HeaderValue::from_str(expire_plain) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    if let Ok(hv) = HeaderValue::from_str(expire_host) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
     tracing::info!(event = "auth_logout", "Session invalidated via logout");
     resp
 }

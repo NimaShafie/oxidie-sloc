@@ -2132,6 +2132,70 @@ fn pdf_draw_header_meta(
     layer.use_text(text, 6.5, Mm(x), Mm(baseline_y), font);
 }
 
+/// Draw the per-page mini header band (dark bar with "oxide-sloc", the truncated report `title`,
+/// and right-aligned run metadata) shared by the dedicated T&C and Git Hotspots pages. `h` is the
+/// page height and `hdr_h` the band height.
+fn pdf_page_mini_header(ctx: &PdfCtx<'_>, h: f32, hdr_h: f32, title: &str, run: &AnalysisRun) {
+    use printpdf::{Color, Mm, Rgb};
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        h - hdr_h,
+        ctx.w,
+        hdr_h,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        "oxide-sloc",
+        9.0,
+        Mm(ctx.margin),
+        Mm(h - 5.5),
+        ctx.font_bold,
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    ctx.layer.use_text(
+        pdf_trunc(&pdf_safe_str(title), 45),
+        7.5,
+        Mm(46.0),
+        Mm(h - 5.5),
+        ctx.font_reg,
+    );
+    pdf_draw_header_meta(
+        ctx.layer,
+        ctx.font_reg,
+        ctx.w,
+        ctx.margin,
+        h - 5.5,
+        &pdf_page_header_meta(run),
+    );
+}
+
+/// Draw the standard page footer band (light bar with the version/licence line) shared by the
+/// dedicated T&C and Git Hotspots pages.
+fn pdf_page_footer_band(ctx: &PdfCtx<'_>, footer_h: f32, version: &str) {
+    use printpdf::{Color, Mm, Rgb};
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        0.0,
+        ctx.w,
+        footer_h,
+        Rgb::new(0.93, 0.91, 0.87, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    ctx.layer.use_text(
+        format!("oxide-sloc v{version}  \u{00b7}  AGPL-3.0-or-later"),
+        6.5,
+        Mm(ctx.margin),
+        Mm(3.0),
+        ctx.font_reg,
+    );
+}
+
 /// Create a dedicated "Tests & Coverage" page, render its content inline, and return the
 /// `(page, layer, y_bottom)` tuple so `pdf_render_per_file_pages` can continue on this page.
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
@@ -2147,7 +2211,7 @@ fn pdf_render_tests_coverage_page(
     title: &str,
     version: &str,
 ) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
-    use printpdf::{Color, Mm, Rgb};
+    use printpdf::Mm;
     const HDR_H: f32 = 8.0;
 
     let (tc_page, tc_layer_idx) = doc.add_page(Mm(w), Mm(h), "Tests & Coverage");
@@ -2162,58 +2226,12 @@ fn pdf_render_tests_coverage_page(
         tbl_hdr_h: 6.0,
     };
 
-    // Mini header bar
-    pdf_fill_rect(
-        ctx.layer,
-        0.0,
-        h - HDR_H,
-        w,
-        HDR_H,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer
-        .use_text("oxide-sloc", 9.0, Mm(margin), Mm(h - 5.5), ctx.font_bold);
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-    ctx.layer.use_text(
-        pdf_trunc(&pdf_safe_str(title), 45),
-        7.5,
-        Mm(46.0),
-        Mm(h - 5.5),
-        ctx.font_reg,
-    );
-    pdf_draw_header_meta(
-        ctx.layer,
-        ctx.font_reg,
-        w,
-        margin,
-        h - 5.5,
-        &pdf_page_header_meta(run),
-    );
+    pdf_page_mini_header(&ctx, h, HDR_H, title, run);
 
     // T&C content inline
     let tc_bottom = pdf_render_tc_inline(&ctx, run, h - HDR_H - 4.0, footer_h);
 
-    // Footer
-    pdf_fill_rect(
-        ctx.layer,
-        0.0,
-        0.0,
-        w,
-        footer_h,
-        Rgb::new(0.93, 0.91, 0.87, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-    ctx.layer.use_text(
-        format!("oxide-sloc v{version}  \u{00b7}  AGPL-3.0-or-later"),
-        6.5,
-        Mm(margin),
-        Mm(3.0),
-        ctx.font_reg,
-    );
+    pdf_page_footer_band(&ctx, footer_h, version);
 
     (tc_page, tc_layer_idx, tc_bottom - 3.0)
 }
@@ -2647,6 +2665,36 @@ fn pdf_render_per_file_pages(
     }
 }
 
+/// Draw the dark section-header bar (full usable width, `hdr_h` tall, top edge at `section_top`)
+/// with `title` rendered in white bold at the left. Shared by every PDF report section so the
+/// header styling stays identical across them.
+fn pdf_section_header_bar(
+    ctx: &PdfCtx<'_>,
+    usable_w: f32,
+    section_top: f32,
+    hdr_h: f32,
+    title: &str,
+) {
+    use printpdf::{Color, Mm, Rgb};
+    pdf_fill_rect(
+        ctx.layer,
+        ctx.margin,
+        section_top - hdr_h,
+        usable_w,
+        hdr_h,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        title,
+        7.0,
+        Mm(ctx.margin + 2.0),
+        Mm(section_top - hdr_h + 1.5),
+        ctx.font_bold,
+    );
+}
+
 /// Render the Code Style Analysis section onto page 1 of the printpdf PDF.
 ///
 /// Draws below the metric tables: a section header, four summary chips, and a
@@ -2671,23 +2719,7 @@ fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f3
     let chip_w = (usable_w - 3.0 * CHIP_GAP) / 4.0;
 
     // ── section header bar ────────────────────────────────────────────────────
-    pdf_fill_rect(
-        ctx.layer,
-        ctx.margin,
-        section_top - HDR_H,
-        usable_w,
-        HDR_H,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
-        "CODE STYLE ANALYSIS",
-        7.0,
-        Mm(ctx.margin + 2.0),
-        Mm(section_top - HDR_H + 1.5),
-        ctx.font_bold,
-    );
+    pdf_section_header_bar(ctx, usable_w, section_top, HDR_H, "CODE STYLE ANALYSIS");
     let col_label = format!("{}-Col", ss.col_threshold);
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(0.85, 0.65, 0.35, None)));
@@ -2838,22 +2870,12 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
     let usable_w = 2.0_f32.mul_add(-ctx.margin, ctx.w);
 
     // Section header bar
-    pdf_fill_rect(
-        ctx.layer,
-        ctx.margin,
-        section_top - HDR_H,
+    pdf_section_header_bar(
+        ctx,
         usable_w,
+        section_top,
         HDR_H,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
         "CONSTRUCTIVE COST MODEL (COCOMO I) ESTIMATE",
-        7.0,
-        Mm(ctx.margin + 2.0),
-        Mm(section_top - HDR_H + 1.5),
-        ctx.font_bold,
     );
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(0.85, 0.65, 0.35, None)));
@@ -2953,22 +2975,12 @@ fn pdf_render_hotspots_section(ctx: &PdfCtx<'_>, rows: &[HotspotRow], section_to
     let usable_w = 2.0_f32.mul_add(-ctx.margin, ctx.w);
 
     // Section header bar.
-    pdf_fill_rect(
-        ctx.layer,
-        ctx.margin,
-        section_top - HDR_H,
+    pdf_section_header_bar(
+        ctx,
         usable_w,
+        section_top,
         HDR_H,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer.use_text(
         "GIT HOTSPOTS (CODE LINES x RECENT COMMITS)",
-        7.0,
-        Mm(ctx.margin + 2.0),
-        Mm(section_top - HDR_H + 1.5),
-        ctx.font_bold,
     );
 
     // Column right edges (numeric columns are right-aligned); File fills the remaining left space.
@@ -3081,7 +3093,7 @@ fn pdf_render_hotspots_page(
     title: &str,
     version: &str,
 ) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
-    use printpdf::{Color, Mm, Rgb};
+    use printpdf::Mm;
     const HDR_H: f32 = 8.0;
 
     let (page, layer_idx) = doc.add_page(Mm(w), Mm(h), "Git Hotspots");
@@ -3096,57 +3108,11 @@ fn pdf_render_hotspots_page(
         tbl_hdr_h: 6.0,
     };
 
-    // Mini page header bar.
-    pdf_fill_rect(
-        ctx.layer,
-        0.0,
-        h - HDR_H,
-        w,
-        HDR_H,
-        Rgb::new(0.098, 0.11, 0.15, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    ctx.layer
-        .use_text("oxide-sloc", 9.0, Mm(margin), Mm(h - 5.5), ctx.font_bold);
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-    ctx.layer.use_text(
-        pdf_trunc(&pdf_safe_str(title), 45),
-        7.5,
-        Mm(46.0),
-        Mm(h - 5.5),
-        ctx.font_reg,
-    );
-    pdf_draw_header_meta(
-        ctx.layer,
-        ctx.font_reg,
-        w,
-        margin,
-        h - 5.5,
-        &pdf_page_header_meta(run),
-    );
+    pdf_page_mini_header(&ctx, h, HDR_H, title, run);
 
     let bottom = pdf_render_hotspots_section(&ctx, rows, h - HDR_H - 4.0);
 
-    // Footer.
-    pdf_fill_rect(
-        ctx.layer,
-        0.0,
-        0.0,
-        w,
-        footer_h,
-        Rgb::new(0.93, 0.91, 0.87, None),
-    );
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-    ctx.layer.use_text(
-        format!("oxide-sloc v{version}  \u{00b7}  AGPL-3.0-or-later"),
-        6.5,
-        Mm(margin),
-        Mm(3.0),
-        ctx.font_reg,
-    );
+    pdf_page_footer_band(&ctx, footer_h, version);
 
     (page, layer_idx, bottom - 3.0)
 }
@@ -3361,191 +3327,112 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
 
 /// Per-character advance widths for the PDF built-in Helvetica and Helvetica-Bold fonts
 /// (1/1000 em units, PDF spec Appendix D). Used to right-align text without a layout engine.
-//
-// This is a verbatim transcription of the PDF spec width tables: one arm per glyph keeps
-// each entry individually traceable to the spec and auditable. Collapsing equal-width
-// glyphs into shared arms (what `match_same_arms` asks for) would destroy that mapping and
-// invite transcription errors in a metrics-critical lookup, so it is intentionally kept flat.
-#[allow(
-    clippy::match_same_arms,
-    clippy::too_many_lines,
-    reason = "verbatim PDF spec width table; one arm per glyph is intentional"
-)]
-const fn helvetica_advance(ch: char, bold: bool) -> u32 {
+///
+/// Each row is `(glyph, bold_advance, regular_advance)`, a verbatim transcription of the PDF
+/// spec width tables. Keeping both weights on one row per glyph preserves the spec mapping for
+/// audit while expressing it as data rather than two parallel `match` arms. Digits (`'0'..='9'`,
+/// 556 in both weights) are handled in `helvetica_advance` and intentionally omitted here.
+const HELVETICA_WIDTHS: &[(char, u32, u32)] = &[
+    (' ', 278, 278),
+    ('!', 333, 278),
+    ('"', 474, 355),
+    ('#', 556, 556),
+    ('$', 556, 556),
+    ('%', 889, 889),
+    ('&', 722, 667),
+    ('\'', 278, 222),
+    ('(', 333, 333),
+    (')', 333, 333),
+    ('*', 389, 389),
+    ('+', 584, 584),
+    (',', 278, 278),
+    ('-', 333, 333),
+    ('.', 278, 278),
+    ('/', 278, 278),
+    (':', 333, 278),
+    (';', 333, 278),
+    ('<', 584, 584),
+    ('=', 584, 584),
+    ('>', 584, 584),
+    ('?', 556, 472),
+    ('@', 975, 1015),
+    ('A', 722, 667),
+    ('B', 722, 667),
+    ('C', 722, 722),
+    ('D', 722, 722),
+    ('E', 667, 667),
+    ('F', 611, 611),
+    ('G', 778, 778),
+    ('H', 722, 722),
+    ('I', 278, 278),
+    ('J', 556, 500),
+    ('K', 722, 667),
+    ('L', 611, 556),
+    ('M', 833, 833),
+    ('N', 722, 722),
+    ('O', 778, 778),
+    ('P', 667, 667),
+    ('Q', 778, 778),
+    ('R', 722, 722),
+    ('S', 667, 667),
+    ('T', 611, 611),
+    ('U', 722, 722),
+    ('V', 667, 667),
+    ('W', 944, 944),
+    ('X', 667, 667),
+    ('Y', 611, 611),
+    ('Z', 611, 611),
+    ('[', 333, 278),
+    ('\\', 278, 278),
+    (']', 333, 278),
+    ('^', 584, 469),
+    ('_', 556, 556),
+    ('`', 278, 222),
+    ('a', 556, 556),
+    ('b', 611, 556),
+    ('c', 556, 500),
+    ('d', 611, 556),
+    ('e', 556, 556),
+    ('f', 333, 278),
+    ('g', 611, 556),
+    ('h', 611, 556),
+    ('i', 278, 222),
+    ('j', 278, 222),
+    ('k', 556, 500),
+    ('l', 278, 222),
+    ('m', 889, 833),
+    ('n', 611, 556),
+    ('o', 611, 556),
+    ('p', 611, 556),
+    ('q', 611, 556),
+    ('r', 389, 333),
+    ('s', 556, 500),
+    ('t', 333, 278),
+    ('u', 611, 556),
+    ('v', 556, 500),
+    ('w', 778, 722),
+    ('x', 556, 500),
+    ('y', 556, 500),
+    ('z', 500, 500),
+    ('\u{00B7}', 278, 278), // middle dot (Latin-1 0xB7) — used as section separator
+];
+
+/// Advance width (1/1000 em) for `ch` in Helvetica (`bold` selects the bold weight). Looks up
+/// `HELVETICA_WIDTHS`; digits are a uniform 556, and unknown glyphs fall back to the average
+/// advance for the weight (556 bold, 500 regular).
+fn helvetica_advance(ch: char, bold: bool) -> u32 {
+    if ch.is_ascii_digit() {
+        return 556;
+    }
+    for &(glyph, bold_w, regular_w) in HELVETICA_WIDTHS {
+        if glyph == ch {
+            return if bold { bold_w } else { regular_w };
+        }
+    }
     if bold {
-        match ch {
-            ' ' => 278,
-            '!' => 333,
-            '"' => 474,
-            '#' => 556,
-            '$' => 556,
-            '%' => 889,
-            '&' => 722,
-            '\'' => 278,
-            '(' => 333,
-            ')' => 333,
-            '*' => 389,
-            '+' => 584,
-            ',' => 278,
-            '-' => 333,
-            '.' => 278,
-            '/' => 278,
-            '0'..='9' => 556,
-            ':' => 333,
-            ';' => 333,
-            '<' => 584,
-            '=' => 584,
-            '>' => 584,
-            '?' => 556,
-            '@' => 975,
-            'A' => 722,
-            'B' => 722,
-            'C' => 722,
-            'D' => 722,
-            'E' => 667,
-            'F' => 611,
-            'G' => 778,
-            'H' => 722,
-            'I' => 278,
-            'J' => 556,
-            'K' => 722,
-            'L' => 611,
-            'M' => 833,
-            'N' => 722,
-            'O' => 778,
-            'P' => 667,
-            'Q' => 778,
-            'R' => 722,
-            'S' => 667,
-            'T' => 611,
-            'U' => 722,
-            'V' => 667,
-            'W' => 944,
-            'X' => 667,
-            'Y' => 611,
-            'Z' => 611,
-            '[' => 333,
-            '\\' => 278,
-            ']' => 333,
-            '^' => 584,
-            '_' => 556,
-            '`' => 278,
-            'a' => 556,
-            'b' => 611,
-            'c' => 556,
-            'd' => 611,
-            'e' => 556,
-            'f' => 333,
-            'g' => 611,
-            'h' => 611,
-            'i' => 278,
-            'j' => 278,
-            'k' => 556,
-            'l' => 278,
-            'm' => 889,
-            'n' => 611,
-            'o' => 611,
-            'p' => 611,
-            'q' => 611,
-            'r' => 389,
-            's' => 556,
-            't' => 333,
-            'u' => 611,
-            'v' => 556,
-            'w' => 778,
-            'x' => 556,
-            'y' => 556,
-            'z' => 500,
-            '\u{00B7}' => 278, // middle dot (Latin-1 0xB7) — used as section separator
-            _ => 556,          // fallback: Helvetica-Bold average advance
-        }
+        556
     } else {
-        match ch {
-            ' ' => 278,
-            '!' => 278,
-            '"' => 355,
-            '#' => 556,
-            '$' => 556,
-            '%' => 889,
-            '&' => 667,
-            '\'' => 222,
-            '(' => 333,
-            ')' => 333,
-            '*' => 389,
-            '+' => 584,
-            ',' => 278,
-            '-' => 333,
-            '.' => 278,
-            '/' => 278,
-            '0'..='9' => 556,
-            ':' => 278,
-            ';' => 278,
-            '<' => 584,
-            '=' => 584,
-            '>' => 584,
-            '?' => 472,
-            '@' => 1015,
-            'A' => 667,
-            'B' => 667,
-            'C' => 722,
-            'D' => 722,
-            'E' => 667,
-            'F' => 611,
-            'G' => 778,
-            'H' => 722,
-            'I' => 278,
-            'J' => 500,
-            'K' => 667,
-            'L' => 556,
-            'M' => 833,
-            'N' => 722,
-            'O' => 778,
-            'P' => 667,
-            'Q' => 778,
-            'R' => 722,
-            'S' => 667,
-            'T' => 611,
-            'U' => 722,
-            'V' => 667,
-            'W' => 944,
-            'X' => 667,
-            'Y' => 611,
-            'Z' => 611,
-            '[' => 278,
-            '\\' => 278,
-            ']' => 278,
-            '^' => 469,
-            '_' => 556,
-            '`' => 222,
-            'a' => 556,
-            'b' => 556,
-            'c' => 500,
-            'd' => 556,
-            'e' => 556,
-            'f' => 278,
-            'g' => 556,
-            'h' => 556,
-            'i' => 222,
-            'j' => 222,
-            'k' => 500,
-            'l' => 222,
-            'm' => 833,
-            'n' => 556,
-            'o' => 556,
-            'p' => 556,
-            'q' => 556,
-            'r' => 333,
-            's' => 500,
-            't' => 278,
-            'u' => 556,
-            'v' => 500,
-            'w' => 722,
-            'x' => 500,
-            'y' => 500,
-            'z' => 500,
-            '\u{00B7}' => 278, // middle dot (Latin-1 0xB7) — used as section separator
-            _ => 500,          // fallback: Helvetica average advance
-        }
+        500
     }
 }
 
@@ -3781,6 +3668,32 @@ fn discover_browser() -> Option<PathBuf> {
     None
 }
 
+/// Push the Chrome/Edge/Brave/Vivaldi `Application`-layout executable paths under `base` onto
+/// `paths`. These four share the same per-base directory layout; Opera differs and is added by
+/// the caller.
+#[cfg(windows)]
+fn push_chromium_app_browsers(paths: &mut Vec<PathBuf>, base: &Path) {
+    paths.push(
+        base.join("Google")
+            .join("Chrome")
+            .join("Application")
+            .join("chrome.exe"),
+    );
+    paths.push(
+        base.join("Microsoft")
+            .join("Edge")
+            .join("Application")
+            .join("msedge.exe"),
+    );
+    paths.push(
+        base.join("BraveSoftware")
+            .join("Brave-Browser")
+            .join("Application")
+            .join("brave.exe"),
+    );
+    paths.push(base.join("Vivaldi").join("Application").join("vivaldi.exe"));
+}
+
 #[cfg(windows)]
 fn windows_browser_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -3791,52 +3704,14 @@ fn windows_browser_candidates() -> Vec<PathBuf> {
 
     for base in [program_files, program_files_x86].into_iter().flatten() {
         let base = PathBuf::from(base);
-
-        paths.push(
-            base.join("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe"),
-        );
-        paths.push(
-            base.join("Microsoft")
-                .join("Edge")
-                .join("Application")
-                .join("msedge.exe"),
-        );
-        paths.push(
-            base.join("BraveSoftware")
-                .join("Brave-Browser")
-                .join("Application")
-                .join("brave.exe"),
-        );
-        paths.push(base.join("Vivaldi").join("Application").join("vivaldi.exe"));
+        push_chromium_app_browsers(&mut paths, &base);
         paths.push(base.join("Opera").join("launcher.exe"));
         paths.push(base.join("Opera GX").join("launcher.exe"));
     }
 
     if let Some(base) = local_app_data {
         let base = PathBuf::from(base);
-
-        paths.push(
-            base.join("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe"),
-        );
-        paths.push(
-            base.join("Microsoft")
-                .join("Edge")
-                .join("Application")
-                .join("msedge.exe"),
-        );
-        paths.push(
-            base.join("BraveSoftware")
-                .join("Brave-Browser")
-                .join("Application")
-                .join("brave.exe"),
-        );
-        paths.push(base.join("Vivaldi").join("Application").join("vivaldi.exe"));
+        push_chromium_app_browsers(&mut paths, &base);
         paths.push(base.join("Programs").join("Opera").join("launcher.exe"));
         paths.push(base.join("Programs").join("Opera GX").join("launcher.exe"));
     }
@@ -7190,7 +7065,7 @@ struct WarningOpportunityRow {
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
           var lmid=y+barBH/2+4;
-          var ttv='Code '+fmt(d.code)+'\nComments '+fmt(d.comments)+'\nBlank '+fmt(d.blanks)+'\nTotal '+fmt(phys);
+          var ttv='Code: '+fmt(d.code)+'\nComments: '+fmt(d.comments)+'\nBlank: '+fmt(d.blanks)+'\nTotal: '+fmt(phys);
           bs+='<g class="lang-bar-row">';
           // Hit area ends just past the total label so empty space to the right of the
           // bar does not trigger the tooltip — only the name, bar and total are hot.
@@ -7481,11 +7356,12 @@ struct WarningOpportunityRow {
               var cW=(d.code||0)/t2*BW,cmW=(d.comments||0)/t2*BW,blW=(d.blanks||0)/t2*BW;
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
-              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
+              var ttvc='Code: '+fmt(d.code||0)+'\nComments: '+fmt(d.comments||0)+'\nBlank: '+fmt(d.blanks||0)+'\nTotal: '+fmt(d.physical||t2);
+              s+='<text'+cTT(d.lang,ttvc)+' x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d" style="cursor:pointer;">'+cEsc(d.lang)+'</text>';
               if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';var _fc=cFitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
               if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';var _fm=cFitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
               if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';var _fb=cFitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
-              s+='<text x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+Math.round((d.code||0)/t2*100)+'%</text>';
+              s+='<text'+cTT(d.lang,ttvc)+' x="'+(LW+BW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b" style="cursor:pointer;">'+Math.round((d.code||0)/t2*100)+'%</text>';
             });
           } else {
             var maxT=Math.max.apply(null,cData.map(function(d){return(d.code||0)+(d.comments||0)+(d.blanks||0);})) || 1;
@@ -7493,12 +7369,13 @@ struct WarningOpportunityRow {
               var cW=(d.code||0)/maxT*BW,cmW=(d.comments||0)/maxT*BW,blW=(d.blanks||0)/maxT*BW;
               var y=topPad+i*rHb+Math.floor((rHb-bH)/2),x=LW;
               var lmid=y+Math.floor(bH/2)+4;
-              s+='<text x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d">'+cEsc(d.lang)+'</text>';
+              var ttvc='Code: '+fmt(d.code||0)+'\nComments: '+fmt(d.comments||0)+'\nBlank: '+fmt(d.blanks||0)+'\nTotal: '+fmt(d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0));
+              s+='<text'+cTT(d.lang,ttvc)+' x="'+(LW-5)+'" y="'+lmid+'" text-anchor="end" font-family="'+CFONT+'" font-size="11" fill="#43342d" style="cursor:pointer;">'+cEsc(d.lang)+'</text>';
               if(cW>0.5){s+='<rect'+cTT(d.lang+' Code',fmt(d.code||0)+' lines')+' data-kind="code" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cW)+'" height="'+bH+'" fill="'+CX+'"/>';var _fc=cFitFs(fmt(d.code||0),cW);if(_fc)s+='<text x="'+cPx(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code||0)+'</text>';x+=cW;}
               if(cmW>0.5){s+='<rect'+cTT(d.lang+' Comments',fmt(d.comments||0)+' lines')+' data-kind="comment" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(cmW)+'" height="'+bH+'" fill="'+CG+'"/>';var _fm=cFitFs(fmt(d.comments||0),cmW);if(_fm)s+='<text x="'+cPx(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments||0)+'</text>';x+=cmW;}
               if(blW>0.5){s+='<rect'+cTT(d.lang+' Blank',fmt(d.blanks||0)+' lines')+' data-kind="blank" x="'+cPx(x)+'" y="'+y+'" width="'+cPx(blW)+'" height="'+bH+'" fill="'+CB+'"/>';var _fb=cFitFs(fmt(d.blanks||0),blW);if(_fb)s+='<text x="'+cPx(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+CFONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks||0)+'</text>';}
               var phys=d.physical||(d.code||0)+(d.comments||0)+(d.blanks||0);
-              s+='<text x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+              s+='<text'+cTT(d.lang,ttvc)+' x="'+(LW+cW+cmW+blW+4)+'" y="'+lmid+'" font-family="'+CFONT+'" font-size="11" font-weight="700" fill="#7b675b" style="cursor:pointer;">'+fmt(phys)+'</text>';
             });
           }
           var ly=SH-legendH+4;
@@ -9542,52 +9419,58 @@ pub fn write_csv(run: &AnalysisRun, path: &Path) -> Result<()> {
     }
 
     // ── Section 3: Per-file detail (if present) ─────────────────────────────
-    if !run.per_file_records.is_empty() {
-        // Only emit the git-activity columns when an --activity-window scan populated them.
-        let has_activity = run
-            .per_file_records
-            .iter()
-            .any(|r| r.commit_count.is_some());
-        out.push_str("\r\n# Per File\r\n");
-        out.push_str(
-            "Path,Language,Size (bytes),Code Lines,Comment Lines,Blank Lines,Physical Lines,Generated,Minified,Vendor",
-        );
-        if has_activity {
-            out.push_str(",Commits,Last Changed");
-        }
-        out.push_str("\r\n");
-        for rec in &run.per_file_records {
-            let _ = write!(
-                out,
-                "{},{},{},{},{},{},{},{},{},{}",
-                csv_escape(&rec.relative_path),
-                csv_escape(
-                    &rec.language
-                        .map(|l| l.display_name().to_string())
-                        .unwrap_or_default()
-                ),
-                rec.size_bytes,
-                rec.effective_counts.code_lines,
-                rec.effective_counts.comment_lines,
-                rec.effective_counts.blank_lines,
-                rec.raw_line_categories.total_physical_lines,
-                rec.generated,
-                rec.minified,
-                rec.vendor,
-            );
-            if has_activity {
-                let _ = write!(
-                    out,
-                    ",{},{}",
-                    rec.commit_count.map(|c| c.to_string()).unwrap_or_default(),
-                    csv_escape(rec.last_commit_date.as_deref().unwrap_or("")),
-                );
-            }
-            out.push_str("\r\n");
-        }
-    }
+    write_csv_per_file_section(&mut out, run);
 
     fs::write(path, out).with_context(|| format!("failed to write CSV to {}", path.display()))
+}
+
+/// Append the per-file detail section to a CSV buffer. No-op when there are no per-file records.
+fn write_csv_per_file_section(out: &mut String, run: &AnalysisRun) {
+    if run.per_file_records.is_empty() {
+        return;
+    }
+    // Only emit the git-activity columns when an --activity-window scan populated them.
+    let has_activity = run
+        .per_file_records
+        .iter()
+        .any(|r| r.commit_count.is_some());
+    out.push_str("\r\n# Per File\r\n");
+    out.push_str(
+        "Path,Language,Size (bytes),Code Lines,Comment Lines,Blank Lines,Physical Lines,Generated,Minified,Vendor",
+    );
+    if has_activity {
+        out.push_str(",Commits,Last Changed");
+    }
+    out.push_str("\r\n");
+    for rec in &run.per_file_records {
+        let _ = write!(
+            out,
+            "{},{},{},{},{},{},{},{},{},{}",
+            csv_escape(&rec.relative_path),
+            csv_escape(
+                &rec.language
+                    .map(|l| l.display_name().to_string())
+                    .unwrap_or_default()
+            ),
+            rec.size_bytes,
+            rec.effective_counts.code_lines,
+            rec.effective_counts.comment_lines,
+            rec.effective_counts.blank_lines,
+            rec.raw_line_categories.total_physical_lines,
+            rec.generated,
+            rec.minified,
+            rec.vendor,
+        );
+        if has_activity {
+            let _ = write!(
+                out,
+                ",{},{}",
+                rec.commit_count.map(|c| c.to_string()).unwrap_or_default(),
+                csv_escape(rec.last_commit_date.as_deref().unwrap_or("")),
+            );
+        }
+        out.push_str("\r\n");
+    }
 }
 
 /// Write a diff/delta as CSV.
