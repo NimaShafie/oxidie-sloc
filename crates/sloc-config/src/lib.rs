@@ -153,7 +153,7 @@ pub struct AnalysisConfig {
     #[serde(default)]
     pub budget: Option<BudgetConfig>,
     /// Path to a coverage report; format is auto-detected (LCOV `.info` from lcov/gcov/
-    /// cargo-llvm-cov, Cobertura XML, JaCoCo XML, coverage.py JSON, or Istanbul/NYC JSON).
+    /// cargo-llvm-cov, Cobertura XML, `JaCoCo` XML, coverage.py JSON, or Istanbul/NYC JSON).
     /// When set, oxide-sloc attaches per-file line/function/branch coverage to each `FileRecord`.
     /// Can also be set via the `SLOC_COVERAGE_FILE` environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +191,9 @@ const fn default_true() -> bool {
     true
 }
 
+// Serde `default = "..."` for the `Option<u32>` field must return the field type, so the
+// `Option` wrapper is required here despite clippy::unnecessary_wraps flagging it under pedantic.
+#[allow(clippy::unnecessary_wraps)]
 const fn default_activity_window_days() -> Option<u32> {
     Some(90)
 }

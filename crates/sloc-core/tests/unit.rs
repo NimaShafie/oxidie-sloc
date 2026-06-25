@@ -2225,3 +2225,112 @@ fn analysis_run_git_branch_from_github_ref_name() {
         assert!(run.summary_totals.files_analyzed <= run.summary_totals.files_considered);
     }
 }
+
+// ── coverage parser edge cases ─────────────────────────────────────────────────
+
+#[test]
+fn lookup_coverage_strategy3_filename_fallback_when_suffix_differs() {
+    // Suffix match fails (different parent dir) but the bare filename still matches —
+    // this exercises strategy 3, distinct from the bare-filename suffix case.
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        std::path::PathBuf::from("vendor/other/foo.rs"),
+        FileCoverage {
+            lines_found: 9,
+            lines_hit: 7,
+            functions_found: 0,
+            functions_hit: 0,
+            branches_found: 0,
+            branches_hit: 0,
+        },
+    );
+    let cov = lookup_coverage(&map, "weird/path/foo.rs");
+    assert!(cov.is_some(), "filename fallback should match foo.rs");
+    assert_eq!(cov.unwrap().lines_found, 9);
+}
+
+#[test]
+fn parse_cobertura_class_without_filename_is_skipped() {
+    // The no-filename class is placed LAST so no `filename=` attribute exists after it,
+    // forcing the `extract_attr(... "filename")` lookup to return None -> `continue`.
+    let xml = r#"<coverage>
+      <packages><package><classes>
+        <class filename="src/a.py"><lines>
+          <line number="1" hits="1"/>
+          <line number="2" hits="0"/>
+        </lines></class>
+        <class name="NoFile"><lines><line number="9" hits="1"/></lines></class>
+      </classes></package></packages>
+    </coverage>"#;
+    let map = sloc_core::coverage::parse_cobertura(xml);
+    assert!(map.contains_key(std::path::Path::new("src/a.py")));
+    let cov = &map[std::path::Path::new("src/a.py")];
+    assert_eq!(cov.lines_found, 2);
+    assert_eq!(cov.lines_hit, 1);
+}
+
+#[test]
+fn parse_cobertura_branch_fraction_variants() {
+    // branch="true" with a well-formed condition-coverage, plus malformed/missing
+    // variants that must fall through to (0,0) without panicking.
+    let xml = r#"<coverage><packages><package><classes>
+      <class filename="src/b.py"><lines>
+        <line number="1" hits="1" branch="true" condition-coverage="50% (1/2)"/>
+        <line number="2" hits="1" branch="true" condition-coverage="garbage-no-paren"/>
+        <line number="3" hits="1" branch="true" condition-coverage="(no-slash)"/>
+        <line number="4" hits="1" branch="true"/>
+      </lines></class>
+    </classes></package></packages></coverage>"#;
+    let map = sloc_core::coverage::parse_cobertura(xml);
+    let cov = &map[std::path::Path::new("src/b.py")];
+    assert_eq!(cov.lines_found, 4);
+    // Only the first well-formed fraction contributes (1/2).
+    assert_eq!(cov.branches_found, 2);
+    assert_eq!(cov.branches_hit, 1);
+}
+
+#[test]
+fn parse_jacoco_sourcefile_without_name_is_skipped() {
+    let xml = r#"<report>
+      <package name="com/example">
+        <sourcefile><counter type="LINE" missed="1" covered="2"/></sourcefile>
+        <sourcefile name="Main.java"><counter type="LINE" missed="1" covered="3"/></sourcefile>
+      </package>
+    </report>"#;
+    let map = sloc_core::coverage::parse_jacoco(xml);
+    assert!(map.contains_key(std::path::Path::new("com/example/Main.java")));
+    let cov = &map[std::path::Path::new("com/example/Main.java")];
+    assert_eq!(cov.lines_found, 4);
+    assert_eq!(cov.lines_hit, 3);
+}
+
+#[test]
+fn parse_istanbul_invalid_json_returns_empty() {
+    assert!(sloc_core::coverage::parse_istanbul("not json at all").is_empty());
+    // Valid JSON that is not an object (a JSON array) also yields an empty map.
+    assert!(sloc_core::coverage::parse_istanbul("[1,2,3]").is_empty());
+}
+
+#[test]
+fn parse_coverage_py_without_files_key_returns_empty() {
+    assert!(sloc_core::coverage::parse_coverage_py("not json").is_empty());
+    assert!(sloc_core::coverage::parse_coverage_py(r#"{"meta":{}}"#).is_empty());
+}
+
+#[test]
+fn resolve_coverage_file_prefers_env_var() {
+    let _lock = env_lock();
+    std::env::set_var("SLOC_COVERAGE_FILE", "from-env-coverage.info");
+    let resolved = sloc_core::coverage::resolve_coverage_file(Some(std::path::Path::new(
+        "config-coverage.info",
+    )));
+    std::env::remove_var("SLOC_COVERAGE_FILE");
+    let resolved = resolved.expect("env var path should resolve to Some");
+    assert!(
+        resolved
+            .to_string_lossy()
+            .contains("from-env-coverage.info"),
+        "env var must win over config path, got {}",
+        resolved.display()
+    );
+}

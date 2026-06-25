@@ -541,3 +541,50 @@ fn analyze_text_c_mixed_code_and_comment() {
         result.raw.mixed_code_single_comment_lines + result.raw.mixed_code_multi_comment_lines;
     assert!(mixed >= 1, "should have at least one mixed line");
 }
+
+// ── string-literal lexer state machine: verbatim + triple-quote branches ──────
+
+#[test]
+fn analyze_text_csharp_verbatim_string_with_escaped_quotes() {
+    // C# verbatim string (@"...") with a "" escape and trailing content forces the
+    // VerbatimDouble state through its escape, continuation, and close branches.
+    let code = concat!(
+        "class P {\n",
+        "    string path = @\"plain verbatim text\";\n",
+        "    string quoted = @\"he said \"\"hi\"\" loudly\";\n",
+        "    int x = 1;\n",
+        "}\n",
+    );
+    let result = analyze_text(Language::CSharp, code, AnalysisOptions::default());
+    assert!(result.raw.total_physical_lines >= 5);
+    assert!(result.raw.code_only_lines >= 3);
+}
+
+#[test]
+fn analyze_text_julia_triple_quote_string_spans_content() {
+    // Julia """ ... """ docstring/string: opener + Triple continuation + close.
+    let code = concat!(
+        "\"\"\"\n",
+        "A multi-line\n",
+        "triple-quoted string body\n",
+        "\"\"\"\n",
+        "function f()\n",
+        "    return 1\n",
+        "end\n",
+    );
+    let result = analyze_text(Language::Julia, code, AnalysisOptions::default());
+    assert!(result.raw.total_physical_lines >= 7);
+}
+
+#[test]
+fn analyze_text_python_single_triple_quote_string() {
+    // Python ''' ... ''' triple-quoted string opener branch.
+    let code = concat!(
+        "x = '''\n",
+        "single-quote triple block\n",
+        "'''\n",
+        "y = 2\n",
+    );
+    let result = analyze_text(Language::Python, code, AnalysisOptions::default());
+    assert!(result.raw.total_physical_lines >= 4);
+}

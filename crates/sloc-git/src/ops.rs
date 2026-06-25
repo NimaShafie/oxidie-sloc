@@ -1,11 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
+use std::net::ToSocketAddrs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 
 use crate::{GitCommit, GitRef, GitRefKind, RepoRefs};
+
+/// Optional positive host allowlist for clone targets, parsed once from
+/// `SLOC_GIT_HOST_ALLOWLIST` (comma-separated, lowercased hostnames). When empty,
+/// `validate_clone_url` runs in denylist mode (metadata/loopback blocking only).
+fn git_host_allowlist() -> &'static [String] {
+    static ALLOW: OnceLock<Vec<String>> = OnceLock::new();
+    ALLOW.get_or_init(|| {
+        std::env::var("SLOC_GIT_HOST_ALLOWLIST")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
 
 // ── low-level git runner ───────────────────────────────────────────────────────
 
@@ -143,11 +160,39 @@ fn validate_clone_url(url: &str) -> Result<()> {
     // The check is host-scoped (not a whole-URL substring match) so legitimate
     // paths/tags such as "release-v10.2" are never mistaken for an IP.
     if let Some(host) = host_of_git_url(url) {
+        // Positive allowlist (durable SSRF control): when SLOC_GIT_HOST_ALLOWLIST is
+        // configured, only those hosts may be cloned. This closes the validate-vs-clone
+        // DNS TOCTOU — an attacker cannot point an *allowed name* at an internal IP and
+        // have it accepted unless the name itself is allowlisted. Empty = denylist mode
+        // (loopback/link-local/metadata blocking only), preserving prior behaviour.
+        let allow = git_host_allowlist();
+        if !allow.is_empty() && !allow.iter().any(|h| h == &host) {
+            bail!("git URL rejected: host {host:?} is not in SLOC_GIT_HOST_ALLOWLIST");
+        }
         if is_ssrf_blocked_host(&host) {
             bail!(
                 "git URL rejected: loopback, link-local, and cloud-metadata \
                  addresses are not permitted (host {host:?})"
             );
+        }
+        // Defence against DNS-rebinding: a hostname that is not itself an IP
+        // literal can still resolve to an SSRF-sensitive address. Resolve it now
+        // and reject if *any* resolved IP is blocked. A resolution failure is not
+        // fatal (the host may only be resolvable by git's own resolver in some
+        // air-gapped setups) — git will then fail or succeed on its own; the
+        // residual is the documented validate-vs-clone TOCTOU.
+        if let Some(port) = port_of_git_url(url) {
+            if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
+                for addr in addrs {
+                    if is_ssrf_blocked_ip(addr.ip()) {
+                        bail!(
+                            "git URL rejected: host {host:?} resolves to a blocked \
+                             address {} (loopback/link-local/cloud-metadata)",
+                            addr.ip()
+                        );
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -173,6 +218,37 @@ fn host_of_git_url(url: &str) -> Option<String> {
         |stripped| stripped.split(']').next().unwrap_or(stripped).to_string(),
     );
     Some(host.to_lowercase())
+}
+
+/// Best-effort port extraction for DNS-rebinding resolution. Returns the explicit
+/// port if present, otherwise the scheme default (https 443, git 9418, ssh 22).
+/// `None` only when no host/scheme can be determined.
+fn port_of_git_url(url: &str) -> Option<u16> {
+    let u = url.trim();
+    // scp-like git@host:path — git over ssh, port 22 (path after ':' is not a port).
+    if u.starts_with("git@") {
+        return Some(22);
+    }
+    let (scheme, after_scheme) = u.split_once("://")?;
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    // Explicit port: take the segment after the last ':' that is not inside [..].
+    let explicit = if let Some(stripped) = authority.strip_prefix('[') {
+        // IPv6 literal: [host]:port
+        stripped
+            .split_once("]:")
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+    } else {
+        authority
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+    };
+    explicit.or(match scheme.to_lowercase().as_str() {
+        "https" => Some(443),
+        "git" => Some(9418),
+        "ssh" => Some(22),
+        _ => None,
+    })
 }
 
 /// Known cloud-metadata / instance-data hostnames that must never be reachable.
@@ -230,15 +306,35 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
     let normalized = normalize_git_url(url);
     let url = normalized.as_str();
     validate_clone_url(url)?;
+    // `http.followRedirects=false` stops git from following an HTTP redirect into an
+    // SSRF-sensitive target that bypassed the up-front host validation above.
     if dest.join(".git").exists() {
-        run_git(dest, &["fetch", "--all", "--tags", "--prune"])?;
+        run_git(
+            dest,
+            &[
+                "-c",
+                "http.followRedirects=false",
+                "fetch",
+                "--all",
+                "--tags",
+                "--prune",
+            ],
+        )?;
     } else {
         std::fs::create_dir_all(dest).context("failed to create clone directory")?;
         let dest_str = dest.to_str().unwrap_or(".");
         let parent = dest.parent().unwrap_or(dest);
         run_git(
             parent,
-            &["clone", "--no-single-branch", "--depth=50", url, dest_str],
+            &[
+                "-c",
+                "http.followRedirects=false",
+                "clone",
+                "--no-single-branch",
+                "--depth=50",
+                url,
+                dest_str,
+            ],
         )?;
     }
     Ok(())
@@ -387,6 +483,31 @@ mod tests {
     use super::*;
     use crate::GitRefKind;
     use chrono::Timelike as _;
+
+    // ── SSRF host classification ───────────────────────────────────────────────
+
+    #[test]
+    fn is_ssrf_blocked_host_blocks_localhost_and_metadata() {
+        assert!(is_ssrf_blocked_host("localhost"));
+        assert!(is_ssrf_blocked_host("metadata.google.internal"));
+        assert!(is_ssrf_blocked_host("metadata.internal"));
+        assert!(is_ssrf_blocked_host("instance-data"));
+        // Case/whitespace/bracket normalisation.
+        assert!(is_ssrf_blocked_host("  LOCALHOST  "));
+        // IP literals: loopback and link-local blocked.
+        assert!(is_ssrf_blocked_host("127.0.0.1"));
+        assert!(is_ssrf_blocked_host("[::1]"));
+        assert!(is_ssrf_blocked_host("169.254.169.254"));
+    }
+
+    #[test]
+    fn is_ssrf_blocked_host_allows_public_hosts() {
+        assert!(!is_ssrf_blocked_host("github.com"));
+        assert!(!is_ssrf_blocked_host("example.com"));
+        // RFC 1918 private ranges are intentionally NOT blocked.
+        assert!(!is_ssrf_blocked_host("192.168.1.10"));
+        assert!(!is_ssrf_blocked_host("10.0.0.1"));
+    }
 
     // ── normalize_git_url ─────────────────────────────────────────────────────
 
@@ -605,6 +726,46 @@ mod tests {
     fn validate_ipv6_ula_fd_allowed() {
         // IPv6 unique-local (fc00::/7) is the private-range equivalent — allowed.
         assert!(validate_clone_url("https://[fd12:3456:789a::1]/repo").is_ok());
+    }
+
+    // ── port_of_git_url (DNS-rebind resolution helper) ────────────────────────
+    #[test]
+    fn port_https_default() {
+        assert_eq!(port_of_git_url("https://github.com/o/r.git"), Some(443));
+    }
+
+    #[test]
+    fn port_explicit_overrides_default() {
+        assert_eq!(
+            port_of_git_url("https://gitlab.corp:8443/o/r.git"),
+            Some(8443)
+        );
+    }
+
+    #[test]
+    fn port_git_scheme_default() {
+        assert_eq!(port_of_git_url("git://example.com/r.git"), Some(9418));
+    }
+
+    #[test]
+    fn port_scp_like_is_ssh() {
+        assert_eq!(port_of_git_url("git@github.com:owner/repo.git"), Some(22));
+    }
+
+    #[test]
+    fn port_ipv6_with_explicit_port() {
+        assert_eq!(port_of_git_url("https://[fd00::1]:7000/r"), Some(7000));
+    }
+
+    #[test]
+    fn port_ipv6_default() {
+        assert_eq!(port_of_git_url("https://[fd00::1]/r"), Some(443));
+    }
+
+    #[test]
+    fn validate_metadata_ip_literal_still_rejected() {
+        // IP-literal path remains blocked regardless of the new DNS resolution step.
+        assert!(validate_clone_url("https://169.254.169.254/latest/meta-data/").is_err());
     }
 
     #[test]
