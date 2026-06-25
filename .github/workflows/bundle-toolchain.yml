@@ -159,19 +159,33 @@ jobs:
       # Main is a protected branch (PRs + "Quality gates" check required), so a
       # direct push is rejected.  peter-evans/create-pull-request pushes the
       # updated toolchain/ files to a new unprotected branch and opens a PR in
-      # one atomic step using GITHUB_TOKEN — no extra secret needed.  The PR is
-      # a no-op (and is skipped) when the toolchain archives are unchanged.
+      # one atomic step.  The PR is a no-op (and is skipped) when the toolchain
+      # archives are unchanged.
+      #
+      # The PR is opened with a GitHub App token rather than the default
+      # GITHUB_TOKEN on purpose: GitHub suppresses workflow triggers for any
+      # push or PR created by GITHUB_TOKEN (anti-recursion), so CodeQL never
+      # ran on the toolchain PR and OpenSSF Scorecard's SAST check flagged the
+      # commit as not SAST-scanned.  An app token is treated as a distinct
+      # actor, so push/pull_request workflows (CodeQL included) run normally.
       - name: Resolve Rust version
         id: rust
         run: |
           RUST_VER=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/' | tr -d '[:space:]')
           echo "version=$RUST_VER" >> "$GITHUB_OUTPUT"
 
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.TOOLCHAIN_APP_ID }}
+          private-key: ${{ secrets.TOOLCHAIN_APP_PRIVATE_KEY }}
+
       - name: Open PR with updated toolchain archives
         id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           branch: chore/update-toolchain-${{ github.run_id }}
           base: main
           add-paths: toolchain/
@@ -193,6 +207,6 @@ jobs:
       - name: Enable auto-merge
         if: steps.cpr.outputs.pull-request-number
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.cpr.outputs.pull-request-number }}
         run: gh pr merge --auto --squash "$PR"
