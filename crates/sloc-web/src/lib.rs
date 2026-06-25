@@ -1361,7 +1361,7 @@ async fn add_security_headers(
     let nonce = uuid::Uuid::new_v4().to_string().replace('-', "");
     req.extensions_mut().insert(CspNonce(nonce.clone()));
     let mut resp = next.run(req).await;
-    inject_loading_overlay_into_html(&mut resp, &nonce).await;
+    inject_page_fade_into_html(&mut resp, &nonce).await;
     let h = resp.headers_mut();
     h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
     h.insert(
@@ -1414,39 +1414,28 @@ async fn add_security_headers(
     resp
 }
 
-/// Inline branded loading overlay shown over every HTML page until `window.load`
-/// fires, so large/slow pages display a "Loading…" screen instead of a
-/// half-rendered, unstyled flash. Mirrors the HTML report's `#rpt-loading-overlay`.
-fn loading_overlay_html(nonce: &str) -> String {
-    const OVERLAY: &str = r##"<style>
-#rpt-loading-overlay{position:fixed;inset:0;z-index:99999;background:var(--bg,#f5f0eb);display:flex;align-items:center;justify-content:center;transition:opacity .55s cubic-bezier(.4,0,.2,1);}
-#rpt-loading-overlay.fade-out{opacity:0;pointer-events:none;}
-.rpt-load-card{display:flex;flex-direction:column;align-items:center;gap:26px;padding:50px 90px;background:linear-gradient(155deg,rgba(255,254,251,.96) 0%,rgba(255,246,236,.9) 100%);border:1px solid rgba(196,110,40,.13);border-radius:28px;box-shadow:0 0 0 1px rgba(255,255,255,.75) inset,0 8px 72px rgba(150,80,20,.09),0 2px 16px rgba(0,0,0,.06);animation:rpt-card-in .5s cubic-bezier(.22,.68,0,1.12) both;}
-@keyframes rpt-card-in{from{opacity:0;transform:translateY(14px) scale(.95);}to{opacity:1;transform:none;}}
-.rpt-load-logo{width:50px;height:50px;object-fit:contain;filter:drop-shadow(0 3px 10px rgba(150,80,20,.22));animation:rpt-logo-bounce 1.8s cubic-bezier(.36,.07,.19,.97) .3s infinite;}
-@keyframes rpt-logo-bounce{0%,100%{transform:translateY(0) scale(1);}40%{transform:translateY(-10px) scale(1.05);}70%{transform:translateY(0) scale(.97);}}
-.rpt-spinner-wrap{position:relative;width:58px;height:58px;}
-.rpt-spinner-track{position:absolute;inset:0;border-radius:50%;border:3px solid rgba(196,92,16,.1);}
-.rpt-spinner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(196,92,16,0) 0%,rgba(196,92,16,.2) 38%,#c45c10 100%);animation:rpt-spin 1.1s linear infinite;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#fff calc(100% - 3px));mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#fff calc(100% - 3px));}
-@keyframes rpt-spin{to{transform:rotate(360deg);}}
-.rpt-load-divider{width:36px;height:1px;background:linear-gradient(90deg,transparent,rgba(196,92,16,.18),transparent);}
-.rpt-loading-text{font-size:13px;font-weight:500;color:var(--muted,#8a7060);letter-spacing:.06em;}
-.rpt-dot{display:inline-block;animation:rpt-bounce 1.7s ease-in-out infinite;opacity:0;}
-.rpt-dot:nth-child(2){animation-delay:.28s;}
-.rpt-dot:nth-child(3){animation-delay:.56s;}
-@keyframes rpt-bounce{0%,60%,100%{opacity:0;transform:translateY(0);}30%{opacity:1;transform:translateY(-4px);}}
-body.dark-theme #rpt-loading-overlay{background:var(--bg,#1a1410);}
-body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(40,21,10,.9) 0%,rgba(28,13,4,.94) 100%);border-color:rgba(200,120,50,.13);box-shadow:0 0 0 1px rgba(255,200,140,.04) inset,0 8px 72px rgba(0,0,0,.48);}
-</style>
-<div id="rpt-loading-overlay" aria-hidden="true"><div class="rpt-load-card"><img class="rpt-load-logo" src="/images/logo/small-logo.png" alt=""><div class="rpt-spinner-wrap"><div class="rpt-spinner-track"></div><div class="rpt-spinner"></div></div><div class="rpt-load-divider"></div><div class="rpt-loading-text">Loading<span class="rpt-dot">.</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span></div></div></div>"##;
-    const JS: &str = r#"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}function d(){var o=document.getElementById('rpt-loading-overlay');if(!o)return;o.classList.add('fade-out');setTimeout(function(){if(o.parentNode)o.parentNode.removeChild(o);},650);}if(document.readyState==='complete'){setTimeout(d,150);}else{window.addEventListener('load',function(){setTimeout(d,150);});}setTimeout(d,15000);})();"#;
-    format!("{OVERLAY}<script nonce=\"{nonce}\">{JS}</script>")
+/// Lightweight fade-in applied to ordinary web-UI pages (Home, Compare Scans,
+/// Test Metrics, …). These render instantly, so a full spinner "Loading…" screen
+/// is overkill — a short opacity fade gives a smooth page-to-page transition
+/// without the heavy overlay. Slow pages (the standalone HTML report) keep the
+/// branded spinner: they bake in their own `#rpt-loading-overlay` and are skipped
+/// by `inject_page_fade_into_html`. The early dark-theme apply prevents a
+/// light-mode flash for dark-theme users.
+fn page_fade_html(nonce: &str) -> String {
+    const STYLE: &str = r##"<style>
+@keyframes sloc-page-fade-in{from{opacity:0;}to{opacity:1;}}
+body{animation:sloc-page-fade-in .26s ease-out both;}
+@media (prefers-reduced-motion:reduce){body{animation:none;}}
+</style>"##;
+    const JS: &str = r#"(function(){try{if(localStorage.getItem('sloc-dark')==='1'&&document.body)document.body.classList.add('dark-theme');}catch(e){}})();"#;
+    format!("{STYLE}<script nonce=\"{nonce}\">{JS}</script>")
 }
 
-/// Buffer an HTML response body and splice the loading overlay in right after the
+/// Buffer an HTML response body and splice the page fade-in right after the
 /// opening `<body>` tag. No-op for non-HTML responses or pages that already carry
-/// an `#rpt-loading-overlay` (e.g. the standalone HTML report).
-async fn inject_loading_overlay_into_html(resp: &mut Response, nonce: &str) {
+/// an `#rpt-loading-overlay` (e.g. the standalone HTML report, which keeps its
+/// branded loading spinner for slow renders).
+async fn inject_page_fade_into_html(resp: &mut Response, nonce: &str) {
     let is_html = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -1480,7 +1469,7 @@ async fn inject_loading_overlay_into_html(resp: &mut Response, nonce: &str) {
         Some(at) => {
             let mut out = String::with_capacity(html.len() + 2800);
             out.push_str(&html[..at]);
-            out.push_str(&loading_overlay_html(nonce));
+            out.push_str(&page_fade_html(nonce));
             out.push_str(&html[at..]);
             out
         }
@@ -9313,7 +9302,7 @@ fn multi_compare_page(
     let total_files = multi.file_matrix.len();
 
     let file_col_headers = build_mc_file_col_headers(n);
-    let nav_compare_active = "";
+    let nav_compare_active = "style=\"background:rgba(255,255,255,0.22);\"";
     let scope_bar_html = build_mc_scope_bar(
         has_submodule_data,
         sub_names,
@@ -10919,11 +10908,11 @@ async fn trend_report_handler(
     .chart-select:focus{{border-color:var(--accent);}}
     .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
     @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
-    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}}
+    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}}
     .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
-    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
     .stat-chip:hover .stat-chip-tip{{opacity:1;}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
@@ -12954,12 +12943,12 @@ async fn test_metrics_handler(
     .muted{{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px;}}
     .summary-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}}
     @media(max-width:800px){{.summary-strip{{grid-template-columns:repeat(2,1fr);}}}}
-    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}}
+    .stat-chip{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}}
     .stat-chip:hover{{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}}
     .stat-chip-val{{font-size:20px;font-weight:900;color:var(--oxide);}}
     .stat-chip-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}}
     .stat-chip-exact{{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}}
-    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;}}
+    .stat-chip-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;line-height:1.6;white-space:normal;max-width:280px;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;}}
     .stat-chip-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
     .stat-chip:hover .stat-chip-tip{{opacity:1;}}
     .section-header{{font-size:13px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:22px 0 10px;padding-top:16px;border-top:1px solid var(--line);}}
@@ -12982,7 +12971,7 @@ async fn test_metrics_handler(
     .density-bar-wrap{{display:flex;align-items:center;gap:8px;}}
     .density-bar{{height:6px;border-radius:3px;background:var(--oxide);opacity:0.75;min-width:2px;flex-shrink:0;}}
     .cov-gauge-row{{display:grid!important;grid-template-columns:repeat(3,1fr)!important;gap:16px;margin-bottom:18px;}}
-    .cov-gauge-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .2s ease,box-shadow .2s ease;min-width:0;}}
+    .cov-gauge-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);min-width:0;}}
     .cov-gauge-card:hover{{transform:translateY(-3px);box-shadow:0 10px 28px rgba(77,44,20,0.15);}}
     .cov-gauge-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);}}
     .cov-gauge-val{{font-size:32px;font-weight:900;line-height:1;}}
@@ -14030,6 +14019,33 @@ async fn test_metrics_handler(
       if (!trendCanvas) return;
 
       var meta = TM_Y_META[ctrl.yKey] || TM_Y_META['test_count'];
+
+      // Gradient fill matching trend-reports: opaque-ish at top → transparent at bottom
+      function makeTrendGradient(ctx2, chartArea) {{
+        var g = ctx2.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+        g.addColorStop(0,   'rgba(196,92,16,0.28)');
+        g.addColorStop(0.5, 'rgba(196,92,16,0.10)');
+        g.addColorStop(1,   'rgba(196,92,16,0)');
+        return g;
+      }}
+
+      // Crosshair plugin: draws a vertical dashed line at the hovered x position
+      var tmCrosshairPlugin = {{
+        afterDraw: function(chart) {{
+          if (chart._tmCrosshairX == null) return;
+          var ctx2 = chart.ctx, ca = chart.chartArea;
+          ctx2.save();
+          ctx2.strokeStyle = isDark() ? 'rgba(245,236,230,0.45)' : 'rgba(67,52,45,0.35)';
+          ctx2.lineWidth = 1.5;
+          ctx2.setLineDash([5, 4]);
+          ctx2.beginPath();
+          ctx2.moveTo(chart._tmCrosshairX, ca.top);
+          ctx2.lineTo(chart._tmCrosshairX, ca.bottom);
+          ctx2.stroke();
+          ctx2.restore();
+        }}
+      }};
+
       trendChart = new Chart(trendCanvas, {{
         type: 'line',
         data: {{
@@ -14038,21 +14054,59 @@ async fn test_metrics_handler(
             label: meta.label,
             data: pts.map(function(d){{ return Number(d[ctrl.yKey]) || 0; }}),
             borderColor: meta.color,
-            backgroundColor: meta.color.replace(')', ',0.10)').replace('rgb(', 'rgba('),
+            borderWidth: 2.5,
+            backgroundColor: function(context) {{
+              var chart = context.chart;
+              var ca = chart.chartArea;
+              if (!ca) return 'rgba(196,92,16,0.15)';
+              return makeTrendGradient(chart.ctx, ca);
+            }},
             pointBackgroundColor: pts.map(function(d){{ return (d.tags && d.tags.length) ? '#4472C4' : meta.color; }}),
-            pointRadius: 5, fill: true, tension: 0.3
+            pointBorderColor: '#fff',
+            pointBorderWidth: 2,
+            pointRadius: 6,
+            pointHoverRadius: 9,
+            pointHoverBorderWidth: 2.5,
+            fill: true, tension: 0.3
           }}]
         }},
         options: {{
           responsive: true, maintainAspectRatio: false,
           layout: {{ padding: {{ top: 22 }} }},
-          plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y) + meta.tooltip; }} }} }} }},
+          interaction: {{ mode: 'index', intersect: false }},
+          onHover: function(e, els) {{
+            var t = e.native && e.native.target;
+            if (!t) return;
+            var ca = trendChart && trendChart.chartArea;
+            if (!ca) {{ t.style.cursor = 'default'; return; }}
+            var rect = t.getBoundingClientRect();
+            var mouseX = (e.native.clientX - rect.left) * (t.width / rect.width);
+            if (mouseX >= ca.left && mouseX <= ca.right) {{
+              t.style.cursor = 'crosshair';
+              if (trendChart) {{ trendChart._tmCrosshairX = mouseX; trendChart.draw(); }}
+            }} else {{
+              t.style.cursor = 'default';
+              if (trendChart) {{ trendChart._tmCrosshairX = null; trendChart.draw(); }}
+            }}
+          }},
+          plugins: {{
+            legend: {{ display: false }},
+            tooltip: {{
+              mode: 'index', intersect: false,
+              callbacks: {{ label: function(ctx2){{ return ' ' + fmtFull(ctx2.parsed.y) + meta.tooltip; }} }}
+            }}
+          }},
           scales: {{
             x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:10}}, maxRotation:35 }} }},
             y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
           }}
         }},
-        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
+        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top'), tmCrosshairPlugin]
+      }});
+      // Reset crosshair on mouse leave
+      trendCanvas.addEventListener('mouseleave', function() {{
+        if (trendChart) {{ trendChart._tmCrosshairX = null; trendChart.draw(); }}
+        trendCanvas.style.cursor = 'default';
       }});
       ALL_CHARTS.push(trendChart);
 
@@ -16930,14 +16984,15 @@ struct SubmoduleRow {
     .wizard-actions .left, .wizard-actions .right { display:flex; gap: 10px; flex-wrap:wrap; }
     .default-path-overlay { position: fixed; inset: 0; z-index: 9000; background: rgba(0,0,0,0.52); display: flex; align-items: center; justify-content: center; padding: 24px; opacity: 0; pointer-events: none; transition: opacity .18s ease; }
     .default-path-overlay.open { opacity: 1; pointer-events: auto; }
-    .default-path-modal { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; max-width: 460px; width: 100%; box-shadow: 0 24px 60px rgba(0,0,0,0.32); padding: 24px 26px 22px; transform: translateY(8px); transition: transform .18s ease; }
+    .default-path-modal { background: var(--surface); border: 1px solid var(--line); border-radius: 28px; max-width: 760px; width: 100%; box-shadow: 0 36px 96px rgba(0,0,0,0.36); padding: 44px 48px 40px; transform: translateY(12px); transition: transform .18s ease; }
     .default-path-overlay.open .default-path-modal { transform: translateY(0); }
-    .default-path-modal h3 { margin: 0 0 10px; font-size: 18px; color: var(--text); display: flex; align-items: center; gap: 9px; }
-    .default-path-modal h3 svg { width: 22px; height: 22px; flex-shrink: 0; color: var(--accent); }
-    .default-path-modal p { margin: 0 0 8px; font-size: 13.5px; line-height: 1.55; color: var(--muted); }
-    .default-path-modal p code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; color: var(--text); }
+    .default-path-modal h3 { margin: 0 0 20px; font-size: 30px; color: var(--text); display: flex; align-items: center; gap: 16px; }
+    .default-path-modal h3 svg { width: 38px; height: 38px; flex-shrink: 0; color: var(--accent); }
+    .default-path-modal p { margin: 0 0 15px; font-size: 19px; line-height: 1.55; color: var(--muted); }
+    .default-path-modal p code { background: rgba(0,0,0,0.06); padding: 2px 9px; border-radius: 7px; font-size: 17px; color: var(--text); }
     body.dark-theme .default-path-modal p code { background: rgba(255,255,255,0.10); }
-    .default-path-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    .default-path-actions { display: flex; justify-content: flex-end; gap: 18px; margin-top: 34px; }
+    .default-path-actions button { font-size: 18px; padding: 14px 26px; border-radius: 12px; }
     .field-help-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
     .field-help-grid.coupled-help { margin-top: 12px; }
     .field-help-grid.preset-grid { align-items: start; }
@@ -17149,16 +17204,16 @@ struct SubmoduleRow {
     .cov-scan-none .cov-scan-title { color:var(--muted); font-weight:500; }
     .loading { position: fixed; inset: 0; display:none; align-items:center; justify-content:center; background: rgba(17,24,39,0.35); z-index: 100; backdrop-filter: blur(2px); }
     .loading.active { display:flex; }
-    .loading-card { width: min(840px, calc(100vw - 40px)); border-radius: 20px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 24px 56px rgba(0,0,0,0.26); padding: 42px 48px; }
+    .loading-card { position:relative; overflow:hidden; width: min(840px, calc(100vw - 40px)); border-radius: 20px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 24px 56px rgba(0,0,0,0.26); padding: 42px 48px; }
+    /* Pulsating gradient sheen behind the modal content — replaces the old "Analysis running" pill */
+    .loading-card::before { content:''; position:absolute; inset:0; z-index:0; pointer-events:none; border-radius:inherit; opacity:0; background: radial-gradient(130% 95% at 18% 0%, rgba(211,122,76,0.22), transparent 58%), radial-gradient(120% 90% at 100% 100%, rgba(37,99,235,0.16), transparent 55%), radial-gradient(140% 120% at 50% 120%, rgba(184,93,51,0.14), transparent 60%); transition: opacity .4s ease; }
+    .loading-card.lc-pulsing::before { animation: lcCardPulse 3.6s ease-in-out infinite; }
+    .loading-card > * { position:relative; z-index:1; }
+    @keyframes lcCardPulse { 0%,100%{opacity:0.45;} 50%{opacity:1;} }
+    body.dark-theme .loading-card::before { background: radial-gradient(130% 95% at 18% 0%, rgba(211,122,76,0.26), transparent 58%), radial-gradient(120% 90% at 100% 100%, rgba(111,155,255,0.18), transparent 55%), radial-gradient(140% 120% at 50% 120%, rgba(184,93,51,0.18), transparent 60%); }
     .progress-bar { width:100%; height:9px; margin-top:0; background: var(--surface-3); border-radius:999px; overflow:hidden; margin-bottom:0; }
-    .progress-bar span { display:block; width:42%; height:100%; background: linear-gradient(90deg, var(--accent-2), var(--oxide,#d37a4c)); animation: pulseBar 1.6s ease-in-out infinite; }
-    @keyframes pulseBar { 0% { transform: translateX(-100%) scaleX(0.5); } 50% { transform: translateX(0%) scaleX(0.5); } 100% { transform: translateX(200%) scaleX(0.5); } }
-    .lc-badge { display:inline-flex;align-items:center;gap:10px;background:linear-gradient(135deg,rgba(211,122,76,0.16),rgba(184,93,51,0.08));border:1.5px solid rgba(211,122,76,0.44);border-radius:10px;padding:8px 18px 8px 13px;font-size:12px;font-weight:800;color:var(--oxide,#d37a4c);text-transform:uppercase;letter-spacing:.07em;margin-bottom:20px;box-shadow:0 2px 16px rgba(211,122,76,0.16); }
-    .lc-dot-wrap { position:relative;width:14px;height:14px;flex:0 0 auto; }
-    .lc-dot { position:absolute;inset:2px;border-radius:50%;background:var(--oxide,#d37a4c);animation:lcPulse 1.4s ease-in-out infinite; }
-    .lc-dot-ring { position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--oxide,#d37a4c);animation:lcRing 1.4s ease-out infinite; }
-    @keyframes lcPulse { 0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.45;transform:scale(0.7);} }
-    @keyframes lcRing { 0%{opacity:0.65;transform:scale(0.5);}100%{opacity:0;transform:scale(2.2);} }
+    .progress-bar span { display:block; width:35%; height:100%; border-radius:999px; background: linear-gradient(90deg, transparent, var(--accent-2) 22%, var(--oxide,#d37a4c) 78%, transparent); will-change: transform; animation: pulseBar 1.5s linear infinite; }
+    @keyframes pulseBar { 0% { transform: translateX(-130%); } 100% { transform: translateX(330%); } }
     .lc-title { font-size:1.44rem;font-weight:800;margin:0 0 6px; }
     .lc-sub { color:var(--muted);font-size:0.9rem;margin:0 0 18px; }
     .lc-path { background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--muted);word-break:break-all;margin-bottom:18px;display:flex;align-items:center;gap:10px; }
@@ -17289,7 +17344,7 @@ struct SubmoduleRow {
       <div class="nav-status">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -17329,8 +17384,7 @@ struct SubmoduleRow {
   </div>
 
   <div class="loading" id="loading">
-    <div class="loading-card">
-      <div class="lc-badge" id="lc-badge"><span class="lc-dot-wrap"><span class="lc-dot"></span><span class="lc-dot-ring"></span></span>Analysis running</div>
+    <div class="loading-card" id="loading-card">
       <h2 class="lc-title" id="lc-title">Analyzing your project…</h2>
       <p class="lc-sub">Scanning files, detecting languages, and counting lines — stay for a live view of the results.</p>
       <div class="lc-path" id="lc-path"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="flex:0 0 auto;opacity:0.45"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span id="lc-path-text"></span></div>
@@ -18381,7 +18435,7 @@ int main() { … }   ← code
         var sd = document.getElementById("lc-stage-desc"); if (sd) sd.textContent = "Initializing language analyzers and loading configuration\u2026";
         for (var ri=1;ri<=4;ri++){var rs=document.getElementById("lc-step-"+ri);if(!rs)continue;rs.classList.remove("active","done");if(ri===1)rs.classList.add("active");}
         var rsc=document.getElementById("lc-speed-card");if(rsc)rsc.classList.add("hidden");
-        var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "";
+        var rcard = document.getElementById("loading-card"); if (rcard) rcard.classList.add("lc-pulsing");
         var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "";
         var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
         if (submitButton) { submitButton.disabled = false; submitButton.textContent = "Run analysis"; }
@@ -18412,7 +18466,7 @@ int main() { … }   ← code
         });
         var cancelBtn = document.getElementById("lc-cancel-btn");
         if (cancelBtn) { cancelBtn.style.display = ""; cancelBtn.disabled = false; }
-        var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "";
+        var startCard = document.getElementById("loading-card"); if (startCard) startCard.classList.add("lc-pulsing");
         var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "";
         var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "";
         var elapsed0 = document.getElementById("lc-elapsed"); if (elapsed0) elapsed0.textContent = "0s";
@@ -18453,7 +18507,7 @@ int main() { … }   ← code
 
         function lcShowCancelled() {
           clearInterval(elapsedTimer);
-          var badge = document.getElementById("lc-badge"); if (badge) badge.style.display = "none";
+          var ccard = document.getElementById("loading-card"); if (ccard) ccard.classList.remove("lc-pulsing");
           var metrics = document.getElementById("lc-metrics"); if (metrics) metrics.style.display = "none";
           var pb = document.getElementById("lc-progress-bar"); if (pb) pb.style.display = "none";
           var warnEl = document.getElementById("lc-warn"); if (warnEl) warnEl.classList.add("hidden");
@@ -18479,6 +18533,7 @@ int main() { … }   ← code
 
         function lcShowError(msg) {
           clearInterval(elapsedTimer);
+          var ecard = document.getElementById("loading-card"); if (ecard) ecard.classList.remove("lc-pulsing");
           lcSetPhase("Failed");
           var msgEl = document.getElementById("lc-err-msg");
           if (msgEl) msgEl.textContent = msg || "Analysis failed.";
@@ -20684,7 +20739,7 @@ struct IndexTemplate {
         <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">local code analysis - metrics, history and reports</div></div>
       </a>
       <div class="nav-right">
-        <a class="nav-pill" href="/">Home</a>
+        <a class="nav-pill" href="/" style="background:rgba(255,255,255,0.22);">Home</a>
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
@@ -21355,7 +21410,7 @@ struct SplashTemplate {
         <div class="brand-copy"><div class="brand-title">OxideSLOC</div><div class="brand-subtitle">local code analysis - metrics, history and reports</div></div>
       </a>
       <div class="nav-right">
-        <a class="nav-pill" href="/">Home</a>
+        <a class="nav-pill" href="/" style="background:rgba(255,255,255,0.22);">Home</a>
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
@@ -21808,14 +21863,14 @@ struct ScanSetupTemplate {
     .delta-chip.pos { background:var(--pos-bg); color:var(--pos); }
     .delta-chip.neg { background:var(--neg-bg); color:var(--neg); }
     .delta-cards-inline { display:grid; grid-template-columns:repeat(7,1fr); gap:8px; flex:1 1 auto; }
-    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; }
+    .delta-card-inline { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px 16px; text-align:center; position:relative; cursor:default; transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1); }
     .delta-card-inline:hover { transform:translateY(-3px); box-shadow:0 8px 20px rgba(77,44,20,0.18); z-index:10; }
     .delta-card-val { font-size:16px; font-weight:800; }
     .delta-card-val.pos { color:#1e7e34; }
     .delta-card-val.neg { color:var(--neg); }
     .delta-card-val.mod { color:#b35428; }
     .delta-card-lbl { font-size:10px; color:var(--muted); margin-top:2px; }
-    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; }
+    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; }
     .delta-card-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .delta-card-inline:hover .delta-card-tip { opacity:1; }
     .compare-label { font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--info-text, #4467d8); }
@@ -21915,12 +21970,12 @@ struct ScanSetupTemplate {
        the cards always occupy exactly two rows; when the count is odd the last
        card spans two columns to fill the trailing cell with no empty gap. */
     .summary-strip-hero { align-items:stretch; }
-    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .2s ease,box-shadow .2s ease; overflow:visible; }
+    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1); overflow:visible; }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:6px; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
     .stat-chip:hover .stat-chip-tip { opacity:1; }
     .cocomo-box { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:20px 22px; }
@@ -21928,7 +21983,7 @@ struct ScanSetupTemplate {
     .cocomo-box-title { font-size:18px; font-weight:750; color:var(--text); letter-spacing:-0.01em; }
     .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
     .cocomo-mode-pill { display:inline-flex; align-items:center; padding:3px 10px; border-radius:999px; background:var(--surface-3); border:1px solid var(--line-strong); font-size:11px; font-weight:700; color:var(--muted); }
-    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .2s ease; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .cocomo-mode-tip::before { content:''; position:absolute; bottom:100%; left:14px; border:5px solid transparent; border-bottom-color:var(--text); }
     .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; }
     .cocomo-box-note { font-size:13px; color:var(--muted); margin-top:10px; line-height:1.6; }
@@ -22047,7 +22102,7 @@ struct ScanSetupTemplate {
       <div class="nav-status">
         <a class="nav-pill" href="/" style="text-decoration:none;">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -23115,6 +23170,7 @@ struct ScanSetupTemplate {
           var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
           ds+='<circle'+tt(D[0].lang,fmt(D[0].code)+' code lines')+' cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+COLS[0]+'" stroke-width="'+rsw+'"/>';
         } else {
+          var smalls=[];
           var ang=-Math.PI/2;
           D.forEach(function(d,i){
             var sw=Math.min(d.code/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
@@ -23124,9 +23180,29 @@ struct ScanSetupTemplate {
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
             ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(COLS[i%COLS.length])+'" stroke="white" stroke-width="2"/>';
-            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){var mAng=ang+sw/2,lcol=COLS[i%COLS.length],ax=cx+Ro*Math.cos(mAng),ay=cy+Ro*Math.sin(mAng),cx2=Math.max(8,Math.min(legX-12,cx+(Ro+24)*Math.cos(mAng))),cy2=Math.max(11,Math.min(DH-9,cy+(Ro+24)*Math.sin(mAng))),lex=ax+(cx2-ax)*0.58,ley=ay+(cy2-ay)*0.58;ds+='<line x1="'+px(ax)+'" y1="'+px(ay)+'" x2="'+px(lex)+'" y2="'+px(ley)+'" stroke="'+lcol+'" stroke-width="1.5" style="pointer-events:none;"/>';ds+='<text x="'+px(cx2)+'" y="'+px(cy2+3)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+lcol+'" style="pointer-events:none;">'+pct+'%</text>';}
+            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){smalls.push({mAng:ang+sw/2,pct:pct,lang:d.lang,col:COLS[i%COLS.length]});}
             ang+=sw;
           });
+          // Small slices (<5%) get outside labels laid out as a de-overlapped fan of
+          // rows across the top, each showing "Lang pct%". Sequential packing
+          // guarantees no text overlap; leader lines connect each label to its slice.
+          // The whole SVG scales up in Full View, so these stay readable there too.
+          if(smalls.length){
+            smalls.sort(function(a,b){return a.mAng-b.mAng;});
+            var sPad=8,sRowY=11,sRowH=13,sAvail=DW-2*sPad;
+            smalls.forEach(function(sm){sm.txt=sm.lang+' '+sm.pct+'%';sm.w=sm.txt.length*5+10;});
+            var sRows=[[]],sCur=sRows[0],sCurW=0;
+            smalls.forEach(function(sm){if(sCurW+sm.w>sAvail&&sCur.length){sRows.push([]);sCur=sRows[sRows.length-1];sCurW=0;}sCur.push(sm);sCurW+=sm.w;});
+            sRows.forEach(function(row,ri){
+              var totW=row.reduce(function(a,s){return a+s.w;},0),xx=sPad+Math.max(0,(sAvail-totW)/2),yy=sRowY+ri*sRowH;
+              row.forEach(function(sm){
+                var lx=xx+sm.w/2,axx=cx+Ro*Math.cos(sm.mAng),ayy=cy+Ro*Math.sin(sm.mAng);
+                ds+='<line x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(lx)+'" y2="'+px(yy+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
+                ds+='<text x="'+px(lx)+'" y="'+px(yy)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="pointer-events:none;">'+esc(sm.txt)+'</text>';
+                xx+=sm.w;
+              });
+            });
+          }
         }
         ds+='<text x="'+cx+'" y="'+(cy-7)+'" text-anchor="middle" font-family="'+FONT+'" font-size="21" font-weight="800" fill="#43342d">'+fmt(tot)+'</text>';
         ds+='<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="#7b675b">code lines</text>';
@@ -23370,9 +23446,25 @@ struct ScanSetupTemplate {
         function renderScatterInEl(el,hOvr){
           if(!el||!SCAT_D||!SCAT_D.length)return;
           var n=SCAT_D.length;
-          var legW=140,LG=64,H=hOvr||224,PL=52,PB=36,PT=44,PR=30;
+          var H=hOvr||224,PL=52,PB=36,PT=44;
           var W=Math.max(320,el.offsetWidth||480);
-          var cW=W-PL-LG-legW,cH=H-PT-PB;
+          var cH=H-PT-PB;
+          // Balanced multi-column legend: ~15 rows/col in Full View, 1–3 cols compact.
+          var legCols,legPerCol,legRowH,legColW;
+          if(hOvr){
+            legCols=Math.max(1,Math.ceil(n/15));
+            legPerCol=Math.ceil(n/legCols);
+            legRowH=Math.min(26,Math.max(16,Math.floor(cH/legPerCol)));
+            legColW=124;
+          }else{
+            legCols=n>26?3:(n>14?2:1);
+            legPerCol=Math.ceil(n/legCols);
+            legRowH=Math.min(20,Math.max(11,Math.floor(cH/legPerCol)));
+            legColW=108;
+          }
+          var LG=26;
+          var legW=legCols*legColW;
+          var cW=W-PL-LG-legW;
           var maxF=Math.max.apply(null,SCAT_D.map(function(d){return d.files;}))||1;
           var maxC=Math.max.apply(null,SCAT_D.map(function(d){return d.code;}))||1;
           var maxP=Math.max.apply(null,SCAT_D.map(function(d){return d.physical;}))||1;
@@ -23415,18 +23507,19 @@ struct ScanSetupTemplate {
           });
           s+='<text x="'+(PL+cW/2)+'" y="'+(H-4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75">Files Analyzed</text>';
           s+='<text x="10" y="'+(PT+cH/2)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="currentColor" opacity="0.75" transform="rotate(-90,10,'+(PT+cH/2)+')">Code Lines</text>';
-          // Legend column (right side — colour-coded circle + name per language)
+          // Legend (right side — balanced columns, colour-coded swatch + name)
           var legX=PL+cW+LG;
-          var legItemH=Math.min(22,Math.max(14,Math.floor(cH/n)));
-          var legTotalH=n*legItemH;
-          var legY0=PT+Math.max(0,Math.floor((cH-legTotalH)/2));
+          var legBlockH=legPerCol*legRowH;
+          var legY0=PT+Math.max(0,Math.floor((cH-legBlockH)/2));
           SCAT_D.forEach(function(d,i){
             var col=COLS[i%COLS.length];
-            var ly=legY0+i*legItemH+Math.floor(legItemH/2);
+            var cc=Math.floor(i/legPerCol),rr=i%legPerCol;
+            var lx=legX+cc*legColW;
+            var ly=legY0+rr*legRowH+Math.floor(legRowH/2);
             s+='<g data-lang="'+esc(d.lang)+'" data-ttl="'+esc(d.lang)+'" data-ttv="'+esc(fmt(d.files)+' files · '+fmt(d.code)+' code lines')+'" style="cursor:pointer;">';
-            s+='<rect x="'+legX+'" y="'+(legY0+i*legItemH)+'" width="'+(legW-4)+'" height="'+legItemH+'" fill="transparent"/>';
-            s+='<rect x="'+legX+'" y="'+(ly-6)+'" width="24" height="12" rx="2" fill="'+col+'" opacity="0.88" style="pointer-events:none;"/>';
-            s+='<text x="'+(legX+28)+'" y="'+(ly+4)+'" font-family="'+FONT+'" font-size="12" font-weight="400" fill="currentColor" style="pointer-events:none;">'+esc(d.lang)+'</text>';
+            s+='<rect x="'+lx+'" y="'+(legY0+rr*legRowH)+'" width="'+(legColW-6)+'" height="'+legRowH+'" fill="transparent"/>';
+            s+='<rect x="'+lx+'" y="'+(ly-6)+'" width="22" height="12" rx="2" fill="'+col+'" opacity="0.88" style="pointer-events:none;"/>';
+            s+='<text x="'+(lx+28)+'" y="'+(ly+4)+'" font-family="'+FONT+'" font-size="12" font-weight="400" fill="currentColor" style="pointer-events:none;">'+esc(d.lang)+'</text>';
             s+='</g>';
           });
           s+='</svg>';
@@ -24241,7 +24334,7 @@ struct ResultTemplate {
         </div>
       </a>
       <div class="nav-right">
-        <a class="nav-pill" href="/">Home</a>
+        <a class="nav-pill" href="/" style="background:rgba(255,255,255,0.22);">Home</a>
         <div class="nav-dropdown">
           <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
@@ -25004,7 +25097,7 @@ struct ErrorTemplate {
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -25631,11 +25724,11 @@ struct RelocateScanTemplate {
     .pg-btn:disabled{opacity:.35;cursor:default;}
     .summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
     @media(max-width:800px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
-    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}
+    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}
     .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}
     .stat-chip-val{font-size:20px;font-weight:900;color:var(--oxide);}
     .stat-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
-    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
+    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .stat-chip:hover .stat-chip-tip{opacity:1;}
     .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
@@ -25709,7 +25802,7 @@ struct RelocateScanTemplate {
       <div class="nav-right">
         <a class="nav-pill" href="/">Home</a>
         <div class="nav-dropdown">
-          <a href="/view-reports" class="nav-dropdown-btn">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
+          <a href="/view-reports" class="nav-dropdown-btn" style="background:rgba(255,255,255,0.22);">View Reports <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
           <div class="nav-dropdown-menu">
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
@@ -26673,11 +26766,11 @@ struct HistoryTemplate {
     @keyframes floatCode{0%{opacity:0;transform:translateY(0) rotate(var(--rot));}10%{opacity:var(--op);}85%{opacity:var(--op);}100%{opacity:0;transform:translateY(-200px) rotate(var(--rot));}}
     .summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
     @media(max-width:800px){.summary-strip{grid-template-columns:repeat(2,1fr);}}
-    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .2s ease,box-shadow .2s ease;}
+    .stat-chip{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative;cursor:default;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}
     .stat-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);z-index:10;}
     .stat-chip-val{font-size:20px;font-weight:900;color:var(--oxide);}
     .stat-chip-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:4px;}
-    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s ease;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
+    .stat-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}
     .stat-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .stat-chip:hover .stat-chip-tip{opacity:1;}
     .stat-chip-exact{position:absolute;bottom:6px;right:10px;font-size:12px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
@@ -26729,7 +26822,7 @@ struct HistoryTemplate {
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
-        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" style="background:rgba(255,255,255,0.22);" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
@@ -27683,7 +27776,7 @@ struct CompareSelectTemplate {
             <a href="/trend-reports"><svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Trend Reports</a>
           </div>
         </div>
-        <a class="nav-pill" href="/compare-scans">Compare Scans</a>
+        <a class="nav-pill" style="background:rgba(255,255,255,0.22);" href="/compare-scans">Compare Scans</a>
         <a class="nav-pill" href="/test-metrics">Test Metrics</a>
         <div class="nav-dropdown">
           <a href="/git-browser" class="nav-dropdown-btn">Git Browser <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg></a>
