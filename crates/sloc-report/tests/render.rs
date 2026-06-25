@@ -1865,6 +1865,63 @@ fn write_pdf_from_run_with_cocomo_fits_page1() {
 }
 
 #[test]
+fn write_pdf_from_run_with_hotspots_succeeds() {
+    // A handful of files carrying git activity → the Git Hotspots page renders.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run();
+    for i in 0u32..6 {
+        let mut rec = make_file_record(
+            &format!("src/mod_{i}.rs"),
+            Language::Rust,
+            40 + u64::from(i) * 10,
+        );
+        rec.commit_count = Some(i + 1);
+        rec.last_commit_date = Some(format!("2026-06-{:02}T10:00:00+00:00", i + 1));
+        run.per_file_records.push(rec);
+    }
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    assert!(
+        std::fs::metadata(tmp.path()).unwrap().len() > 0,
+        "PDF with a hotspots page must be non-empty"
+    );
+}
+
+#[test]
+fn write_pdf_from_run_with_hotspots_and_many_files() {
+    // Hotspots page followed by multiple per-file pages — exercises the continuation threading.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_empty_run();
+    for i in 0u32..40 {
+        let mut rec = make_file_record(
+            &format!("src/file_{i:02}.rs"),
+            Language::Rust,
+            50 + u64::from(i),
+        );
+        rec.commit_count = Some(i % 7 + 1);
+        rec.last_commit_date = Some("2026-06-01T10:00:00+00:00".into());
+        run.per_file_records.push(rec);
+    }
+    run.totals_by_language = vec![make_lang_summary(Language::Rust, 40, 3000)];
+    run.summary_totals.files_analyzed = 40;
+    run.summary_totals.code_lines = 3000;
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    assert!(std::fs::metadata(tmp.path()).unwrap().len() > 0);
+}
+
+#[test]
+fn write_pdf_from_run_without_hotspots_unchanged_path() {
+    // No git activity → no hotspots page; the standard path still produces a valid PDF.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let run = make_run();
+    assert!(run
+        .per_file_records
+        .iter()
+        .all(|r| r.commit_count.is_none()));
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+    assert!(std::fs::metadata(tmp.path()).unwrap().len() > 0);
+}
+
+#[test]
 fn write_pdf_from_run_with_cocomo_page2() {
     // To force page-2 COCOMO path, fill the page with many per-file records
     // so after_tables_y drops below FOOTER_H + 20, pushing COCOMO to page 2.

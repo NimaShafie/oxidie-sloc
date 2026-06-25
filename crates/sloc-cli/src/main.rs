@@ -242,8 +242,8 @@ struct AnalyzeArgs {
     #[arg(long, value_name = "N")]
     style_col_threshold: Option<u16>,
 
-    /// Attach per-file git activity over the last N days (one `git log` pass) and surface
-    /// a Hotspots ranking (code lines × recent commits). Off by default; requires a git repo.
+    /// Git activity window in days for the Hotspots ranking (code lines × recent commits),
+    /// computed from one `git log` pass. On by default (90); pass 0 to disable. Needs a git repo.
     #[arg(long, value_name = "DAYS")]
     activity_window: Option<u32>,
 

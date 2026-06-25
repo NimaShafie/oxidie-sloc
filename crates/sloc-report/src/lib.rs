@@ -2914,6 +2914,243 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
     note_y - NOTE_H
 }
 
+/// Draw `text` so its right edge sits at `x_right` mm, at vertical `y` mm. The caller sets the
+/// fill colour beforehand. Uses the Helvetica advance-width table for alignment.
+fn pdf_text_right(ctx: &PdfCtx<'_>, text: &str, pt: f32, x_right: f32, y: f32, bold: bool) {
+    use printpdf::Mm;
+    let font = if bold { ctx.font_bold } else { ctx.font_reg };
+    let w = helvetica_width_mm(text, pt, bold);
+    ctx.layer.use_text(text, pt, Mm(x_right - w), Mm(y), font);
+}
+
+/// Front-truncate `path` with a leading "..." so it fits within `budget_mm` at `pt`, keeping the
+/// most informative tail (the filename). Returns the path unchanged when it already fits.
+fn pdf_fit_path(path: &str, budget_mm: f32, pt: f32) -> String {
+    if helvetica_width_mm(path, pt, false) <= budget_mm {
+        return path.to_string();
+    }
+    let mut chars: Vec<char> = path.chars().collect();
+    while !chars.is_empty() {
+        chars.remove(0);
+        let candidate: String = format!("...{}", chars.iter().collect::<String>());
+        if helvetica_width_mm(&candidate, pt, false) <= budget_mm {
+            return candidate;
+        }
+    }
+    "...".to_string()
+}
+
+/// Render the Git Hotspots table (files ranked by code lines x recent commits) starting at
+/// `section_top`. Returns the Y coordinate below the rendered content. Mirrors the COCOMO
+/// section's dark header bar and the per-file table's right-aligned numeric columns.
+fn pdf_render_hotspots_section(ctx: &PdfCtx<'_>, rows: &[HotspotRow], section_top: f32) -> f32 {
+    use printpdf::{Color, Mm, Rgb};
+    const HDR_H: f32 = 5.5;
+    const COLHDR_H: f32 = 5.0;
+    const ROW_H: f32 = 5.2;
+    const NOTE_GAP: f32 = 4.0;
+
+    let usable_w = 2.0_f32.mul_add(-ctx.margin, ctx.w);
+
+    // Section header bar.
+    pdf_fill_rect(
+        ctx.layer,
+        ctx.margin,
+        section_top - HDR_H,
+        usable_w,
+        HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer.use_text(
+        "GIT HOTSPOTS (CODE LINES x RECENT COMMITS)",
+        7.0,
+        Mm(ctx.margin + 2.0),
+        Mm(section_top - HDR_H + 1.5),
+        ctx.font_bold,
+    );
+
+    // Column right edges (numeric columns are right-aligned); File fills the remaining left space.
+    let col_last_r = ctx.w - ctx.margin;
+    let col_score_r = col_last_r - 32.0;
+    let col_commits_r = col_score_r - 33.0;
+    let col_code_r = col_commits_r - 32.0;
+    let file_x = ctx.margin + 2.0;
+    let file_budget = (col_code_r - 26.0) - file_x;
+
+    // Column-header row.
+    let chdr_y = section_top - HDR_H - COLHDR_H;
+    pdf_fill_rect(
+        ctx.layer,
+        ctx.margin,
+        chdr_y,
+        usable_w,
+        COLHDR_H,
+        Rgb::new(0.90, 0.88, 0.84, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.30, 0.30, 0.30, None)));
+    ctx.layer
+        .use_text("File", 6.0, Mm(file_x), Mm(chdr_y + 1.4), ctx.font_bold);
+    pdf_text_right(ctx, "Code lines", 6.0, col_code_r, chdr_y + 1.4, true);
+    pdf_text_right(ctx, "Commits", 6.0, col_commits_r, chdr_y + 1.4, true);
+    pdf_text_right(ctx, "Hotspot score", 6.0, col_score_r, chdr_y + 1.4, true);
+    pdf_text_right(ctx, "Last changed", 6.0, col_last_r, chdr_y + 1.4, true);
+
+    // Data rows (zebra background).
+    let mut y = chdr_y;
+    for (ri, hrow) in rows.iter().enumerate() {
+        y -= ROW_H;
+        let bg = if ri.is_multiple_of(2) {
+            Rgb::new(0.975, 0.965, 0.95, None)
+        } else {
+            Rgb::new(1.0, 1.0, 1.0, None)
+        };
+        pdf_fill_rect(ctx.layer, ctx.margin, y, usable_w, ROW_H, bg);
+        // File path (front-truncated to its width budget).
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        let path = pdf_fit_path(&pdf_safe_str(&hrow.path), file_budget, 6.0);
+        ctx.layer
+            .use_text(path, 6.0, Mm(file_x), Mm(y + 1.4), ctx.font_reg);
+        // Numeric columns.
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.12, 0.12, 0.12, None)));
+        pdf_text_right(
+            ctx,
+            &group_thousands(&hrow.code_lines.to_string()),
+            6.0,
+            col_code_r,
+            y + 1.4,
+            false,
+        );
+        pdf_text_right(
+            ctx,
+            &hrow.commit_count.to_string(),
+            6.0,
+            col_commits_r,
+            y + 1.4,
+            false,
+        );
+        // Hotspot score — emphasised in the oxide accent colour.
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.7, 0.33, 0.16, None)));
+        pdf_text_right(
+            ctx,
+            &group_thousands(&hrow.score.to_string()),
+            6.0,
+            col_score_r,
+            y + 1.4,
+            true,
+        );
+        ctx.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+        pdf_text_right(ctx, &hrow.last_commit_date, 6.0, col_last_r, y + 1.4, false);
+    }
+
+    // Footnote.
+    let note_y = y - NOTE_GAP;
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.45, 0.45, 0.45, None)));
+    ctx.layer.use_text(
+        "Files ranked by code lines x commits over the configured git activity window. \
+         Distinct from the Compare page's scan-to-scan churn rate.",
+        5.5,
+        Mm(ctx.margin),
+        Mm(note_y + 1.0),
+        ctx.font_reg,
+    );
+
+    note_y
+}
+
+/// Render a dedicated "Git Hotspots" page and return its `(page, layer, y_below)` so the per-file
+/// table can continue on the same page (mirrors `pdf_render_tests_coverage_page`).
+#[allow(clippy::too_many_arguments)]
+fn pdf_render_hotspots_page(
+    doc: &printpdf::PdfDocumentReference,
+    font_reg: &printpdf::IndirectFontRef,
+    font_bold: &printpdf::IndirectFontRef,
+    run: &AnalysisRun,
+    rows: &[HotspotRow],
+    w: f32,
+    h: f32,
+    margin: f32,
+    footer_h: f32,
+    title: &str,
+    version: &str,
+) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
+    use printpdf::{Color, Mm, Rgb};
+    const HDR_H: f32 = 8.0;
+
+    let (page, layer_idx) = doc.add_page(Mm(w), Mm(h), "Git Hotspots");
+    let layer = doc.get_page(page).get_layer(layer_idx);
+    let ctx = PdfCtx {
+        layer: &layer,
+        font_reg,
+        font_bold,
+        w,
+        margin,
+        row_h: 5.5,
+        tbl_hdr_h: 6.0,
+    };
+
+    // Mini page header bar.
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        h - HDR_H,
+        w,
+        HDR_H,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    ctx.layer
+        .use_text("oxide-sloc", 9.0, Mm(margin), Mm(h - 5.5), ctx.font_bold);
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    ctx.layer.use_text(
+        pdf_trunc(&pdf_safe_str(title), 45),
+        7.5,
+        Mm(46.0),
+        Mm(h - 5.5),
+        ctx.font_reg,
+    );
+    pdf_draw_header_meta(
+        ctx.layer,
+        ctx.font_reg,
+        w,
+        margin,
+        h - 5.5,
+        &pdf_page_header_meta(run),
+    );
+
+    let bottom = pdf_render_hotspots_section(&ctx, rows, h - HDR_H - 4.0);
+
+    // Footer.
+    pdf_fill_rect(
+        ctx.layer,
+        0.0,
+        0.0,
+        w,
+        footer_h,
+        Rgb::new(0.93, 0.91, 0.87, None),
+    );
+    ctx.layer
+        .set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    ctx.layer.use_text(
+        format!("oxide-sloc v{version}  \u{00b7}  AGPL-3.0-or-later"),
+        6.5,
+        Mm(margin),
+        Mm(3.0),
+        ctx.font_reg,
+    );
+
+    (page, layer_idx, bottom - 3.0)
+}
+
 /// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
 ///
 /// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
@@ -3071,8 +3308,30 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         Some((tc_page, tc_layer, tc_y))
     };
 
+    // Git Hotspots — its own page after COCOMO/T&C, only when an --activity-window scan
+    // collected per-file git activity. Threaded as the per-file continuation (like COCOMO)
+    // so the per-file table flows on below it with no blank-page gap.
+    let hotspot_rows = build_hotspot_rows(run);
+    let per_file_start = if hotspot_rows.is_empty() {
+        cocomo_page_ctx
+    } else {
+        Some(pdf_render_hotspots_page(
+            &doc,
+            &font_reg,
+            &font_bold,
+            run,
+            &hotspot_rows,
+            W,
+            H,
+            MARGIN,
+            FOOTER_H,
+            &title,
+            version,
+        ))
+    };
+
     if !run.per_file_records.is_empty() {
-        // Per-file continues on the same page as T&C (or COCOMO+T&C) — no blank page between.
+        // Per-file continues on the same page as T&C / COCOMO / Hotspots — no blank page between.
         pdf_render_per_file_pages(
             &doc,
             &font_reg,
@@ -3088,7 +3347,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             &ts,
             version,
             banner,
-            cocomo_page_ctx,
+            per_file_start,
         );
     }
 
@@ -4195,10 +4454,10 @@ struct WarningOpportunityRow {
     .tz-select:focus{border-color:var(--oxide);}
     .page { max-width: 1720px; margin: 0 auto; padding: 32px 24px 40px; }
     @media (max-width: 1920px) { .top-nav-inner { max-width: 1500px; } .page { max-width: 1500px; } }
-    /* Uniform grid: every card is the same width and columns line up across both
-       rows. JS sets the column count to ceil(n/2) so the cards always occupy
-       exactly two rows; when the count is odd the last card spans two columns so
-       there is no empty trailing cell while all other columns stay aligned. */
+    /* Uniform two-row card strip. JS pads the card count to even (revealing a
+       reserve card when odd) and sets the column count to n/2, so the cards form
+       exactly two full rows with every column aligned and every card the same
+       width — no oversized card, no empty trailing cell. */
     .summary-grid { display:grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap:10px; align-items:stretch; }
     .panel, .metric, .warning-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
     .panel { padding: 20px; }
@@ -4209,9 +4468,9 @@ struct WarningOpportunityRow {
     .metric-value { margin-top: 6px; }
     .metric-big { display:block; font-size: 20px; font-weight: 900; color: var(--oxide); line-height: 1.15; letter-spacing: -0.02em; }
     .metric-exact { position: absolute; bottom: 6px; right: 10px; font-size: 12px; font-weight: 600; color: var(--muted); font-family: ui-monospace, monospace; }
-    .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.55; white-space: normal; max-width: 340px; min-width: 200px; text-align: left; pointer-events: none; opacity: 0; transition: opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index: 100; box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
+    .metric-tooltip { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%) translateY(7px); background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 10px; font-size: 12px; font-weight: 500; line-height: 1.55; white-space: normal; max-width: 340px; min-width: 200px; text-align: left; pointer-events: none; opacity: 0; transition: opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index: 100; box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
     .metric-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--text); }
-    .metric:hover .metric-tooltip { opacity: 1; }
+    .metric:hover .metric-tooltip { opacity: 1; transform: translateX(-50%) translateY(0); }
     .hero { padding: 24px 24px 20px; margin-bottom: 18px; background: linear-gradient(150deg, rgba(111,155,255,0.06) 0%, transparent 55%), var(--surface); border-top: 3px solid var(--accent); }
     .hero-top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
     .hero h1 { margin:0 0 8px; font-size: 28px; letter-spacing: -0.04em; }
@@ -4230,10 +4489,10 @@ struct WarningOpportunityRow {
     .run-id-chip.muted-chip .run-id-chip-value { color:var(--muted); font-style:italic; }
     .submodule-state-badge { display:inline-block; font-size:10px; font-style:italic; font-weight:600; color:var(--accent-2); background:rgba(100,130,220,0.10); border:1px solid rgba(100,130,220,0.22); border-radius:4px; padding:1px 6px; letter-spacing:0.03em; }
     body.dark-theme .submodule-state-badge { color:var(--accent); background:rgba(111,155,255,0.13); border-color:rgba(111,155,255,0.28); }
-    .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
+    .chip-tooltip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:6px 11px; border-radius:8px; font-size:11px; font-weight:500; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.25); line-height:1.4; }
     .chip-tooltip::before { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
-    .run-id-chip:hover .chip-tooltip { opacity:1; }
-    a.run-id-chip-link:hover .chip-tooltip { opacity:1; }
+    .run-id-chip:hover .chip-tooltip { opacity:1; transform:translateX(-50%) translateY(0); }
+    a.run-id-chip-link:hover .chip-tooltip { opacity:1; transform:translateX(-50%) translateY(0); }
     .chip-copy-icon { display:inline-block; margin-left:5px; font-size:10px; opacity:0.55; vertical-align:middle; }
     .chip-label-icon { display:inline-block; vertical-align:middle; margin-right:3px; margin-top:-1px; opacity:0.8; }
     .chip-popout-icon { display:inline-block; vertical-align:middle; margin-left:4px; opacity:0.6; flex-shrink:0; }
@@ -4276,9 +4535,9 @@ struct WarningOpportunityRow {
     body.dark-theme .delta-card-val.neg { color:#e07070; }
     body.dark-theme .delta-card-val.mod { color:#d4a843; }
     .delta-card-lbl { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
-    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; box-shadow:0 4px 12px rgba(0,0,0,0.18); }
+    .delta-card-tip { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:7px 12px; border-radius:8px; font-size:11px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; box-shadow:0 4px 12px rgba(0,0,0,0.18); }
     .delta-card-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
-    .delta-card-inline:hover .delta-card-tip { opacity:1; }
+    .delta-card-inline:hover .delta-card-tip { opacity:1; transform:translateX(-50%) translateY(0); }
     .delta-panel-link { display:inline-flex; align-items:center; gap:6px; padding:8px 16px; border-radius:10px; border:1px solid var(--line); background:var(--surface); color:var(--text); font-size:12px; font-weight:600; text-decoration:none; transition:background .15s, border-color .15s, color .15s, transform .15s, box-shadow .15s; box-shadow:0 2px 6px rgba(77,44,20,0.08); }
     .delta-panel-link:hover { background:var(--oxide); color:#fff; border-color:var(--oxide); transform:translateY(-2px); box-shadow:0 6px 18px rgba(77,44,20,0.25); }
     body.dark-theme .delta-panel-link { box-shadow:0 2px 6px rgba(0,0,0,0.2); }
@@ -4387,25 +4646,25 @@ struct WarningOpportunityRow {
     .empty-state-row td { text-align:center; padding:20px; color:var(--muted-2); font-size:13px; font-style:italic; }
     .cov-gauge-row { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:18px; }
     @media(max-width:700px) { .cov-gauge-row { grid-template-columns:1fr; } }
-    .cov-gauge-card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px 20px; display:flex; flex-direction:column; gap:8px; transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1); min-width:0; }
+    .cov-gauge-card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px 20px; display:flex; flex-direction:column; gap:8px; transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1); min-width:0; }
     .cov-gauge-card:hover { transform:translateY(-3px); box-shadow:0 10px 28px rgba(77,44,20,0.15); }
     .cov-gauge-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
     .cov-gauge-val { font-size:32px; font-weight:900; line-height:1; }
     .cov-gauge-track { height:8px; border-radius:4px; background:var(--line); overflow:hidden; }
     .cov-gauge-fill { height:100%; border-radius:4px; transition:width .5s ease; }
     .cov-gauge-sub { font-size:11px; color:var(--muted); }
-    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1); }
+    .stat-chip { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; position:relative; cursor:default; transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1); }
     .stat-chip:hover { transform:translateY(-4px); box-shadow:0 12px 32px rgba(77,44,20,0.2); z-index:10; }
     .stat-chip-val { font-size:20px; font-weight:900; color:var(--oxide); }
     .stat-chip-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-top:4px; }
-    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; font-weight:500; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .stat-chip-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; font-weight:500; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .stat-chip-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
-    .stat-chip:hover .stat-chip-tip { opacity:1; }
+    .stat-chip:hover .stat-chip-tip { opacity:1; transform:translateX(-50%) translateY(0); }
     .stat-chip-exact { position:absolute; bottom:6px; right:10px; font-size:12px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1; }
     .cocomo-mode-pill-wrap { position:relative; display:inline-flex; align-items:center; cursor:help; }
-    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s; z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .cocomo-mode-tip { position:absolute; top:calc(100% + 8px); left:0; transform:translateY(-7px); background:var(--text); color:var(--bg); padding:9px 13px; border-radius:8px; font-size:11px; font-weight:500; line-height:1.55; white-space:normal; max-width:300px; min-width:180px; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:300; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
     .cocomo-mode-tip::before { content:''; position:absolute; bottom:100%; left:14px; border:5px solid transparent; border-bottom-color:var(--text); }
-    .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; }
+    .cocomo-mode-pill-wrap:hover .cocomo-mode-tip { opacity:1; transform:translateY(0); }
     .report-stack { display:grid; gap: 18px; align-items:start; }
     pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 16px; padding: 16px; overflow: auto; font-size: 12px; color: var(--text); }
     .warn-list { margin: 0; padding-left: 18px; line-height: 1.6; }
@@ -4788,23 +5047,31 @@ struct WarningOpportunityRow {
     .pdf-variant-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#7b675b;margin:0 0 3px;}
     .pdf-variant-img{width:100%;height:auto;display:block;border-radius:6px;border:1px solid #ddd;}
 
-    #rpt-loading-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:opacity .6s cubic-bezier(.4,0,.2,1);background:linear-gradient(125deg,#f5f0eb 0%,#f8ede1 22%,#f2e6d6 44%,#f7ede2 66%,#f4ece4 88%,#f5f0eb 100%);background-size:320% 320%;animation:rpt-bg-pan 20s ease-in-out infinite;}
-    #rpt-loading-overlay::before{content:'';position:absolute;inset:-25%;pointer-events:none;background:radial-gradient(38% 38% at 28% 30%,rgba(196,92,16,.12),transparent 70%),radial-gradient(44% 44% at 72% 66%,rgba(214,140,60,.11),transparent 70%);animation:rpt-glow-drift 15s ease-in-out infinite;}
+    #rpt-loading-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:opacity .6s cubic-bezier(.4,0,.2,1);background:radial-gradient(125% 125% at 50% 0%,#fbf4ec 0%,#f4ebe0 45%,#ecdfd0 100%);}
     #rpt-loading-overlay.fade-out{opacity:0;pointer-events:none;}
-    @keyframes rpt-bg-pan{0%{background-position:0% 50%;}50%{background-position:100% 50%;}100%{background-position:0% 50%;}}
-    @keyframes rpt-glow-drift{0%,100%{transform:translate(0,0) scale(1);}33%{transform:translate(4%,-3%) scale(1.08);}66%{transform:translate(-3%,4%) scale(1.05);}}
-    .rpt-load-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:36px;padding:68px 126px;min-width:418px;background:linear-gradient(155deg,rgba(255,254,251,.97) 0%,rgba(255,246,236,.92) 100%);border:1px solid rgba(196,110,40,.14);border-radius:34px;box-shadow:0 0 0 1px rgba(255,255,255,.75) inset,0 10px 90px rgba(150,80,20,.11),0 2px 18px rgba(0,0,0,.07);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);animation:rpt-card-in .6s cubic-bezier(.22,.68,0,1.12) both,rpt-card-glow 5s ease-in-out 1s infinite;}
-    @keyframes rpt-card-in{from{opacity:0;transform:translateY(16px) scale(.94);}to{opacity:1;transform:none;}}
-    @keyframes rpt-card-glow{0%,100%{box-shadow:0 0 0 1px rgba(255,255,255,.75) inset,0 10px 90px rgba(150,80,20,.10),0 2px 18px rgba(0,0,0,.07);}50%{box-shadow:0 0 0 1px rgba(255,255,255,.88) inset,0 16px 120px rgba(196,92,16,.20),0 2px 18px rgba(0,0,0,.07);}}
-    .rpt-load-logo{width:68px;height:68px;object-fit:contain;will-change:transform,filter;animation:rpt-logo-in .55s cubic-bezier(.22,.68,0,1.2) .08s both,rpt-logo-float 3.6s ease-in-out .65s infinite;}
-    @keyframes rpt-logo-in{from{opacity:0;transform:scale(.72) rotate(-6deg);}to{opacity:1;transform:none;}}
-    @keyframes rpt-logo-float{0%{transform:translateY(0) rotate(-2.5deg) scale(1);filter:drop-shadow(0 5px 12px rgba(150,80,20,.22));}50%{transform:translateY(-13px) rotate(2.5deg) scale(1.045);filter:drop-shadow(0 18px 24px rgba(196,92,16,.16));}100%{transform:translateY(0) rotate(-2.5deg) scale(1);filter:drop-shadow(0 5px 12px rgba(150,80,20,.22));}}
-    .rpt-spinner-wrap{position:relative;width:80px;height:80px;}
-    .rpt-spinner-track{position:absolute;inset:0;border-radius:50%;border:4px solid rgba(196,92,16,.1);}
-    .rpt-spinner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(196,92,16,0) 0%,rgba(196,92,16,.2) 38%,#c45c10 100%);animation:rpt-spin 1.1s cubic-bezier(.4,0,.6,1) infinite;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 5px),#fff calc(100% - 4px));mask:radial-gradient(farthest-side,transparent calc(100% - 5px),#fff calc(100% - 4px));}
-    .rpt-spinner::after{content:'';position:absolute;inset:0;border-radius:50%;border:4px solid transparent;border-top-color:rgba(196,92,16,.55);filter:blur(1px);animation:rpt-spin 2.2s linear reverse infinite;}
+    /* Drifting color blobs — transform/opacity only (GPU composited, no per-frame repaint) */
+    .rpt-bg-blob{position:absolute;border-radius:50%;filter:blur(64px);opacity:.5;pointer-events:none;will-change:transform;}
+    .rpt-blob-a{width:48vw;height:48vw;left:-10vw;top:-12vw;background:radial-gradient(circle,#e8932f,transparent 64%);animation:rpt-drift-a 17s ease-in-out infinite;}
+    .rpt-blob-b{width:42vw;height:42vw;right:-8vw;bottom:-10vw;background:radial-gradient(circle,#d3621a,transparent 64%);animation:rpt-drift-b 21s ease-in-out infinite;}
+    .rpt-blob-c{width:34vw;height:34vw;right:20vw;top:-8vw;background:radial-gradient(circle,#caa14f,transparent 64%);opacity:.38;animation:rpt-drift-c 25s ease-in-out infinite;}
+    @keyframes rpt-drift-a{0%,100%{transform:translate3d(0,0,0) scale(1);}50%{transform:translate3d(9vw,7vw,0) scale(1.18);}}
+    @keyframes rpt-drift-b{0%,100%{transform:translate3d(0,0,0) scale(1.06);}50%{transform:translate3d(-8vw,-6vw,0) scale(.88);}}
+    @keyframes rpt-drift-c{0%,100%{transform:translate3d(0,0,0) scale(1);}50%{transform:translate3d(-7vw,8vw,0) scale(1.22);}}
+    body.dark-theme #rpt-loading-overlay{background:radial-gradient(125% 125% at 50% 0%,#241810 0%,#1a120b 45%,#130c06 100%);}
+    body.dark-theme .rpt-bg-blob{opacity:.36;}
+    .rpt-load-card{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:22px;width:432px;max-width:88vw;padding:46px 54px 38px;background:linear-gradient(155deg,rgba(255,255,253,.95),rgba(255,248,240,.9));border:1px solid rgba(196,110,40,.16);border-radius:26px;box-shadow:0 1px 0 rgba(255,255,255,.8) inset,0 22px 64px rgba(120,64,16,.16),0 4px 16px rgba(0,0,0,.06);animation:rpt-card-in .5s cubic-bezier(.22,.68,0,1.12) both;}
+    @keyframes rpt-card-in{from{opacity:0;transform:translateY(14px) scale(.96);}to{opacity:1;transform:none;}}
+    body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(42,24,12,.92),rgba(28,15,6,.95));border-color:rgba(200,120,50,.16);box-shadow:0 1px 0 rgba(255,200,140,.05) inset,0 22px 64px rgba(0,0,0,.5),0 4px 16px rgba(0,0,0,.35);}
+    /* Logo is static — no bounce (kept GPU-cheap) */
+    .rpt-load-logo{width:58px;height:58px;object-fit:contain;filter:drop-shadow(0 6px 16px rgba(90,48,12,.45));animation:rpt-card-in .5s ease .05s both;}
+    .rpt-spinner-wrap{position:relative;width:90px;height:90px;}
+    .rpt-spinner-track{position:absolute;inset:0;border-radius:50%;border:5px solid rgba(196,92,16,.12);}
+    .rpt-spinner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(196,92,16,0) 0%,rgba(196,92,16,.18) 35%,#c45c10 100%);will-change:transform;animation:rpt-spin 1s linear infinite;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 6px),#fff calc(100% - 5px));mask:radial-gradient(farthest-side,transparent calc(100% - 6px),#fff calc(100% - 5px));}
     @keyframes rpt-spin{to{transform:rotate(360deg);}}
-    .rpt-load-divider{width:46px;height:1px;background:linear-gradient(90deg,transparent,rgba(196,92,16,.22),transparent);}
+    .rpt-spinner-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;color:#c45c10;font-variant-numeric:tabular-nums;}
+    body.dark-theme .rpt-spinner-track{border-color:rgba(196,92,16,.2);}
+    body.dark-theme .rpt-spinner-pct{color:#e8932f;}
+    .rpt-load-divider{width:54px;height:1px;background:linear-gradient(90deg,transparent,rgba(196,92,16,.22),transparent);}
     .rpt-loading-text{font-size:15px;font-weight:600;letter-spacing:.08em;display:flex;align-items:baseline;gap:2px;}
     .rpt-load-word{background:linear-gradient(90deg,#9a7a64 0%,#c45c10 45%,#e08a3a 55%,#9a7a64 100%);background-size:220% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;animation:rpt-text-shimmer 3.2s linear infinite;}
     @keyframes rpt-text-shimmer{to{background-position:-220% center;}}
@@ -4812,12 +5079,19 @@ struct WarningOpportunityRow {
     .rpt-dot:nth-child(2){animation-delay:.28s;}
     .rpt-dot:nth-child(3){animation-delay:.56s;}
     @keyframes rpt-bounce{0%,60%,100%{opacity:0;transform:translateY(0);}30%{opacity:1;transform:translateY(-5px);}}
-    body.dark-theme #rpt-loading-overlay{background:linear-gradient(125deg,#1a1410 0%,#23170d 22%,#1c1208 44%,#241810 66%,#1b140d 88%,#1a1410 100%);background-size:320% 320%;}
-    body.dark-theme #rpt-loading-overlay::before{background:radial-gradient(38% 38% at 28% 30%,rgba(214,120,40,.16),transparent 70%),radial-gradient(44% 44% at 72% 66%,rgba(196,92,16,.13),transparent 70%);}
-    body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(40,21,10,.9) 0%,rgba(28,13,4,.94) 100%);border-color:rgba(200,120,50,.13);box-shadow:0 0 0 1px rgba(255,200,140,.04) inset,0 8px 72px rgba(0,0,0,.48),0 2px 16px rgba(0,0,0,.32);}
-    body.dark-theme .rpt-spinner-track{border-color:rgba(196,92,16,.16);}
+    .rpt-status{font-size:12.5px;font-weight:600;letter-spacing:.02em;color:var(--muted,#8a7060);min-height:16px;text-align:center;}
+    .rpt-status-in{animation:rpt-status-pop .38s ease both;}
+    @keyframes rpt-status-pop{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+    .rpt-progress{width:100%;height:6px;border-radius:99px;background:rgba(196,92,16,.12);overflow:hidden;}
+    .rpt-progress-bar{height:100%;width:100%;transform:scaleX(0);transform-origin:left center;border-radius:99px;background:linear-gradient(90deg,#e8932f,#c45c10);transition:transform .25s cubic-bezier(.4,0,.2,1);will-change:transform;}
+    body.dark-theme .rpt-progress{background:rgba(196,92,16,.2);}
+    .rpt-feed{width:100%;min-height:66px;display:flex;flex-direction:column;justify-content:flex-end;gap:3px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;line-height:1.5;color:rgba(138,112,96,.72);text-align:left;overflow:hidden;}
+    .rpt-feed-line{display:flex;align-items:center;gap:6px;opacity:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:rpt-feed-in .4s ease forwards;}
+    .rpt-feed-line::before{content:'>';color:#c45c10;font-weight:700;}
+    @keyframes rpt-feed-in{from{opacity:0;transform:translateX(-6px);}to{opacity:.82;transform:none;}}
+    body.dark-theme .rpt-feed{color:rgba(204,172,150,.62);}
     body.dark-theme .rpt-load-divider{background:linear-gradient(90deg,transparent,rgba(196,92,16,.28),transparent);}
-    @media (prefers-reduced-motion:reduce){ #rpt-loading-overlay,#rpt-loading-overlay::before,.rpt-load-card,.rpt-load-logo,.rpt-load-word,.rpt-spinner::after{animation:none!important;}}
+    @media (prefers-reduced-motion:reduce){ #rpt-loading-overlay .rpt-bg-blob,#rpt-loading-overlay .rpt-spinner,#rpt-loading-overlay .rpt-load-word,#rpt-loading-overlay .rpt-dot{animation:none!important;}}
     /* ── Code Style Analysis section ── */
     .style-guide-grid{display:grid;gap:10px;}
     .style-guide-row{display:grid;grid-template-columns:140px 1fr 52px;align-items:center;gap:10px;padding:6px 8px;border-radius:8px;cursor:default;position:relative;transition:transform .18s ease,box-shadow .18s ease,background .18s ease;}
@@ -4829,16 +5103,16 @@ struct WarningOpportunityRow {
     .style-guide-row:hover .style-guide-fill{filter:brightness(1.12);}
     .style-guide-score{font-size:12px;font-weight:800;color:var(--oxide);text-align:right;white-space:nowrap;}
     .style-guide-desc{font-size:10px;color:var(--muted);margin-top:2px;grid-column:2/3;}
-    .style-bar-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 14px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:300;box-shadow:0 4px 18px rgba(0,0,0,.24);}
+    .style-bar-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 14px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:300;box-shadow:0 4px 18px rgba(0,0,0,.24);}
     .style-bar-tip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--text);}
     .style-guide-row:hover .style-bar-tip{opacity:1;}
     .style-metrics-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0 0;}
     @media(max-width:800px){.style-metrics-strip{grid-template-columns:repeat(2,1fr);}}
-    .style-chip{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:center;cursor:default;position:relative;transition:transform .28s cubic-bezier(.4,0,.2,1),box-shadow .28s cubic-bezier(.4,0,.2,1);}
+    .style-chip{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:center;cursor:default;position:relative;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);}
     .style-chip:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(77,44,20,0.2);}
     .style-chip-val{font-size:18px;font-weight:900;color:var(--oxide);}
     .style-chip-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:3px;}
-    .style-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .3s cubic-bezier(.4,0,.2,1) .04s;z-index:200;}
+    .style-chip-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:7px 12px;border-radius:8px;font-size:11px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:200;}
     .style-chip-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}
     .style-chip:hover .style-chip-tip{opacity:1;}
     .style-file-table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;}
@@ -4898,16 +5172,39 @@ struct WarningOpportunityRow {
 </head>
 <body{% if report_header_footer.is_some() %} class="has-report-banner"{% endif %}>
   <div id="rpt-loading-overlay" aria-live="polite" aria-label="Loading report">
+    <div class="rpt-bg-blob rpt-blob-a" aria-hidden="true"></div>
+    <div class="rpt-bg-blob rpt-blob-b" aria-hidden="true"></div>
+    <div class="rpt-bg-blob rpt-blob-c" aria-hidden="true"></div>
     <div class="rpt-load-card">
       <img src="{{ small_logo_uri }}" alt="oxide-sloc" class="rpt-load-logo" />
       <div class="rpt-spinner-wrap">
         <div class="rpt-spinner-track"></div>
         <div class="rpt-spinner"></div>
+        <div class="rpt-spinner-pct" id="rpt-pct">0%</div>
       </div>
       <div class="rpt-load-divider"></div>
       <div class="rpt-loading-text"><span class="rpt-load-word">Loading report</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span></div>
+      <div class="rpt-status" id="rpt-status">Initializing analysis engine</div>
+      <div class="rpt-progress"><div class="rpt-progress-bar" id="rpt-progress-bar"></div></div>
+      <div class="rpt-feed" id="rpt-feed" aria-hidden="true"></div>
     </div>
   </div>
+  <script nonce="{{ nonce }}">
+  (function(){
+    var ov=document.getElementById('rpt-loading-overlay');if(!ov)return;
+    var statusEl=document.getElementById('rpt-status'),bar=document.getElementById('rpt-progress-bar'),pct=document.getElementById('rpt-pct'),feed=document.getElementById('rpt-feed');
+    var msgs=['Initializing analysis engine','Discovering source files','Detecting languages','Tokenizing and counting lines','Classifying comments and docstrings','Computing complexity metrics','Aggregating per-language totals','Estimating COCOMO effort','Rendering charts','Finalizing report'];
+    var logs=['scan: walking directory tree','lexer: state machine warm','metrics: SLOC and ULOC ready','cocomo: effort model loaded','charts: canvas contexts bound','render: assembling sections','dedup: hashing file contents','git: reading activity window'];
+    var mi=0,li=0,prog=0,ready=false,start=Date.now(),MIN=1700;
+    function setProg(p){prog=p;if(bar)bar.style.transform='scaleX('+(p/100).toFixed(3)+')';if(pct)pct.textContent=Math.round(p)+'%';}
+    function nextMsg(){if(statusEl){statusEl.classList.remove('rpt-status-in');void statusEl.offsetWidth;statusEl.textContent=msgs[mi%msgs.length];statusEl.classList.add('rpt-status-in');}mi++;}
+    function addLog(){if(!feed)return;var l=document.createElement('div');l.className='rpt-feed-line';l.textContent=logs[li%logs.length];feed.appendChild(l);li++;while(feed.childNodes.length>4)feed.removeChild(feed.firstChild);}
+    nextMsg();addLog();setProg(6);
+    var msgTimer=setInterval(nextMsg,900),logTimer=setInterval(addLog,640),progTimer=setInterval(function(){var cap=ready?100:90;if(prog<cap){var step=(cap-prog)*0.08+0.6;setProg(Math.min(cap,prog+step));}},80);
+    function done(){clearInterval(msgTimer);clearInterval(logTimer);clearInterval(progTimer);setProg(100);if(statusEl){statusEl.textContent='Done';statusEl.classList.add('rpt-status-in');}setTimeout(function(){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},600);},260);}
+    window.__rptFinish=function(){ready=true;setTimeout(done,Math.max(0,MIN-(Date.now()-start)));};
+  })();
+  </script>
   <div class="background-watermarks" aria-hidden="true">
     <img src="{{ logo_text_uri }}" alt="" />
     <img src="{{ logo_text_uri }}" alt="" />
@@ -5142,6 +5439,10 @@ struct WarningOpportunityRow {
         {% if uloc > 0 %}<div class="metric" data-metric-value="{{ uloc }}"><div class="metric-tooltip">Unique Lines of Code: distinct non-blank code lines across all files. Counts each line once regardless of how many files it appears in.</div><div class="metric-label">Unique SLOC (ULOC)</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
         {% if uloc > 0 && dryness_pct_str != "" %}<div class="metric"><div class="metric-tooltip">ULOC &divide; Code Lines &mdash; the fraction of code lines that are unique. Higher = less copy-paste across the codebase. 100% means every code line is distinct.</div><div class="metric-label">DRYness</div><div class="metric-value"><span class="metric-big">{{ dryness_pct_str }}%</span></div></div>{% endif %}
         {% if duplicate_group_count > 0 %}<div class="metric" data-metric-value="{{ duplicate_group_count }}"><div class="metric-tooltip">Groups of files with identical content detected. These may inflate SLOC totals. Re-run with --no-duplicates to exclude them.</div><div class="metric-label">Duplicate groups</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>{% endif %}
+        <!-- Reserve "pad" card: revealed by JS only when the visible card count is
+             odd, so the strip always has an even number of cards that fill exactly
+             two aligned rows (no oversized card, no empty trailing cell). -->
+        <div class="metric metric-pad" data-metric-value="{{ run.summary_totals.test_assertion_count }}" style="display:none"><div class="metric-tooltip">Best-effort count of test assertion call lines (assertEquals, EXPECT_*, etc.) detected across all test files.</div><div class="metric-label">Assertions</div><div class="metric-value"><span class="metric-big"></span></div><span class="metric-exact"></span></div>
       </div>
     </section>
 
@@ -5212,7 +5513,7 @@ struct WarningOpportunityRow {
         <section class="panel stack chart-section">
           <div>
             <div class="toolbar">
-              <div class="toolbar-left"><h2>File Count vs SLOC</h2></div>
+              <div class="toolbar-left"><h2>Files vs Code Lines</h2></div>
               <button class="chart-expand-btn" id="scatter-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
             </div>
             <p style="margin:0 0 14px;color:var(--muted);font-size:13px;">Each bubble is a language. X&nbsp;=&nbsp;files analyzed, Y&nbsp;=&nbsp;code lines, bubble size&nbsp;∝&nbsp;total physical lines.</p>
@@ -6413,20 +6714,22 @@ struct WarningOpportunityRow {
       }
       (function(){
         var g=document.querySelector('.summary-grid');if(!g)return;
-        var items=Array.prototype.slice.call(g.querySelectorAll('.metric'));var n=items.length;if(!n)return;
-        var last=items[n-1];
+        var pad=g.querySelector('.metric-pad');
+        var real=Array.prototype.slice.call(g.querySelectorAll('.metric')).filter(function(el){return el!==pad;});
+        if(!real.length)return;
         function upd(){
-          // Desktop: ceil(n/2) equal columns so the cards occupy exactly two rows
-          // with every column aligned. When n is odd the last card spans two
-          // columns to fill the trailing cell (no empty gap, no uneven sizing).
+          // Pad the strip to an EVEN card count so a true CSS grid lays it out as
+          // exactly two full rows with every column aligned and every card the
+          // same size. When the real-card count is odd, reveal the reserve
+          // "Assertions" pad card; otherwise keep it hidden.
+          var n=real.length;
+          if(pad){ if(n%2===1){pad.style.display='';n++;} else {pad.style.display='none';} }
           var perRow=window.innerWidth<=640?2:Math.ceil(n/2);
           g.style.gridTemplateColumns='repeat('+perRow+',minmax(0,1fr))';
-          items.forEach(function(el){el.style.gridColumn='';});
-          if(window.innerWidth>640&&perRow*2!==n){last.style.gridColumn='span 2';}
         }
         upd();window.addEventListener('resize',upd);
       })();
-      (function(){var ov=document.getElementById('rpt-loading-overlay');if(ov){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},450);}})();
+      (function(){if(typeof window.__rptFinish==='function'){window.__rptFinish();return;}var ov=document.getElementById('rpt-loading-overlay');if(ov){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},450);}})();
     })();
     // ── Info chip interactivity ───────────────────────────────────────────────
     (function() {
@@ -6785,7 +7088,8 @@ struct WarningOpportunityRow {
         var paths=svg.querySelectorAll('path[data-lang]');
         function hl(lang){for(var i=0;i<paths.length;i++){if(paths[i].getAttribute('data-lang')===lang){paths[i].style.filter='brightness(1.18) drop-shadow(0 2px 8px rgba(0,0,0,.25))';paths[i].style.transform='scale(1.05)';paths[i].style.opacity='1';}else{paths[i].style.opacity='0.32';paths[i].style.filter='none';paths[i].style.transform='none';}}}
         function rst(){for(var i=0;i<paths.length;i++){paths[i].style.opacity='';paths[i].style.filter='';paths[i].style.transform='';}}
-        svg.addEventListener('mouseover',function(e){var t=e.target;while(t&&t!==svg){var l=t.getAttribute&&t.getAttribute('data-lang');if(l){hl(l);return;}t=t.parentNode;}});
+        svg.addEventListener('mouseover',function(e){var t=e.target;while(t&&t!==svg){var l=t.getAttribute&&t.getAttribute('data-lang');if(l){hl(l);return;}t=t.parentNode;}rst();});
+        svg.addEventListener('mousemove',function(e){var t=e.target;while(t&&t!==svg){if(t.getAttribute&&t.getAttribute('data-lang'))return;t=t.parentNode;}rst();});
         svg.addEventListener('mouseout',function(e){if(e.relatedTarget&&svg.contains(e.relatedTarget))return;rst();});
       }
       function wireMixLegend(svg) {
@@ -6835,24 +7139,22 @@ struct WarningOpportunityRow {
             if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){smalls.push({mAng:ang+sw/2,pct:pct,lang:d.lang,col:PALETTE[i%PALETTE.length]});}
             ang+=sw;
           });
-          // Small slices (<5%) get outside labels laid out as a de-overlapped fan of
-          // rows across the top, each showing "Lang pct%". Sequential packing
-          // guarantees no text overlap; leader lines connect each label to its slice.
-          // The whole SVG scales up in Full View, so these stay readable there too.
+          // Small slices (<5%) get outside labels positioned near each slice's own
+          // angular position (a slice on the left gets its label/leader on the left),
+          // then nudged apart horizontally so text never overlaps. Leader lines point
+          // from each slice to its label. Horizontal text keeps long names legible;
+          // the whole SVG scales up in Full View so these stay readable there too.
           if(smalls.length){
             smalls.sort(function(a,b){return a.mAng-b.mAng;});
-            var sPad=8,sRowY=11,sRowH=13,sAvail=DW-2*sPad;
-            smalls.forEach(function(sm){sm.txt=sm.lang+' '+sm.pct+'%';sm.w=sm.txt.length*5+10;});
-            var sRows=[[]],sCur=sRows[0],sCurW=0;
-            smalls.forEach(function(sm){if(sCurW+sm.w>sAvail&&sCur.length){sRows.push([]);sCur=sRows[sRows.length-1];sCurW=0;}sCur.push(sm);sCurW+=sm.w;});
-            sRows.forEach(function(row,ri){
-              var totW=row.reduce(function(a,s){return a+s.w;},0),xx=sPad+Math.max(0,(sAvail-totW)/2),yy=sRowY+ri*sRowH;
-              row.forEach(function(sm){
-                var lx=xx+sm.w/2,axx=cx+Ro*Math.cos(sm.mAng),ayy=cy+Ro*Math.sin(sm.mAng);
-                ds+='<line x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(lx)+'" y2="'+px(yy+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
-                ds+='<text x="'+px(lx)+'" y="'+px(yy)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="pointer-events:none;">'+esc(sm.txt)+'</text>';
-                xx+=sm.w;
-              });
+            var sPad=6,sRowY=11;
+            smalls.forEach(function(sm){sm.txt=sm.lang+' '+sm.pct+'%';sm.w=sm.txt.length*5+8;sm.x=Math.max(sPad+sm.w/2,Math.min(DW-sPad-sm.w/2,cx+(Ro+14)*Math.cos(sm.mAng)));});
+            for(var si=1;si<smalls.length;si++){var mnX=smalls[si-1].x+smalls[si-1].w/2+smalls[si].w/2+3;if(smalls[si].x<mnX)smalls[si].x=mnX;}
+            var sLast=smalls[smalls.length-1],sOver=sLast.x+sLast.w/2-(DW-sPad);
+            if(sOver>0)smalls.forEach(function(sm){sm.x-=sOver;});
+            smalls.forEach(function(sm){
+              var axx=cx+Ro*Math.cos(sm.mAng),ayy=cy+Ro*Math.sin(sm.mAng);
+              ds+='<line x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(sm.x)+'" y2="'+px(sRowY+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
+              ds+='<text x="'+px(sm.x)+'" y="'+px(sRowY)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="pointer-events:none;">'+esc(sm.txt)+'</text>';
             });
           }
         }
@@ -6888,13 +7190,17 @@ struct WarningOpportunityRow {
           var phys=d.physical||d.code+d.comments+d.blanks;
           var cW=d.code/maxT*BW,cmW=d.comments/maxT*BW,blW=d.blanks/maxT*BW;
           var lmid=y+barBH/2+4;
+          var ttv='Code '+fmt(d.code)+'\nComments '+fmt(d.comments)+'\nBlank '+fmt(d.blanks)+'\nTotal '+fmt(phys);
           bs+='<g class="lang-bar-row">';
-          bs+='<rect x="0" y="'+y+'" width="'+svgW+'" height="'+barBH+'" fill="transparent"/>';
-          bs+='<text x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d">'+esc(d.lang)+'</text>';
+          // Hit area ends just past the total label so empty space to the right of the
+          // bar does not trigger the tooltip — only the name, bar and total are hot.
+          var hitW=px(LW+phys/maxT*BW+8+(String(fmt(phys)).length*6.8)+6);
+          bs+='<rect'+tt(d.lang,ttv)+' x="0" y="'+y+'" width="'+hitW+'" height="'+barBH+'" fill="transparent" style="cursor:pointer;"/>';
+          bs+='<text'+tt(d.lang,ttv)+' x="'+(LW-6)+'" y="'+lmid+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="#43342d" style="cursor:pointer;">'+esc(d.lang)+'</text>';
           if(cW>0.5){bs+='<rect'+tt(d.lang+' Code',fmt(d.code)+' lines')+' data-kind="code" x="'+px(x)+'" y="'+y+'" width="'+px(cW)+'" height="'+barBH+'" fill="'+OX+'"/>';var _fc=fitFs(fmt(d.code),cW);if(_fc)bs+='<text x="'+px(x+cW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fc+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.code)+'</text>';x+=cW;}
           if(cmW>0.5){bs+='<rect'+tt(d.lang+' Comments',fmt(d.comments)+' lines')+' data-kind="comment" x="'+px(x)+'" y="'+y+'" width="'+px(cmW)+'" height="'+barBH+'" fill="'+GN+'"/>';var _fm=fitFs(fmt(d.comments),cmW);if(_fm)bs+='<text x="'+px(x+cmW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fm+'" font-weight="700" fill="#fff" style="pointer-events:none;">'+fmt(d.comments)+'</text>';x+=cmW;}
           if(blW>0.5){bs+='<rect'+tt(d.lang+' Blank',fmt(d.blanks)+' lines')+' data-kind="blank" x="'+px(x)+'" y="'+y+'" width="'+px(blW)+'" height="'+barBH+'" fill="'+GY+'"/>';var _fb=fitFs(fmt(d.blanks),blW);if(_fb)bs+='<text x="'+px(x+blW/2)+'" y="'+lmid+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+_fb+'" font-weight="700" fill="#555" style="pointer-events:none;">'+fmt(d.blanks)+'</text>';}
-          bs+='<text x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b">'+fmt(phys)+'</text>';
+          bs+='<text'+tt(d.lang,ttv)+' x="'+px(LW+phys/maxT*BW+8)+'" y="'+lmid+'" font-family="'+FONT+'" font-size="11" font-weight="700" fill="#7b675b" style="cursor:pointer;">'+fmt(phys)+'</text>';
           bs+='</g>';
         });
         var ly=SH-14;
@@ -7228,7 +7534,12 @@ struct WarningOpportunityRow {
       // Must run BEFORE `new Chart(canvas, …)` so Chart.js' resize observer binds to
       // the inner wrapper (not the full-width host). Returns a holder whose `.chart`
       // field the caller assigns once the chart exists, so hover can drive it.
-      function attachScatterLegend(canvas) {
+      // expandBtnId: when set (compact card), the legend is capped to what fits in
+      // 2 columns at the available height and a trailing "+N more" row links to Full
+      // View. When null (Full View itself) every language is shown across (up to) 2
+      // tall columns. Languages are ordered by code lines so the compact view keeps
+      // the biggest ones; colours/hover still key off each language's original index.
+      function attachScatterLegend(canvas, expandBtnId) {
         var holder = { chart: null };
         var host = canvas && canvas.parentNode;
         if (!host) return holder;
@@ -7239,15 +7550,28 @@ struct WarningOpportunityRow {
         cwrap.style.cssText = 'position:relative;flex:1 1 auto;min-width:0;height:100%;';
         host.insertBefore(cwrap, canvas);
         cwrap.appendChild(canvas);
+
         var n = SCAT_D.length;
-        var hostH = host.clientHeight || 224;
-        var maxRows = Math.max(4, Math.floor((hostH - 6) / 19));
-        var cols = Math.max(1, Math.ceil(n / Math.min(15, maxRows)));
-        var perCol = Math.ceil(n / cols);
+        var availH = Math.max(120, host.clientHeight || 224);
+        var rowsFit = Math.max(2, Math.floor(availH / 18));   // readable pitch
+        // Never more than 2 columns; compact view truncates to fit, Full View shows all.
+        var truncated = expandBtnId ? (n > 2 * rowsFit) : false;
+        var realShown = truncated ? (2 * rowsFit - 1) : n;
+        var totalItems = truncated ? (2 * rowsFit) : n;
+        // Split into 2 equal columns once a single column would exceed ~18 rows, even
+        // when the (tall) Full-View modal could fit them all in one column.
+        var cols = totalItems > Math.min(rowsFit, 18) ? 2 : 1;
+        var perCol = Math.ceil(totalItems / cols);
+        var rowH = Math.max(14, Math.min(30, Math.floor(availH / perCol)));
+
+        // Order by code lines desc so the compact view keeps the biggest languages.
+        var order = SCAT_D.map(function(_, i){ return i; })
+          .sort(function(a, b){ return (SCAT_D[b].code || 0) - (SCAT_D[a].code || 0); });
+
         var leg = document.createElement('div');
         leg.style.cssText = 'flex:0 0 auto;display:grid;grid-auto-flow:column;'
-          + 'grid-template-rows:repeat(' + perCol + ',auto);column-gap:18px;row-gap:3px;'
-          + 'align-content:center;max-height:100%;font-size:12px;line-height:1.2;';
+          + 'grid-template-rows:repeat(' + perCol + ',' + rowH + 'px);column-gap:18px;'
+          + 'align-content:center;font-size:12px;line-height:1;';
         function setHi(idx) {
           var chart = holder.chart; if (!chart) return;
           chart.data.datasets.forEach(function(ds, i) {
@@ -7268,20 +7592,33 @@ struct WarningOpportunityRow {
           chart.setActiveElements([]);
           chart.update('none');
         }
-        SCAT_D.forEach(function(d, i) {
-          var b = PALETTE[i % PALETTE.length];
+        function addItem(swColor, label, idx, isMore) {
           var it = document.createElement('div');
-          it.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;white-space:nowrap;';
+          it.style.cssText = 'display:flex;align-items:center;gap:7px;white-space:nowrap;'
+            + ((idx != null || isMore) ? 'cursor:pointer;' : '');
           var sw = document.createElement('span');
-          sw.style.cssText = 'width:22px;height:12px;border-radius:2px;flex:0 0 auto;background:' + b + ';';
+          sw.style.cssText = 'width:22px;height:12px;border-radius:2px;flex:0 0 auto;background:'
+            + swColor + ';' + (isMore ? 'opacity:0.45;' : '');
           var tx = document.createElement('span');
-          tx.textContent = d.lang;
-          it.appendChild(sw);
-          it.appendChild(tx);
-          it.addEventListener('mouseenter', function(){ setHi(i); });
-          it.addEventListener('mouseleave', clearHi);
+          tx.textContent = label;
+          if (isMore) { tx.style.fontStyle = 'italic'; tx.style.opacity = '0.8'; }
+          it.appendChild(sw); it.appendChild(tx);
+          if (idx != null) {
+            it.addEventListener('mouseenter', function(){ setHi(idx); });
+            it.addEventListener('mouseleave', clearHi);
+          }
+          if (isMore) {
+            it.addEventListener('click', function(){
+              var b = document.getElementById(expandBtnId); if (b) b.click();
+            });
+          }
           leg.appendChild(it);
-        });
+        }
+        for (var k = 0; k < realShown; k++) {
+          var oi = order[k];
+          addItem(PALETTE[oi % PALETTE.length], SCAT_D[oi].lang, oi, false);
+        }
+        if (truncated) addItem('#9a8c82', '+' + (n - realShown) + ' more — Full View', null, true);
         host.appendChild(leg);
         return holder;
       }
@@ -7293,7 +7630,7 @@ struct WarningOpportunityRow {
         var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
         var maxFx = Math.max.apply(null, SCAT_D.map(function(d){return d.files;})) || 1;
         var c = clr();
-        var legHolder = attachScatterLegend(canvas);
+        var legHolder = attachScatterLegend(canvas, 'scatter-expand-btn');
         var chart = new Chart(canvas, {
           type: 'bubble',
           data: {
@@ -7876,12 +8213,12 @@ struct WarningOpportunityRow {
           });
         })();
 
-        // File Count vs SLOC (Scatter)
+        // Files vs Code Lines (Scatter)
         (function(){
           var btn = document.getElementById('scatter-expand-btn');
           if(!btn || !SCAT_D || !SCAT_D.length) return;
           btn.addEventListener('click', function(){
-            var canvas = makeOverlay('File Count vs SLOC \u2014 Full View', undefined, 'File count vs SLOC per language');
+            var canvas = makeOverlay('Files vs Code Lines \u2014 Full View', undefined, 'File count vs SLOC per language');
             if(!canvas) return;
             var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical;})) || 1;
             var maxFx = Math.max.apply(null, SCAT_D.map(function(d){return d.files;})) || 1;
@@ -8357,9 +8694,9 @@ struct WarningOpportunityRow {
           });
         root.appendChild(pgComp.group);
 
-        // ── File Count vs SLOC — render off-screen (bubble chart, single-col centred) ─
+        // ── Files vs Code Lines — render off-screen (bubble chart, single-col centred) ─
         if (SCAT_D && SCAT_D.length) {
-          var pgScat = mkGroup('File Count vs SLOC');
+          var pgScat = mkGroup('Files vs Code Lines');
           pgScat.grid.classList.add('single-col'); // CSS class drives centering in print
           var maxP = Math.max.apply(null, SCAT_D.map(function(d){return d.physical||0;})) || 1;
           var scatPng = snap('bubble', {
@@ -8464,7 +8801,7 @@ struct WarningOpportunityRow {
         var t=e.target;
         while(t&&t.getAttribute){
           var l=t.getAttribute('data-ttl');
-          if(l!==null){ show(e,'<strong>'+escH(l)+'</strong><br>'+escH(t.getAttribute('data-ttv')||'')); return; }
+          if(l!==null){ show(e,'<strong>'+escH(l)+'</strong><br>'+escH(t.getAttribute('data-ttv')||'').replace(/\n/g,'<br>')); return; }
           t=t.parentNode;
         }
       });

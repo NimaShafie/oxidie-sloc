@@ -175,16 +175,24 @@ pub struct AnalysisConfig {
     /// `"c_family"` = C / C++ / Objective-C only (fast, backwards-compatible).
     #[serde(default = "default_style_lang_scope")]
     pub style_lang_scope: String,
-    /// Opt-in git activity window in days. When set (e.g. 90), oxide-sloc runs a single
+    /// Git activity window in days. **On by default (90)**: oxide-sloc runs a single
     /// `git log --since` pass and attaches per-file commit-count + last-change date to each
-    /// `FileRecord`, enabling the hotspots view. `None` (default) skips all git activity work.
-    /// This is distinct from the scan-to-scan "churn rate" shown in the web UI.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `FileRecord`, powering the hotspots view. `Some(0)` (or `None`) disables it; on a
+    /// non-git path the single `git log` attempt fails gracefully and no hotspots are produced.
+    /// This is distinct from the scan-to-scan "churn rate" shown in the web UI's Compare page.
+    #[serde(
+        default = "default_activity_window_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub activity_window_days: Option<u32>,
 }
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_activity_window_days() -> Option<u32> {
+    Some(90)
 }
 
 const fn default_style_col_threshold() -> u16 {
@@ -291,7 +299,7 @@ impl Default for AnalysisConfig {
             style_analysis_enabled: true,
             style_score_threshold: 0,
             style_lang_scope: "all".into(),
-            activity_window_days: None,
+            activity_window_days: Some(90),
         }
     }
 }
@@ -507,6 +515,17 @@ mod tests {
     fn app_config_default_validates() {
         let cfg = AppConfig::default();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn activity_window_is_on_by_default() {
+        // Default config and a TOML that omits the field both default to a 90-day window.
+        assert_eq!(AnalysisConfig::default().activity_window_days, Some(90));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sloc.toml");
+        std::fs::write(&path, "[analysis]\n").unwrap();
+        let cfg = AppConfig::load_from_file(&path).unwrap();
+        assert_eq!(cfg.analysis.activity_window_days, Some(90));
     }
 
     #[test]
