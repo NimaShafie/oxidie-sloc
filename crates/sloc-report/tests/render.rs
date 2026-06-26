@@ -2003,6 +2003,36 @@ fn write_pdf_from_run_terminal_tc_page_is_trimmed() {
 }
 
 #[test]
+fn write_pdf_from_run_tc_page_trimmed_when_hotspots_follow() {
+    // The reported bug: a COCOMO + Tests & Coverage + SUBMODULES page left a huge empty gap
+    // when a Git Hotspots page followed it (the per-file table flows onto the Hotspots page,
+    // not the T&C page, so the T&C page ends early). The T&C page must still be trimmed.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run_with_submodules();
+    // Give the per-file records git activity so a Git Hotspots page is emitted.
+    for (i, rec) in run.per_file_records.iter_mut().enumerate() {
+        rec.commit_count = Some((i as u32) + 1);
+        rec.last_commit_date = Some("2026-06-01T10:00:00+00:00".into());
+    }
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::Organic,
+        ksloc: 16.4,
+        effort_person_months: 45.27,
+        duration_months: 10.65,
+        avg_staff: 4.25,
+    });
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+
+    let bytes = std::fs::read(tmp.path()).unwrap();
+    let heights = pdf_mediabox_heights(&bytes);
+    let min_h = heights.iter().cloned().fold(f32::INFINITY, f32::min);
+    assert!(
+        min_h < 590.0,
+        "T&C page should be trimmed even when a Hotspots page follows; got heights {heights:?}"
+    );
+}
+
+#[test]
 fn write_pdf_from_run_with_style_analysis() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let run = make_run_with_style();
