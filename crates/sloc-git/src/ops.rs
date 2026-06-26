@@ -159,40 +159,55 @@ fn validate_clone_url(url: &str) -> Result<()> {
     // threat is cloud-metadata and loopback, not "any private IP".
     // The check is host-scoped (not a whole-URL substring match) so legitimate
     // paths/tags such as "release-v10.2" are never mistaken for an IP.
-    if let Some(host) = host_of_git_url(url) {
-        // Positive allowlist (durable SSRF control): when SLOC_GIT_HOST_ALLOWLIST is
-        // configured, only those hosts may be cloned. This closes the validate-vs-clone
-        // DNS TOCTOU — an attacker cannot point an *allowed name* at an internal IP and
-        // have it accepted unless the name itself is allowlisted. Empty = denylist mode
-        // (loopback/link-local/metadata blocking only), preserving prior behaviour.
-        let allow = git_host_allowlist();
-        if !allow.is_empty() && !allow.iter().any(|h| h == &host) {
-            bail!("git URL rejected: host {host:?} is not in SLOC_GIT_HOST_ALLOWLIST");
-        }
-        if is_ssrf_blocked_host(&host) {
+    let Some(host) = host_of_git_url(url) else {
+        return Ok(());
+    };
+    check_host_allowed(&host)?;
+    check_resolved_ips(&host, url)?;
+    Ok(())
+}
+
+/// Host-level SSRF gate: positive allowlist (when configured) plus the
+/// loopback/link-local/cloud-metadata denylist. Split out of `validate_clone_url`
+/// to keep that function's cognitive complexity low.
+fn check_host_allowed(host: &str) -> Result<()> {
+    // Positive allowlist (durable SSRF control): when SLOC_GIT_HOST_ALLOWLIST is
+    // configured, only those hosts may be cloned. This closes the validate-vs-clone
+    // DNS TOCTOU — an attacker cannot point an *allowed name* at an internal IP and
+    // have it accepted unless the name itself is allowlisted. Empty = denylist mode
+    // (loopback/link-local/metadata blocking only), preserving prior behaviour.
+    let allow = git_host_allowlist();
+    if !allow.is_empty() && !allow.iter().any(|h| h == host) {
+        bail!("git URL rejected: host {host:?} is not in SLOC_GIT_HOST_ALLOWLIST");
+    }
+    if is_ssrf_blocked_host(host) {
+        bail!(
+            "git URL rejected: loopback, link-local, and cloud-metadata \
+             addresses are not permitted (host {host:?})"
+        );
+    }
+    Ok(())
+}
+
+/// Defence against DNS-rebinding: a hostname that is not itself an IP literal can
+/// still resolve to an SSRF-sensitive address. Resolve it now and reject if *any*
+/// resolved IP is blocked. A resolution failure is not fatal (the host may only be
+/// resolvable by git's own resolver in some air-gapped setups) — git will then fail
+/// or succeed on its own; the residual is the documented validate-vs-clone TOCTOU.
+fn check_resolved_ips(host: &str, url: &str) -> Result<()> {
+    let Some(port) = port_of_git_url(url) else {
+        return Ok(());
+    };
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
+        return Ok(());
+    };
+    for addr in addrs {
+        if is_ssrf_blocked_ip(addr.ip()) {
             bail!(
-                "git URL rejected: loopback, link-local, and cloud-metadata \
-                 addresses are not permitted (host {host:?})"
+                "git URL rejected: host {host:?} resolves to a blocked \
+                 address {} (loopback/link-local/cloud-metadata)",
+                addr.ip()
             );
-        }
-        // Defence against DNS-rebinding: a hostname that is not itself an IP
-        // literal can still resolve to an SSRF-sensitive address. Resolve it now
-        // and reject if *any* resolved IP is blocked. A resolution failure is not
-        // fatal (the host may only be resolvable by git's own resolver in some
-        // air-gapped setups) — git will then fail or succeed on its own; the
-        // residual is the documented validate-vs-clone TOCTOU.
-        if let Some(port) = port_of_git_url(url) {
-            if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
-                for addr in addrs {
-                    if is_ssrf_blocked_ip(addr.ip()) {
-                        bail!(
-                            "git URL rejected: host {host:?} resolves to a blocked \
-                             address {} (loopback/link-local/cloud-metadata)",
-                            addr.ip()
-                        );
-                    }
-                }
-            }
         }
     }
     Ok(())
@@ -233,17 +248,21 @@ fn port_of_git_url(url: &str) -> Option<u16> {
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
     let authority = authority.rsplit('@').next().unwrap_or(authority);
     // Explicit port: take the segment after the last ':' that is not inside [..].
-    let explicit = if let Some(stripped) = authority.strip_prefix('[') {
+    let explicit = authority.strip_prefix('[').map_or_else(
+        // No '[' prefix: take the segment after the last ':'.
+        || {
+            authority
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+        },
         // IPv6 literal: [host]:port
-        stripped
-            .split_once("]:")
-            .and_then(|(_, p)| p.parse::<u16>().ok())
-    } else {
-        authority
-            .rsplit_once(':')
-            .and_then(|(_, p)| p.parse::<u16>().ok())
-    };
-    explicit.or(match scheme.to_lowercase().as_str() {
+        |stripped| {
+            stripped
+                .split_once("]:")
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+        },
+    );
+    explicit.or_else(|| match scheme.to_lowercase().as_str() {
         "https" => Some(443),
         "git" => Some(9418),
         "ssh" => Some(22),
