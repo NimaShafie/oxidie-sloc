@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 #![allow(clippy::multiple_crate_versions)]
 
+mod pdf_compat;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -1073,9 +1075,9 @@ fn write_pdf_via_wkhtmltopdf(html_path: &Path, pdf_path: &Path) -> Result<()> {
 }
 
 struct PdfCtx<'a> {
-    layer: &'a printpdf::PdfLayerReference,
-    font_reg: &'a printpdf::IndirectFontRef,
-    font_bold: &'a printpdf::IndirectFontRef,
+    layer: &'a crate::pdf_compat::PdfLayerReference,
+    font_reg: &'a crate::pdf_compat::IndirectFontRef,
+    font_bold: &'a crate::pdf_compat::IndirectFontRef,
     w: f32,
     margin: f32,
     row_h: f32,
@@ -1119,7 +1121,7 @@ fn pdf_render_page1_header(
     hdr_h: f32,
     banner: Option<&str>,
 ) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let hdr_y = h - hdr_h;
     pdf_fill_rect(
         ctx.layer,
@@ -1209,7 +1211,7 @@ fn pdf_render_page1_gitbox(
     title_text_y: f32,
     roots_text_y: f32,
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let mut git_parts: Vec<String> = vec![];
     if let Some(ref b) = run.git_branch {
         git_parts.push(format!("Branch: {}", pdf_safe_str(b)));
@@ -1300,7 +1302,7 @@ fn pdf_render_page1_gitbox(
 
 #[allow(clippy::cast_precision_loss)]
 fn pdf_render_summary_chips(ctx: &PdfCtx<'_>, run: &AnalysisRun, roots_text_y: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let tot = &run.summary_totals;
     let chip_gap: f32 = 5.0;
     let chip_w = 3.0f32.mul_add(-chip_gap, 2.0f32.mul_add(-ctx.margin, ctx.w)) / 4.0;
@@ -1489,7 +1491,7 @@ fn pdf_info_parts_tests(tot: &SummaryTotals) -> Vec<String> {
 }
 
 fn pdf_info_emit_line(ctx: &PdfCtx<'_>, y: f32, r: f32, g: f32, b: f32, text: &str) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
     ctx.layer.use_text(
@@ -1528,7 +1530,7 @@ fn pdf_table_render_section(
     title: &str,
     rows: &[(&str, String)],
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     pdf_fill_rect(
         ctx.layer,
         x,
@@ -1652,7 +1654,7 @@ fn pdf_render_metric_tables(ctx: &PdfCtx<'_>, run: &AnalysisRun, tbl_top: f32) {
 /// Render Tests & Coverage content **inline** on an existing page, starting at `y_start`.
 /// Draw a full-width dark section title bar at `y` and return the Y just below it.
 fn pdf_tc_title_bar(ctx: &PdfCtx<'_>, label: &str, y: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let tbl_w = 2.0_f32.mul_add(-ctx.margin, ctx.w);
     pdf_fill_rect(
         ctx.layer,
@@ -1675,8 +1677,8 @@ fn pdf_tc_title_bar(ctx: &PdfCtx<'_>, label: &str, y: f32) -> f32 {
 }
 
 /// Alternating zebra row background for PDF tables.
-fn pdf_row_bg(ri: usize) -> printpdf::Rgb {
-    use printpdf::Rgb;
+fn pdf_row_bg(ri: usize) -> crate::pdf_compat::Rgb {
+    use crate::pdf_compat::Rgb;
     if ri.is_multiple_of(2) {
         Rgb::new(0.975, 0.965, 0.95, None)
     } else {
@@ -1695,7 +1697,7 @@ fn pdf_sub_sum(
 /// Render the four summary stat boxes (test functions/assertions/suites + line coverage).
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn pdf_tc_stat_boxes(ctx: &PdfCtx<'_>, run: &AnalysisRun, has_cov: bool, mut y: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let gap: f32 = 4.0;
     let box_h: f32 = 15.0;
     let box_w = (ctx.w - 2.0 * ctx.margin - 3.0 * gap) / 4.0;
@@ -1746,7 +1748,7 @@ fn pdf_tc_stat_boxes(ctx: &PdfCtx<'_>, run: &AnalysisRun, has_cov: bool, mut y: 
 /// Render the full-width SUBMODULES table when submodule summaries are present.
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn pdf_tc_submodules(ctx: &PdfCtx<'_>, run: &AnalysisRun, footer_h: f32, mut y: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let subs = &run.submodule_summaries;
     if subs.is_empty() {
         return y;
@@ -1836,7 +1838,7 @@ fn pdf_tc_submodules(ctx: &PdfCtx<'_>, run: &AnalysisRun, footer_h: f32, mut y: 
 /// Render the line/function/branch coverage gauges across the page width.
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn pdf_tc_gauges(ctx: &PdfCtx<'_>, run: &AnalysisRun, mut y: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let margin = ctx.margin;
     let gap: f32 = 4.0;
     let gauges: &[(&str, u64, u64)] = &[
@@ -1930,7 +1932,7 @@ fn pdf_tc_per_file_header(
     col_fn_w: f32,
     y: f32,
 ) -> (f32, CovCols) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let margin = ctx.margin;
     let col_br_w: f32 = if has_br_cov { 22.0 } else { 0.0 };
     let col_file_w = 2.0_f32.mul_add(-margin, ctx.w) - 22.0 - col_fn_w - col_br_w;
@@ -1967,7 +1969,7 @@ fn pdf_tc_per_file_header(
 
 /// Render one per-file coverage row at vertical position `ry`.
 fn pdf_tc_per_file_row(ctx: &PdfCtx<'_>, file: &FileRecord, ri: usize, cols: &CovCols, ry: f32) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let (has_fn_cov, has_br_cov, col_fn_w, hdr_x2) =
         (cols.has_fn_cov, cols.has_br_cov, cols.col_fn_w, cols.hdr_x2);
     let Some(cov) = file.coverage.as_ref() else {
@@ -2061,7 +2063,7 @@ fn pdf_tc_per_file(
 
 /// Render the "no coverage data" note when no coverage is present.
 fn pdf_tc_no_coverage_note(ctx: &PdfCtx<'_>, mut y: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let margin = ctx.margin;
     let note_h: f32 = 12.0;
     pdf_fill_rect(
@@ -2130,14 +2132,14 @@ fn pdf_page_header_meta(run: &AnalysisRun) -> String {
 /// baseline sits at `baseline_y`. Uses exact Helvetica advance widths for precise
 /// right-edge alignment against the page margin.
 fn pdf_draw_header_meta(
-    layer: &printpdf::PdfLayerReference,
-    font: &printpdf::IndirectFontRef,
+    layer: &crate::pdf_compat::PdfLayerReference,
+    font: &crate::pdf_compat::IndirectFontRef,
     w: f32,
     margin: f32,
     baseline_y: f32,
     text: &str,
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     let tw = helvetica_width_mm(text, 6.5, false);
     let x = (w - margin - tw).max(margin + 60.0);
     layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
@@ -2148,7 +2150,7 @@ fn pdf_draw_header_meta(
 /// and right-aligned run metadata) shared by the dedicated T&C and Git Hotspots pages. `h` is the
 /// page height and `hdr_h` the band height.
 fn pdf_page_mini_header(ctx: &PdfCtx<'_>, h: f32, hdr_h: f32, title: &str, run: &AnalysisRun) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     pdf_fill_rect(
         ctx.layer,
         0.0,
@@ -2188,7 +2190,7 @@ fn pdf_page_mini_header(ctx: &PdfCtx<'_>, h: f32, hdr_h: f32, title: &str, run: 
 /// Draw the standard page footer band (light bar with the version/licence line) shared by the
 /// dedicated T&C and Git Hotspots pages.
 fn pdf_page_footer_band(ctx: &PdfCtx<'_>, footer_h: f32, version: &str) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     pdf_fill_rect(
         ctx.layer,
         0.0,
@@ -2212,9 +2214,9 @@ fn pdf_page_footer_band(ctx: &PdfCtx<'_>, footer_h: f32, version: &str) {
 /// `(page, layer, y_bottom)` tuple so `pdf_render_per_file_pages` can continue on this page.
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
 fn pdf_render_tests_coverage_page(
-    doc: &printpdf::PdfDocumentReference,
-    font_reg: &printpdf::IndirectFontRef,
-    font_bold: &printpdf::IndirectFontRef,
+    doc: &crate::pdf_compat::PdfDocumentReference,
+    font_reg: &crate::pdf_compat::IndirectFontRef,
+    font_bold: &crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     w: f32,
     h: f32,
@@ -2222,8 +2224,12 @@ fn pdf_render_tests_coverage_page(
     footer_h: f32,
     title: &str,
     version: &str,
-) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
-    use printpdf::Mm;
+) -> (
+    crate::pdf_compat::PdfPageIndex,
+    crate::pdf_compat::PdfLayerIndex,
+    f32,
+) {
+    use crate::pdf_compat::Mm;
     const HDR_H: f32 = 8.0;
 
     let (tc_page, tc_layer_idx) = doc.add_page(Mm(w), Mm(h), "Tests & Coverage");
@@ -2256,7 +2262,7 @@ fn pdf_render_page1_footer(
     version: &str,
     banner: Option<&str>,
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     pdf_fill_rect(
         ctx.layer,
         0.0,
@@ -2295,11 +2301,11 @@ fn pdf_render_page1_footer(
     }
 }
 
-fn per_file_row_bg(ri: usize) -> printpdf::Rgb {
+fn per_file_row_bg(ri: usize) -> crate::pdf_compat::Rgb {
     if ri.is_multiple_of(2) {
-        printpdf::Rgb::new(0.975, 0.965, 0.95, None)
+        crate::pdf_compat::Rgb::new(0.975, 0.965, 0.95, None)
     } else {
-        printpdf::Rgb::new(1.0, 1.0, 1.0, None)
+        crate::pdf_compat::Rgb::new(1.0, 1.0, 1.0, None)
     }
 }
 
@@ -2313,9 +2319,9 @@ const PDF_PERFILE_TABLE_GAP: f32 = 3.0;
 /// Doc/font/dims context for per-file page helpers; carries `doc` instead of `layer`
 /// because the page layer is created inside `pdf_draw_perfile_header`.
 struct PdfPerFileCtx<'a> {
-    doc: &'a printpdf::PdfDocumentReference,
-    font_reg: &'a printpdf::IndirectFontRef,
-    font_bold: &'a printpdf::IndirectFontRef,
+    doc: &'a crate::pdf_compat::PdfDocumentReference,
+    font_reg: &'a crate::pdf_compat::IndirectFontRef,
+    font_bold: &'a crate::pdf_compat::IndirectFontRef,
     w: f32,
     h: f32,
     margin: f32,
@@ -2350,13 +2356,17 @@ fn pdf_perfile_page_slice(
 fn pdf_draw_perfile_header(
     ctx: &PdfPerFileCtx<'_>,
     use_continuation: bool,
-    first_page: Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)>,
+    first_page: Option<(
+        crate::pdf_compat::PdfPageIndex,
+        crate::pdf_compat::PdfLayerIndex,
+        f32,
+    )>,
     page_idx: usize,
     page_count: usize,
     banner: Option<&str>,
     meta: &str,
-) -> (printpdf::PdfLayerReference, f32) {
-    use printpdf::{Color, Mm, Rgb};
+) -> (crate::pdf_compat::PdfLayerReference, f32) {
+    use crate::pdf_compat::{Color, Mm, Rgb};
     if use_continuation {
         let (fp_page, fp_layer_idx, fp_top) = first_page.unwrap();
         let layer = ctx.doc.get_page(fp_page).get_layer(fp_layer_idx);
@@ -2417,7 +2427,7 @@ fn pdf_draw_perfile_rows(
     col_x: &[f32; 13],
     pf_tbl_top: f32,
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     for (ri, rec) in records.iter().enumerate() {
         let ry = ((ri + 1) as f32).mul_add(-ctx.row_h, pf_tbl_top - ctx.tbl_hdr_h);
         let bg = per_file_row_bg(ri);
@@ -2475,9 +2485,9 @@ fn pdf_draw_perfile_rows(
     clippy::suboptimal_flops
 )]
 fn pdf_render_per_file_pages(
-    doc: &printpdf::PdfDocumentReference,
-    font_reg: &printpdf::IndirectFontRef,
-    font_bold: &printpdf::IndirectFontRef,
+    doc: &crate::pdf_compat::PdfDocumentReference,
+    font_reg: &crate::pdf_compat::IndirectFontRef,
+    font_bold: &crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     w: f32,
     h: f32,
@@ -2491,9 +2501,13 @@ fn pdf_render_per_file_pages(
     banner: Option<&str>,
     // When COCOMO is rendered on its own page, continue the per-file table on that same page
     // rather than starting a new one.  Tuple: (page index, layer index, available top y-coord).
-    first_page: Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)>,
+    first_page: Option<(
+        crate::pdf_compat::PdfPageIndex,
+        crate::pdf_compat::PdfLayerIndex,
+        f32,
+    )>,
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     // File column gets ~136 mm; numeric columns compressed to minimum readable width.
     // Column widths: File=136, Lang=14, Phys=12, Code=10, Comments=13, Blank=10, Mixed=10,
     //   Functions=13, Classes=11, Variables=13, Imports=11, Tests=10, Assertions=14  → total 277 mm
@@ -2687,7 +2701,7 @@ fn pdf_section_header_bar(
     hdr_h: f32,
     title: &str,
 ) {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     pdf_fill_rect(
         ctx.layer,
         ctx.margin,
@@ -2719,7 +2733,7 @@ fn pdf_section_header_bar(
     clippy::suboptimal_flops
 )]
 fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     const HDR_H: f32 = 5.5;
     const CHIP_H: f32 = 11.0;
     const CHIP_GAP: f32 = 4.0;
@@ -2864,7 +2878,7 @@ fn pdf_render_style_section(ctx: &PdfCtx<'_>, ss: &StyleSummary, section_top: f3
 /// Returns the bottom y-coordinate of the rendered section.
 #[allow(clippy::cast_precision_loss)]
 fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     const HDR_H: f32 = 5.5;
     const ROW_H: f32 = 13.0; // tall enough for label + value with comfortable padding
     const NOTE_H: f32 = 2.0; // just enough clearance for 5.5 pt descenders below the baseline
@@ -2951,7 +2965,7 @@ fn pdf_render_cocomo_section(ctx: &PdfCtx<'_>, run: &AnalysisRun, section_top: f
 /// Draw `text` so its right edge sits at `x_right` mm, at vertical `y` mm. The caller sets the
 /// fill colour beforehand. Uses the Helvetica advance-width table for alignment.
 fn pdf_text_right(ctx: &PdfCtx<'_>, text: &str, pt: f32, x_right: f32, y: f32, bold: bool) {
-    use printpdf::Mm;
+    use crate::pdf_compat::Mm;
     let font = if bold { ctx.font_bold } else { ctx.font_reg };
     let w = helvetica_width_mm(text, pt, bold);
     ctx.layer.use_text(text, pt, Mm(x_right - w), Mm(y), font);
@@ -2978,7 +2992,7 @@ fn pdf_fit_path(path: &str, budget_mm: f32, pt: f32) -> String {
 /// `section_top`. Returns the Y coordinate below the rendered content. Mirrors the COCOMO
 /// section's dark header bar and the per-file table's right-aligned numeric columns.
 fn pdf_render_hotspots_section(ctx: &PdfCtx<'_>, rows: &[HotspotRow], section_top: f32) -> f32 {
-    use printpdf::{Color, Mm, Rgb};
+    use crate::pdf_compat::{Color, Mm, Rgb};
     const HDR_H: f32 = 5.5;
     const COLHDR_H: f32 = 5.0;
     const ROW_H: f32 = 5.2;
@@ -3093,9 +3107,9 @@ fn pdf_render_hotspots_section(ctx: &PdfCtx<'_>, rows: &[HotspotRow], section_to
 /// table can continue on the same page (mirrors `pdf_render_tests_coverage_page`).
 #[allow(clippy::too_many_arguments)]
 fn pdf_render_hotspots_page(
-    doc: &printpdf::PdfDocumentReference,
-    font_reg: &printpdf::IndirectFontRef,
-    font_bold: &printpdf::IndirectFontRef,
+    doc: &crate::pdf_compat::PdfDocumentReference,
+    font_reg: &crate::pdf_compat::IndirectFontRef,
+    font_bold: &crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     rows: &[HotspotRow],
     w: f32,
@@ -3104,8 +3118,12 @@ fn pdf_render_hotspots_page(
     footer_h: f32,
     title: &str,
     version: &str,
-) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
-    use printpdf::Mm;
+) -> (
+    crate::pdf_compat::PdfPageIndex,
+    crate::pdf_compat::PdfLayerIndex,
+    f32,
+) {
+    use crate::pdf_compat::Mm;
     const HDR_H: f32 = 8.0;
 
     let (page, layer_idx) = doc.add_page(Mm(w), Mm(h), "Git Hotspots");
@@ -3148,7 +3166,7 @@ fn measure_terminal_tc_page_height(
     tbl_hdr_h: f32,
     with_cocomo: bool,
 ) -> f32 {
-    use printpdf::{BuiltinFont, Mm, PdfDocument};
+    use crate::pdf_compat::{BuiltinFont, Mm, PdfDocument};
     let measure = || -> Option<f32> {
         let (doc, page, layer_idx) = PdfDocument::new("measure", Mm(w), Mm(h_full), "m");
         let font_reg = doc.add_builtin_font(BuiltinFont::Helvetica).ok()?;
@@ -3190,17 +3208,21 @@ fn measure_terminal_tc_page_height(
     clippy::too_many_arguments
 )]
 fn pdf_render_cocomo_or_tc_page(
-    doc: &printpdf::PdfDocumentReference,
-    font_reg: &printpdf::IndirectFontRef,
-    font_bold: &printpdf::IndirectFontRef,
+    doc: &crate::pdf_compat::PdfDocumentReference,
+    font_reg: &crate::pdf_compat::IndirectFontRef,
+    font_bold: &crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     dims: PdfPageDims,
     title: &str,
     version: &str,
     cocomo_fits_page1: bool,
     trim_page: bool,
-) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
-    use printpdf::{Color, Mm, Mm as PdfMm, Rgb};
+) -> (
+    crate::pdf_compat::PdfPageIndex,
+    crate::pdf_compat::PdfLayerIndex,
+    f32,
+) {
+    use crate::pdf_compat::{Color, Mm, Mm as PdfMm, Rgb};
     let PdfPageDims {
         w,
         h,
@@ -3311,7 +3333,7 @@ fn pdf_render_cocomo_or_tc_page(
     clippy::too_many_lines
 )]
 pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
-    use printpdf::{BuiltinFont, Mm, PdfDocument};
+    use crate::pdf_compat::{BuiltinFont, Mm, PdfDocument};
     use std::fs::File;
     use std::io::BufWriter;
 
@@ -3591,26 +3613,14 @@ fn helvetica_width_mm(text: &str, pt: f32, bold: bool) -> f32 {
 }
 
 fn pdf_fill_rect(
-    layer: &printpdf::PdfLayerReference,
+    layer: &crate::pdf_compat::PdfLayerReference,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
-    color: printpdf::Rgb,
+    color: crate::pdf_compat::Rgb,
 ) {
-    use printpdf::path::{PaintMode, WindingOrder};
-    use printpdf::{Color, Mm, Point, Polygon};
-    layer.set_fill_color(Color::Rgb(color));
-    layer.add_polygon(Polygon {
-        rings: vec![vec![
-            (Point::new(Mm(x), Mm(y)), false),
-            (Point::new(Mm(x + w), Mm(y)), false),
-            (Point::new(Mm(x + w), Mm(y + h)), false),
-            (Point::new(Mm(x), Mm(y + h)), false),
-        ]],
-        mode: PaintMode::Fill,
-        winding_order: WindingOrder::NonZero,
-    });
+    layer.fill_rect(x, y, w, h, color);
 }
 
 fn pdf_safe_str(s: &str) -> String {

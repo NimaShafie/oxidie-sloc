@@ -77,7 +77,17 @@ skip = [
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+  # lopdf stack overflow when parsing deeply-nested PDF objects. oxide-sloc uses lopdf
+  # write-only (PDF generation via printpdf) and never parses untrusted PDFs, so the
+  # vulnerable parser path is unreachable. No published printpdf release depends on
+  # lopdf >= 0.42 yet (0.9.1 pins ^0.39) — drop this once one does.
+  { id = "RUSTSEC-2026-0187", reason = "lopdf used write-only via printpdf; parser DoS unreachable" },
+  # proc-macro-error is an unmaintained build-time proc-macro dep pulled transitively by
+  # printpdf 0.9 (allsorts -> ouroboros -> proc-macro-error). No safe upgrade is available;
+  # it runs only at build time and ships nothing into the binary.
+  { id = "RUSTSEC-2024-0370", reason = "unmaintained build-time transitive dep of printpdf; no safe upgrade" },
+]
 
 [sources]
 unknown-registry = "deny"
