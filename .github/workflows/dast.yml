@@ -18,7 +18,7 @@ jobs:
     name: ZAP baseline scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Build release binary
         run: cargo build --release -p oxide-sloc
@@ -38,8 +38,7 @@ jobs:
           done
 
       - name: ZAP baseline scan
-        # TODO: pin to a commit SHA once resolvable (repo convention is SHA-pinned actions).
-        uses: zaproxy/action-baseline@v0.12.0
+        uses: zaproxy/action-baseline@66042c8e7e24680119199a017e5b0e8603bf4dae  # v0.12.0
         with:
           target: http://localhost:4317
           # Non-blocking: report findings without failing the build. Flip to `false`
