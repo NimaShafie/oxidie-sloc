@@ -64,9 +64,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.96 (matches rust-toolchain.toml)
         with:
-          toolchain: "1.95"
+          toolchain: "1.96"
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
@@ -278,9 +278,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.96 (matches rust-toolchain.toml)
         with:
-          toolchain: "1.95"
+          toolchain: "1.96"
 
       - name: Generate vendor archive
         run: bash scripts/internal/update-vendor.sh
@@ -302,9 +302,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.96 (matches rust-toolchain.toml)
         with:
-          toolchain: "1.95"
+          toolchain: "1.96"
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
@@ -799,7 +799,7 @@ jobs:
             bash scripts/internal/airgap-build.sh vendor.tar.xz
             ```
 
-            ## Or build from source (requires Rust 1.95+)
+            ## Or build from source (requires Rust 1.96+)
 
             ```bash
             cargo install --git https://github.com/oxide-sloc/oxide-sloc oxide-sloc
@@ -886,9 +886,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.95 (matches rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537  # 1.96 (matches rust-toolchain.toml)
         with:
-          toolchain: "1.95"
+          toolchain: "1.96"
 
       - name: Disable vendor source redirect for publish
         run: |
