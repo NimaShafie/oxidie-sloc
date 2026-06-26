@@ -3198,7 +3198,7 @@ fn pdf_render_cocomo_or_tc_page(
     title: &str,
     version: &str,
     cocomo_fits_page1: bool,
-    tc_page_is_terminal: bool,
+    trim_page: bool,
 ) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
     use printpdf::{Color, Mm, Mm as PdfMm, Rgb};
     let PdfPageDims {
@@ -3212,7 +3212,7 @@ fn pdf_render_cocomo_or_tc_page(
 
     // No COCOMO on its own page — create a dedicated T&C page and start per-file from it.
     if run.cocomo.is_none() || cocomo_fits_page1 {
-        let page_h = if tc_page_is_terminal {
+        let page_h = if trim_page {
             measure_terminal_tc_page_height(run, w, h, margin, footer_h, row_h, tbl_hdr_h, false)
         } else {
             h
@@ -3222,7 +3222,7 @@ fn pdf_render_cocomo_or_tc_page(
         );
     }
 
-    let page_h = if tc_page_is_terminal {
+    let page_h = if trim_page {
         measure_terminal_tc_page_height(run, w, h, margin, footer_h, row_h, tbl_hdr_h, true)
     } else {
         h
@@ -3379,11 +3379,14 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     }
     pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
 
-    // The COCOMO/T&C page is the terminal page only when nothing flows onto/after it —
-    // i.e. no Git Hotspots page and no per-file table. In that case it is trimmed to its
-    // content height to avoid a large empty gap below the last section.
+    // Page-flow bookkeeping for empty-gap trimming. The per-file table continues on the
+    // COCOMO/T&C page only when there is no Git Hotspots page in between (the Hotspots page,
+    // when present, becomes the per-file continuation instead). A page that nothing flows
+    // onto is trimmed to its content height to avoid a large empty gap below the last section.
     let hotspot_rows = build_hotspot_rows(run);
-    let tc_page_is_terminal = hotspot_rows.is_empty() && run.per_file_records.is_empty();
+    let has_per_file = !run.per_file_records.is_empty();
+    let tc_page_gets_per_file = hotspot_rows.is_empty() && has_per_file;
+    let trim_tc_page = !tc_page_gets_per_file;
 
     // If COCOMO didn't fit on page 1, render it on a dedicated page 2 (with T&C inline);
     // otherwise render a standalone T&C page. Either way the returned page/layer/Y lets the
@@ -3405,12 +3408,15 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         &title,
         version,
         cocomo_fits_page1,
-        tc_page_is_terminal,
+        trim_tc_page,
     );
 
     // Git Hotspots — its own page after COCOMO/T&C, only when an --activity-window scan
     // collected per-file git activity. Threaded as the per-file continuation (like COCOMO)
     // so the per-file table flows on below it with no blank-page gap.
+    // A Git Hotspots page is only emitted when per-file git activity exists, which means
+    // `per_file_records` is non-empty and the per-file table always flows onto it — so it is
+    // never a terminal page and needs no trimming (it stays full height for the per-file rows).
     let per_file_start = if hotspot_rows.is_empty() {
         Some(cocomo_page_ctx)
     } else {
