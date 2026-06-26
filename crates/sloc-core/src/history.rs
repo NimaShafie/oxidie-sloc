@@ -41,6 +41,33 @@ pub struct ScanSummarySnapshot {
     pub coverage_branches_hit: u64,
 }
 
+impl From<&crate::SummaryTotals> for ScanSummarySnapshot {
+    /// Project the full per-run totals down to the lightweight registry/baseline snapshot.
+    /// Centralises the field-by-field copy that callers (CLI baseline, web registry) would
+    /// otherwise duplicate.
+    fn from(t: &crate::SummaryTotals) -> Self {
+        Self {
+            files_analyzed: t.files_analyzed,
+            files_skipped: t.files_skipped,
+            total_physical_lines: t.total_physical_lines,
+            code_lines: t.code_lines,
+            comment_lines: t.comment_lines,
+            blank_lines: t.blank_lines,
+            functions: t.functions,
+            classes: t.classes,
+            variables: t.variables,
+            imports: t.imports,
+            test_count: t.test_count,
+            coverage_lines_found: t.coverage_lines_found,
+            coverage_lines_hit: t.coverage_lines_hit,
+            coverage_functions_found: t.coverage_functions_found,
+            coverage_functions_hit: t.coverage_functions_hit,
+            coverage_branches_found: t.coverage_branches_found,
+            coverage_branches_hit: t.coverage_branches_hit,
+        }
+    }
+}
+
 /// One entry in the scan registry — one per completed analysis run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
