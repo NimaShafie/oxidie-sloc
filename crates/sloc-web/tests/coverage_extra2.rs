@@ -101,7 +101,7 @@ async fn wait_for_run_id(app: Router, wait_id: &str) -> String {
     String::new()
 }
 
-/// Drive a synchronous-feeling analyze: POST /analyze, then poll for the run_id.
+/// Drive a synchronous-feeling analyze: POST /analyze, then poll for the `run_id`.
 async fn analyze_and_wait(app: Router, form: &str) -> String {
     let (status, headers, _) = post_form_shared(app.clone(), "/analyze", form).await;
     assert!(status.is_success() || status.is_redirection() || status.is_client_error());
