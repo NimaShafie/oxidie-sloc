@@ -1953,7 +1953,7 @@ fn write_pdf_from_run_with_cocomo_page2() {
     );
 }
 
-/// Extract every page's MediaBox height (in PDF points) from raw PDF bytes.
+/// Extract every page's `MediaBox` height (in PDF points) from raw PDF bytes.
 /// printpdf writes `/MediaBox [0 0 W H]` uncompressed in each page dictionary.
 fn pdf_mediabox_heights(bytes: &[u8]) -> Vec<f32> {
     let text = String::from_utf8_lossy(bytes);
@@ -1995,7 +1995,7 @@ fn write_pdf_from_run_terminal_tc_page_is_trimmed() {
     let heights = pdf_mediabox_heights(&bytes);
     assert!(!heights.is_empty(), "expected at least one MediaBox");
     // Full landscape A4 height = 210 mm ≈ 595.28 pt. The terminal page must be shorter.
-    let min_h = heights.iter().cloned().fold(f32::INFINITY, f32::min);
+    let min_h = heights.iter().copied().fold(f32::INFINITY, f32::min);
     assert!(
         min_h < 590.0,
         "terminal T&C page should be trimmed below full landscape height; got heights {heights:?}"
