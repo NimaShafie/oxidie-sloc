@@ -1,26 +1,47 @@
-name: Auto-approve owner PRs
+name: Auto-approve & merge trusted PRs
 
 # SEPARATION OF DUTIES (F-08): auto-approval bypasses independent human review.
-# It is intentionally retained for the solo-maintainer OSS workflow, but is now
-# scoped so that PRs touching security-sensitive paths are NEVER auto-approved —
-# those always require a manual approval. For an accredited (ATO) deployment with
-# more than one maintainer, disable this workflow and enforce 2-person review via
+# It is intentionally retained for the solo-maintainer OSS workflow, but is scoped
+# so that PRs touching security-sensitive paths are NEVER auto-approved — those
+# always require a manual approval. For an accredited (ATO) deployment with more
+# than one maintainer, disable this workflow and enforce 2-person review via
 # branch-protection required reviewers.
+#
+# What this does, end to end, for a trusted author (owner or an allow-listed bot):
+#   1. Skip entirely if the diff touches a security-sensitive path.
+#   2. If the branch is BEHIND main (required checks are `strict`), update it via
+#      the GitHub App token. A GITHUB_TOKEN push would NOT re-trigger the required
+#      "Quality gates" check (GitHub anti-recursion), so the merge would hang. The
+#      App token is a distinct actor, so updating the branch re-runs CI normally.
+#   3. Approve the PR (satisfies the 1-review branch-protection rule).
+#   4. Enable squash auto-merge so it lands the moment "Quality gates" goes green.
+# Each branch update fires a `synchronize` event that re-enters this workflow, so a
+# PR that falls BEHIND again as main advances is healed automatically until it lands.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
+concurrency:
+  # One in-flight run per PR; a newer run (e.g. after a branch update) supersedes
+  # the older one so we don't stack redundant approvals.
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
-  auto-approve:
-    name: Auto-approve PRs from repo owner
+  auto-merge:
+    name: Auto-approve and enable auto-merge
     runs-on: ubuntu-latest
-    # Only approve PRs opened by the repo owner — all other contributors go through normal review
-    if: github.actor == 'NimaShafie'
+    # Trusted authors only. Everyone else goes through normal human review.
+    # Bot logins carry the `[bot]` suffix in pull_request payloads.
+    if: >-
+      github.event.pull_request.user.login == 'NimaShafie' ||
+      github.event.pull_request.user.login == 'oxide-sloc-toolchain-bot[bot]' ||
+      github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Detect security-sensitive changes
         id: sensitive
@@ -29,7 +50,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          # Sensitive paths require manual review even from the owner.
+          # Sensitive paths require manual review even from a trusted author.
           PATTERN='^(\.github/workflows/|crates/sloc-web/src/auth\.rs|crates/sloc-web/src/git_webhook\.rs|crates/sloc-git/src/(ops|webhook)\.rs|Dockerfile|docker-compose\.yml|deny\.toml|_signing/|action\.yml|scripts/)'
           FILES=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)
           if echo "$FILES" | grep -qE "$PATTERN"; then
@@ -40,8 +61,50 @@ jobs:
             echo "sensitive=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # An App token is needed to update the PR branch: pushes made with the default
+      # GITHUB_TOKEN do not trigger workflows, so the required "Quality gates" check
+      # would never re-run on the updated head and the PR would stay blocked.
+      - name: Generate app token
+        id: app-token
+        if: steps.sensitive.outputs.sensitive == 'false'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.TOOLCHAIN_APP_ID }}
+          private-key: ${{ secrets.TOOLCHAIN_APP_PRIVATE_KEY }}
+
+      # Update BEFORE approving: branch protection has dismiss_stale_reviews=true, so
+      # a commit added after approval would dismiss it. Updating first means the
+      # approval we add next applies to the final head.
+      - name: Update branch if behind main
+        if: steps.sensitive.outputs.sensitive == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus -q .mergeStateStatus)
+          echo "merge state: $STATE"
+          if [ "$STATE" = "BEHIND" ]; then
+            echo "Branch is behind main — updating (re-triggers required checks)."
+            gh api --method PUT "repos/$REPO/pulls/$PR_NUMBER/update-branch" || \
+              echo "update-branch call returned non-zero (often benign: update already queued)."
+          else
+            echo "Branch is current — no update needed."
+          fi
+
       - name: Approve PR
         if: steps.sensitive.outputs.sensitive == 'false'
         uses: hmarr/auto-approve-action@f0939ea97e9205ef24d872e76833fa908a770363  # v4.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable squash auto-merge
+        if: steps.sensitive.outputs.sensitive == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Idempotent: succeeds whether or not auto-merge was already enabled.
+          gh pr merge --auto --squash "$PR_NUMBER" --repo "$REPO" || \
+            echo "auto-merge already enabled or PR not in a mergeable state yet."
