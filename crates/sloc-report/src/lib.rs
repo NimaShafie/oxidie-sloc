@@ -3199,7 +3199,7 @@ fn pdf_render_cocomo_or_tc_page(
     version: &str,
     cocomo_fits_page1: bool,
     tc_page_is_terminal: bool,
-) -> Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)> {
+) -> (printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32) {
     use printpdf::{Color, Mm, Mm as PdfMm, Rgb};
     let PdfPageDims {
         w,
@@ -3217,9 +3217,9 @@ fn pdf_render_cocomo_or_tc_page(
         } else {
             h
         };
-        return Some(pdf_render_tests_coverage_page(
+        return pdf_render_tests_coverage_page(
             doc, font_reg, font_bold, run, w, page_h, margin, footer_h, title, version,
-        ));
+        );
     }
 
     let page_h = if tc_page_is_terminal {
@@ -3292,7 +3292,7 @@ fn pdf_render_cocomo_or_tc_page(
         font_reg,
     );
     // Pass the Y below T&C content so per-file can continue on this page without a gap.
-    Some((c2_page, c2_layer_idx, tc_bottom - 3.0))
+    (c2_page, c2_layer_idx, tc_bottom - 3.0)
 }
 
 /// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
@@ -3412,7 +3412,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     // collected per-file git activity. Threaded as the per-file continuation (like COCOMO)
     // so the per-file table flows on below it with no blank-page gap.
     let per_file_start = if hotspot_rows.is_empty() {
-        cocomo_page_ctx
+        Some(cocomo_page_ctx)
     } else {
         Some(pdf_render_hotspots_page(
             &doc,
