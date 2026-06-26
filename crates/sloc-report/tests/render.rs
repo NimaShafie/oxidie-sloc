@@ -1953,6 +1953,55 @@ fn write_pdf_from_run_with_cocomo_page2() {
     );
 }
 
+/// Extract every page's MediaBox height (in PDF points) from raw PDF bytes.
+/// printpdf writes `/MediaBox [0 0 W H]` uncompressed in each page dictionary.
+fn pdf_mediabox_heights(bytes: &[u8]) -> Vec<f32> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut heights = Vec::new();
+    let mut rest = text.as_ref();
+    while let Some(pos) = rest.find("/MediaBox") {
+        rest = &rest[pos + "/MediaBox".len()..];
+        if let (Some(open), Some(close)) = (rest.find('['), rest.find(']')) {
+            let nums: Vec<f32> = rest[open + 1..close]
+                .split_whitespace()
+                .filter_map(|t| t.parse::<f32>().ok())
+                .collect();
+            if nums.len() == 4 {
+                heights.push(nums[3]);
+            }
+        }
+    }
+    heights
+}
+
+#[test]
+fn write_pdf_from_run_terminal_tc_page_is_trimmed() {
+    // Repro for the "huge empty gap below the SUBMODULES section" bug: when COCOMO +
+    // Tests & Coverage land on their own terminal page (no per-file table, no hotspots),
+    // that page must be trimmed to its content instead of left at full landscape height.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut run = make_run_with_submodules();
+    run.per_file_records.clear(); // no per-file table → T&C page is terminal
+    run.cocomo = Some(CocomoEstimate {
+        mode: CocomoMode::Organic,
+        ksloc: 16.4,
+        effort_person_months: 45.27,
+        duration_months: 10.65,
+        avg_staff: 4.25,
+    });
+    write_pdf_from_run(&run, tmp.path()).unwrap();
+
+    let bytes = std::fs::read(tmp.path()).unwrap();
+    let heights = pdf_mediabox_heights(&bytes);
+    assert!(!heights.is_empty(), "expected at least one MediaBox");
+    // Full landscape A4 height = 210 mm ≈ 595.28 pt. The terminal page must be shorter.
+    let min_h = heights.iter().cloned().fold(f32::INFINITY, f32::min);
+    assert!(
+        min_h < 590.0,
+        "terminal T&C page should be trimmed below full landscape height; got heights {heights:?}"
+    );
+}
+
 #[test]
 fn write_pdf_from_run_with_style_analysis() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
