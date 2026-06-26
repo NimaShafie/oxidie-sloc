@@ -3117,6 +3117,55 @@ fn pdf_render_hotspots_page(
     (page, layer_idx, bottom - 3.0)
 }
 
+/// Measure how tall the COCOMO + Tests & Coverage page needs to be, so a terminal
+/// (last) page can be trimmed to its content instead of left at full landscape height
+/// with a large empty gap below the last section.
+///
+/// Renders the same sections onto a throwaway, never-saved document of height `h_full`
+/// and reads where the content ends. Layout is vertically translation-invariant, so the
+/// trimmed height is `h_full - content_bottom + footer_h + pad`. Falls back to `h_full`
+/// on any error so the report is always produced.
+#[allow(clippy::too_many_arguments)]
+fn measure_terminal_tc_page_height(
+    run: &AnalysisRun,
+    w: f32,
+    h_full: f32,
+    margin: f32,
+    footer_h: f32,
+    row_h: f32,
+    tbl_hdr_h: f32,
+    with_cocomo: bool,
+) -> f32 {
+    use printpdf::{BuiltinFont, Mm, PdfDocument};
+    let measure = || -> Option<f32> {
+        let (doc, page, layer_idx) = PdfDocument::new("measure", Mm(w), Mm(h_full), "m");
+        let font_reg = doc.add_builtin_font(BuiltinFont::Helvetica).ok()?;
+        let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold).ok()?;
+        let layer = doc.get_page(page).get_layer(layer_idx);
+        let ctx = PdfCtx {
+            layer: &layer,
+            font_reg: &font_reg,
+            font_bold: &font_bold,
+            w,
+            margin,
+            row_h,
+            tbl_hdr_h,
+        };
+        // Mirror the real render's starting offsets exactly (see the cocomo/T&C branches
+        // in `write_pdf_from_run`): an 8 mm header band, then the first section below it.
+        let content_bottom = if with_cocomo {
+            let cocomo_bottom = pdf_render_cocomo_section(&ctx, run, h_full - 8.0 - 6.0);
+            pdf_render_tc_inline(&ctx, run, cocomo_bottom - 2.0, footer_h)
+        } else {
+            pdf_render_tc_inline(&ctx, run, h_full - 8.0 - 4.0, footer_h)
+        };
+        // 4 mm bottom padding below the last element, mirroring the top-of-content gap.
+        let pad = 4.0;
+        Some((h_full - content_bottom + footer_h + pad).clamp(60.0, h_full))
+    };
+    measure().unwrap_or(h_full)
+}
+
 /// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
 ///
 /// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
@@ -3201,12 +3250,23 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     }
     pdf_render_page1_footer(&ctx, run, FOOTER_H, version, banner);
 
+    // The COCOMO/T&C page is the terminal page only when nothing flows onto/after it —
+    // i.e. no Git Hotspots page and no per-file table. In that case it is trimmed to its
+    // content height to avoid a large empty gap below the last section.
+    let hotspot_rows = build_hotspot_rows(run);
+    let tc_page_is_terminal = hotspot_rows.is_empty() && run.per_file_records.is_empty();
+
     // If COCOMO didn't fit on page 1, render it on a dedicated page 2.
     // Capture the page/layer so that the per-file table can continue on the same page
     // instead of starting a new one (eliminating the blank-page gap between the two sections).
     let cocomo_page_ctx = if run.cocomo.is_some() && !cocomo_fits_page1 {
         use printpdf::{Color, Mm as PdfMm, Rgb};
-        let (c2_page, c2_layer_idx) = doc.add_page(Mm(W), Mm(H), "Content");
+        let page_h = if tc_page_is_terminal {
+            measure_terminal_tc_page_height(run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, true)
+        } else {
+            H
+        };
+        let (c2_page, c2_layer_idx) = doc.add_page(Mm(W), Mm(page_h), "Content");
         let c2_layer = doc.get_page(c2_page).get_layer(c2_layer_idx);
         let c2_ctx = PdfCtx {
             layer: &c2_layer,
@@ -3221,19 +3281,25 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         pdf_fill_rect(
             &c2_layer,
             0.0,
-            H - 8.0,
+            page_h - 8.0,
             W,
             8.0,
             Rgb::new(0.098, 0.11, 0.15, None),
         );
         c2_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-        c2_layer.use_text("oxide-sloc", 9.0, PdfMm(MARGIN), PdfMm(H - 5.5), &font_bold);
+        c2_layer.use_text(
+            "oxide-sloc",
+            9.0,
+            PdfMm(MARGIN),
+            PdfMm(page_h - 5.5),
+            &font_bold,
+        );
         c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
         c2_layer.use_text(
             pdf_trunc(&pdf_safe_str(&title), 45),
             7.5,
             PdfMm(46.0),
-            PdfMm(H - 5.5),
+            PdfMm(page_h - 5.5),
             &font_reg,
         );
         pdf_draw_header_meta(
@@ -3241,10 +3307,10 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
             &font_reg,
             W,
             MARGIN,
-            H - 5.5,
+            page_h - 5.5,
             &pdf_page_header_meta(run),
         );
-        let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, H - 8.0 - 6.0);
+        let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, page_h - 8.0 - 6.0);
         // Render T&C inline on the same page immediately after COCOMO — no blank gap.
         let tc_bottom = pdf_render_tc_inline(&c2_ctx, run, cocomo_bottom - 2.0, FOOTER_H);
         // Footer (per-file renderer will overdraw with its richer version if it starts here).
@@ -3268,8 +3334,13 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         Some((c2_page, c2_layer_idx, tc_bottom - 3.0))
     } else {
         // No COCOMO on its own page — create a dedicated T&C page and start per-file from it.
+        let page_h = if tc_page_is_terminal {
+            measure_terminal_tc_page_height(run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, false)
+        } else {
+            H
+        };
         let (tc_page, tc_layer, tc_y) = pdf_render_tests_coverage_page(
-            &doc, &font_reg, &font_bold, run, W, H, MARGIN, FOOTER_H, &title, version,
+            &doc, &font_reg, &font_bold, run, W, page_h, MARGIN, FOOTER_H, &title, version,
         );
         Some((tc_page, tc_layer, tc_y))
     };
@@ -3277,7 +3348,6 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     // Git Hotspots — its own page after COCOMO/T&C, only when an --activity-window scan
     // collected per-file git activity. Threaded as the per-file continuation (like COCOMO)
     // so the per-file table flows on below it with no blank-page gap.
-    let hotspot_rows = build_hotspot_rows(run);
     let per_file_start = if hotspot_rows.is_empty() {
         cocomo_page_ctx
     } else {
