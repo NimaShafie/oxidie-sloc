@@ -10,6 +10,38 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.73] — 2026-06-25
+
+### Added
+
+- **Git Hotspots on by default** (`crates/sloc-core`): the per-file activity
+  window now defaults to 90 days (`analysis.activity_window_days = Some(90)`,
+  `0` disables). A single `git log` pass attaches per-file commit counts and
+  last-change dates, and a Hotspots table/page (ranked by `code_lines ×
+  commits`) renders in HTML, web, PDF, and CSV.
+- **coverage.py JSON support** (`crates/sloc-core`): Python `coverage.py` JSON
+  reports are now parsed alongside the existing coverage formats, with new
+  trend-chart controls and UI polish on the test-metrics page.
+- **Expanded language-analyzer coverage**: additional corpus fixtures and
+  golden tests broaden unit-test/assertion detection across more languages.
+
+### Changed
+
+- **Page transitions & animation polish**: smooth page-fade transitions, tooltip
+  animation polish, and the floating code-particles animation across report and
+  web pages.
+
+### Fixed
+
+- **PDF page trimming**: the terminal COCOMO / Tests & Coverage PDF page is now
+  trimmed to its content height, including the case where a Git Hotspots page
+  follows it (`crates/sloc-report`).
+- **Lint gates**: cleared clippy pedantic/nursery findings that were blocking the
+  Jenkins lint gate, and reduced cognitive complexity in `write_pdf_from_run`
+  and the SSRF gate paths without behaviour changes.
+
+---
+
 ## [1.5.72] — 2026-06-17
 
 ### Added
