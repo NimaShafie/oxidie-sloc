@@ -234,19 +234,13 @@ impl ConfluenceClient {
             .ok_or_else(|| anyhow::anyhow!("Confluence space '{}' not found", self.space_key))
     }
 
-    async fn find_page_cloud(
-        &self,
-        space_id: &str,
-        title: &str,
-    ) -> anyhow::Result<Option<PageSummary>> {
-        let enc = urlencoding_encode(title);
-        let url = format!(
-            "{}/wiki/api/v2/pages?spaceId={}&title={}&limit=1&expand=version",
-            self.base_url, space_id, enc
-        );
+    /// GET a Confluence search endpoint and project the first result into a
+    /// `PageSummary`. Shared by the Cloud and Server variants, which differ only in the
+    /// query URL they build.
+    async fn fetch_first_page_summary(&self, url: &str) -> anyhow::Result<Option<PageSummary>> {
         let resp: serde_json::Value = self
             .client
-            .get(&url)
+            .get(url)
             .header("Authorization", &self.auth_header)
             .header("Accept", "application/json")
             .send()
@@ -268,34 +262,26 @@ impl ConfluenceClient {
         }))
     }
 
+    async fn find_page_cloud(
+        &self,
+        space_id: &str,
+        title: &str,
+    ) -> anyhow::Result<Option<PageSummary>> {
+        let enc = urlencoding_encode(title);
+        let url = format!(
+            "{}/wiki/api/v2/pages?spaceId={}&title={}&limit=1&expand=version",
+            self.base_url, space_id, enc
+        );
+        self.fetch_first_page_summary(&url).await
+    }
+
     async fn find_page_server(&self, title: &str) -> anyhow::Result<Option<PageSummary>> {
         let enc = urlencoding_encode(title);
         let url = format!(
             "{}/rest/api/content?spaceKey={}&title={}&type=page&expand=version&limit=1",
             self.base_url, self.space_key, enc
         );
-        let resp: serde_json::Value = self
-            .client
-            .get(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .send()
-            .await?
-            .json()
-            .await?;
-        let results = resp["results"].as_array();
-        if results.is_none_or(std::vec::Vec::is_empty) {
-            return Ok(None);
-        }
-        let page = &resp["results"][0];
-        let id = page["id"].as_str().unwrap_or("").to_owned();
-        // Confluence version numbers are small; truncation is not possible in practice.
-        #[allow(clippy::cast_possible_truncation)]
-        let ver = page["version"]["number"].as_u64().unwrap_or(1) as u32;
-        Ok(Some(PageSummary {
-            id,
-            version_number: ver,
-        }))
+        self.fetch_first_page_summary(&url).await
     }
 
     async fn create_cloud(
@@ -312,19 +298,36 @@ impl ConfluenceClient {
         if let Some(parent_id) = &self.parent_page_id {
             payload["parentId"] = serde_json::Value::String(parent_id.clone());
         }
+        self.post_create_page(
+            format!("{}/wiki/api/v2/pages", self.base_url),
+            &payload,
+            "Cloud",
+        )
+        .await
+    }
+
+    /// POST a page-create payload and return the new page id. Shared by the Cloud and
+    /// Server variants, which differ only in the endpoint URL, request payload, and the
+    /// label used in the error message.
+    async fn post_create_page(
+        &self,
+        url: String,
+        payload: &serde_json::Value,
+        label: &str,
+    ) -> anyhow::Result<String> {
         let resp = self
             .client
-            .post(format!("{}/wiki/api/v2/pages", self.base_url))
+            .post(url)
             .header("Authorization", &self.auth_header)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .json(&payload)
+            .json(payload)
             .send()
             .await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Confluence Cloud create failed (HTTP {status}): {body}");
+            anyhow::bail!("Confluence {label} create failed (HTTP {status}): {body}");
         }
         let created: serde_json::Value = resp.json().await?;
         Ok(created["id"].as_str().unwrap_or("").to_owned())
@@ -340,22 +343,12 @@ impl ConfluenceClient {
         if let Some(parent_id) = &self.parent_page_id {
             payload["ancestors"] = serde_json::json!([{ "id": parent_id }]);
         }
-        let resp = self
-            .client
-            .post(format!("{}/rest/api/content", self.base_url))
-            .header("Authorization", &self.auth_header)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .json(&payload)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Confluence Server create failed (HTTP {status}): {body}");
-        }
-        let created: serde_json::Value = resp.json().await?;
-        Ok(created["id"].as_str().unwrap_or("").to_owned())
+        self.post_create_page(
+            format!("{}/rest/api/content", self.base_url),
+            &payload,
+            "Server",
+        )
+        .await
     }
 
     async fn update_cloud(
@@ -370,19 +363,35 @@ impl ConfluenceClient {
             "title": title,
             "body": { "representation": "storage", "value": body_html }
         });
+        self.put_update_page(
+            format!("{}/wiki/api/v2/pages/{page_id}", self.base_url),
+            &payload,
+            "Cloud",
+        )
+        .await
+    }
+
+    /// PUT a page-update payload. Shared by the Cloud and Server variants, which differ
+    /// only in the endpoint URL, request payload, and error-message label.
+    async fn put_update_page(
+        &self,
+        url: String,
+        payload: &serde_json::Value,
+        label: &str,
+    ) -> anyhow::Result<()> {
         let resp = self
             .client
-            .put(format!("{}/wiki/api/v2/pages/{page_id}", self.base_url))
+            .put(url)
             .header("Authorization", &self.auth_header)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .json(&payload)
+            .json(payload)
             .send()
             .await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Confluence Cloud update failed (HTTP {status}): {body}");
+            anyhow::bail!("Confluence {label} update failed (HTTP {status}): {body}");
         }
         Ok(())
     }
@@ -401,21 +410,12 @@ impl ConfluenceClient {
             "space": { "key": self.space_key },
             "body": { "storage": { "value": body_html, "representation": "storage" } }
         });
-        let resp = self
-            .client
-            .put(format!("{}/rest/api/content/{page_id}", self.base_url))
-            .header("Authorization", &self.auth_header)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .json(&payload)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Confluence Server update failed (HTTP {status}): {body}");
-        }
-        Ok(())
+        self.put_update_page(
+            format!("{}/rest/api/content/{page_id}", self.base_url),
+            &payload,
+            "Server",
+        )
+        .await
     }
 
     pub async fn test_connection(&self) -> anyhow::Result<()> {
