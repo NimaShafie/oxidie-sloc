@@ -22,9 +22,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Least privilege at the top level: the default token is read-only for every job
+# (and for any third-party action invoked below). The single job that needs write
+# requests it explicitly via job-level permissions.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   # One in-flight run per PR; a newer run (e.g. after a branch update) supersedes
@@ -36,6 +38,10 @@ jobs:
   auto-merge:
     name: Auto-approve and enable auto-merge
     runs-on: ubuntu-latest
+    # Write is scoped to this job only: approve the PR and enable squash auto-merge.
+    permissions:
+      contents: write
+      pull-requests: write
     # Trusted authors only. Everyone else goes through normal human review.
     # Bot logins carry the `[bot]` suffix in pull_request payloads.
     if: >-
