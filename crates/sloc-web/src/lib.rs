@@ -2814,25 +2814,7 @@ fn registry_entry_from_run(
         json_path: Some(json_path),
         html_path: Some(html_path),
         pdf_path: None,
-        summary: ScanSummarySnapshot {
-            files_analyzed: run.summary_totals.files_analyzed,
-            files_skipped: run.summary_totals.files_skipped,
-            total_physical_lines: run.summary_totals.total_physical_lines,
-            code_lines: run.summary_totals.code_lines,
-            comment_lines: run.summary_totals.comment_lines,
-            blank_lines: run.summary_totals.blank_lines,
-            functions: run.summary_totals.functions,
-            classes: run.summary_totals.classes,
-            variables: run.summary_totals.variables,
-            imports: run.summary_totals.imports,
-            test_count: run.summary_totals.test_count,
-            coverage_lines_found: run.summary_totals.coverage_lines_found,
-            coverage_lines_hit: run.summary_totals.coverage_lines_hit,
-            coverage_functions_found: run.summary_totals.coverage_functions_found,
-            coverage_functions_hit: run.summary_totals.coverage_functions_hit,
-            coverage_branches_found: run.summary_totals.coverage_branches_found,
-            coverage_branches_hit: run.summary_totals.coverage_branches_hit,
-        },
+        summary: ScanSummarySnapshot::from(&run.summary_totals),
         csv_path: None,
         xlsx_path: None,
         git_branch: None,
@@ -3614,25 +3596,7 @@ fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
         pdf_path,
         csv_path,
         xlsx_path,
-        summary: ScanSummarySnapshot {
-            files_analyzed: run.summary_totals.files_analyzed,
-            files_skipped: run.summary_totals.files_skipped,
-            total_physical_lines: run.summary_totals.total_physical_lines,
-            code_lines: run.summary_totals.code_lines,
-            comment_lines: run.summary_totals.comment_lines,
-            blank_lines: run.summary_totals.blank_lines,
-            functions: run.summary_totals.functions,
-            classes: run.summary_totals.classes,
-            variables: run.summary_totals.variables,
-            imports: run.summary_totals.imports,
-            test_count: run.summary_totals.test_count,
-            coverage_lines_found: run.summary_totals.coverage_lines_found,
-            coverage_lines_hit: run.summary_totals.coverage_lines_hit,
-            coverage_functions_found: run.summary_totals.coverage_functions_found,
-            coverage_functions_hit: run.summary_totals.coverage_functions_hit,
-            coverage_branches_found: run.summary_totals.coverage_branches_found,
-            coverage_branches_hit: run.summary_totals.coverage_branches_hit,
-        },
+        summary: ScanSummarySnapshot::from(&run.summary_totals),
         git_branch: run.git_branch.clone(),
         git_commit: run.git_commit_short.clone(),
         git_author: run.git_commit_author.clone(),
@@ -3940,6 +3904,46 @@ async fn image_handler(AxumPath((folder, file)): AxumPath<(String, String)>) -> 
     ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
 }
 
+/// Server-mode authorization gate for preview paths. Returns `Err(Html(...))` with a
+/// user-facing rejection message for each disallowed case, or `Ok(())` when the path is
+/// permitted. Extracted from `preview_handler` to keep that handler's cognitive
+/// complexity low; the fail-closed semantics are unchanged.
+fn authorize_preview_path(state: &AppState, resolved: &Path) -> Result<(), Html<String>> {
+    // Fail closed: a path that cannot be canonicalised must NOT fall back to the
+    // raw, un-normalised path for the allowlist check (a textual `starts_with` on
+    // `<root>/../../etc` would otherwise pass). On resolution failure, only known-safe
+    // sample/upload locations are permitted; everything else is rejected.
+    let Ok(canonical) = fs::canonicalize(resolved) else {
+        if !is_upload_tmp_path(resolved) && !is_sample_path(resolved) {
+            return Err(Html(
+                r#"<div class="preview-error">Preview rejected: path could not be resolved to a real directory.</div>"#.to_string()
+            ));
+        }
+        return Ok(());
+    };
+    // Upload temp dirs and built-in sample/fixture paths are always safe.
+    if is_upload_tmp_path(&canonical) || is_sample_path(&canonical) {
+        return Ok(());
+    }
+    let config = &state.base_config;
+    if config.discovery.allowed_scan_roots.is_empty() {
+        return Err(Html(
+            r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
+        ));
+    }
+    let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
+        fs::canonicalize(root)
+            .ok()
+            .is_some_and(|r| canonical.starts_with(&r))
+    });
+    if !allowed {
+        return Err(Html(
+            r#"<div class="preview-error">Preview rejected: path is not within an allowed scan directory.</div>"#.to_string()
+        ));
+    }
+    Ok(())
+}
+
 async fn preview_handler(
     State(state): State<AppState>,
     Query(query): Query<PreviewQuery>,
@@ -3961,39 +3965,8 @@ async fn preview_handler(
     }
 
     if state.server_mode {
-        // Fail closed: a path that cannot be canonicalised must NOT fall back to the
-        // raw, un-normalised path for the allowlist check (a textual `starts_with` on
-        // `<root>/../../etc` would otherwise pass). On resolution failure, only known-safe
-        // sample/upload locations are permitted; everything else is rejected.
-        match fs::canonicalize(&resolved) {
-            Ok(canonical) => {
-                // Upload temp dirs and built-in sample/fixture paths are always safe.
-                if !is_upload_tmp_path(&canonical) && !is_sample_path(&canonical) {
-                    let config = &state.base_config;
-                    if config.discovery.allowed_scan_roots.is_empty() {
-                        return Html(
-                            r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
-                        );
-                    }
-                    let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
-                        fs::canonicalize(root)
-                            .ok()
-                            .is_some_and(|r| canonical.starts_with(&r))
-                    });
-                    if !allowed {
-                        return Html(
-                            r#"<div class="preview-error">Preview rejected: path is not within an allowed scan directory.</div>"#.to_string()
-                        );
-                    }
-                }
-            }
-            Err(_) => {
-                if !is_upload_tmp_path(&resolved) && !is_sample_path(&resolved) {
-                    return Html(
-                        r#"<div class="preview-error">Preview rejected: path could not be resolved to a real directory.</div>"#.to_string()
-                    );
-                }
-            }
+        if let Err(resp) = authorize_preview_path(&state, &resolved) {
+            return resp;
         }
     }
 
