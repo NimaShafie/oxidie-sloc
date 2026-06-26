@@ -66,14 +66,13 @@ fn client_ip_from(headers: &HeaderMap, peer_ip: IpAddr) -> IpAddr {
 fn secure_cookies(state: &AppState) -> bool {
     state.tls_enabled
         || std::env::var("SLOC_SECURE_COOKIES")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Session cookie name. The `__Host-` prefix (Secure + Path=/ + no Domain) is used
 /// whenever cookies are Secure, giving the strongest browser binding; plain mode
 /// falls back to the unprefixed name (the prefix *requires* Secure).
-fn session_cookie_name(secure: bool) -> &'static str {
+const fn session_cookie_name(secure: bool) -> &'static str {
     if secure {
         "__Host-sloc_session"
     } else {
