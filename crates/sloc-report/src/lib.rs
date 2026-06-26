@@ -1082,6 +1082,18 @@ struct PdfCtx<'a> {
     tbl_hdr_h: f32,
 }
 
+/// Fixed page geometry (landscape A4 in mm) threaded through the PDF page builders.
+/// Bundled into one struct so the page helpers stay under the argument-count lint.
+#[derive(Clone, Copy)]
+struct PdfPageDims {
+    w: f32,
+    h: f32,
+    margin: f32,
+    footer_h: f32,
+    row_h: f32,
+    tbl_hdr_h: f32,
+}
+
 #[allow(
     clippy::cast_precision_loss,
     clippy::suboptimal_flops,
@@ -3166,6 +3178,123 @@ fn measure_terminal_tc_page_height(
     measure().unwrap_or(h_full)
 }
 
+/// Render the dedicated COCOMO + Tests & Coverage page (page 2) when COCOMO did not fit
+/// on page 1, or a standalone Tests & Coverage page otherwise. Returns the page/layer and
+/// the Y below the last section so the per-file table can continue on the same page with
+/// no blank-page gap. Extracted from `write_pdf_from_run` to keep that function's cognitive
+/// complexity low; layout and output are unchanged.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_arguments
+)]
+fn pdf_render_cocomo_or_tc_page(
+    doc: &printpdf::PdfDocumentReference,
+    font_reg: &printpdf::IndirectFontRef,
+    font_bold: &printpdf::IndirectFontRef,
+    run: &AnalysisRun,
+    dims: PdfPageDims,
+    title: &str,
+    version: &str,
+    cocomo_fits_page1: bool,
+    tc_page_is_terminal: bool,
+) -> Option<(printpdf::PdfPageIndex, printpdf::PdfLayerIndex, f32)> {
+    use printpdf::{Color, Mm, Mm as PdfMm, Rgb};
+    let PdfPageDims {
+        w,
+        h,
+        margin,
+        footer_h,
+        row_h,
+        tbl_hdr_h,
+    } = dims;
+
+    // No COCOMO on its own page — create a dedicated T&C page and start per-file from it.
+    if run.cocomo.is_none() || cocomo_fits_page1 {
+        let page_h = if tc_page_is_terminal {
+            measure_terminal_tc_page_height(run, w, h, margin, footer_h, row_h, tbl_hdr_h, false)
+        } else {
+            h
+        };
+        return Some(pdf_render_tests_coverage_page(
+            doc, font_reg, font_bold, run, w, page_h, margin, footer_h, title, version,
+        ));
+    }
+
+    let page_h = if tc_page_is_terminal {
+        measure_terminal_tc_page_height(run, w, h, margin, footer_h, row_h, tbl_hdr_h, true)
+    } else {
+        h
+    };
+    let (c2_page, c2_layer_idx) = doc.add_page(Mm(w), Mm(page_h), "Content");
+    let c2_layer = doc.get_page(c2_page).get_layer(c2_layer_idx);
+    let c2_ctx = PdfCtx {
+        layer: &c2_layer,
+        font_reg,
+        font_bold,
+        w,
+        margin,
+        row_h,
+        tbl_hdr_h,
+    };
+    // Small page header so the reader knows which report this is.
+    pdf_fill_rect(
+        &c2_layer,
+        0.0,
+        page_h - 8.0,
+        w,
+        8.0,
+        Rgb::new(0.098, 0.11, 0.15, None),
+    );
+    c2_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
+    c2_layer.use_text(
+        "oxide-sloc",
+        9.0,
+        PdfMm(margin),
+        PdfMm(page_h - 5.5),
+        font_bold,
+    );
+    c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
+    c2_layer.use_text(
+        pdf_trunc(&pdf_safe_str(title), 45),
+        7.5,
+        PdfMm(46.0),
+        PdfMm(page_h - 5.5),
+        font_reg,
+    );
+    pdf_draw_header_meta(
+        &c2_layer,
+        font_reg,
+        w,
+        margin,
+        page_h - 5.5,
+        &pdf_page_header_meta(run),
+    );
+    let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, page_h - 8.0 - 6.0);
+    // Render T&C inline on the same page immediately after COCOMO — no blank gap.
+    let tc_bottom = pdf_render_tc_inline(&c2_ctx, run, cocomo_bottom - 2.0, footer_h);
+    // Footer (per-file renderer will overdraw with its richer version if it starts here).
+    pdf_fill_rect(
+        &c2_layer,
+        0.0,
+        0.0,
+        w,
+        footer_h,
+        Rgb::new(0.93, 0.91, 0.87, None),
+    );
+    c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
+    c2_layer.use_text(
+        format!("oxide-sloc v{version}  |  AGPL-3.0-or-later"),
+        6.5,
+        PdfMm(margin),
+        PdfMm(3.0),
+        font_reg,
+    );
+    // Pass the Y below T&C content so per-file can continue on this page without a gap.
+    Some((c2_page, c2_layer_idx, tc_bottom - 3.0))
+}
+
 /// Generate a PDF summary report from `AnalysisRun` data using the pure-Rust `printpdf` crate.
 ///
 /// No external tools (Chrome, wkhtmltopdf) are required — this path is always available on
@@ -3256,94 +3385,28 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     let hotspot_rows = build_hotspot_rows(run);
     let tc_page_is_terminal = hotspot_rows.is_empty() && run.per_file_records.is_empty();
 
-    // If COCOMO didn't fit on page 1, render it on a dedicated page 2.
-    // Capture the page/layer so that the per-file table can continue on the same page
-    // instead of starting a new one (eliminating the blank-page gap between the two sections).
-    let cocomo_page_ctx = if run.cocomo.is_some() && !cocomo_fits_page1 {
-        use printpdf::{Color, Mm as PdfMm, Rgb};
-        let page_h = if tc_page_is_terminal {
-            measure_terminal_tc_page_height(run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, true)
-        } else {
-            H
-        };
-        let (c2_page, c2_layer_idx) = doc.add_page(Mm(W), Mm(page_h), "Content");
-        let c2_layer = doc.get_page(c2_page).get_layer(c2_layer_idx);
-        let c2_ctx = PdfCtx {
-            layer: &c2_layer,
-            font_reg: &font_reg,
-            font_bold: &font_bold,
-            w: W,
-            margin: MARGIN,
-            row_h: ROW_H,
-            tbl_hdr_h: TBL_HDR_H,
-        };
-        // Small page header so the reader knows which report this is.
-        pdf_fill_rect(
-            &c2_layer,
-            0.0,
-            page_h - 8.0,
-            W,
-            8.0,
-            Rgb::new(0.098, 0.11, 0.15, None),
-        );
-        c2_layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-        c2_layer.use_text(
-            "oxide-sloc",
-            9.0,
-            PdfMm(MARGIN),
-            PdfMm(page_h - 5.5),
-            &font_bold,
-        );
-        c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.72, 0.72, 0.72, None)));
-        c2_layer.use_text(
-            pdf_trunc(&pdf_safe_str(&title), 45),
-            7.5,
-            PdfMm(46.0),
-            PdfMm(page_h - 5.5),
-            &font_reg,
-        );
-        pdf_draw_header_meta(
-            &c2_layer,
-            &font_reg,
-            W,
-            MARGIN,
-            page_h - 5.5,
-            &pdf_page_header_meta(run),
-        );
-        let cocomo_bottom = pdf_render_cocomo_section(&c2_ctx, run, page_h - 8.0 - 6.0);
-        // Render T&C inline on the same page immediately after COCOMO — no blank gap.
-        let tc_bottom = pdf_render_tc_inline(&c2_ctx, run, cocomo_bottom - 2.0, FOOTER_H);
-        // Footer (per-file renderer will overdraw with its richer version if it starts here).
-        pdf_fill_rect(
-            &c2_layer,
-            0.0,
-            0.0,
-            W,
-            FOOTER_H,
-            Rgb::new(0.93, 0.91, 0.87, None),
-        );
-        c2_layer.set_fill_color(Color::Rgb(Rgb::new(0.4, 0.4, 0.4, None)));
-        c2_layer.use_text(
-            format!("oxide-sloc v{version}  |  AGPL-3.0-or-later"),
-            6.5,
-            PdfMm(MARGIN),
-            PdfMm(3.0),
-            &font_reg,
-        );
-        // Pass the Y below T&C content so per-file can continue on this page without a gap.
-        Some((c2_page, c2_layer_idx, tc_bottom - 3.0))
-    } else {
-        // No COCOMO on its own page — create a dedicated T&C page and start per-file from it.
-        let page_h = if tc_page_is_terminal {
-            measure_terminal_tc_page_height(run, W, H, MARGIN, FOOTER_H, ROW_H, TBL_HDR_H, false)
-        } else {
-            H
-        };
-        let (tc_page, tc_layer, tc_y) = pdf_render_tests_coverage_page(
-            &doc, &font_reg, &font_bold, run, W, page_h, MARGIN, FOOTER_H, &title, version,
-        );
-        Some((tc_page, tc_layer, tc_y))
+    // If COCOMO didn't fit on page 1, render it on a dedicated page 2 (with T&C inline);
+    // otherwise render a standalone T&C page. Either way the returned page/layer/Y lets the
+    // per-file table continue on the same page with no blank-page gap.
+    let page_dims = PdfPageDims {
+        w: W,
+        h: H,
+        margin: MARGIN,
+        footer_h: FOOTER_H,
+        row_h: ROW_H,
+        tbl_hdr_h: TBL_HDR_H,
     };
+    let cocomo_page_ctx = pdf_render_cocomo_or_tc_page(
+        &doc,
+        &font_reg,
+        &font_bold,
+        run,
+        page_dims,
+        &title,
+        version,
+        cocomo_fits_page1,
+        tc_page_is_terminal,
+    );
 
     // Git Hotspots — its own page after COCOMO/T&C, only when an --activity-window scan
     // collected per-file git activity. Threaded as the per-file continuation (like COCOMO)
