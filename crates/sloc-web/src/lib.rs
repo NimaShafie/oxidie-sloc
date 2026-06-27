@@ -693,7 +693,13 @@ fn build_router(state: AppState) -> Router {
         .route("/api/git/scan-ref", get(git_browser::api_scan_ref))
         .route("/api/git/compare-refs", get(git_browser::api_compare_refs))
         // ── Report export (HTML→PDF via headless Chrome) ──────────────────────
-        .route("/export/pdf", post(export_pdf_handler))
+        // The request body is the full rendered HTML report, whose size scales
+        // with file count — large repos (Compare Scans, Files, Trend, Test
+        // Metrics) can exceed the global 10 MB limit and 413 without this raise.
+        .route(
+            "/export/pdf",
+            post(export_pdf_handler).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         // ── Config export / import ─────────────────────────────────────────────
         .route("/export-config", get(export_config_handler))
         .route("/import-config", post(import_config_handler))
@@ -10483,6 +10489,7 @@ fn multi_compare_page(
         var LGY=cv('--line','#e6d0bf');
         var axisCol=cv('--line-strong','#d8bfad');
         var surf2col=cv('--surface-2','#f4ede4');
+        var surfCol=cv('--surface','#fff8f0');
         var p0=POINTS[0],pLast=POINTS[N-1];
         var dark=document.body.classList.contains('dark-theme');
         var barBorder=dark?'rgba(255,255,255,0.40)':'rgba(0,0,0,0.62)';
