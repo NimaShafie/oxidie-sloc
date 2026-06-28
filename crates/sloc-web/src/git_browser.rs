@@ -593,15 +593,27 @@ pub struct CompareRefsQuery {
           if (loadingMsg) loadingMsg.lastChild.textContent = baseText + ' ' + elapsed + 's' + hint;
         }, 1000);
 
+        // Guard against a backend that never responds (e.g. a git subprocess wedged on an
+        // auth prompt): abort after 90s so the spinner can't loop forever and the user gets
+        // a recoverable error in-page instead of having to refresh.
+        var ctrl = new AbortController();
+        var abortTimer = setTimeout(function () { ctrl.abort(); }, 90000);
         try {
-          var r = await fetch('/api/git/refs?' + new URLSearchParams({ repo: repo }));
+          var r = await fetch('/api/git/refs?' + new URLSearchParams({ repo: repo }), { signal: ctrl.signal });
           var data = await r.json();
           if (!r.ok) { showFetchError(data.error || 'Failed to load repository.', repo); return; }
           renderRefs(data);
           document.getElementById('refPanel').classList.remove('panel-hidden');
           document.getElementById('statusMsg').style.display = 'none';
-        } catch (e) { showFetchError('Network error: ' + e.message, repo); }
+        } catch (e) {
+          if (e && e.name === 'AbortError') {
+            showFetchError('Fetch timed out after 90s. The repository may be very large, unreachable, or require credentials that git is waiting on. Verify the URL and access, then try again.', repo);
+          } else {
+            showFetchError('Network error: ' + e.message, repo);
+          }
+        }
         finally {
+          clearTimeout(abortTimer);
           clearInterval(timer);
           if (loadingMsg) loadingMsg.lastChild.textContent = baseText;
           resetLoadingState();
