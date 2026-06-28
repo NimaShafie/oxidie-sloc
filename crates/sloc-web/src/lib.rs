@@ -10860,9 +10860,14 @@ fn multi_compare_page(
         var commitsList=POINTS.map(function(pt,i){{return esc(ptRef(pt,i));}}).join(', ');
         var p0=N>0?POINTS[0]:null,pLast=N>0?POINTS[N-1]:null;
         var codeDelta=(p0&&pLast)?Number(pLast.code)-Number(p0.code):null;
+        // Header/footer flow in document order (NOT position:fixed) — a fixed
+        // header repeats every printed page in Chromium and overlaps the content
+        // below it, swallowing the first rows of pages 2+ and clipping the cards
+        // on page 1. The table <thead> repeats per page natively, so every row
+        // stays visible.
         var css='body{{margin:0;padding:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}}'+
-          '.pdf-header{{position:fixed;top:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
-          '.pdf-footer{{position:fixed;bottom:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
+          '.pdf-header{{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
+          '.pdf-footer{{margin-top:12px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
           '.page-hdr{{background:#fff;border-bottom:2px solid #1a2035;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;}}'+
           '.ph-brand{{font-size:14px;font-weight:900;color:#1a2035;white-space:nowrap;}}'+
           '.ph-brand em{{color:#c45c10;font-style:normal;}}'+
@@ -10872,7 +10877,7 @@ fn multi_compare_page(
           '.ib-name{{font-size:13px;font-weight:800;color:#fff;}}'+
           '.ib-right{{font-size:11px;color:#8899aa;text-align:right;line-height:1.7;}}'+
           '.ftr{{background:#1a2035;color:#7a8b9c;font-size:10px;padding:5px 14px;display:flex;justify-content:space-between;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'+
-          '.body{{padding:8px 14px;margin-top:76px;margin-bottom:34px;}}'+
+          '.body{{padding:12px 18px 0;}}'+
           '.sg{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}}'+
           '.sc{{border:1px solid #ddd;border-radius:8px;padding:8px 10px;}}'+
           '.sv{{font-size:18px;font-weight:900;color:#c45c10;}}'+
@@ -10933,8 +10938,8 @@ fn multi_compare_page(
         }}
         return '<!DOCTYPE html><html><head><meta charset="utf-8">'+
           '<title>OxideSLOC \u2014 Multi-Scan Timeline</title><style>'+css+'</style></head><body>'+
-          '<div class="pdf-header"><div class="page-hdr"><div class="ph-brand"><em>oxide</em>-sloc</div><div class="ph-title">Multi-Scan Timeline</div><div class="ph-date">'+esc(now)+'</div></div><div class="info-bar"><div><div class="ib-name">{project_label}</div></div><div class="ib-right">{n} scans compared<br>'+commitsList+'</div></div></div><div class="pdf-footer"><div class="ftr"><span>oxide-sloc v{version} | AGPL-3.0-or-later</span><span>Multi-Scan Timeline Report</span><span>{project_label} &middot; {n} scans</span></div></div>'+
-          
+          '<div class="pdf-header"><div class="page-hdr"><div class="ph-brand"><em>oxide</em>-sloc</div><div class="ph-title">Multi-Scan Timeline</div><div class="ph-date">'+esc(now)+'</div></div><div class="info-bar"><div><div class="ib-name">{project_label}</div></div><div class="ib-right">{n} scans compared<br>'+commitsList+'</div></div></div>'+
+
           '<div class="body">'+
           '<div class="sg">'+
           (pLast?'<div class="sc"><div class="sv">'+full(pLast.code)+'</div><div class="sl">Latest Code Lines</div></div>':
@@ -10954,7 +10959,7 @@ fn multi_compare_page(
           '</tr></thead><tbody>'+deltaRows+'</tbody></table></div>':'')+
           fmSection+
           '</div>'+
-          ''+
+          '<div class="pdf-footer"><div class="ftr"><span>oxide-sloc v{version} | AGPL-3.0-or-later</span><span>Multi-Scan Timeline Report</span><span>{project_label} &middot; {n} scans</span></div></div>'+
           '</body></html>';
       }}
       function mcDoPdf(btn){{
@@ -12367,8 +12372,11 @@ async fn trend_report_handler(
       var css='<style>'
         +'*{{box-sizing:border-box;}}'
         +'html,body{{margin:0;padding:0;}}'
-        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;padding-top:54px;padding-bottom:58px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
-        +'.rep-masthead{{position:fixed;top:0;left:0;right:0;z-index:10;background:#191c26;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:15px 34px;}}'
+        // Masthead/footer flow in document order — a position:fixed header repeats
+        // on every printed page in Chromium and hides the rows beneath it on pages
+        // 2+. The trend table's <thead> repeats per page natively instead.
+        +'body{{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#241813;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
+        +'.rep-masthead{{background:#191c26;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:15px 34px;}}'
         +'.rep-mast-left{{display:flex;align-items:baseline;gap:14px;}}'
         +'.rep-mast-brand{{font-size:19px;font-weight:900;letter-spacing:-.01em;}}'
         +'.rep-mast-sub{{font-size:12.5px;color:rgba(255,255,255,0.65);font-weight:600;}}'
@@ -12395,7 +12403,7 @@ async fn trend_report_handler(
         +'th{{background:#f0e9e0;font-weight:800;}}'
         +'.sort-icon,.col-resize-handle{{display:none!important;}}'
         +'.pagination,.table-pager,.sh-pager{{display:none!important;}}'
-        +'.rep-foot{{position:fixed;bottom:0;left:0;right:0;z-index:10;background:#191c26;color:rgba(255,255,255,0.72);padding:9px 34px;font-size:11px;font-weight:600;text-align:center;line-height:1.5;}}'
+        +'.rep-foot{{margin-top:22px;background:#191c26;color:rgba(255,255,255,0.72);padding:9px 34px;font-size:11px;font-weight:600;text-align:center;line-height:1.5;}}'
         +'.rep-foot-gen{{margin-top:2px;color:rgba(255,255,255,0.55);}}'
         +'</style>';
       var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Trend Report</title>'+css+'</head><body>'
@@ -28930,9 +28938,16 @@ struct CompareSelectTemplate {
         dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
         var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
         var tfTotal=sd.fm+sd.fa+sd.fr+sd.fu;
+        // The header/footer flow in normal document order (NOT position:fixed).
+        // A fixed header repeats on every printed page in Chromium and overlaps
+        // the content beneath it — silently swallowing the first few table rows of
+        // pages 2+ and clipping the summary cards on page 1. Letting the header
+        // flow once at the top and relying on the table's <thead> (which Chromium
+        // repeats per page) keeps every row visible. `.body` keeps a small inset
+        // so nothing bleeds to the sheet edge.
         var css='body{margin:0;padding:0;font-family:"Helvetica Neue",Arial,sans-serif;background:#fff;color:#111;font-size:13px;}'+
-          '.pdf-header{position:fixed;top:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
-          '.pdf-footer{position:fixed;bottom:0;left:0;right:0;z-index:1000;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.pdf-header{-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.pdf-footer{margin-top:12px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           '.page-hdr{background:#fff;border-bottom:2px solid #1a2035;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;}'+
           '.ph-brand{font-size:14px;font-weight:900;color:#1a2035;white-space:nowrap;}'+
           '.ph-brand em{color:#c45c10;font-style:normal;}'+
@@ -28943,7 +28958,7 @@ struct CompareSelectTemplate {
           '.ib-path{font-size:10px;color:#8899aa;margin-top:2px;}'+
           '.ib-right{font-size:11px;color:#8899aa;text-align:right;line-height:1.7;}'+
           '.ftr{background:#1a2035;color:#7a8b9c;font-size:10px;padding:5px 14px;display:flex;justify-content:space-between;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
-          '.body{padding:8px 14px;margin-top:76px;margin-bottom:34px;}'+
+          '.body{padding:12px 18px 0;}'+
           '.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}'+
           '.sc{border:1px solid #ddd;border-radius:8px;padding:8px 10px;}'+
           '.sv{font-size:18px;font-weight:900;color:#c45c10;}'+
@@ -28973,10 +28988,6 @@ struct CompareSelectTemplate {
           '<div class="info-bar"><div><div class="ib-name">'+esc(projName)+'</div><div class="ib-path">'+esc(proj)+'</div></div>'+
           '<div class="ib-right">Baseline: '+esc(_blabel)+'<br>Current: '+esc(_clabel)+'</div></div>'+
           '</div>'+
-          '<div class="pdf-footer"><div class="ftr">'+
-          '<span>oxide-sloc v{{ version }} | AGPL-3.0-or-later</span><span>Scan Delta Report</span>'+
-          '<span>'+esc(sd.bid)+' \u2192 '+esc(sd.cid)+'</span>'+
-          '</div></div>'+
           '<div class="body">'+
           '<div class="sg">'+
           '<div class="sc"><div class="sv">'+delt(sd.cd)+'</div><div class="sl">Code Lines \u0394</div></div>'+
@@ -28998,6 +29009,10 @@ struct CompareSelectTemplate {
           '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code \u0394</th>'+
           '</tr></thead><tbody>'+fileRows+more+'</tbody></table></div>'+
           '</div>'+
+          '<div class="pdf-footer"><div class="ftr">'+
+          '<span>oxide-sloc v{{ version }} | AGPL-3.0-or-later</span><span>Scan Delta Report</span>'+
+          '<span>'+esc(sd.bid)+' → '+esc(sd.cid)+'</span>'+
+          '</div></div>'+
           '</body></html>';
       }
       function doDeltaPdf(btn) {
