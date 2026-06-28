@@ -28969,6 +28969,10 @@ struct CompareSelectTemplate {
           '.ml{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.06em;}.mv{font-weight:700;margin-top:3px;font-size:15px;}'+
           '.sec{margin-bottom:10px;}'+
           '.sh{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.pg-rhdr th{background:#0f1420;color:#fff;padding:0;border:none;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.pg-rhdr-in{display:flex;justify-content:space-between;align-items:center;padding:6px 11px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;}'+
+          '.pg-rhdr-in em{color:#c45c10;font-style:normal;}'+
+          '.pg-rhdr-r{color:#9fb0c8;font-weight:600;text-transform:none;letter-spacing:0;}'+
           'table{width:100%;border-collapse:collapse;font-size:12px;}'+
           'th{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-align:left;letter-spacing:.03em;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           'td{border-bottom:1px solid #eee;padding:3px 8px;vertical-align:middle;}'+
@@ -29005,25 +29009,22 @@ struct CompareSelectTemplate {
           '<div><div class="ml">Unchanged</div><div class="mv">'+fullN(sd.fu)+'</div></div>'+
           '</div>'+
           (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
-          '<div class="sec"><p class="sh">File Delta ('+fmtN(dr.length)+' files)</p>'+
-          '<table><thead><tr><th>File</th><th>Language</th><th>Status</th>'+
+          '<div class="sec">'+
+          '<table><thead>'+
+          '<tr class="pg-rhdr"><th colspan="6"><div class="pg-rhdr-in"><span>File Delta &middot; '+fmtN(dr.length)+' files</span><span class="pg-rhdr-r"><em>oxide</em>-sloc &middot; Scan Delta &middot; '+esc(projName)+'</span></div></th></tr>'+
+          '<tr><th>File</th><th>Language</th><th>Status</th>'+
           '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code \u0394</th>'+
           '</tr></thead><tbody>'+fileRows+more+'</tbody></table></div>'+
           '</div>'+
-          '<div class="pdf-footer"><div class="ftr">'+
+          '<div id="pdf-native-footer" style="display:none">'+
+          '<div style="width:100%;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#9fb0c8;background:#1a2035;-webkit-print-color-adjust:exact;print-color-adjust:exact;padding:5px 14px;display:flex;justify-content:space-between;align-items:center;">'+
           '<span>oxide-sloc v{{ version }} | AGPL-3.0-or-later</span><span>Scan Delta Report</span>'+
           '<span>'+esc(sd.bid)+' → '+esc(sd.cid)+'</span>'+
           '</div></div>'+
           '</body></html>';
       }
       function doDeltaPdf(btn) {
-        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF\u2026';
-        var html=buildDeltaPdfHtml();
-        fetch('/export/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({html:html,filename:getExportFilename('pdf')})})
-          .then(function(r){if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();})
-          .then(function(blob){var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=getExportFilename('pdf');a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},200);})
-          .catch(function(e){alert('PDF export failed: '+e.message);})
-          .finally(function(){btn.disabled=false;btn.innerHTML=orig;});
+        window.slocExportPdf({html:buildDeltaPdfHtml(),filename:getExportFilename('pdf'),button:btn});
       }
       var pdfBtn = document.getElementById('delta-pdf-btn');
       if (pdfBtn) pdfBtn.addEventListener('click', function() { doDeltaPdf(pdfBtn); });
