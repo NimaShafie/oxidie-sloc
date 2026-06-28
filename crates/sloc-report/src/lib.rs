@@ -864,6 +864,22 @@ fn extract_banner_text(tab: &headless_chrome::Tab) -> Option<String> {
     }
 }
 
+/// Read the `innerHTML` of an optional `#<id>` element supplied by the document to act as
+/// a Chrome print header/footer template. Chrome renders these in the page margin on every
+/// printed page (including a short final page), which in-flow or `position:fixed` markup
+/// cannot do reliably. Returns `None` when the element is absent or empty.
+fn extract_pdf_template(tab: &headless_chrome::Tab, id: &str) -> Option<String> {
+    // `id` is always a hard-coded constant below — no script-injection surface.
+    let js = format!(
+        "(function(){{var el=document.getElementById('{id}');return el?el.innerHTML:null;}})()"
+    );
+    let result = tab.evaluate(&js, false).ok()?;
+    match result.value? {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// Use Chrome `DevTools` Protocol to render `html_path` as a PDF at `output_path`.
 ///
 /// Launches a headless Chromium-based browser at A4-landscape viewport (1122 × 794 px),
@@ -913,6 +929,24 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
 
     let has_banner = banner_text.is_some();
 
+    // Optional per-document native header/footer templates. A document can embed hidden
+    // `#pdf-native-header` / `#pdf-native-footer` elements; their innerHTML is handed to
+    // Chrome as print templates so a header repeats at the top and a footer is pinned to
+    // the bottom margin of every page (the Scan Delta report uses this for its per-page
+    // footer bar). A document supplying only a footer gets no top chrome.
+    let native_header = if has_banner {
+        None
+    } else {
+        extract_pdf_template(&tab, "pdf-native-header")
+    };
+    let native_footer = if has_banner {
+        None
+    } else {
+        extract_pdf_template(&tab, "pdf-native-footer")
+    };
+    let has_native_header = native_header.is_some();
+    let has_native_footer = native_footer.is_some();
+
     // Build Chrome header/footer HTML templates from the banner text.
     // The template is rendered in the margin area; `font-size` must be set explicitly.
     let make_banner_tmpl = |text: &str| -> String {
@@ -929,9 +963,39 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
         )
     };
 
-    let (header_tmpl, footer_tmpl) = banner_text.as_ref().map_or((None, None), |t| {
+    // Chrome prints both a header and a footer template whenever display_header_footer is
+    // on; an empty `<span>` suppresses its default date/title/url chrome on the side we are
+    // not populating.
+    let (header_tmpl, footer_tmpl): (Option<String>, Option<String>) = if has_banner {
+        let t = banner_text.as_deref().unwrap_or_default();
         (Some(make_banner_tmpl(t)), Some(make_banner_tmpl(t)))
-    });
+    } else if has_native_header || has_native_footer {
+        let empty = || "<span></span>".to_string();
+        (
+            Some(native_header.unwrap_or_else(empty)),
+            Some(native_footer.unwrap_or_else(empty)),
+        )
+    } else {
+        (None, None)
+    };
+
+    let display_header_footer = has_banner || has_native_header || has_native_footer;
+    // Reserve margin only on the side(s) that actually carry chrome so content keeps the
+    // most room. Banner keeps its historical top/bottom reserve.
+    let margin_top = if has_banner {
+        0.35
+    } else if has_native_header {
+        0.55
+    } else {
+        0.0
+    };
+    let margin_bottom = if has_banner {
+        0.25
+    } else if has_native_footer {
+        0.42
+    } else {
+        0.0
+    };
 
     let pdf_bytes = tab
         .print_to_pdf(Some(PrintToPdfOptions {
@@ -940,14 +1004,16 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
             scale: Some(0.97),
             paper_width: Some(11.69), // A4 landscape width (inches)
             paper_height: Some(8.27), // A4 landscape height (inches)
-            // When a banner is present widen the top/bottom margins so Chrome's
-            // header/footer templates render fully without overlapping content.
-            margin_top: Some(if has_banner { 0.35 } else { 0.0 }),
-            margin_bottom: Some(if has_banner { 0.25 } else { 0.0 }),
+            margin_top: Some(margin_top),
+            margin_bottom: Some(margin_bottom),
             margin_left: Some(0.0),
             margin_right: Some(0.0),
             prefer_css_page_size: Some(false),
-            display_header_footer: if has_banner { Some(true) } else { None },
+            display_header_footer: if display_header_footer {
+                Some(true)
+            } else {
+                None
+            },
             header_template: header_tmpl,
             footer_template: footer_tmpl,
             ..Default::default()
