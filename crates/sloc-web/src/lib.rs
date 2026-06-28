@@ -10579,7 +10579,7 @@ fn multi_compare_page(
 
     // ── Inline scan charts (matching Scan Delta layout) ──────────────────────
     (function(){{
-      var OX='#C45C10',GN='#2A6846',RD='#B23030';
+      var OX='#C45C10',GN='#2A6846',GD='#D4A017',RD='#B23030';
       function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
       function fmt2(n){{return Number(n).toLocaleString();}}
       function px(n){{return Math.round(n);}}
@@ -10621,12 +10621,13 @@ fn multi_compare_page(
         var surfCol=cv('--surface','#fff8f0');
         var p0=POINTS[0],pLast=POINTS[N-1];
         var dark=document.body.classList.contains('dark-theme');
+        var FADE=dark?'#524238':'#e6d0bf';
         var barBorder=dark?'rgba(255,255,255,0.40)':'rgba(0,0,0,0.62)';
         function niceMax(v){{var x=v||1;var p=Math.pow(10,Math.floor(Math.log10(x)));var n=x/p;var s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}}
       var c1mets=[
-        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:'#E3A876',cc:'#C45C10'}},
-        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:'#9FC3AE',cc:'#2A6846'}},
-        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:'#E0C58A',cc:'#BE8A2E'}}
+        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:FADE,cc:OX}},
+        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:FADE,cc:GN}},
+        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:FADE,cc:GD}}
       ];
       var maxV1=niceMax(Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))||1);
       // Code Metrics chart — grows to fill the height its grid row settled to (the
@@ -10669,7 +10670,7 @@ fn multi_compare_page(
       var mets=[
         {{l:'Code Lines',v:Number(pLast.code)-Number(p0.code),mc:'#C45C10'}},
         {{l:'Files Analyzed',v:Number(pLast.files)-Number(p0.files),mc:'#2A6846'}},
-        {{l:'Comment Lines',v:Number(pLast.comments)-Number(p0.comments),mc:'#BE8A2E'}}
+        {{l:'Comment Lines',v:Number(pLast.comments)-Number(p0.comments),mc:GD}}
       ];
       var maxD=Math.max.apply(null,mets.map(function(m){{return Math.abs(m.v);}}));maxD=maxD||1;
       var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
@@ -10717,13 +10718,13 @@ fn multi_compare_page(
       // Chart 4: File Change Distribution (donut left, legend right, % on slices)
       var fm=0,fa=0,fr=0,fu=0;
       FILES.forEach(function(f){{if(f.s==='modified')fm++;else if(f.s==='added')fa++;else if(f.s==='removed')fr++;else fu++;}});
-      var segs=[{{l:'Modified',v:fm,c:OX}},{{l:'Added',v:fa,c:GN}},{{l:'Removed',v:fr,c:RD}},{{l:'Unchanged',v:fu,c:'#9E9E9E'}}].filter(function(s){{return s.v>0;}});
+      var segs=[{{l:'Modified',v:fm,c:OX}},{{l:'Added',v:fa,c:GN}},{{l:'Removed',v:fr,c:RD}},{{l:'Unchanged',v:fu,c:FADE}}].filter(function(s){{return s.v>0;}});
       var tot4=segs.reduce(function(a,s){{return a+s.v;}},0)||1;
       var C4W=380,C4H=210,cx4=104,cy4=105,Ro=80,Ri=50;
-      function pctFill(c){{return '#ffffff';}}
+      function pctFill(c){{return c===FADE?textCol:'#ffffff';}}
       var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:440px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang4=-Math.PI/2;
       if(segs.length===1){{
-        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'" stroke="white" stroke-width="2.5"/>';
+        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'" stroke="'+surfCol+'" stroke-width="2.5"/>';
         c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="'+surfCol+'"/>';
         c4+='<text x="'+cx4+'" y="'+px(cy4-(Ro+Ri)/2+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="700" fill="'+pctFill(segs[0].c)+'">100%</text>';
       }} else {{
@@ -10731,7 +10732,7 @@ fn multi_compare_page(
           var sw=Math.min(s.v/tot4*2*Math.PI,2*Math.PI-0.001),a2=ang4+sw;
           var x1=cx4+Ro*Math.cos(ang4),y1=cy4+Ro*Math.sin(ang4),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang4),yi2=cy4+Ri*Math.sin(ang4);
-          c4+='<path'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          c4+='<path'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="'+surfCol+'" stroke-width="2.5"/>';
           if(sw>0.32){{var midA=ang4+sw/2,rr=(Ro+Ri)/2,lx=cx4+rr*Math.cos(midA),ly=cy4+rr*Math.sin(midA);c4+='<text x="'+px(lx)+'" y="'+px(ly+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="'+pctFill(s.c)+'">'+px(s.v/tot4*100)+'%</text>';}}
           ang4+=sw;
         }});
@@ -28518,7 +28519,7 @@ struct CompareSelectTemplate {
         </div>
         <div class="ic-card">
           <div class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</div>
-          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#E3A876"></span><span style="color:#C45C10;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#9FC3AE"></span><span style="color:#2A6846;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#E0C58A"></span><span style="color:#BE8A2E;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
+          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#C45C10"></span><span style="color:#C45C10;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#2A6846"></span><span style="color:#2A6846;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#D4A017"></span><span style="color:#D4A017;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
           <div id="ic-c1"></div>
         </div>
         <div class="ic-card" id="ic-lang-card">
@@ -29365,7 +29366,14 @@ struct CompareSelectTemplate {
     window.addEventListener('blur',function(){window.icHT();});
     document.addEventListener('visibilitychange',function(){if(document.hidden)window.icHT();});
     (function(){
-      var OX='#C45C10',GN='#2A6846',RD='#B23030',GY='#AAAAAA',LGY='#DDDDDD';
+      // Theme-aware palette — matches the canonical scheme used by /test-metrics
+      // charts so every page renders bars/text/grid with the same colours and
+      // adapts to dark mode (see Design section in CLAUDE.md).
+      var cs=getComputedStyle(document.body),dark=document.body.classList.contains('dark-theme');
+      function cv(n,fb){var v=cs.getPropertyValue(n);return(v&&v.trim())||fb;}
+      var OX='#C45C10',GN='#2A6846',GD='#D4A017',RD='#B23030';
+      var FADE=dark?'#524238':'#e6d0bf';
+      var textCol=cv('--text','#43342d'),mutedCol=cv('--muted','#7b675b'),LGY=cv('--line','#e6d0bf'),axisCol=cv('--line-strong','#d8bfad'),surfCol=cv('--surface','#fbf7f2');
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function fmt(n){return Number(n).toLocaleString();}
       function px(n){return Math.round(n);}
@@ -29376,26 +29384,26 @@ struct CompareSelectTemplate {
       dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
       var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
       // Chart 1: Baseline vs Current grouped bars
-      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#E3A876',cc:'#C45C10'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#9FC3AE',cc:'#2A6846'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#E0C58A',cc:'#BE8A2E'}];
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:FADE,cc:OX},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:FADE,cc:GN},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:FADE,cc:GD}];
       var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
       var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
       var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
-      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
+      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="'+axisCol+'" stroke-width="1.5"/>';
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
         var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
+        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+textCol+'">'+esc(m.l)+'</text>';
         c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">'+fmt(m.b)+'</text>';
         c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"/>';
         c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#999">Before</text>';
+        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">Before</text>';
         c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">After</text>';
       });
       c1+='</svg>';
       // Chart 2: Delta by Metric
-      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:'#C45C10'},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:'#2A6846'},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:'#BE8A2E'}];
+      var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:OX},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:GN},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:GD}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
       var C2W=530,rH=56,C2H=mets.length*rH+28,c2LW=144,c2RP=18,cx2=c2LW+Math.floor((C2W-c2LW-c2RP)/2),maxBW=Math.floor((C2W-c2LW-c2RP)/2)-4;
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
@@ -29417,16 +29425,16 @@ struct CompareSelectTemplate {
         c3+='<line x1="'+cx3+'" y1="0" x2="'+cx3+'" y2="'+C3H+'" stroke="'+LGY+'" stroke-width="1.5"/>';
         langs.forEach(function(l,i){
           var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
-          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="#444">'+esc(l)+'</text>';
+          c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="'+textCol+'">'+esc(l)+'</text>';
           c3+='<rect'+btt(l,'Delta: '+vStr+' code lines \u2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
           if(bw>=48){c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
           else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
-          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="#AAA">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
+          c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
         });
         c3+='</svg>';
       }
       // Chart 4: File Change Donut — centered pie with legend below
-      var segs=[{l:'Modified',v:sd.fm,c:OX},{l:'Added',v:sd.fa,c:GN},{l:'Removed',v:sd.fr,c:RD},{l:'Unchanged',v:sd.fu,c:'#CCCCCC'}].filter(function(s){return s.v>0;});
+      var segs=[{l:'Modified',v:sd.fm,c:OX},{l:'Added',v:sd.fa,c:GN},{l:'Removed',v:sd.fr,c:RD},{l:'Unchanged',v:sd.fu,c:FADE}].filter(function(s){return s.v>0;});
       var tot=segs.reduce(function(a,s){return a+s.v;},0)||1;
       var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
       var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
@@ -29438,16 +29446,16 @@ struct CompareSelectTemplate {
           var sw=Math.min(s.v/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
           var x1=cx4+Ro*Math.cos(ang),y1=cy4+Ro*Math.sin(ang),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang),yi2=cy4+Ri*Math.sin(ang);
-          c4+='<path'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
+          c4+='<path'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="'+surfCol+'" stroke-width="2.5"/>';
           ang+=sw;
         });
       }
-      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="22" font-weight="bold" fill="#444">'+fmt(tot)+'</text>';
-      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" fill="#888">total files</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="22" font-weight="bold" fill="'+textCol+'">'+fmt(tot)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" fill="'+mutedCol+'">total files</text>';
       segs.forEach(function(s,i){
         var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
         c4+='<rect'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="#555" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+        c4+='<text'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="'+textCol+'" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
       });
       c4+='</svg>';
       var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=c1;addTT(e1);}
