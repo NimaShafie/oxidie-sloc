@@ -5068,8 +5068,8 @@ struct WarningOpportunityRow {
     .chart-modal-header .chart-modal-title { flex:1 1 auto; margin:0; min-width:0; }
     body.dark-theme .chart-modal { background:var(--surface); }
     .chart-container { width:100%; overflow:visible; }
-    .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:stretch; }
-    .charts-grid > .panel { margin:0; display:flex; flex-direction:column; }
+    .charts-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; align-items:stretch; }
+    .charts-grid > .panel { margin:0; min-width:0; display:flex; flex-direction:column; }
     .charts-grid .chart-section > div { display:flex; flex-direction:column; flex:1; }
     .charts-grid .chart-container { flex:1; min-height:180px; }
     .chart-pre { min-height:72px; }
