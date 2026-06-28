@@ -458,7 +458,9 @@ fn render_html_inner(
 
     let totals = &run.summary_totals;
 
-    let hotspot_rows = build_hotspot_rows(run);
+    // The HTML report paginates client-side, so surface a deeper ranking (up to 200 files)
+    // than the 15-row PDF page.
+    let hotspot_rows = build_hotspot_rows(run, 200);
 
     let template = ReportTemplate {
         // Empty nonce for disk-saved reports; patch_html_nonce replaces it
@@ -691,9 +693,12 @@ struct HotspotRow {
     score: u64,
 }
 
-/// Build the top-15 git hotspots from per-file activity (only files that carry a
-/// `commit_count` from an `--activity-window` scan). Ranked by `code_lines × commits`.
-fn build_hotspot_rows(run: &AnalysisRun) -> Vec<HotspotRow> {
+/// Build the git hotspots from per-file activity (only files that carry a
+/// `commit_count` from an `--activity-window` scan), ranked by `code_lines × commits`
+/// and capped at `limit` rows. The interactive HTML report requests a larger cap (so its
+/// client-side pagination has something to page through); the fixed-height PDF page keeps
+/// the original top-15.
+fn build_hotspot_rows(run: &AnalysisRun, limit: usize) -> Vec<HotspotRow> {
     let mut rows: Vec<HotspotRow> = run
         .per_file_records
         .iter()
@@ -717,7 +722,7 @@ fn build_hotspot_rows(run: &AnalysisRun) -> Vec<HotspotRow> {
             .cmp(&a.score)
             .then(b.commit_count.cmp(&a.commit_count))
     });
-    rows.truncate(15);
+    rows.truncate(limit);
     rows
 }
 
@@ -3405,7 +3410,7 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     // COCOMO/T&C page only when there is no Git Hotspots page in between (the Hotspots page,
     // when present, becomes the per-file continuation instead). A page that nothing flows
     // onto is trimmed to its content height to avoid a large empty gap below the last section.
-    let hotspot_rows = build_hotspot_rows(run);
+    let hotspot_rows = build_hotspot_rows(run, 15);
     let has_per_file = !run.per_file_records.is_empty();
     let tc_page_gets_per_file = hotspot_rows.is_empty() && has_per_file;
     let trim_tc_page = !tc_page_gets_per_file;
@@ -4610,6 +4615,21 @@ struct WarningOpportunityRow {
     #skipped-table { table-layout: fixed; width: 100%; }
     #skipped-table th, #skipped-table td { padding: 7px 8px; }
     #skipped-table td:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Hotspots table — overflow visible so header tooltips can escape the cell */
+    #hotspots-table th { overflow: visible; }
+    .hs-hint { color: var(--muted); font-style: italic; }
+    /* Column-header explainer tooltip (shared visual language with .stat-chip-tip) */
+    .col-tip { position: absolute; top: calc(100% + 9px); left: 0; z-index: 60; width: max-content; max-width: 270px;
+      background: var(--text); color: var(--bg); padding: 9px 12px; border-radius: 9px;
+      font-size: 11.5px; font-weight: 500; line-height: 1.5; letter-spacing: normal; text-transform: none;
+      white-space: normal; text-align: left; box-shadow: 0 10px 30px rgba(0,0,0,0.22);
+      opacity: 0; pointer-events: none; transition: opacity .18s ease; }
+    .col-tip.col-tip-r { left: auto; right: 0; }
+    .col-tip strong { color: var(--bg); }
+    .col-tip::after { content: ''; position: absolute; bottom: 100%; left: 16px;
+      border: 6px solid transparent; border-bottom-color: var(--text); }
+    .col-tip.col-tip-r::after { left: auto; right: 16px; }
+    #hotspots-table th:hover .col-tip { opacity: 1; }
     /* Column resize handle */
     .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 10; }
     .col-resize-handle:hover, .col-resize-handle.dragging { background: rgba(211,122,76,0.3); }
@@ -4856,9 +4876,12 @@ struct WarningOpportunityRow {
       #per-file-table th:first-child,
       #per-file-table td:first-child { position: static !important; }
       /* Show ALL rows — JS pagination hides rows via inline style; !important overrides it */
-      #per-file-table tbody tr, #skipped-table tbody tr { display: table-row !important; }
+      #per-file-table tbody tr, #skipped-table tbody tr, #hotspots-table tbody tr { display: table-row !important; }
       /* Hide pagination controls — not interactive in PDF */
       .page-size-row, .pagination-bar { display: none !important; }
+      /* Header tooltips and the interaction hint are screen-only */
+      .col-tip { display: none !important; }
+      .hs-hint { display: none !important; }
 
       thead { display: table-header-group; }
       tr { break-inside: avoid !important; }
@@ -5912,29 +5935,40 @@ struct WarningOpportunityRow {
       {% endif %}
 
       {% if has_hotspots %}
-      <section class="panel" id="hotspots-section">
-        <div class="toolbar"><div class="toolbar-left"><h2>Git Hotspots</h2></div></div>
-        <p style="font-size:13px;color:var(--muted);padding:4px 4px 10px;line-height:1.6;">Files ranked by <strong>code lines &times; recent commits</strong> over the configured git activity window. Large files that change often are the strongest refactoring candidates.</p>
-        <table style="width:100%;border-collapse:collapse;">
-          <thead><tr>
-            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);">File</th>
-            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Code lines</th>
-            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Commits</th>
-            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Hotspot score</th>
-            <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);">Last changed</th>
-          </tr></thead>
-          <tbody>
-          {% for h in hotspot_rows %}
-            <tr>
-              <td style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">{{ h.path }}</td>
-              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);">{{ h.code_lines|commas }}</td>
-              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);">{{ h.commit_count }}</td>
-              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);font-weight:700;color:var(--oxide);">{{ h.score|commas }}</td>
-              <td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);color:var(--muted);">{{ h.last_commit_date }}</td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
+      <section class="panel stack" id="hotspots-section">
+        <div class="toolbar"><div class="toolbar-left"><h2>Git Hotspots</h2><input id="hotspots-search" class="search" type="search" placeholder="Filter files..." /><div class="page-size-row"><label class="page-size-label" for="hotspots-page-size">Show:</label><select id="hotspots-page-size" class="page-size-select"><option value="15" selected>15</option><option value="25">25</option><option value="50">50</option><option value="all">All</option></select><span id="hotspots-count-label" class="page-count-label"></span></div></div></div>
+        <p style="font-size:13px;color:var(--muted);padding:4px 4px 10px;line-height:1.6;">Files ranked by <strong>code lines &times; recent commits</strong> over the configured git activity window. Large files that change often are the strongest refactoring candidates. <span class="hs-hint">Click a column header to sort; drag its right edge to resize; hover a header for what it means.</span></p>
+        <div class="table-shell">
+          <table id="hotspots-table" data-sort-table class="table-resizable hotspots-table">
+            <colgroup><col><col><col><col><col></colgroup>
+            <thead><tr>
+              <th data-sort-type="text">File<span class="col-tip">Repository-relative path of the file. Click to sort the list alphabetically by path.</span><div class="col-resize-handle"></div></th>
+              <th data-sort-type="number" class="num-col">Code lines<span class="col-tip col-tip-r">Executable source lines in the file (blank lines and comments excluded). Bigger files are harder to change safely.</span><div class="col-resize-handle"></div></th>
+              <th data-sort-type="number" class="num-col">Commits<span class="col-tip col-tip-r">How many times the file was committed within the git activity window. More commits = more churn.</span><div class="col-resize-handle"></div></th>
+              <th data-sort-type="number" class="num-col">Hotspot score<span class="col-tip col-tip-r"><strong>Code lines &times; Commits.</strong> A large file that changes often scores high &mdash; it concentrates both size and churn, making it the strongest refactoring candidate. Lower is calmer.</span><div class="col-resize-handle"></div></th>
+              <th data-sort-type="text" class="num-col">Last changed<span class="col-tip col-tip-r">Date of the most recent commit that touched this file, within the activity window.</span><div class="col-resize-handle"></div></th>
+            </tr></thead>
+            <tbody>
+            {% for h in hotspot_rows %}
+              <tr>
+                <td class="mono" title="{{ h.path }}">{{ h.path }}</td>
+                <td class="num-col">{{ h.code_lines|commas }}</td>
+                <td class="num-col">{{ h.commit_count }}</td>
+                <td class="num-col" style="font-weight:700;color:var(--oxide);">{{ h.score|commas }}</td>
+                <td class="num-col" style="color:var(--muted);">{{ h.last_commit_date }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div id="hotspots-pagination" class="pagination-bar">
+          <button id="hs-first" class="pager-btn pager-edge" disabled title="First page">&#8676; First</button>
+          <button id="hs-prev" class="pager-btn" disabled>&#8592; Prev</button>
+          <span class="pager-jump-wrap">Page <input id="hs-page-jump" class="pager-jump" type="number" min="1" value="1" title="Jump to page"> of <span id="hs-page-total">&#8212;</span></span>
+          <span id="hs-page-info" class="pager-info"></span>
+          <button id="hs-next" class="pager-btn">Next &#8594;</button>
+          <button id="hs-last" class="pager-btn pager-edge" title="Last page">Last &#8677;</button>
+        </div>
       </section>
       {% endif %}
 
@@ -6644,6 +6678,115 @@ struct WarningOpportunityRow {
         table.addEventListener('sloc-sorted', function () { applyFilter(); });
         applyFilter();
       })();
+
+      // ── Hotspots table pagination ────────────────────────────────────────────
+      (function () {
+        var table = document.getElementById('hotspots-table');
+        if (!table) return;
+        var tbody = table.tBodies[0];
+        var searchInput = document.getElementById('hotspots-search');
+        var pageSizeSelect = document.getElementById('hotspots-page-size');
+        var firstBtn = document.getElementById('hs-first');
+        var prevBtn = document.getElementById('hs-prev');
+        var nextBtn = document.getElementById('hs-next');
+        var lastBtn = document.getElementById('hs-last');
+        var pageInfo = document.getElementById('hs-page-info');
+        var jumpInput = document.getElementById('hs-page-jump');
+        var pageTotal = document.getElementById('hs-page-total');
+        var countLabel = document.getElementById('hotspots-count-label');
+        var filteredRows = [];
+        var currentPage = 1;
+        var totalAll = tbody.rows.length;
+
+        function getPageSize() {
+          var v = pageSizeSelect ? pageSizeSelect.value : '15';
+          return v === 'all' ? Infinity : parseInt(v, 10);
+        }
+
+        function applyFilter() {
+          var q = searchInput ? searchInput.value.toLowerCase() : '';
+          var rows = Array.prototype.slice.call(tbody.rows);
+          filteredRows = q === '' ? rows : rows.filter(function (row) {
+            return row.textContent.toLowerCase().indexOf(q) >= 0;
+          });
+          currentPage = 1;
+          render();
+        }
+
+        function render() {
+          var ps = getPageSize();
+          var total = filteredRows.length;
+          var totalPages = ps === Infinity ? 1 : Math.max(1, Math.ceil(total / ps));
+          if (currentPage > totalPages) currentPage = totalPages;
+          if (currentPage < 1) currentPage = 1;
+          var start = ps === Infinity ? 0 : (currentPage - 1) * ps;
+          var end = ps === Infinity ? total : Math.min(start + ps, total);
+          Array.prototype.forEach.call(tbody.rows, function (row) { row.style.display = 'none'; });
+          for (var i = start; i < end; i++) { filteredRows[i].style.display = ''; }
+          if (pageInfo) {
+            if (total === 0) {
+              pageInfo.textContent = 'No results';
+            } else if (ps === Infinity) {
+              pageInfo.textContent = 'All ' + total.toLocaleString() + ' files';
+            } else {
+              pageInfo.textContent = (start + 1) + '–' + end + ' of ' + total.toLocaleString() + ' files';
+            }
+          }
+          if (countLabel) {
+            countLabel.textContent = (total < totalAll && total > 0) ? '(' + total.toLocaleString() + ' matching)' : '';
+          }
+          var edgeDisabled = ps === Infinity;
+          if (firstBtn) firstBtn.disabled = currentPage <= 1 || edgeDisabled;
+          if (prevBtn) prevBtn.disabled = currentPage <= 1 || edgeDisabled;
+          if (nextBtn) nextBtn.disabled = currentPage >= totalPages || edgeDisabled;
+          if (lastBtn) lastBtn.disabled = currentPage >= totalPages || edgeDisabled;
+          if (jumpInput) { jumpInput.value = currentPage; jumpInput.max = totalPages; jumpInput.disabled = edgeDisabled; }
+          if (pageTotal) pageTotal.textContent = totalPages.toLocaleString();
+        }
+
+        if (searchInput) {
+          var filterTimer = null;
+          searchInput.addEventListener('input', function () {
+            clearTimeout(filterTimer);
+            filterTimer = setTimeout(applyFilter, 200);
+          });
+        }
+        if (pageSizeSelect) {
+          pageSizeSelect.addEventListener('change', function () { currentPage = 1; render(); });
+        }
+        if (firstBtn) {
+          firstBtn.addEventListener('click', function () { currentPage = 1; render(); });
+        }
+        if (prevBtn) {
+          prevBtn.addEventListener('click', function () { if (currentPage > 1) { currentPage--; render(); } });
+        }
+        if (nextBtn) {
+          nextBtn.addEventListener('click', function () {
+            var ps = getPageSize();
+            var totalPages = ps === Infinity ? 1 : Math.ceil(filteredRows.length / ps);
+            if (currentPage < totalPages) { currentPage++; render(); }
+          });
+        }
+        if (lastBtn) {
+          lastBtn.addEventListener('click', function () {
+            var ps = getPageSize();
+            currentPage = ps === Infinity ? 1 : Math.max(1, Math.ceil(filteredRows.length / ps));
+            render();
+          });
+        }
+        if (jumpInput) {
+          function hsJump() {
+            var ps = getPageSize();
+            var totalPages = ps === Infinity ? 1 : Math.max(1, Math.ceil(filteredRows.length / ps));
+            var v = parseInt(jumpInput.value, 10);
+            if (!isNaN(v)) { currentPage = Math.max(1, Math.min(v, totalPages)); render(); }
+          }
+          jumpInput.addEventListener('change', hsJump);
+          jumpInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') hsJump(); });
+        }
+        table.addEventListener('sloc-sorted', function () { applyFilter(); });
+        applyFilter();
+      })();
     })();
 
     (function randomizeWatermarks() {
@@ -6932,6 +7075,12 @@ struct WarningOpportunityRow {
       function sec(v){return[{_sec:true,v:v}];}
       function B(v){return{v:v,s:4};}
       function N(v){return{v:typeof v==='number'?v:Number(v),s:5};}
+      // Table cells render with thousands separators (1,656,153) via the |commas
+      // filter; Number() on that string is NaN, which would store the value as text
+      // (green-triangle warning, left-aligned). Strip separators so numeric cells
+      // become real numbers and align correctly. Non-numeric text is left untouched.
+      function numify(v){var s=String(v==null?'':v).trim();if(s==='')return s;var t=s.replace(/,/g,'');return /^-?\d+(\.\d+)?$/.test(t)?Number(t):v;}
+      function pnum(v){var t=String(v==null?'':v).replace(/,/g,'').trim();return /^-?\d+(\.\d+)?$/.test(t)?Number(t):0;}
       var dens=_SLOC_META.physicalLines>0?(_SLOC_META.codeLines/_SLOC_META.physicalLines*100).toFixed(1)+'%':'0%';
       var sumRows=[
         sec('RUN INFORMATION'),
@@ -6964,7 +7113,7 @@ struct WarningOpportunityRow {
       document.querySelectorAll('#lang-breakdown-table tbody tr').forEach(function(tr){
         var tds=tr.querySelectorAll('td');
         var row=[];
-        Array.prototype.forEach.call(tds,function(td,i){var v=td.textContent.trim();row.push(i>0&&v!==''&&!isNaN(Number(v))?Number(v):v);});
+        Array.prototype.forEach.call(tds,function(td,i){var v=td.textContent.trim();row.push(i>0?numify(v):v);});
         langRows.push(row);
       });
       var pfHdrs=['File','Language','Physical Lines','Code Lines','Comments','Blank','Mixed','Functions','Classes','Variables','Imports','Tests','Assertions','Suites'];
@@ -6973,7 +7122,7 @@ struct WarningOpportunityRow {
         var tds=tr.querySelectorAll('td');
         if(tds.length<11)return;
         var row=[];
-        Array.prototype.forEach.call(tds,function(td,i){var v=td.textContent.trim();row.push(i>=2&&v!==''&&!isNaN(Number(v))?Number(v):v);});
+        Array.prototype.forEach.call(tds,function(td,i){var v=td.textContent.trim();row.push(i>=2?numify(v):v);});
         pfRows.push(row);
       });
       var skHdrs=['File','Status','Warnings'];
@@ -6988,11 +7137,11 @@ struct WarningOpportunityRow {
       document.querySelectorAll('#lang-breakdown-table tbody tr').forEach(function(tr){
         var tds=tr.querySelectorAll('td');
         if(tds.length<4)return;
-        var phys=Number(tds[2].textContent.trim())||0;
-        var code=Number(tds[3].textContent.trim())||0;
+        var phys=pnum(tds[2].textContent);
+        var code=pnum(tds[3].textContent);
         var densStr=phys>0?(code/phys*100).toFixed(1)+'%':'0%';
-        var row=[tds[0].textContent.trim(),Number(tds[1].textContent.trim())||0,phys,code,{v:densStr,s:6}];
-        for(var i=7;i<Math.min(tds.length,14);i++){var v=tds[i].textContent.trim();row.push(v!==''&&!isNaN(Number(v))?Number(v):v);}
+        var row=[tds[0].textContent.trim(),pnum(tds[1].textContent),phys,code,{v:densStr,s:6}];
+        for(var i=7;i<Math.min(tds.length,14);i++){row.push(numify(tds[i].textContent.trim()));}
         covRows.push(row);
       });
       slocXlsMulti(fname,[
