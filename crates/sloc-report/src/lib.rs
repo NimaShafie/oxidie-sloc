@@ -1495,17 +1495,45 @@ fn pdf_info_parts_tests(tot: &SummaryTotals) -> Vec<String> {
     tc
 }
 
-fn pdf_info_emit_line(ctx: &PdfCtx<'_>, y: f32, r: f32, g: f32, b: f32, text: &str) -> f32 {
+/// Emit one or more info lines, packing `parts` joined by "  |  " and wrapping onto a fresh
+/// line whenever appending the next part would overflow the usable page width. Measured with
+/// the exact Helvetica advance table so the whole line is always shown — never truncated.
+/// Returns the y position below the last emitted line.
+fn pdf_info_emit_line(
+    ctx: &PdfCtx<'_>,
+    mut y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    parts: &[String],
+) -> f32 {
     use crate::pdf_compat::{Color, Mm, Rgb};
+    if parts.is_empty() {
+        return y;
+    }
+    const SEP: &str = "  |  ";
+    let usable = ctx.w - 2.0 * ctx.margin;
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
-    ctx.layer.use_text(
-        pdf_trunc(text, 165),
-        7.0,
-        Mm(ctx.margin),
-        Mm(y),
-        ctx.font_reg,
-    );
+    let mut line = String::new();
+    for part in parts {
+        let candidate = if line.is_empty() {
+            part.clone()
+        } else {
+            format!("{line}{SEP}{part}")
+        };
+        // Keep packing until the next part would overflow; then flush and start a new line.
+        if !line.is_empty() && helvetica_width_mm(&candidate, 7.0, false) > usable {
+            ctx.layer
+                .use_text(line.as_str(), 7.0, Mm(ctx.margin), Mm(y), ctx.font_reg);
+            y -= 5.0;
+            line.clone_from(part);
+        } else {
+            line = candidate;
+        }
+    }
+    ctx.layer
+        .use_text(line.as_str(), 7.0, Mm(ctx.margin), Mm(y), ctx.font_reg);
     y - 5.0
 }
 
@@ -1513,14 +1541,14 @@ fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> 
     let tot = &run.summary_totals;
     let mut y = row2_bot - 6.5;
     let stats = pdf_info_parts_stats(tot);
-    y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.15, &stats.join("  |  "));
+    y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.15, &stats);
     let git = pdf_info_parts_git(run);
     if !git.is_empty() {
-        y = pdf_info_emit_line(ctx, y, 0.10, 0.35, 0.15, &git.join("  |  "));
+        y = pdf_info_emit_line(ctx, y, 0.10, 0.35, 0.15, &git);
     }
     let tests = pdf_info_parts_tests(tot);
     if !tests.is_empty() {
-        y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.50, &tests.join("  |  "));
+        y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.50, &tests);
     }
     y
 }

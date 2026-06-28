@@ -28,6 +28,18 @@ fn git_host_allowlist() -> &'static [String] {
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
+    // Force non-interactive operation. Without this, a `clone`/`fetch` that hits an
+    // authentication challenge (e.g. a rate-limited anonymous clone returning 401, or a
+    // private repo) blocks indefinitely waiting for input that never arrives — git asks on
+    // the terminal and Git Credential Manager pops a GUI dialog, neither of which a
+    // background server subprocess can answer. The request then hangs forever and the web
+    // UI spins on "Fetching repository…". These variables make git fail fast with an error
+    // instead. They suppress only *interactive* prompts; already-stored credentials (SSH
+    // agent, cached HTTPS tokens) are still used, so configured private repos keep working.
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "");
     let out = cmd
         .args(args)
         .current_dir(repo)
@@ -404,7 +416,12 @@ pub fn list_refs(repo: &Path) -> Result<RepoRefs> {
 }
 
 fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
-    let fmt = "%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)";
+    // `%(symref)` is the leading column and is non-empty only for symbolic refs such as the
+    // remote's default-branch pointer `origin/HEAD`. We must filter on it rather than on the
+    // ref name: `%(refname:short)` collapses `refs/remotes/origin/HEAD` down to bare `origin`,
+    // which is neither "HEAD" nor "*/HEAD", so a name-based filter lets it through and renders
+    // a phantom duplicate of the default branch (same SHA, displayed as "origin").
+    let fmt = "%(symref)|%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)";
     // Use -r (remote-tracking only) to avoid local/remote duplicates.
     // Strip the leading remote name (e.g. "origin/") from each ref so the
     // displayed name matches what the upstream repository calls the branch.
@@ -412,9 +429,16 @@ fn list_branches(repo: &Path) -> Result<Vec<GitRef>> {
     let refs = out
         .lines()
         .filter(|l| !l.trim().is_empty())
+        // Split off the symref column; skip the line entirely when it is a symbolic ref.
+        .filter_map(|l| {
+            let (symref, rest) = l.split_once('|')?;
+            if symref.trim().is_empty() {
+                Some(rest)
+            } else {
+                None
+            }
+        })
         .map(|l| parse_ref_line(l, GitRefKind::Branch))
-        // Drop symbolic HEAD pointers (e.g. origin/HEAD).
-        .filter(|r| r.name != "HEAD" && !r.name.ends_with("/HEAD"))
         .map(|mut r| {
             // Strip the remote prefix ("origin/", "upstream/", etc.).
             if let Some(slash) = r.name.find('/') {
@@ -1125,6 +1149,41 @@ mod git_integration {
         // (validate_clone_url would reject local paths; test the fetch branch
         // via run_git directly since it's already covered by run_git tests above)
         run_git(&dest, &["fetch", "--all", "--tags", "--prune"]).unwrap();
+    }
+
+    #[test]
+    fn list_branches_excludes_origin_head_symref() {
+        // A fresh clone carries `origin/HEAD -> origin/main`. `%(refname:short)` shortens that
+        // symref to bare `origin`, which a name-based filter misses — it would surface as a
+        // phantom branch duplicating the default branch. Verify it is dropped.
+        let src = tempdir().unwrap();
+        let inner = src.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        make_repo(&inner);
+        git(&inner, &["branch", "feature-x"]);
+
+        let dest_root = tempdir().unwrap();
+        let dest = dest_root.path().join("clone");
+        let src_str = inner.to_str().unwrap();
+        let dest_str = dest.to_str().unwrap();
+        run_git(src.path(), &["clone", src_str, dest_str]).unwrap();
+        // Ensure the remote HEAD symref exists (some git versions set it on clone already).
+        let _ = run_git(&dest, &["remote", "set-head", "origin", "--auto"]);
+
+        let branches = list_branches(&dest).unwrap();
+        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            !names.contains(&"origin"),
+            "origin/HEAD symref must not appear as a branch: {names:?}"
+        );
+        assert!(
+            names.contains(&"main"),
+            "main branch must be listed: {names:?}"
+        );
+        assert!(
+            names.contains(&"feature-x"),
+            "real branches must still be listed: {names:?}"
+        );
     }
 
     #[test]

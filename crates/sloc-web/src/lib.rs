@@ -1534,6 +1534,133 @@ body.sloc-leaving .page,body.sloc-leaving .site-footer{opacity:0;transition:opac
     format!("{STYLE}<script nonce=\"{nonce}\">{JS}</script>")
 }
 
+/// Self-contained branded loading overlay for the heavy comparison pages (Scan
+/// Delta, Multi-Scan Timeline). Returns a block — its own `<style>`, markup and
+/// `<script>` — meant to be spliced in immediately after `<body>`.
+///
+/// It pairs the spinner with a **visibility gate**: from the first byte the page
+/// content is held at `visibility:hidden` (only the overlay paints), so the user
+/// never sees a half-rendered flash while charts/tables are still settling. On
+/// `load` the gate is lifted to reveal the fully-laid-out page *underneath* the
+/// still-opaque overlay, which then fades out one frame later — so the reveal is
+/// of a finished page, with no glitch on either side of the transition.
+///
+/// `visibility:hidden` (unlike `display:none`) preserves layout boxes, so charts
+/// that size themselves from `clientWidth`/`ResizeObserver` render correctly while
+/// hidden. A `<noscript>` fallback drops the gate and overlay when JS is disabled.
+fn loading_overlay_block(nonce: &str, aria_label: &str) -> String {
+    const TPL: &str = r#"<style nonce="__N__">
+html.sloc-pending body{visibility:hidden;}
+html.sloc-pending #rpt-loading-overlay{visibility:visible;}
+#rpt-loading-overlay{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:opacity .45s cubic-bezier(.4,0,.2,1);background:radial-gradient(125% 125% at 50% 0%,#fbf4ec 0%,#f4ebe0 45%,#ecdfd0 100%);}
+#rpt-loading-overlay.fade-out{opacity:0;pointer-events:none;}
+body.dark-theme #rpt-loading-overlay{background:radial-gradient(125% 125% at 50% 0%,#241810 0%,#1a120b 45%,#130c06 100%);}
+body.pdf-mode #rpt-loading-overlay{display:none!important;}
+.rpt-bg-blob{position:absolute;border-radius:50%;filter:blur(64px);opacity:.5;pointer-events:none;will-change:transform;}
+.rpt-blob-a{width:48vw;height:48vw;left:-10vw;top:-12vw;background:radial-gradient(circle,#e8932f,transparent 64%);animation:rpt-drift-a 17s ease-in-out infinite;}
+.rpt-blob-b{width:42vw;height:42vw;right:-8vw;bottom:-10vw;background:radial-gradient(circle,#d3621a,transparent 64%);animation:rpt-drift-b 21s ease-in-out infinite;}
+@keyframes rpt-drift-a{0%,100%{transform:translate3d(0,0,0) scale(1);}50%{transform:translate3d(9vw,7vw,0) scale(1.18);}}
+@keyframes rpt-drift-b{0%,100%{transform:translate3d(0,0,0) scale(1.06);}50%{transform:translate3d(-8vw,-6vw,0) scale(.88);}}
+body.dark-theme .rpt-bg-blob{opacity:.36;}
+.rpt-load-card{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:20px;width:380px;max-width:88vw;padding:42px 50px 34px;background:linear-gradient(155deg,rgba(255,255,253,.95),rgba(255,248,240,.9));border:1px solid rgba(196,110,40,.16);border-radius:24px;box-shadow:0 1px 0 rgba(255,255,255,.8) inset,0 22px 64px rgba(120,64,16,.16),0 4px 16px rgba(0,0,0,.06);animation:rpt-card-in .5s cubic-bezier(.22,.68,0,1.12) both;}
+@keyframes rpt-card-in{from{opacity:0;transform:translateY(14px) scale(.96);}to{opacity:1;transform:none;}}
+body.dark-theme .rpt-load-card{background:linear-gradient(155deg,rgba(42,24,12,.92),rgba(28,15,6,.95));border-color:rgba(200,120,50,.16);box-shadow:0 1px 0 rgba(255,200,140,.05) inset,0 22px 64px rgba(0,0,0,.5),0 4px 16px rgba(0,0,0,.35);}
+.rpt-load-logo{width:54px;height:54px;object-fit:contain;filter:drop-shadow(0 6px 16px rgba(90,48,12,.45));}
+.rpt-spinner-wrap{position:relative;width:84px;height:84px;}
+.rpt-spinner-track{position:absolute;inset:0;border-radius:50%;border:5px solid rgba(196,92,16,.12);}
+.rpt-spinner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(196,92,16,0) 0%,rgba(196,92,16,.18) 35%,#c45c10 100%);will-change:transform;animation:rpt-spin 1s linear infinite;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 6px),#fff calc(100% - 5px));mask:radial-gradient(farthest-side,transparent calc(100% - 6px),#fff calc(100% - 5px));}
+@keyframes rpt-spin{to{transform:rotate(360deg);}}
+.rpt-spinner-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#c45c10;font-variant-numeric:tabular-nums;}
+body.dark-theme .rpt-spinner-track{border-color:rgba(196,92,16,.2);}
+body.dark-theme .rpt-spinner-pct{color:#e8932f;}
+.rpt-loading-text{font-size:15px;font-weight:600;letter-spacing:.08em;display:flex;align-items:baseline;gap:2px;}
+.rpt-load-word{background:linear-gradient(90deg,#9a7a64 0%,#c45c10 45%,#e08a3a 55%,#9a7a64 100%);background-size:220% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;animation:rpt-text-shimmer 3.2s linear infinite;}
+@keyframes rpt-text-shimmer{to{background-position:-220% center;}}
+.rpt-dot{display:inline-block;color:#c45c10;-webkit-text-fill-color:#c45c10;animation:rpt-bounce 1.7s ease-in-out infinite;opacity:0;}
+.rpt-dot:nth-child(2){animation-delay:.28s;}
+.rpt-dot:nth-child(3){animation-delay:.56s;}
+@keyframes rpt-bounce{0%,60%,100%{opacity:0;transform:translateY(0);}30%{opacity:1;transform:translateY(-5px);}}
+.rpt-status{font-size:12.5px;font-weight:600;letter-spacing:.02em;color:var(--muted,#8a7060);min-height:16px;text-align:center;}
+.rpt-progress{width:100%;height:6px;border-radius:99px;background:rgba(196,92,16,.12);overflow:hidden;}
+.rpt-progress-bar{height:100%;width:100%;transform:scaleX(0);transform-origin:left center;border-radius:99px;background:linear-gradient(90deg,#e8932f,#c45c10);transition:transform .25s cubic-bezier(.4,0,.2,1);will-change:transform;}
+body.dark-theme .rpt-progress{background:rgba(196,92,16,.2);}
+@media (prefers-reduced-motion:reduce){ #rpt-loading-overlay .rpt-bg-blob,#rpt-loading-overlay .rpt-spinner,#rpt-loading-overlay .rpt-load-word,#rpt-loading-overlay .rpt-dot{animation:none!important;}}
+</style>
+<noscript><style nonce="__N__">html.sloc-pending body{visibility:visible!important;}#rpt-loading-overlay{display:none!important;}</style></noscript>
+<script nonce="__N__">document.documentElement.classList.add('sloc-pending');try{if(localStorage.getItem('sloc-dark')==='1'||localStorage.getItem('oxide-sloc-theme')==='dark')document.body.classList.add('dark-theme');}catch(e){}</script>
+<div id="rpt-loading-overlay" aria-live="polite" aria-label="__LABEL__">
+  <div class="rpt-bg-blob rpt-blob-a" aria-hidden="true"></div>
+  <div class="rpt-bg-blob rpt-blob-b" aria-hidden="true"></div>
+  <div class="rpt-load-card">
+    <img src="/images/logo/small-logo.png" alt="oxide-sloc" class="rpt-load-logo" />
+    <div class="rpt-spinner-wrap">
+      <div class="rpt-spinner-track"></div>
+      <div class="rpt-spinner"></div>
+      <div class="rpt-spinner-pct" id="rpt-pct">0%</div>
+    </div>
+    <div class="rpt-loading-text"><span class="rpt-load-word">Loading comparison</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span><span class="rpt-dot">.</span></div>
+    <div class="rpt-status" id="rpt-status">__LABEL__</div>
+    <div class="rpt-progress"><div class="rpt-progress-bar" id="rpt-progress-bar"></div></div>
+  </div>
+</div>
+<script nonce="__N__">
+(function(){
+  var ov=document.getElementById('rpt-loading-overlay');
+  var root=document.documentElement;
+  function reveal(){root.classList.remove('sloc-pending');}
+  if(!ov){reveal();return;}
+  var bar=document.getElementById('rpt-progress-bar'),pct=document.getElementById('rpt-pct'),statusEl=document.getElementById('rpt-status');
+  var msgs=['__LABEL__','Reading baseline scan','Reading current scan','Computing line deltas','Building file matrix','Rendering charts'];
+  var mi=0,prog=0,done=false,start=Date.now();
+  // MIN: minimum time the overlay stays up. SETTLE: extra buffer after the page
+  // reports ready so the final chart paint completes. CHART_CAP: stop waiting on
+  // charts after this. HARD_CAP: absolute backstop so the overlay can never stick.
+  var MIN=1200,SETTLE=750,CHART_CAP=12000,HARD_CAP=25000;
+  function setProg(p){prog=p;if(bar)bar.style.transform='scaleX('+(p/100).toFixed(3)+')';if(pct)pct.textContent=Math.round(p)+'%';}
+  function nextMsg(){if(statusEl)statusEl.textContent=msgs[mi%msgs.length];mi++;}
+  setProg(8);
+  var msgTimer=setInterval(nextMsg,700);
+  var progTimer=setInterval(function(){var cap=99;if(prog<cap){var step=(cap-prog)*0.05+0.4;setProg(Math.min(cap,prog+step));}},90);
+  // These pages draw charts into known SVG containers that start empty and are
+  // filled by JS once layout is available (some only after a ResizeObserver pass
+  // post-`load`). Treat the page as ready only once every chart container present
+  // actually has rendered content, so the overlay never lifts on a half-drawn page.
+  function chartsRendered(){
+    var sel=['#cmp-tl-svg','#mc-chart'];
+    for(var i=0;i<sel.length;i++){var el=document.querySelector(sel[i]);if(el&&!el.firstChild)return false;}
+    return true;
+  }
+  function finish(){
+    if(done)return;done=true;
+    clearInterval(msgTimer);clearInterval(progTimer);setProg(100);if(statusEl)statusEl.textContent='Done';
+    // Reveal the fully-rendered page under the still-opaque overlay, let it paint
+    // for two frames, THEN fade the overlay — so no half-rendered state is shown.
+    reveal();
+    requestAnimationFrame(function(){requestAnimationFrame(function(){
+      setTimeout(function(){ov.classList.add('fade-out');setTimeout(function(){if(ov.parentNode)ov.parentNode.removeChild(ov);},480);},80);
+    });});
+  }
+  // Wait for `load` (resources + first layout), then poll until the charts have
+  // actually rendered (or the chart cap), then hold for MIN + SETTLE before fading.
+  function afterLoad(){
+    var loadAt=Date.now();
+    (function poll(){
+      if(done)return;
+      if(chartsRendered()||Date.now()-loadAt>=CHART_CAP){
+        setTimeout(finish,Math.max(MIN-(Date.now()-start),0)+SETTLE);
+        return;
+      }
+      requestAnimationFrame(poll);
+    })();
+  }
+  if(document.readyState==='complete')afterLoad();else window.addEventListener('load',afterLoad);
+  // Absolute safety net: never let the gate/overlay get stuck.
+  setTimeout(function(){if(!done)finish();},HARD_CAP);
+})();
+</script>"#;
+    TPL.replace("__N__", nonce).replace("__LABEL__", aria_label)
+}
+
 /// Buffer an HTML response body and splice the page fade-in right after the
 /// opening `<body>` tag. No-op for non-HTML responses or pages that already carry
 /// an `#rpt-loading-overlay` (e.g. the standalone HTML report, which keeps its
@@ -7813,6 +7940,7 @@ async fn compare_handler(
     );
     let s = &comparison.summary;
     let template = CompareTemplate {
+        loading_overlay: loading_overlay_block(&csp_nonce, "Loading scan delta"),
         version: env!("CARGO_PKG_VERSION"),
         project_label: baseline_entry.project_label.clone(),
         baseline_git_commit: baseline_entry.git_commit.clone().unwrap_or_default(),
@@ -9713,6 +9841,7 @@ fn multi_compare_page(
   </style>
 </head>
 <body>
+  {loading_overlay}
   <div class="background-watermarks" aria-hidden="true">
     <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
     <img src="/images/logo/logo-text.png" alt=""><img src="/images/logo/logo-text.png" alt="">
@@ -9997,7 +10126,7 @@ fn multi_compare_page(
     // ── fmt helper ───────────────────────────────────────────────────────────
     function fmt(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
     function fmtFull(n){{return Number(n).toLocaleString();}}
-    function fmtDelta(n){{return n>0?'+'+fmt(n):fmt(n);}}
+    function fmtDelta(n){{return n>0?'+'+fmtFull(n):fmtFull(n);}}
 
     // ── Export filename: <project>_<n_scans>_<first_scan_short_commit> ──
     function mcExportProj(){{return ('{project_label}'.replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^-+|-+$/g,''))||'project';}}
@@ -10019,8 +10148,8 @@ fn multi_compare_page(
       var pts=POINTS.map(function(p){{return p[metric]!=null?Number(p[metric]):null;}});
       var valid=pts.filter(function(v){{return v!=null;}});
       if(!valid.length){{var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.30)':'rgba(67,52,45,0.32)';var _nd_ts=_nd_dark?'rgba(255,255,255,0.55)':'rgba(67,52,45,0.60)';var _nd_lbl=(metricLabel[metric]||metric);var _nd_cov=metric==='cov';var _nd_msg=_nd_cov?'No coverage data for these scans':'No '+_nd_lbl.toLowerCase()+' recorded';var _nd_sub=_nd_cov?'Coverage appears once test results are captured during a scan.':'None of the selected scans reported a value for this metric.';var _cx=W/2,_cy=H/2;svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<g opacity="0.55"><rect x="'+(_cx-28).toFixed(1)+'" y="'+(_cy-50).toFixed(1)+'" width="56" height="34" rx="5" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6"/><polyline points="'+(_cx-20).toFixed(1)+','+(_cy-24).toFixed(1)+' '+(_cx-7).toFixed(1)+','+(_cy-30).toFixed(1)+' '+(_cx+6).toFixed(1)+','+(_cy-26).toFixed(1)+' '+(_cx+20).toFixed(1)+','+(_cy-34).toFixed(1)+'" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+4).toFixed(1)+'" text-anchor="middle" font-size="14" font-weight="700" fill="'+_nd_ts+'">'+escHtml(_nd_msg)+'</text>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+24).toFixed(1)+'" text-anchor="middle" font-size="11.5" fill="'+_nd_tc+'">'+escHtml(_nd_sub)+'</text>';return;}}
-      var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
-      if(minV===maxV){{minV=Math.max(0,minV-1);maxV=maxV+1;}}
+      var minV=0,maxV=Math.max.apply(null,valid);
+      if(maxV<=0){{maxV=1;}}else{{maxV=maxV*1.08;}}
       var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
       function xOf(i){{return pad.l+(N===1?plotW/2:i/(N-1)*plotW);}}
       function yOf(v){{return pad.t+plotH-(v-minV)/(maxV-minV)*plotH;}}
@@ -10042,7 +10171,7 @@ fn multi_compare_page(
         var p=POINTS[i];var lbl=(p.commit||'').substring(0,7)||(i+1)+'';
         var hasTag=p.tags&&p.tags.length>0;
         // Permanent Y-value label above the dot
-        parts.push('<text x="'+cx.toFixed(1)+'" y="'+(cy-11).toFixed(1)+'" text-anchor="middle" font-size="11" font-weight="600" fill="'+textColor+'">'+fmt(pts[i])+'</text>');
+        parts.push('<text x="'+cx.toFixed(1)+'" y="'+(cy-11).toFixed(1)+'" text-anchor="middle" font-size="11" font-weight="600" fill="'+textColor+'">'+fmtFull(pts[i])+'</text>');
         parts.push('<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+(hasTag?5.5:4)+'" fill="'+(hasTag?'#6f9bff':dotColor)+'" stroke="'+(dark?'#241a12':'#fbf7f2')+'" stroke-width="1.5" style="cursor:pointer" data-run-id="'+p.run_id+'"/>');
         var xanchor=i===0?'start':i===N-1?'end':'middle';
         // X-axis label at 2× the original size (18 px)
@@ -10129,7 +10258,7 @@ fn multi_compare_page(
         cells+='<td class="left"><span class="status-badge '+f.s+'">'+f.s+'</span></td>';
         for(var j=0;j<N;j++){{
           var cv=f.c[j];
-          cells+='<td class="file-scan-col">'+(cv!=null?fmt(cv):'<span class="absent">\u2014</span>')+'</td>';
+          cells+='<td class="file-scan-col">'+(cv!=null?fmtFull(cv):'<span class="absent">\u2014</span>')+'</td>';
           if(j<N-1){{
             var dv=f.d[j+1];
             cells+='<td class="file-delta-col '+(dv!=null?dv>0?'pos':dv<0?'neg':'zero':'absent-delta')+'">'+
@@ -10452,7 +10581,7 @@ fn multi_compare_page(
     (function(){{
       var OX='#C45C10',GN='#2A6846',RD='#B23030';
       function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-      function fmt2(n){{var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}}
+      function fmt2(n){{return Number(n).toLocaleString();}}
       function px(n){{return Math.round(n);}}
       var _tt=document.getElementById('mc-ic-tt');
       function btt(l,v){{return ' class="ic-cb" data-ttl="'+esc(l)+'" data-ttv="'+esc(v)+'"';}}
@@ -10500,27 +10629,42 @@ fn multi_compare_page(
         {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:'#E0C58A',cc:'#BE8A2E'}}
       ];
       var maxV1=niceMax(Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))||1);
-      var C1W=620,C1H=200,c1mt=40,c1mb=30,c1ml=58,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=54,c1gap=10;
-      var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
-      for(var gi=1;gi<=4;gi++){{
-        var gy=c1mt+c1ph*(1-gi/4),gv=maxV1*gi/4;
-        c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';
-        c1+='<text x="'+(c1ml-6)+'" y="'+(px(gy)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">'+fmt2(gv)+'</text>';
+      // Code Metrics chart — grows to fill the height its grid row settled to (the
+      // Language Code Delta sibling usually drives that), so it never sits short at
+      // the top of an over-tall cell. C1W is fixed; C1H scales with the cell.
+      function drawC1(){{
+        var C1W=620,C1H=200;
+        var c1host=document.getElementById('mc-ic-c1');
+        var c1card=c1host?c1host.closest('.ic-card'):null;
+        if(c1host&&c1card&&c1host.clientWidth>0){{
+          var avW=c1host.clientWidth;
+          var availPx=(c1card.getBoundingClientRect().bottom-16)-c1host.getBoundingClientRect().top;
+          var wantH=availPx*C1W/avW;
+          if(wantH>C1H)C1H=wantH;
+        }}
+        var c1mt=40,c1mb=34,c1ml=58,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=54,c1gap=10;
+        var c1='<svg viewBox="0 0 '+C1W+' '+px(C1H)+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+        for(var gi=1;gi<=4;gi++){{
+          var gy=c1mt+c1ph*(1-gi/4),gv=maxV1*gi/4;
+          c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';
+          c1+='<text x="'+(c1ml-6)+'" y="'+(px(gy)+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">'+fmt(gv)+'</text>';
+        }}
+        c1+='<line x1="'+c1ml+'" y1="'+px(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+px(c1mt+c1ph)+'" stroke="'+axisCol+'" stroke-width="1.5"/>';
+        c1+='<text x="'+(c1ml-6)+'" y="'+px(c1mt+c1ph+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">0</text>';
+        c1mets.forEach(function(m,i){{
+          var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
+          var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
+          c1+='<text x="'+cx+'" y="18" text-anchor="middle" font-family="'+FONT+'" font-size="13" font-weight="700" fill="'+textCol+'">'+esc(m.l)+'</text>';
+          c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="5" style="cursor:pointer;"/>';
+          c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.b)+'</text>';
+          c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="5" style="cursor:pointer;"/>';
+          c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.c)+'</text>';
+          c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">Scan 1</text>';
+          c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">Latest</text>';
+        }});
+        c1+='</svg>';
+        return c1;
       }}
-      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="'+axisCol+'" stroke-width="1.5"/>';
-      c1+='<text x="'+(c1ml-6)+'" y="'+(c1mt+c1ph+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">0</text>';
-      c1mets.forEach(function(m,i){{
-        var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
-        var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="18" text-anchor="middle" font-family="'+FONT+'" font-size="13" font-weight="700" fill="'+textCol+'">'+esc(m.l)+'</text>';
-        c1+='<rect'+btt(m.l,'Scan 1: '+fmt2(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="5" style="cursor:pointer;"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.b)+'</text>';
-        c1+='<rect'+btt(m.l,'Latest (Scan '+N+'): '+fmt2(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="5" style="cursor:pointer;"/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-5)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+textCol+'">'+fmt2(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">Scan 1</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+18)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">Latest</text>';
-      }});
-      c1+='</svg>';
       // Chart 2: Delta by Metric (net delta first scan to last)
       var mets=[
         {{l:'Code Lines',v:Number(pLast.code)-Number(p0.code),mc:'#C45C10'}},
@@ -10549,7 +10693,7 @@ fn multi_compare_page(
         var C3W=550,c3LW=124,c3FW=52,cx3=c3LW+Math.floor((C3W-c3LW-c3FW-14)/2),maxLBW=Math.floor((C3W-c3LW-c3FW-14)/2)-4;
         var c3host=document.getElementById('mc-ic-c3');
         var c3card=document.getElementById('mc-ic-lang-card');
-        var C3H=langs.length*44+24;
+        var C3H=langs.length*30+24;
         if(c3host&&c3card&&c3host.clientWidth>0){{
           var avW=c3host.clientWidth;
           var availPx=(c3card.getBoundingClientRect().bottom-16)-c3host.getBoundingClientRect().top;
@@ -10562,7 +10706,7 @@ fn multi_compare_page(
         langs.forEach(function(l,i){{
           var e=lm[l],yc=topPad+band*(i+0.5),bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
           c3+='<text x="'+(c3LW-7)+'" y="'+px(yc+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">'+esc(l)+'</text>';
-          c3+='<rect'+btt(l,'Net delta: '+vStr+' 2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+px(yc-barH/2)+'" width="'+px(bw)+'" height="'+px(barH)+'" fill="'+col+'" rx="3"/>';
+          c3+='<rect'+btt(l,'Net delta: '+vStr+' • '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+px(yc-barH/2)+'" width="'+px(bw)+'" height="'+px(barH)+'" fill="'+col+'" rx="3"/>';
           if(bw>=48){{c3+='<text x="'+px(bx+bw/2)+'" y="'+px(yc+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
           else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+px(yc+4)+'" text-anchor="'+anc3+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
           c3+='<text x="'+(C3W-5)+'" y="'+px(yc+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="'+mutedCol+'">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
@@ -10573,21 +10717,21 @@ fn multi_compare_page(
       // Chart 4: File Change Distribution (donut left, legend right, % on slices)
       var fm=0,fa=0,fr=0,fu=0;
       FILES.forEach(function(f){{if(f.s==='modified')fm++;else if(f.s==='added')fa++;else if(f.s==='removed')fr++;else fu++;}});
-      var segs=[{{l:'Modified',v:fm,c:OX}},{{l:'Added',v:fa,c:GN}},{{l:'Removed',v:fr,c:RD}},{{l:'Unchanged',v:fu,c:'#CCCCCC'}}].filter(function(s){{return s.v>0;}});
+      var segs=[{{l:'Modified',v:fm,c:OX}},{{l:'Added',v:fa,c:GN}},{{l:'Removed',v:fr,c:RD}},{{l:'Unchanged',v:fu,c:'#9E9E9E'}}].filter(function(s){{return s.v>0;}});
       var tot4=segs.reduce(function(a,s){{return a+s.v;}},0)||1;
       var C4W=380,C4H=210,cx4=104,cy4=105,Ro=80,Ri=50;
-      function pctFill(c){{return c==='#CCCCCC'?'#555555':'#ffffff';}}
+      function pctFill(c){{return '#ffffff';}}
       var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:440px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang4=-Math.PI/2;
       if(segs.length===1){{
-        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files 2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
-        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="'+surf2col+'"/>';
+        c4+='<circle'+btt(segs[0].l,fmt2(segs[0].v)+' files • 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'" stroke="white" stroke-width="2.5"/>';
+        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="'+surfCol+'"/>';
         c4+='<text x="'+cx4+'" y="'+px(cy4-(Ro+Ri)/2+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="700" fill="'+pctFill(segs[0].c)+'">100%</text>';
       }} else {{
         segs.forEach(function(s){{
           var sw=Math.min(s.v/tot4*2*Math.PI,2*Math.PI-0.001),a2=ang4+sw;
           var x1=cx4+Ro*Math.cos(ang4),y1=cy4+Ro*Math.sin(ang4),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang4),yi2=cy4+Ri*Math.sin(ang4);
-          c4+='<path'+btt(s.l,fmt2(s.v)+' files 2022 '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="'+surf2col+'" stroke-width="2.5"/>';
+          c4+='<path'+btt(s.l,fmt2(s.v)+' files • '+px(s.v/tot4*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="white" stroke-width="2.5"/>';
           if(sw>0.32){{var midA=ang4+sw/2,rr=(Ro+Ri)/2,lx=cx4+rr*Math.cos(midA),ly=cy4+rr*Math.sin(midA);c4+='<text x="'+px(lx)+'" y="'+px(ly+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="11" font-weight="700" fill="'+pctFill(s.c)+'">'+px(s.v/tot4*100)+'%</text>';}}
           ang4+=sw;
         }});
@@ -10597,18 +10741,21 @@ fn multi_compare_page(
       var legX=212,legRowH=26,legBlockH=segs.length*legRowH,legStartY=cy4-legBlockH/2+legRowH/2;
       segs.forEach(function(s,i){{
         var ly=legStartY+i*legRowH,pct=px(s.v/tot4*100);
-        c4+='<rect'+btt(s.l,fmt2(s.v)+' files 2022 '+pct+'%')+' x="'+legX+'" y="'+px(ly-10)+'" width="13" height="13" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt2(s.v)+' files 2022 '+pct+'%')+' x="'+(legX+20)+'" y="'+px(ly+1)+'" font-family="'+FONT+'" font-size="12" font-weight="600" fill="'+textCol+'" style="cursor:pointer;">'+esc(s.l)+'</text>';
-        c4+='<text x="'+(legX+20)+'" y="'+px(ly+15)+'" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">'+fmt2(s.v)+' files 2022 '+pct+'%</text>';
+        c4+='<rect'+btt(s.l,fmt2(s.v)+' files • '+pct+'%')+' x="'+legX+'" y="'+px(ly-10)+'" width="13" height="13" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
+        c4+='<text'+btt(s.l,fmt2(s.v)+' files • '+pct+'%')+' x="'+(legX+20)+'" y="'+px(ly+1)+'" font-family="'+FONT+'" font-size="12" font-weight="600" fill="'+textCol+'" style="cursor:pointer;">'+esc(s.l)+'</text>';
+        c4+='<text x="'+(legX+20)+'" y="'+px(ly+15)+'" font-family="'+FONT+'" font-size="10" fill="'+mutedCol+'">'+fmt2(s.v)+' files • '+pct+'%</text>';
       }});
       c4+='</svg>';
-      // Inject the fixed-size charts first so the grid row reaches its final height,
-      // then build the Language Code Delta chart (which measures that height).
+      // Inject the fixed-size siblings first, then size Code Metrics (c1) and
+      // Language Code Delta (c3) to fill the shared grid-row height. c1 is drawn
+      // once at natural height to seed the row, then both are filled to the row the
+      // grid settled to, so neither sits short at the top of an over-tall cell.
       var lc=document.getElementById('mc-ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
-      var e1=document.getElementById('mc-ic-c1');if(e1)e1.innerHTML=c1;
       var e2=document.getElementById('mc-ic-c2');if(e2)e2.innerHTML=c2;
       var e4=document.getElementById('mc-ic-c4');if(e4)e4.innerHTML=c4;
+      var e1=document.getElementById('mc-ic-c1');if(e1)e1.innerHTML=drawC1();
       var e3=document.getElementById('mc-ic-c3');if(e3)e3.innerHTML=langs.length?drawC3():'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';
+      if(e1)e1.innerHTML=drawC1();
       }}
       buildCharts();
       renderInlineCharts=buildCharts;
@@ -10945,6 +11092,7 @@ fn multi_compare_page(
         csp_nonce = csp_nonce,
         scope_bar_html = scope_bar_html,
         scope_label = scope_label,
+        loading_overlay = loading_overlay_block(csp_nonce, "Loading comparison"),
     )
 }
 
@@ -11553,7 +11701,7 @@ async fn trend_report_handler(
         var gy=PT+CH-Math.round(ti/5*CH);
         var gv=Math.round(ti/5*maxY);
         svg+='<line x1="'+PL+'" y1="'+gy+'" x2="'+(PL+CW)+'" y2="'+gy+'" stroke="#e6d0bf" stroke-width="1"/>';
-        svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="'+fs+'" fill="#7b675b">'+fmt(gv)+'</text>';
+        svg+='<text x="'+(PL-6)+'" y="'+(gy+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="'+fs+'" fill="#7b675b">'+fmtFull(gv)+'</text>';
       }}
 
       // X axis labels (every N-th point to avoid crowding)
@@ -11596,7 +11744,7 @@ async fn trend_report_handler(
         svg+='<circle class="trend-pt" cx="'+x+'" cy="'+y+'" r="'+r+'" fill="'+(isReleasePoint?'#4472C4':'#C45C10')+'" stroke="white" stroke-width="2" style="cursor:pointer;" data-idx="'+i+'"/>';
         if(showLabels && i%labelEveryN===0){{
           var lx=x, ly=y-r-5;
-          svg+='<text x="'+lx+'" y="'+ly+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+fs+'" font-weight="700" fill="#7b675b" pointer-events="none">'+fmt(Number(d[yKey]))+'</text>';
+          svg+='<text x="'+lx+'" y="'+ly+'" text-anchor="middle" font-family="'+FONT+'" font-size="'+fs+'" font-weight="700" fill="#7b675b" pointer-events="none">'+fmtFull(Number(d[yKey]))+'</text>';
         }}
       }});
 
@@ -11723,7 +11871,7 @@ async fn trend_report_handler(
         var commitHtml=d.commit?'<span class="git-chip" title="'+esc(d.commit)+'">'+esc(d.commit.substring(0,7))+'</span>':'<span style="color:var(--muted)">&#8212;</span>';
         var branchHtml=d.branch?'<span class="git-chip">'+esc(d.branch)+'</span>':'<span style="color:var(--muted)">&#8212;</span>';
         var runIdHtml=d.run_id_short?'<span class="run-id-chip">'+esc(d.run_id_short)+'</span>':'&#8212;';
-        var metricHtml='<span class="metric-num">'+fmt(d._metricVal)+'</span>';
+        var metricHtml='<span class="metric-num">'+fmtFull(d._metricVal)+'</span>';
         var reportCell='';
         if(d.html_url){{
           reportCell+='<div class="actions-cell"><a class="btn primary rpt-btn" href="'+esc(d.html_url)+'" target="_blank" rel="noopener">View</a>';
@@ -13797,11 +13945,11 @@ async fn test_metrics_handler(
             layout: {{ padding: {{ right: 64 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
-              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmtFull(v); }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
             }}
           }},
-          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+          plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'end')]
         }});
         ALL_CHARTS.push(testsChart);
       }}
@@ -13847,11 +13995,11 @@ async fn test_metrics_handler(
           layout: {{ padding: {{ right: 64 }} }},
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
           scales: {{
-            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmtFull(v); }} }} }},
             y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
           }}
         }},
-        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+        plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'end')]
       }});
       ALL_CHARTS.push(assertionsChart);
     }}
@@ -13874,11 +14022,11 @@ async fn test_metrics_handler(
           layout: {{ padding: {{ right: 64 }} }},
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
           scales: {{
-            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }},
+            x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmtFull(v); }} }} }},
             y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
           }}
         }},
-        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+        plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'end')]
       }});
       ALL_CHARTS.push(suitesChart);
     }}
@@ -13911,7 +14059,7 @@ async fn test_metrics_handler(
                   var val = ds.data[i] || 0;
                   var pct = tot > 0 ? (val / tot * 100).toFixed(0) : '0';
                   return {{
-                    text: lbl + ' ' + fmt(val) + ' (' + pct + '%)',
+                    text: lbl + ' ' + fmtFull(val) + ' (' + pct + '%)',
                     fillStyle: ds.backgroundColor[i],
                     strokeStyle: ds.borderColor,
                     lineWidth: ds.borderWidth,
@@ -13969,10 +14117,10 @@ async fn test_metrics_handler(
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y); }} }} }} }},
           scales: {{
             x: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }},
-            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmtFull(v); }} }} }}
           }}
         }},
-        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top')]
+        plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'top')]
       }});
       ALL_CHARTS.push(compositionChart);
     }}
@@ -14054,11 +14202,11 @@ async fn test_metrics_handler(
         var barW = Math.round(d.density / maxDensity * 120);
         return '<tr>' +
           '<td><strong>' + d.lang + '</strong></td>' +
-          '<td class="num">' + fmt(d.tests) + '</td>' +
-          '<td class="num">' + fmt(d.assertions || 0) + '</td>' +
-          '<td class="num">' + fmt(d.suites || 0) + '</td>' +
-          '<td class="num">' + fmt(d.code) + '</td>' +
-          '<td class="num">' + fmt(d.files) + '</td>' +
+          '<td class="num">' + fmtFull(d.tests) + '</td>' +
+          '<td class="num">' + fmtFull(d.assertions || 0) + '</td>' +
+          '<td class="num">' + fmtFull(d.suites || 0) + '</td>' +
+          '<td class="num">' + fmtFull(d.code) + '</td>' +
+          '<td class="num">' + fmtFull(d.files) + '</td>' +
           '<td class="num">' + d.density.toFixed(2) + '</td>' +
           '<td><div class="density-bar-wrap"><div class="density-bar" style="width:' + barW + 'px;"></div></div></td>' +
           '</tr>';
@@ -14317,10 +14465,10 @@ async fn test_metrics_handler(
           }},
           scales: {{
             x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, maxRotation:35 }} }},
-            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmt(v); }} }} }}
+            y: {{ beginAtZero: true, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return fmtFull(v); }} }} }}
           }}
         }},
-        plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'top'), tmFillGuard]
+        plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'top'), tmFillGuard]
       }};
     }}
 
@@ -14423,11 +14571,11 @@ async fn test_metrics_handler(
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
-              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmt(v); }} }} }},
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmtFull(v); }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
             }}
           }},
-          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+          plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'end')]
         }});
       }});
     }})();
@@ -14501,11 +14649,11 @@ async fn test_metrics_handler(
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
-              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmt(v); }} }} }},
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmtFull(v); }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
             }}
           }},
-          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+          plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'end')]
         }});
       }});
     }})();
@@ -14532,11 +14680,11 @@ async fn test_metrics_handler(
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
-              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmt(v); }} }} }},
+              x: {{ grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:12}}, callback: function(v){{ return fmtFull(v); }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:12}} }} }}
             }}
           }},
-          plugins: [makeDlPlugin(function(v){{ return fmt(v); }}, 'end')]
+          plugins: [makeDlPlugin(function(v){{ return fmtFull(v); }}, 'end')]
         }});
       }});
     }})();
@@ -28103,6 +28251,7 @@ struct CompareSelectTemplate {
   </style>
 </head>
 <body>
+  {{ loading_overlay|safe }}
   <div class="background-watermarks" aria-hidden="true">
     <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
     <img src="/images/logo/logo-text.png" alt="" /><img src="/images/logo/logo-text.png" alt="" />
@@ -28693,7 +28842,7 @@ struct CompareSelectTemplate {
         // Apply fmt() to non-absent strong values
         strongs.forEach(function(el) {
           var n = parseInt(el.textContent, 10);
-          if (!isNaN(n)) el.textContent = fmt(n);
+          if (!isNaN(n)) el.textContent = fmtFull(n);
         });
         // Safety: force dash for genuinely absent sides
         if (status === 'added' && bv === 0) {
@@ -28774,7 +28923,7 @@ struct CompareSelectTemplate {
         var tz;try{tz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){tz='America/Los_Angeles';}
         var now=(window.fmtTz?window.fmtTz(Date.now(),tz):new Date().toISOString().replace('T',' ').slice(0,16)+' UTC');
         function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-        function fmtN(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
+        function fmtN(n){return Number(n).toLocaleString();}
         function fullN(n){var v=Number(n);return isNaN(v)?'\u2014':v.toLocaleString();}
         function delt(v){var s=String(v==null?'\u2014':v);if(!s||s==='0'||s==='\u2014')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
         var lm={};
@@ -29011,7 +29160,7 @@ struct CompareSelectTemplate {
       var OX='#C45C10', GN='#2A6846', RD='#B23030', GY='#AAAAAA', LGY='#DDDDDD';
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
-      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
+      function fmt(n){return Number(n).toLocaleString();}
       function px(n){return Math.round(n);}
       var el=document.querySelector('[data-folder]'), proj=el?el.getAttribute('data-folder'):'';
       // Language map
@@ -29203,7 +29352,7 @@ struct CompareSelectTemplate {
     (function(){
       var OX='#C45C10',GN='#2A6846',RD='#B23030',GY='#AAAAAA',LGY='#DDDDDD';
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-      function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
+      function fmt(n){return Number(n).toLocaleString();}
       function px(n){return Math.round(n);}
       function jsq(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,'\\x27');}
       function btt(l,v){return ' class="ic-cb" data-ttl="'+esc(l)+'" data-ttv="'+esc(v)+'"';}
@@ -29309,8 +29458,8 @@ struct CompareSelectTemplate {
           var pts=cmpPts.map(function(p){var v=p.v[metric];return(v==null)?null:Number(v);});
           var valid=pts.filter(function(v){return v!=null;});
           if(!valid.length){var _nd_dark=document.body.classList.contains('dark-theme');var _nd_bg=_nd_dark?'#241a12':'#fbf7f2';var _nd_tc=_nd_dark?'rgba(255,255,255,0.30)':'rgba(67,52,45,0.32)';var _nd_ts=_nd_dark?'rgba(255,255,255,0.55)':'rgba(67,52,45,0.60)';var _nd_lbl=(cmpMetricLabel[metric]||metric);var _nd_cov=metric==='cov';var _nd_msg=_nd_cov?'No coverage data for these scans':'No '+_nd_lbl.toLowerCase()+' recorded';var _nd_sub=_nd_cov?'Coverage appears once test results are captured during a scan.':'Neither the baseline nor current scan reported a value for this metric.';var _cx=W/2,_cy=H/2;svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.innerHTML='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="'+_nd_bg+'" rx="8"/>'+'<g opacity="0.55"><rect x="'+(_cx-28).toFixed(1)+'" y="'+(_cy-50).toFixed(1)+'" width="56" height="34" rx="5" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6"/><polyline points="'+(_cx-20).toFixed(1)+','+(_cy-24).toFixed(1)+' '+(_cx-7).toFixed(1)+','+(_cy-30).toFixed(1)+' '+(_cx+6).toFixed(1)+','+(_cy-26).toFixed(1)+' '+(_cx+20).toFixed(1)+','+(_cy-34).toFixed(1)+'" fill="none" stroke="'+_nd_tc+'" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+4).toFixed(1)+'" text-anchor="middle" font-size="14" font-weight="700" fill="'+_nd_ts+'">'+_nd_msg+'</text>'+'<text x="'+_cx.toFixed(1)+'" y="'+(_cy+24).toFixed(1)+'" text-anchor="middle" font-size="11.5" fill="'+_nd_tc+'">'+_nd_sub+'</text>';return;}
-          var minV=Math.min.apply(null,valid),maxV=Math.max.apply(null,valid);
-          if(minV===maxV){minV=Math.max(0,minV-1);maxV=maxV+1;}
+          var minV=0,maxV=Math.max.apply(null,valid);
+          if(maxV<=0){maxV=1;}else{maxV=maxV*1.08;}
           var plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b;
           var cx0=pad.l,cx1=pad.l+plotW;
           var cy0=pts[0]!=null?pad.t+plotH-(pts[0]-minV)/(maxV-minV)*plotH:pad.t+plotH;
@@ -29332,7 +29481,7 @@ struct CompareSelectTemplate {
           var dotPts=[{cx:cx0,cy:cy0,v:pts[0],lbl:cmpPts[0].label,anchor:'start',lbl2:'BASELINE'},
                       {cx:cx1,cy:cy1,v:pts[1],lbl:cmpPts[1].label,anchor:'end',lbl2:'CURRENT'}];
           dotPts.forEach(function(pt){
-            parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(pt.cy-11).toFixed(1)+'" text-anchor="'+pt.anchor+'" font-size="11" font-weight="600" fill="'+textColor+'">'+fmtN(pt.v)+'</text>');
+            parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(pt.cy-11).toFixed(1)+'" text-anchor="'+pt.anchor+'" font-size="11" font-weight="600" fill="'+textColor+'">'+Number(pt.v).toLocaleString()+'</text>');
             parts.push('<circle cx="'+pt.cx.toFixed(1)+'" cy="'+pt.cy.toFixed(1)+'" r="5" fill="#d37a4c" stroke="'+(dark?'#241a12':'#fbf7f2')+'" stroke-width="1.5"/>');
             parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(H-pad.b+18)+'" text-anchor="'+pt.anchor+'" font-size="15" fill="'+textColor+'" font-family="ui-monospace,monospace">'+escH(pt.lbl)+'</text>');
             parts.push('<text x="'+pt.cx.toFixed(1)+'" y="'+(H-pad.b+32)+'" text-anchor="'+pt.anchor+'" font-size="9" font-weight="700" fill="'+textColor+'">'+escH(pt.lbl2)+'</text>');
@@ -29357,7 +29506,7 @@ struct CompareSelectTemplate {
             if(!cmpTT)return;
             var clbl=cmpPts[nearest].label;
             var scanLbl=nearest===0?'Baseline':'Current';
-            cmpTT.innerHTML='<strong>'+scanLbl+'</strong> <span style="font-family:monospace;font-size:11px;opacity:.75">'+escH(clbl)+'</span><br>'+escH(cmpMetricLabel[metric]||metric)+': <strong>'+fmtN(pts[nearest])+'</strong>';
+            cmpTT.innerHTML='<strong>'+scanLbl+'</strong> <span style="font-family:monospace;font-size:11px;opacity:.75">'+escH(clbl)+'</span><br>'+escH(cmpMetricLabel[metric]||metric)+': <strong>'+Number(pts[nearest]).toLocaleString()+'</strong>';
             var bx=rect.left+(nc/W*rect.width)+18;
             if(bx+220>window.innerWidth-8)bx=rect.left+(nc/W*rect.width)-228;
             cmpTT.style.left=bx+'px';cmpTT.style.top=(e.clientY-38)+'px';cmpTT.style.display='block';
@@ -29435,6 +29584,8 @@ struct CompareSelectTemplate {
 // Template structs need many bool fields to pass Askama rendering flags.
 #[allow(clippy::struct_excessive_bools)]
 struct CompareTemplate {
+    /// Pre-rendered branded loading overlay + visibility gate (see `loading_overlay_block`).
+    loading_overlay: String,
     version: &'static str,
     project_label: String,
     baseline_git_commit: String,
