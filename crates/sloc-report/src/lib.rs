@@ -901,6 +901,11 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
 
     let browser = launch_cdp_browser(browser_path, no_sandbox)?;
     let tab = browser.new_tab().context("failed to open browser tab")?;
+    // Raise the per-call CDP timeout well above the 20 s default. On a loaded host
+    // (e.g. the user's own Chromium already eating several GB) just launching a second
+    // headless instance and navigating a trivial page can take 15-30 s; the old default
+    // made navigation/print time out and fall back to wkhtmltopdf, failing the export.
+    tab.set_default_timeout(std::time::Duration::from_secs(90));
 
     let html_for_url = PathBuf::from(
         html_path
