@@ -28384,6 +28384,17 @@ struct CompareSelectTemplate {
     .col-num{text-align:right;font-variant-numeric:tabular-nums;}
     #delta-table th:nth-child(n+4),#delta-table td:nth-child(n+4){text-align:right;font-variant-numeric:tabular-nums;}
     #delta-table th:last-child,#delta-table td:last-child{padding-right:14px;}
+    /* Fixed layout: column widths come from the colgroup, not from scanning every
+       row. With auto layout a large file matrix forces the browser to re-measure
+       all cells on each reflow, which freezes the page during sort/resize. */
+    #delta-table{table-layout:fixed;}
+    #delta-table col:nth-child(1){width:32%;}
+    #delta-table col:nth-child(2){width:11%;}
+    #delta-table col:nth-child(3){width:11%;}
+    #delta-table col:nth-child(4){width:16%;}
+    #delta-table col:nth-child(5){width:10%;}
+    #delta-table col:nth-child(6){width:10%;}
+    #delta-table col:nth-child(7){width:10%;}
     tr.row-added td{background:rgba(26,143,71,0.04);}
     tr.row-removed td{background:rgba(179,59,59,0.06);}
     tr.row-modified td{background:rgba(146,96,0,0.04);}
@@ -28928,24 +28939,84 @@ struct CompareSelectTemplate {
         .catch(function () {});
     }
 
-    function getDeltaFilteredRows() {
-      return Array.prototype.slice.call(document.querySelectorAll('#delta-tbody .delta-row')).filter(function(r) {
-        return activeStatusFilter === 'all' || r.getAttribute('data-status') === activeStatusFilter;
-      });
+    // \u2500\u2500 File-matrix model (windowed render) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // The server renders every row once; we lift them into a plain-data array and
+    // then clear the DOM so only the visible page's <tr>s ever exist. Sorting and
+    // filtering run on the array (no DOM churn) and each render rebuilds just one
+    // page (~25 rows). This keeps every interaction O(page) instead of O(all
+    // files): a 28k-row table previously re-touched every node on each click
+    // (querySelectorAll x2, appendChild x28k to sort) and froze the page.
+    var DELTA = [], _deltaView = [], sortCol = null, sortOrder = 'asc';
+
+    function parseDeltaNum(str) {
+      if (!str || str === '\u2014') return 0;
+      return parseFloat(str.replace(/[^0-9.\-]/g, '')) * (str.trim().charAt(0) === '-' ? -1 : 1);
+    }
+
+    function captureDelta() {
+      var tbody = document.getElementById('delta-tbody');
+      if (!tbody) return;
+      var rows = tbody.querySelectorAll('.delta-row');
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        DELTA.push({
+          h: r.innerHTML,
+          cls: r.className,
+          path: r.getAttribute('data-path') || '',
+          lang: r.getAttribute('data-language') || '',
+          status: r.getAttribute('data-status') || '',
+          bc: parseFloat(r.getAttribute('data-baseline-code')) || 0,
+          cc: parseFloat(r.getAttribute('data-current-code')) || 0,
+          cd: parseDeltaNum(r.getAttribute('data-code-delta')),
+          cmd: parseDeltaNum(r.getAttribute('data-comment-delta')),
+          td: parseDeltaNum(r.getAttribute('data-total-delta')),
+          bcs: r.getAttribute('data-baseline-code') || '',
+          ccs: r.getAttribute('data-current-code') || '',
+          cds: r.getAttribute('data-code-delta') || '',
+          cmds: r.getAttribute('data-comment-delta') || '',
+          tds: r.getAttribute('data-total-delta') || ''
+        });
+      }
+      tbody.innerHTML = '';
+    }
+
+    function applyDeltaQuery() {
+      var v = (activeStatusFilter === 'all') ? DELTA.slice()
+        : DELTA.filter(function(d) { return d.status === activeStatusFilter; });
+      if (sortCol) {
+        var asc = sortOrder === 'asc';
+        v.sort(function(a, b) {
+          var va, vb;
+          if (sortCol === 'path') { va = a.path; vb = b.path; }
+          else if (sortCol === 'language') { va = a.lang; vb = b.lang; }
+          else if (sortCol === 'status') { va = a.status; vb = b.status; }
+          else if (sortCol === 'baseline_code') { return asc ? a.bc - b.bc : b.bc - a.bc; }
+          else if (sortCol === 'code_delta') { return asc ? a.cd - b.cd : b.cd - a.cd; }
+          else if (sortCol === 'comment_delta') { return asc ? a.cmd - b.cmd : b.cmd - a.cmd; }
+          else if (sortCol === 'total_delta') { return asc ? a.td - b.td : b.td - a.td; }
+          else { return 0; }
+          if (asc) return va < vb ? -1 : va > vb ? 1 : 0;
+          return va < vb ? 1 : va > vb ? -1 : 0;
+        });
+      }
+      _deltaView = v;
+      deltaCurrPage = 1;
+      renderDeltaPage();
     }
 
     function renderDeltaPage() {
-      var filtered = getDeltaFilteredRows();
-      var total = filtered.length;
+      var total = _deltaView.length;
       var totalPages = Math.max(1, Math.ceil(total / deltaPerPage));
-      deltaCurrPage = Math.min(deltaCurrPage, totalPages);
+      if (deltaCurrPage > totalPages) deltaCurrPage = totalPages;
+      if (deltaCurrPage < 1) deltaCurrPage = 1;
       var start = (deltaCurrPage - 1) * deltaPerPage;
       var end = Math.min(start + deltaPerPage, total);
-      var shownSet = {};
-      filtered.slice(start, end).forEach(function(r) { shownSet[r.dataset.origIdx] = true; });
-      Array.prototype.slice.call(document.querySelectorAll('#delta-tbody .delta-row')).forEach(function(r) {
-        r.style.display = shownSet[r.dataset.origIdx] !== undefined ? '' : 'none';
-      });
+      var tbody = document.getElementById('delta-tbody');
+      if (tbody) {
+        var html = '';
+        for (var i = start; i < end; i++) { var d = _deltaView[i]; html += '<tr class="' + d.cls + '">' + d.h + '</tr>'; }
+        tbody.innerHTML = html;
+      }
       var rl = document.getElementById('pg-range-label');
       if (rl) rl.textContent = total ? 'Showing ' + (start + 1) + '\u2013' + end + ' of ' + total + ' files' : 'No results';
       var btns = document.getElementById('pg-btns');
@@ -28969,59 +29040,24 @@ struct CompareSelectTemplate {
 
     function filterRows(status, btn) {
       activeStatusFilter = status;
-      deltaCurrPage = 1;
       Array.prototype.slice.call(document.querySelectorAll('.tab-btn')).forEach(function (b) {
         b.classList.remove('active');
       });
       if (btn) btn.classList.add('active');
-      renderDeltaPage();
+      applyDeltaQuery();
     }
 
     // ── Sorting ──────────────────────────────────────────────────────────────
-    var sortCol = null, sortOrder = 'asc';
     var sortHeaders = Array.prototype.slice.call(document.querySelectorAll('#delta-thead .sortable'));
-    (function() {
-      var tbody = document.getElementById('delta-tbody');
-      if (!tbody) return;
-      var rows = Array.prototype.slice.call(tbody.querySelectorAll('.delta-row'));
-      rows.forEach(function(r, i) { r.dataset.origIdx = i; });
-    })();
-
-    function parseDeltaNum(str) {
-      if (!str || str === '\u2014') return 0;
-      return parseFloat(str.replace(/[^0-9.\-]/g, '')) * (str.trim().startsWith('-') ? -1 : 1);
-    }
-
     sortHeaders.forEach(function(th) {
       th.addEventListener('click', function(e) {
         if (e.target.classList.contains('col-resize-handle')) return;
-        var col = th.dataset.sortCol, type = th.dataset.sortType || 'str';
+        var col = th.dataset.sortCol;
         if (sortCol === col) { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; } else { sortCol = col; sortOrder = 'asc'; }
         sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
         th.classList.add('sort-' + sortOrder);
         var si = th.querySelector('.sort-icon'); if (si) si.textContent = sortOrder === 'asc' ? '\u2191' : '\u2193';
-        var tbody = document.getElementById('delta-tbody');
-        if (!tbody) return;
-        var rows = Array.prototype.slice.call(tbody.querySelectorAll('.delta-row'));
-        rows.sort(function(a, b) {
-          var va, vb;
-          if (col === 'path') { va = a.dataset.path || ''; vb = b.dataset.path || ''; }
-          else if (col === 'language') { va = a.dataset.language || ''; vb = b.dataset.language || ''; }
-          else if (col === 'status') { va = a.dataset.status || ''; vb = b.dataset.status || ''; }
-          else if (col === 'baseline_code') { va = parseFloat(a.dataset.baselineCode || 0); vb = parseFloat(b.dataset.baselineCode || 0); return sortOrder === 'asc' ? va - vb : vb - va; }
-          else if (col === 'code_delta') { va = parseDeltaNum(a.dataset.codeDelta); vb = parseDeltaNum(b.dataset.codeDelta); return sortOrder === 'asc' ? va - vb : vb - va; }
-          else if (col === 'comment_delta') { va = parseDeltaNum(a.dataset.commentDelta); vb = parseDeltaNum(b.dataset.commentDelta); return sortOrder === 'asc' ? va - vb : vb - va; }
-          else if (col === 'total_delta') { va = parseDeltaNum(a.dataset.totalDelta); vb = parseDeltaNum(b.dataset.totalDelta); return sortOrder === 'asc' ? va - vb : vb - va; }
-          else { va = ''; vb = ''; }
-          if (sortOrder === 'asc') return va < vb ? -1 : va > vb ? 1 : 0;
-          return va < vb ? 1 : va > vb ? -1 : 0;
-        });
-        rows.forEach(function(r) { tbody.appendChild(r); });
-        deltaCurrPage = 1;
-        renderDeltaPage();
-        var activeBtn = document.querySelector('.tab-btn.active');
-        Array.prototype.slice.call(document.querySelectorAll('.tab-btn')).forEach(function(b) { b.classList.remove('active'); });
-        if (activeBtn) activeBtn.classList.add('active');
+        applyDeltaQuery();
       });
     });
 
@@ -29034,12 +29070,29 @@ struct CompareSelectTemplate {
       ths.forEach(function(th, i) {
         var handle = th.querySelector('.col-resize-handle');
         if (!handle || !cols[i]) return;
-        var startX, startW;
         handle.addEventListener('mousedown', function(e) {
           e.stopPropagation(); e.preventDefault();
-          startX = e.clientX; startW = cols[i].offsetWidth || th.offsetWidth;
+          // Lock every column to its current rendered px width and size the table
+          // to the column total. With table-layout:fixed + width:100% the table is
+          // pinned to the container, so widening one <col> only rebalances the rest
+          // and the drag looks inert; pinning px widths lets the column actually
+          // grow while the wrapper (overflow-x:auto) scrolls.
+          var startTableW = 0;
+          for (var k = 0; k < ths.length; k++) {
+            if (!cols[k]) continue;
+            var w = ths[k].getBoundingClientRect().width;
+            cols[k].style.width = w + 'px';
+            startTableW += w;
+          }
+          table.style.width = startTableW + 'px';
+          var startX = e.clientX;
+          var startW = ths[i].getBoundingClientRect().width;
           handle.classList.add('dragging');
-          function onMove(e) { cols[i].style.width = Math.max(40, startW + e.clientX - startX) + 'px'; }
+          function onMove(ev) {
+            var newW = Math.max(40, startW + ev.clientX - startX);
+            cols[i].style.width = newW + 'px';
+            table.style.width = (startTableW + (newW - startW)) + 'px';
+          }
           function onUp() { handle.classList.remove('dragging'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
           document.addEventListener('mousemove', onMove);
           document.addEventListener('mouseup', onUp);
@@ -29051,24 +29104,15 @@ struct CompareSelectTemplate {
     window.resetDeltaTable = function() {
       sortCol = null; sortOrder = 'asc';
       sortHeaders.forEach(function(t) { var si = t.querySelector('.sort-icon'); if (si) si.textContent = '\u2195'; t.classList.remove('sort-asc', 'sort-desc'); });
-      var tbody = document.getElementById('delta-tbody');
-      if (tbody) {
-        var rows = Array.prototype.slice.call(tbody.querySelectorAll('.delta-row'));
-        rows.sort(function(a, b) { return parseInt(a.dataset.origIdx || 0) - parseInt(b.dataset.origIdx || 0); });
-        rows.forEach(function(r) { tbody.appendChild(r); });
-      }
       var table = document.getElementById('delta-table');
-      if (table) Array.prototype.slice.call(table.querySelectorAll('col')).forEach(function(c) { c.style.width = ''; });
+      if (table) { table.style.width = ''; Array.prototype.slice.call(table.querySelectorAll('col')).forEach(function(c) { c.style.width = ''; }); }
       var pps = document.getElementById('per-page-sel'); if (pps) { pps.value = '25'; deltaPerPage = 25; }
       activeStatusFilter = 'all';
-      deltaCurrPage = 1;
       Array.prototype.slice.call(document.querySelectorAll('.tab-btn')).forEach(function(b) { b.classList.remove('active'); });
       var allBtn = document.querySelector('.tab-btn');
       if (allBtn) allBtn.classList.add('active');
-      renderDeltaPage();
+      applyDeltaQuery();
     };
-
-    renderDeltaPage();
 
     // Compact number formatter (shared by the delta table; charts define their own locally)
     function fmt(n){var v=Number(n),a=Math.abs(v);if(a>=1e6)return(v/1e6).toFixed(1).replace(/\.0$/,'')+'M';if(a>=1e4)return(v/1e3).toFixed(1).replace(/\.0$/,'')+'K';return v.toLocaleString();}
@@ -29105,7 +29149,11 @@ struct CompareSelectTemplate {
         }
       });
     }
+    // Initialize: format the server-rendered rows, lift them into the data model
+    // (which also clears the DOM), then render only the first page.
     fmtFromTo();
+    captureDelta();
+    applyDeltaQuery();
 
     // ── Event wiring (CSP-safe: no inline handlers) ───────────────────────────
     (function() {
@@ -29425,7 +29473,7 @@ struct CompareSelectTemplate {
     var _summaryHdrs = ['Metric',_blabel,_clabel,'Delta','% Change'];
     function getSummaryExportRows(){return[['Code Lines',String(_sd.bc),String(_sd.cc),_sd.cd,_slPct(_sd.cc-_sd.bc,_sd.bc)],['Files Analyzed',String(_sd.bf),String(_sd.cf),_sd.fd,_slPct(_sd.cf-_sd.bf,_sd.bf)],['Comment Lines',String(_sd.bcm),String(_sd.ccm),_sd.cmd,_slPct(_sd.ccm-_sd.bcm,_sd.bcm)],['Modified Files','0','0',String(_sd.fm),_tfPct(_sd.fm)],['Added Files','0','0',String(_sd.fa),_tfPct(_sd.fa)],['Removed Files','0','0',String(_sd.fr),_tfPct(_sd.fr)],['Unchanged Files','0','0',String(_sd.fu),_tfPct(_sd.fu)]];}
     var _dh = ['File','Language','Status','Code Before ('+_blabel+')','Code After ('+_clabel+')','Code Delta','Comment Delta','Total Delta','% Code Chg'];
-    function getDeltaExportRows(){var r=[];document.querySelectorAll('#delta-tbody .delta-row').forEach(function(tr){var b=parseInt(tr.getAttribute('data-baseline-code'))||0,c=parseInt(tr.getAttribute('data-current-code'))||0,st=tr.getAttribute('data-status')||'';r.push([tr.getAttribute('data-path')||'',tr.getAttribute('data-language')||'',st,tr.getAttribute('data-baseline-code')||'',tr.getAttribute('data-current-code')||'',tr.getAttribute('data-code-delta')||'',tr.getAttribute('data-comment-delta')||'',tr.getAttribute('data-total-delta')||'',_filePct(b,c,st)]);});return r;}
+    function getDeltaExportRows(){return DELTA.map(function(d){var b=parseInt(d.bcs)||0,c=parseInt(d.ccs)||0;return [d.path,d.lang,d.status,d.bcs,d.ccs,d.cds,d.cmds,d.tds,_filePct(b,c,d.status)];});}
     window.exportDeltaCsv = function(){slocCsv(_exportBase+'.csv',_dh,getDeltaExportRows());};
     window.exportDeltaXls = function(){slocMakeXlsx(getExportFilename('xlsx'),_sd,getDeltaExportRows());};
 
