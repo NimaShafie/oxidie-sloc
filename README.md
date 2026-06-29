@@ -70,11 +70,15 @@ AI-native integration — particularly as an MCP tool callable by Claude, Copilo
 
 ![Home — navigation hub with quick-launch cards for every feature](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/home-page.png)
 
-| View Reports | Compare Delta |
+| View Reports | Scan Delta |
 |---|---|
-| ![View Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png) | ![Compare Delta](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/compare-delta.png) |
+| ![View Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png) | ![Scan Delta](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/compare-delta.png) |
 | **Trend Reports** | **Test Metrics** |
 | ![Trend Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/trend-reports.png) | ![Test Metrics](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/test-metrics.png) |
+| **PDF Report** | **Excel Export** |
+| ![PDF Report](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/report-pdf.png) | ![Excel Export](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/export-excel.png) |
+
+![Per-run report — summary stat chips, export options, and submodule breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/report-summary.png)
 
 ---
 
