@@ -518,6 +518,7 @@ fn make_registry_entry(run_id: &str) -> RegistryEntry {
         summary: snapshot(100),
         git_branch: None,
         git_commit: None,
+        git_commit_long: None,
         git_author: None,
         git_tags: None,
         git_nearest_tag: None,
