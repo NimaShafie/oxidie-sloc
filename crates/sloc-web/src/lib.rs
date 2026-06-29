@@ -1661,6 +1661,102 @@ body.dark-theme .rpt-progress{background:rgba(196,92,16,.2);}
     TPL.replace("__N__", nonce).replace("__LABEL__", aria_label)
 }
 
+/// Shared toast-notification assets + a global PDF-export helper, spliced into
+/// every page that exports a PDF (Scan Delta, Multi-Scan Timeline, Trend Reports,
+/// Test Metrics). Returns its own nonce'd `<style>` + `<script>` block, meant to be
+/// placed just before `</body>`.
+///
+/// It defines two globals:
+/// * `window.slocToast(msg, {type})` — shows a stacked, auto-dismissing toast in the
+///   bottom-right (`type` = `success` | `error` | `info` | `loading`). A `loading`
+///   toast stays up until its returned handle's `.dismiss()` is called.
+/// * `window.slocExportPdf({html, filename, button})` — the single code path for every
+///   "Export PDF" button: greys the button, shows a loading toast, POSTs to
+///   `/export/pdf`, triggers the download, then raises a success or error toast and
+///   restores the button. Centralising this guarantees identical, obvious feedback
+///   everywhere instead of a silent `alert()`-only failure path.
+fn sloc_toast_assets(nonce: &str) -> String {
+    const TPL: &str = r##"<style nonce="__N__">
+#sloc-toast-wrap{position:fixed;right:18px;top:18px;z-index:11000;display:flex;flex-direction:column;gap:10px;max-width:min(380px,calc(100vw - 36px));pointer-events:none;}
+.sloc-toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-radius:12px;background:#fcfaf7;color:#2f241c;border:1px solid #dfcfbf;box-shadow:0 12px 32px rgba(77,44,20,0.22);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:13px;font-weight:600;line-height:1.35;opacity:0;transform:translateY(12px) scale(.96);transition:opacity .26s ease,transform .26s cubic-bezier(.22,.68,0,1.12);}
+.sloc-toast.sloc-toast-in{opacity:1;transform:none;}
+.sloc-toast.sloc-toast-out{opacity:0;transform:translateY(8px) scale(.97);}
+.sloc-toast-ico{flex:0 0 auto;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;color:#fff;font-style:normal;}
+.sloc-toast-success .sloc-toast-ico{background:#2a6846;}
+.sloc-toast-error .sloc-toast-ico{background:#b23030;}
+.sloc-toast-info .sloc-toast-ico{background:#c45c10;}
+.sloc-toast-success{border-color:#bfe0cc;}
+.sloc-toast-error{border-color:#e6b3b3;}
+.sloc-toast-msg{flex:1 1 auto;padding-top:1px;word-break:break-word;}
+.sloc-toast-spin{flex:0 0 auto;width:18px;height:18px;border-radius:50%;border:2.5px solid rgba(196,92,16,.25);border-top-color:#c45c10;animation:sloc-toast-spin .7s linear infinite;}
+@keyframes sloc-toast-spin{to{transform:rotate(360deg);}}
+.sloc-toast-x{flex:0 0 auto;background:none;border:none;color:inherit;opacity:.5;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;margin:-1px -2px 0 2px;}
+.sloc-toast-x:hover{opacity:1;}
+body.dark-theme .sloc-toast{background:#241a12;color:#f0e6dc;border-color:#3a2c20;box-shadow:0 12px 32px rgba(0,0,0,.5);}
+body.dark-theme .sloc-toast-success{border-color:#2f5a44;}
+body.dark-theme .sloc-toast-error{border-color:#6e3434;}
+body.dark-theme .sloc-toast-spin{border-color:rgba(232,147,47,.25);border-top-color:#e8932f;}
+@media (prefers-reduced-motion:reduce){.sloc-toast{transition:opacity .2s ease;transform:none!important;}}
+</style>
+<script nonce="__N__">
+(function(){
+  if(window.slocToast)return;
+  function wrap(){
+    var w=document.getElementById('sloc-toast-wrap');
+    if(!w){w=document.createElement('div');w.id='sloc-toast-wrap';w.setAttribute('aria-live','polite');w.setAttribute('aria-atomic','false');(document.body||document.documentElement).appendChild(w);}
+    return w;
+  }
+  window.slocToast=function(msg,opts){
+    opts=opts||{};
+    var type=opts.type||'info';
+    var loading=type==='loading';
+    var t=document.createElement('div');
+    t.className='sloc-toast sloc-toast-'+(loading?'info':type);
+    t.setAttribute('role',type==='error'?'alert':'status');
+    var ico=loading
+      ? '<span class="sloc-toast-spin" aria-hidden="true"></span>'
+      : '<span class="sloc-toast-ico" aria-hidden="true">'+(type==='success'?'✓':type==='error'?'✕':'i')+'</span>';
+    t.innerHTML=ico+'<span class="sloc-toast-msg"></span><button type="button" class="sloc-toast-x" aria-label="Dismiss">×</button>';
+    t.querySelector('.sloc-toast-msg').textContent=String(msg);
+    wrap().appendChild(t);
+    requestAnimationFrame(function(){t.classList.add('sloc-toast-in');});
+    var gone=false,timer=null;
+    function close(){
+      if(gone)return;gone=true;if(timer)clearTimeout(timer);
+      t.classList.remove('sloc-toast-in');t.classList.add('sloc-toast-out');
+      setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t);},300);
+    }
+    t.querySelector('.sloc-toast-x').addEventListener('click',close);
+    var ttl=opts.duration!=null?opts.duration:(type==='error'?7000:loading?0:4500);
+    if(ttl>0)timer=setTimeout(close,ttl);
+    return {dismiss:close,el:t};
+  };
+  window.slocExportPdf=function(o){
+    o=o||{};
+    var btn=o.button||null,orig=btn?btn.innerHTML:'',fname=o.filename||'report.pdf';
+    if(btn&&btn.disabled)return;
+    if(btn){btn.disabled=true;btn.style.opacity='0.55';btn.style.cursor='not-allowed';btn.textContent='Generating PDF…';}
+    var load=window.slocToast('Generating PDF… this can take a few seconds.',{type:'loading'});
+    return fetch('/export/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({html:o.html,filename:fname})})
+      .then(function(r){if(!r.ok)throw new Error('server returned '+r.status);return r.blob();})
+      .then(function(blob){
+        var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fname;
+        document.body.appendChild(a);a.click();document.body.removeChild(a);
+        setTimeout(function(){URL.revokeObjectURL(a.href);},400);
+        load.dismiss();
+        window.slocToast('PDF exported — '+fname+' saved to your local disk.',{type:'success'});
+      })
+      .catch(function(e){
+        load.dismiss();
+        window.slocToast('PDF export failed: '+e.message+'. A Chromium-based browser (Chrome/Edge/Brave) must be installed on the server.',{type:'error'});
+      })
+      .finally(function(){if(btn){btn.disabled=false;btn.style.opacity='';btn.style.cursor='';btn.innerHTML=orig;}});
+  };
+})();
+</script>"##;
+    TPL.replace("__N__", nonce)
+}
+
 /// Buffer an HTML response body and splice the page fade-in right after the
 /// opening `<body>` tag. No-op for non-HTML responses or pages that already carry
 /// an `#rpt-loading-overlay` (e.g. the standalone HTML report, which keeps its
@@ -2952,6 +3048,7 @@ fn registry_entry_from_run(
         xlsx_path: None,
         git_branch: None,
         git_commit: None,
+        git_commit_long: None,
         git_author: None,
         git_tags: None,
         git_nearest_tag: None,
@@ -3732,6 +3829,7 @@ fn build_registry_entry_from_json(json_path: PathBuf) -> Option<RegistryEntry> {
         summary: ScanSummarySnapshot::from(&run.summary_totals),
         git_branch: run.git_branch.clone(),
         git_commit: run.git_commit_short.clone(),
+        git_commit_long: run.git_commit_long.clone(),
         git_author: run.git_commit_author.clone(),
         git_tags: run.git_tags.clone(),
         git_nearest_tag: run.git_nearest_tag.clone(),
@@ -4348,6 +4446,7 @@ pub(crate) fn build_run_registry_entry(
         summary: summary_snapshot_from_run(run),
         git_branch: run.git_branch.clone(),
         git_commit: run.git_commit_short.clone(),
+        git_commit_long: run.git_commit_long.clone(),
         git_author: run.git_commit_author.clone(),
         git_tags: run.git_tags.clone(),
         git_nearest_tag: run.git_nearest_tag.clone(),
@@ -7253,6 +7352,8 @@ struct HistoryEntryRow {
     test_count: u64,
     git_branch: String,
     git_commit: String,
+    /// Full-length commit SHA shown as a hover tooltip (falls back to short when absent).
+    git_commit_long: String,
     has_html: bool,
     has_json: bool,
     has_pdf: bool,
@@ -7403,6 +7504,11 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                 test_count: e.summary.test_count,
                 git_branch: e.git_branch.clone().unwrap_or_default(),
                 git_commit: e.git_commit.clone().unwrap_or_default(),
+                git_commit_long: e
+                    .git_commit_long
+                    .clone()
+                    .or_else(|| e.git_commit.clone())
+                    .unwrap_or_default(),
                 has_html: e.html_path.as_ref().is_some_and(|p| p.exists()),
                 has_json: e.json_path.as_ref().is_some_and(|p| p.exists()),
                 has_pdf: e.pdf_path.as_ref().is_some_and(|p| p.exists()),
@@ -8023,6 +8129,7 @@ async fn compare_handler(
         has_any_submodule_data,
         active_submodule,
         super_scope_active,
+        toast_assets: sloc_toast_assets(&csp_nonce),
         csp_nonce,
         coverage_delta_card: build_coverage_delta_card(s),
         baseline_test_count: effective_baseline.summary_totals.test_count,
@@ -9602,6 +9709,7 @@ fn multi_compare_page(
         super_scope_active,
     );
     let scope_label = build_mc_scope_label(active_sub, super_scope_active);
+    let toast_assets = sloc_toast_assets(csp_nonce);
 
     format!(
         r#"<!doctype html>
@@ -9612,7 +9720,7 @@ fn multi_compare_page(
   <title>OxideSLOC | Multi-Scan Timeline — {project_label}</title>
   <link rel="icon" type="image/png" href="/images/logo/small-logo.png">
   <style nonce="{csp_nonce}">
-    :root{{--radius:18px;--bg:#f5efe8;--surface:#fbf7f2;--surface-2:#f4ede4;--line:#e6d0bf;--line-strong:#d8bfad;--text:#43342d;--muted:#7b675b;--muted-2:#a08777;--nav:#283790;--nav-2:#013e6b;--accent:#6f9bff;--oxide:#d37a4c;--oxide-2:#b35428;--shadow:0 18px 42px rgba(77,44,20,0.12);--pos:#1a8f47;--pos-bg:#e8f5ed;--neg:#b33b3b;--neg-bg:#fcd6d6;}}
+    :root{{--radius:18px;--bg:#f5efe8;--surface:rgba(255,255,255,0.86);--surface-2:#fbf7f2;--line:#e6d0bf;--line-strong:#d8bfad;--text:#43342d;--muted:#7b675b;--muted-2:#a08777;--nav:#283790;--nav-2:#013e6b;--accent:#6f9bff;--oxide:#d37a4c;--oxide-2:#b35428;--shadow:0 18px 42px rgba(77,44,20,0.12);--pos:#1a8f47;--pos-bg:#e8f5ed;--neg:#b33b3b;--neg-bg:#fcd6d6;}}
     *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
     body{{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;}}
     body.dark-theme{{--bg:#1a120b;--surface:#241a12;--surface-2:#2d2117;--line:#3d2e22;--line-strong:#54402f;--text:#f0e6dc;--muted:#b09080;--muted-2:#8a6e5f;--pos-bg:#163a23;--neg-bg:#3d1c1c;}}
@@ -9748,8 +9856,8 @@ fn multi_compare_page(
     .ic-svg-modal-close:hover{{background:var(--line);}}
     .ic-leg{{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;flex-wrap:wrap;}}
     .ic-dot{{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}}
-    .ic-cb{{cursor:pointer;transition:filter .15s;}}
-    .ic-cb:hover{{filter:brightness(1.12);}}
+    .ic-cb{{cursor:pointer;transition:opacity .17s,filter .17s,transform .17s;transform-box:fill-box;transform-origin:center center;}}
+    .ic-cb:hover{{filter:brightness(1.15) drop-shadow(0 2px 6px rgba(0,0,0,.18));transform:scale(1.05);}}
     .ic-leg-item{{cursor:pointer;transition:opacity .15s;border-radius:4px;padding:2px 6px;}}
     .ic-leg-item:hover{{background:rgba(211,122,76,0.08);}}
     #mc-ic-tt{{display:none;position:fixed;background:rgba(15,10,6,.95);color:rgba(255,255,255,0.92);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.5;pointer-events:none;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.28);max-width:240px;white-space:nowrap;}}
@@ -9955,6 +10063,7 @@ fn multi_compare_page(
         <!-- Language Code Delta -->
         <div class="ic-card" id="mc-ic-lang-card">
           <div class="ic-chart-hdr"><span class="ic-card-h2">Language Code Delta</span><button class="ic-expand-btn" data-expand-src="mc-ic-c3" data-expand-title="Language Code Delta">&#x2922; Full View</button></div>
+          <div style="font-size:10.5px;color:var(--muted);margin:-4px 0 12px;line-height:1.45;">Net change in <strong>code lines</strong> per language from the first to the latest scan (<strong>+0</strong> means that language is unchanged). The count on the right is how many <strong>files</strong> of that language were scanned.</div>
           <div id="mc-ic-c3"></div>
         </div>
         <!-- Delta by Metric -->
@@ -10567,19 +10676,15 @@ fn multi_compare_page(
 
       var pdfBtn=document.getElementById('mc-file-pdf-btn');
       if(pdfBtn)pdfBtn.addEventListener('click',function(){{
-        var btn=pdfBtn,orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF\u2026';
-        var h=mcBuildPdfHtml();
-        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:h,filename:mcExportName('files.pdf')}})}})
-          .then(function(r){{if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();}})
-          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=mcExportName('files.pdf');a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
-          .catch(function(e){{alert('PDF export failed: '+e.message);}})
-          .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
+        window.slocExportPdf({{html:mcBuildPdfHtml(),filename:mcExportName('files.pdf'),button:pdfBtn}});
       }});
     }})();
 
     // ── Inline scan charts (matching Scan Delta layout) ──────────────────────
     (function(){{
       var OX='#C45C10',GN='#2A6846',GD='#D4A017',RD='#B23030';
+      // Deeper shade of each metric hue for "before"/Scan-1 bars — bold, not washed.
+      var OXD='#8a3f0a',GND='#1d4a30',GDD='#9c7610';
       function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
       function fmt2(n){{return Number(n).toLocaleString();}}
       function px(n){{return Math.round(n);}}
@@ -10625,9 +10730,9 @@ fn multi_compare_page(
         var barBorder=dark?'rgba(255,255,255,0.40)':'rgba(0,0,0,0.62)';
         function niceMax(v){{var x=v||1;var p=Math.pow(10,Math.floor(Math.log10(x)));var n=x/p;var s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}}
       var c1mets=[
-        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:FADE,cc:OX}},
-        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:FADE,cc:GN}},
-        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:FADE,cc:GD}}
+        {{l:'Code Lines',b:Number(p0.code),c:Number(pLast.code),bc:OXD,cc:OX}},
+        {{l:'Files',b:Number(p0.files),c:Number(pLast.files),bc:GND,cc:GN}},
+        {{l:'Comments',b:Number(p0.comments),c:Number(pLast.comments),bc:GDD,cc:GD}}
       ];
       var maxV1=niceMax(Math.max.apply(null,c1mets.map(function(m){{return Math.max(m.b,m.c);}}))||1);
       // Code Metrics chart — grows to fill the height its grid row settled to (the
@@ -10677,11 +10782,11 @@ fn multi_compare_page(
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){{
-        var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt2(m.v);
+        var y=16+i*rH,bw=(m.v===0?0:Math.max(Math.abs(m.v)/maxD*maxBW,2)),col=m.v>=0?GN:RD,vcol=(m.v===0?textCol:col),bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt2(m.v);
         c2+='<text x="'+(c2LW-8)+'" y="'+(y+22)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" font-weight="600" fill="'+textCol+'">'+esc(m.l)+'</text>';
         c2+='<rect'+btt(m.l,'Net delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3" style="cursor:pointer;"/>';
         if(bw>=52){{c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="'+FONT+'" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
-        else{{var vx2=m.v>=0?px(bx+bw)+6:px(bx)-6,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="'+FONT+'" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
+        else{{var vx2=m.v>=0?px(bx+bw)+6:px(bx)-6,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="'+FONT+'" font-size="12" font-weight="700" fill="'+vcol+'">'+esc(vStr)+'</text>';}}
       }});
       c2+='</svg>';
       // Chart 3: Language Code Delta (from FILES net total_code_delta per language)
@@ -10705,11 +10810,11 @@ fn multi_compare_page(
         var c3='<svg viewBox="0 0 '+C3W+' '+px(C3H)+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
         c3+='<line x1="'+cx3+'" y1="'+topPad+'" x2="'+cx3+'" y2="'+px(C3H-botPad)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
         langs.forEach(function(l,i){{
-          var e=lm[l],yc=topPad+band*(i+0.5),bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
+          var e=lm[l],yc=topPad+band*(i+0.5),bw=(e.d===0?0:Math.max(Math.abs(e.d)/maxLD*maxLBW,2)),col=e.d>=0?GN:RD,vcol=(e.d===0?textCol:col),bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt2(e.d);
           c3+='<text x="'+(c3LW-7)+'" y="'+px(yc+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="11" fill="'+textCol+'">'+esc(l)+'</text>';
           c3+='<rect'+btt(l,'Net delta: '+vStr+' • '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+px(yc-barH/2)+'" width="'+px(bw)+'" height="'+px(barH)+'" fill="'+col+'" rx="3"/>';
           if(bw>=48){{c3+='<text x="'+px(bx+bw/2)+'" y="'+px(yc+4)+'" text-anchor="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}}
-          else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+px(yc+4)+'" text-anchor="'+anc3+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}}
+          else{{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+px(yc+4)+'" text-anchor="'+anc3+'" font-family="'+FONT+'" font-size="10" font-weight="700" fill="'+vcol+'">'+esc(vStr)+'</text>';}}
           c3+='<text x="'+(C3W-5)+'" y="'+px(yc+4)+'" text-anchor="end" font-family="'+FONT+'" font-size="9" fill="'+mutedCol+'">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
         }});
         c3+='</svg>';
@@ -10964,13 +11069,7 @@ fn multi_compare_page(
           '</body></html>';
       }}
       function mcDoPdf(btn){{
-        var orig=btn.innerHTML;btn.disabled=true;btn.textContent='Generating PDF\u2026';
-        var html=mcBuildPdfHtml();
-        fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:html,filename:mcExportName('pdf')}})}})
-          .then(function(r){{if(!r.ok)throw new Error('PDF failed: '+r.status);return r.blob();}})
-          .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=mcExportName('pdf');a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},200);}})
-          .catch(function(e){{alert('PDF export failed: '+e.message);}})
-          .finally(function(){{btn.disabled=false;btn.innerHTML=orig;}});
+        window.slocExportPdf({{html:mcBuildPdfHtml(),filename:mcExportName('pdf'),button:btn}});
       }}
 
       var mcHtmlBtn=document.getElementById('mc-export-html-btn');
@@ -11077,6 +11176,7 @@ fn multi_compare_page(
       <div class="mc-modal-body" id="mc-modal-body"></div>
     </div>
   </div>
+  {toast_assets}
 </body>
 </html>"#,
         project_label = html_escape(project_label),
@@ -11134,6 +11234,7 @@ async fn trend_report_handler(
     let roots_json = serde_json::to_string(&roots).unwrap_or_else(|_| "[]".to_string());
     let nonce = &csp_nonce;
     let version = env!("CARGO_PKG_VERSION");
+    let toast_assets = sloc_toast_assets(nonce);
 
     // Build the watched-dirs bar HTML (outside the format! so braces don't need escaping).
     // Build the watched-dirs bar HTML. In Network Server mode show a locked notice instead
@@ -12367,9 +12468,6 @@ async fn trend_report_handler(
       var tableHtml='<div class="chart-section-header">SCAN HISTORY</div><table><thead><tr><th>Scan Date</th><th>Project</th><th>Commit</th><th>Branch</th><th>Tags</th><th style="text-align:right">'+esc(yL)+'</th></tr></thead><tbody>';
       rowsDesc.forEach(function(d){{tableHtml+='<tr><td>'+esc(d.timestamp.substring(0,16).replace('T',' '))+'</td><td>'+esc(d.project_label||'')+'</td><td>'+esc((d.commit||'').substring(0,7))+'</td><td>'+esc(d.branch||'')+'</td><td>'+esc((d.tags||[]).join(', '))+'</td><td style="text-align:right">'+fmtFull(Number(d[yK])||0)+'</td></tr>';}});
       tableHtml+='</tbody></table>';
-      var btn=document.getElementById('export-pdf-btn');
-      var origBtn=btn?btn.innerHTML:'';
-      if(btn){{btn.disabled=true;btn.textContent='Generating PDF\u2026';}}
       var css='<style>'
         +'*{{box-sizing:border-box;}}'
         +'html,body{{margin:0;padding:0;}}'
@@ -12418,11 +12516,7 @@ async fn trend_report_handler(
         +'</div>'
         +'<div class="rep-foot"><div>\u00a9 2026 OxideSLOC \u00b7 oxide-sloc v{version} \u00b7 local code metrics workbench \u00b7 AGPL-3.0-or-later \u00b7 github.com/oxide-sloc/oxide-sloc</div><div class="rep-foot-gen">Generated '+tp.date+'</div></div>'
         +'</body></html>';
-      fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-trend-report.pdf'}})}})
-        .then(function(r){{if(!r.ok)throw new Error('server returned '+r.status);return r.blob();}})
-        .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='oxide-sloc-trend-report.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},300);}})
-        .catch(function(e){{alert('PDF export failed: '+e.message+'. A Chromium-based browser (Chrome/Edge/Brave) must be installed on the server for PDF rendering.');}})
-        .finally(function(){{if(btn){{btn.disabled=false;btn.innerHTML=origBtn;}}}});
+      window.slocExportPdf({{html:doc,filename:'oxide-sloc-trend-report.pdf',button:document.getElementById('export-pdf-btn')}});
     }}
 
     ['y-sel','x-sel','scale-sel'].forEach(function(id){{
@@ -12744,6 +12838,7 @@ async fn trend_report_handler(
     &nbsp;·&nbsp; <a href="/api-docs" rel="noopener">REST API</a>
   </footer>
   <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} \u2014 Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  {toast_assets}
 </body>
 </html>"##,
     );
@@ -13268,6 +13363,7 @@ async fn test_metrics_handler(
 
     let workspace_density_str = format!("{workspace_density:.1}");
     let nonce = &csp_nonce;
+    let toast_assets = sloc_toast_assets(nonce);
     let version = env!("CARGO_PKG_VERSION");
 
     // Build the watched-dirs bar HTML. In Network Server mode show a locked notice instead
@@ -14995,9 +15091,6 @@ async fn test_metrics_handler(
     function exportTmPDF() {{
       var D=currentLangTests;
       var t=tmExportMeta();
-      var btn=document.getElementById('tm-export-pdf-btn');
-      var origHtml=btn?btn.innerHTML:'';
-      if(btn){{btn.disabled=true;btn.textContent='Generating…';}}
       var strips=document.querySelectorAll('.summary-strip');
       var statsHtml='';strips.forEach(function(s){{statsHtml+=s.outerHTML;}});
       var totTests=D.reduce(function(a,d){{return a+d.tests;}},0);
@@ -15055,11 +15148,7 @@ async fn test_metrics_handler(
         +'<div class="rep-footer">© 2026 OxideSLOC · oxide-sloc v{version} · local code metrics workbench · AGPL-3.0-or-later · Generated '+t.full+'</div>'
         +'</body></html>';
       var proj4=t.proj.replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').substring(0,30)||'all';
-      fetch('/export/pdf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:doc,filename:'oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf'}})}})
-        .then(function(r){{if(!r.ok)throw new Error('server returned '+r.status);return r.blob();}})
-        .then(function(blob){{var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf';a.click();setTimeout(function(){{URL.revokeObjectURL(a.href);}},300);}})
-        .catch(function(e){{alert('PDF export failed: '+e.message+'. A Chromium-based browser (Chrome/Edge/Brave) must be installed on the server for PDF rendering.');}})
-        .finally(function(){{if(btn){{btn.disabled=false;btn.innerHTML=origHtml;}}}});
+      window.slocExportPdf({{html:doc,filename:'oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf',button:document.getElementById('tm-export-pdf-btn')}});
     }}
 
     (function() {{
@@ -15075,6 +15164,7 @@ async fn test_metrics_handler(
   }})();
   </script>
   <script nonce="{nonce}">(function(){{var dot=document.getElementById('status-dot'),pingEl=document.getElementById('server-ping-ms'),tipEl=document.getElementById('server-tip-ping'),lbl=document.getElementById('server-status-label'),fm=document.getElementById('footer-mode'),isServer=location.hostname!=='localhost'&&location.hostname!=='127.0.0.1'&&location.hostname!=='[::1]';if(lbl)lbl.textContent=isServer?'Server':'Local';if(fm)fm.textContent='oxide-sloc v{version} \u2014 Mode: '+(isServer?'Network Server':'Local');function setDot(ms){{if(!dot)return;if(ms<100){{dot.style.background='#26d768';dot.style.boxShadow='0 0 0 4px rgba(38,215,104,0.14)';}}else if(ms<300){{dot.style.background='#f5a623';dot.style.boxShadow='0 0 0 4px rgba(245,166,35,0.14)';}}else{{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}}function doPing(){{var t0=performance.now();fetch('/healthz',{{cache:'no-store'}}).then(function(){{var ms=Math.round(performance.now()-t0);if(pingEl)pingEl.textContent=ms+'ms';if(tipEl)tipEl.textContent='Server latency: '+ms+' ms';setDot(ms);}}).catch(function(){{if(pingEl)pingEl.textContent='';if(tipEl)tipEl.textContent='';if(dot){{dot.style.background='#e05c5c';dot.style.boxShadow='0 0 0 4px rgba(224,92,92,0.14)';}}}});}}doPing();setInterval(doPing,5000);}})();</script>
+  {toast_assets}
 </body>
 </html>"#,
     );
@@ -22715,8 +22805,8 @@ struct ScanSetupTemplate {
         <span class="meta-chip">Scan by <b>{{ scan_performed_by }}</b></span>
         <span class="meta-chip">Scanned <b>{{ scan_time_display }}</b></span>
         <span class="meta-chip">OS <b>{{ os_display }}</b></span>
-        <span class="meta-chip">Files analyzed <b>{{ files_analyzed }}</b></span>
-        <span class="meta-chip">Files skipped <b>{{ files_skipped }}</b></span>
+        <span class="meta-chip">Files analyzed <b>{{ files_analyzed|commas }}</b></span>
+        <span class="meta-chip">Files skipped <b>{{ files_skipped|commas }}</b></span>
       </div>
 
       <!-- All summary stat chips in one unified strip (8 columns) -->
@@ -23303,7 +23393,7 @@ struct ScanSetupTemplate {
       </div>
       <div class="summary-strip" style="margin-top:0;grid-template-columns:repeat(4,1fr);">
         <div class="stat-chip">
-          <div class="stat-chip-val" data-fmt="{{ test_count }}">{{ test_count }}</div>
+          <div class="stat-chip-val" data-fmt="{{ test_count }}">{{ test_count|commas }}</div>
           <div class="stat-chip-label">Test Functions</div>
           <div class="stat-chip-tip">Lexically detected test case / function definitions</div>
         </div>
@@ -26208,7 +26298,11 @@ struct RelocateScanTemplate {
     .git-chip{font-family:ui-monospace,monospace;font-size:11px;font-weight:700;background:rgba(100,130,220,0.08);border:1px solid rgba(100,130,220,0.20);border-radius:6px;padding:2px 7px;color:var(--accent);}
     body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
     .metric-num{font-weight:700;color:var(--text);}
-    .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
+    .metric-secondary{font-size:11px;color:var(--muted);margin-top:3px;}
+    .skipped-pill{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:1px 8px;line-height:1.5;font-variant-numeric:tabular-nums;}
+    .skipped-pill::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--muted);opacity:.6;}
+    body.dark-theme .skipped-pill{background:rgba(255,255,255,0.04);border-color:rgba(255,255,255,0.10);}
+    .git-commit-chip{cursor:help;}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn:hover{background:var(--line);}
     .btn.primary{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
@@ -26474,12 +26568,12 @@ struct RelocateScanTemplate {
               <td><span class="ts-local" data-utc-ms="{{ entry.timestamp_utc_ms }}">{{ entry.timestamp }}</span></td>
               <td title="{{ entry.project_path }}">{{ entry.project_label }}</td>
               <td><span class="run-id-chip">{{ entry.run_id_short }}</span></td>
-              <td><span class="metric-num">{{ entry.files_analyzed }}</span><div class="metric-secondary">{{ entry.files_skipped }} skipped</div></td>
+              <td><span class="metric-num">{{ entry.files_analyzed }}</span><div class="metric-secondary"><span class="skipped-pill">{{ entry.files_skipped|commas }} skipped</span></div></td>
               <td><span class="metric-num">{{ entry.code_lines }}</span></td>
               <td><span class="metric-num">{{ entry.comment_lines }}</span></td>
               <td><span class="metric-num">{{ entry.blank_lines }}</span></td>
               <td>{% if !entry.git_branch.is_empty() %}<span class="git-chip">{{ entry.git_branch }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
-              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip" title="{{ entry.git_commit }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
+              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip git-commit-chip" title="{{ entry.git_commit_long }}" data-full-commit="{{ entry.git_commit_long }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
               <td class="report-cell">
                 <div class="actions-cell">
                   {% if entry.has_json %}<a class="btn primary rpt-btn" href="/runs/result/{{ entry.run_id }}" target="_blank" rel="noopener" title="Open full interactive result report">View</a>{% else %}<a class="btn primary rpt-btn" href="/runs/html/{{ entry.run_id }}" target="_blank" rel="noopener" title="View HTML report">View</a>{% endif %}
@@ -27492,7 +27586,7 @@ struct HistoryTemplate {
               <td><span class="metric-num">{{ entry.comment_lines }}</span></td>
               <td><span class="metric-num">{{ entry.blank_lines }}</span></td>
               <td>{% if !entry.git_branch.is_empty() %}<span class="git-chip">{{ entry.git_branch }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
-              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip">{{ entry.git_commit }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
+              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip" style="cursor:help;" title="{{ entry.git_commit_long }}">{{ entry.git_commit }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
               <td style="white-space:normal;vertical-align:middle;">{% if !entry.submodule_links.is_empty() %}<div class="submod-chips-cell">{% for sub in entry.submodule_links %}<span class="submod-chip">{{ sub.name }}</span>{% endfor %}</div>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
             </tr>
             {% endfor %}
@@ -28239,16 +28333,26 @@ struct CompareSelectTemplate {
     .submod-scope-hint{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap;}
     .ic-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
     @media(max-width:800px){.ic-grid{grid-template-columns:1fr;}}
-    .ic-card{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:16px 20px;}
+    .ic-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 20px;}
     body.dark-theme .ic-card{background:var(--surface-2);}
     .ic-card-h2{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-2);margin:0 0 10px;}
     .ic-leg{display:flex;gap:14px;margin-bottom:10px;font-size:11px;align-items:center;flex-wrap:wrap;}
     .ic-leg-item{cursor:pointer;transition:opacity .15s;border-radius:4px;padding:2px 6px;}
     .ic-leg-item:hover{background:rgba(211,122,76,0.08);}
     .ic-dot{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px;}
-    .ic-cb{cursor:pointer;transition:filter .15s;}.ic-cb:hover{filter:brightness(1.12);}
+    .ic-cb{cursor:pointer;transition:opacity .17s,filter .17s,transform .17s;transform-box:fill-box;transform-origin:center center;}.ic-cb:hover{filter:brightness(1.15) drop-shadow(0 2px 6px rgba(0,0,0,.18));transform:scale(1.05);}
     .ic-card-h2-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
     .ic-card-h2-row .ic-card-h2{margin:0;}
+    .ic-expand-btn{background:none;border:1px solid var(--line-strong);border-radius:6px;cursor:pointer;color:var(--muted);padding:4px 10px;font-size:12px;line-height:1;transition:background .13s,color .13s;flex-shrink:0;white-space:nowrap;margin-left:auto;}
+    .ic-expand-btn:hover{background:var(--surface-2);color:var(--text);}
+    .ic-svg-modal-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.58);z-index:9998;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}
+    .ic-svg-modal-ov.open{display:flex;}
+    .ic-svg-modal{background:var(--surface);border:1px solid var(--line-strong);border-radius:14px;padding:22px 24px;max-width:1100px;width:100%;max-height:88vh;overflow-y:auto;position:relative;box-shadow:0 24px 80px rgba(0,0,0,0.3);}
+    body.dark-theme .ic-svg-modal{background:var(--surface-2);}
+    .ic-svg-modal-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--line);}
+    .ic-svg-modal-title{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-2);}
+    .ic-svg-modal-close{background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:5px 11px;cursor:pointer;color:var(--text);font-size:12px;font-weight:700;}
+    .ic-svg-modal-close:hover{background:var(--line);}
     .chart-metric-btn{padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .12s;}
     .chart-metric-btn.active{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
     .chart-metric-btn:hover:not(.active){background:var(--line);}
@@ -28463,10 +28567,10 @@ struct CompareSelectTemplate {
           <div class="dc-tip">Per-file breakdown.<br>Modified = at least one count changed.<br>Unchanged = identical counts in both scans.<br>Added/Removed = only in one scan.</div>
           <div class="delta-card-label">File changes</div>
           <div class="file-changes-grid">
-            <div class="fc-row fc-modified"><span class="fc-count">{{ files_modified }}</span><span class="fc-label">Modified</span></div>
-            <div class="fc-row fc-added"><span class="fc-count">{{ files_added }}</span><span class="fc-label">Added</span></div>
-            <div class="fc-row fc-removed"><span class="fc-count">{{ files_removed }}</span><span class="fc-label">Removed</span></div>
-            <div class="fc-row fc-unchanged"><span class="fc-count">{{ files_unchanged }}</span><span class="fc-label">Unchanged (identical code counts)</span></div>
+            <div class="fc-row fc-modified"><span class="fc-count">{{ files_modified|commas }}</span><span class="fc-label">Modified</span></div>
+            <div class="fc-row fc-added"><span class="fc-count">{{ files_added|commas }}</span><span class="fc-label">Added</span></div>
+            <div class="fc-row fc-removed"><span class="fc-count">{{ files_removed|commas }}</span><span class="fc-label">Removed</span></div>
+            <div class="fc-row fc-unchanged"><span class="fc-count">{{ files_unchanged|commas }}</span><span class="fc-label">Unchanged (identical code counts)</span></div>
           </div>
         </div>
       </div>
@@ -28514,38 +28618,48 @@ struct CompareSelectTemplate {
               <button class="chart-metric-btn" data-cmp-metric="tests">Tests</button>
               <button class="chart-metric-btn" data-cmp-metric="cov">Coverage</button>
             </div>
+            <button class="ic-expand-btn" data-expand-src="cmp-tl-svg" data-expand-title="Timeline">&#x2922; Full View</button>
           </div>
           <div class="chart-wrap"><svg id="cmp-tl-svg" width="100%" height="280"></svg></div>
         </div>
         <div class="ic-card">
-          <div class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</div>
-          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#C45C10"></span><span style="color:#C45C10;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#2A6846"></span><span style="color:#2A6846;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#D4A017"></span><span style="color:#D4A017;font-weight:600">Comments</span></span><span style="font-size:10px;color:var(--muted)">(faded&nbsp;=&nbsp;before)</span></div>
+          <div class="ic-card-h2-row"><span class="ic-card-h2">Code Metrics &mdash; Baseline vs Current</span><button class="ic-expand-btn" data-expand-src="ic-c1" data-expand-title="Code Metrics — Baseline vs Current">&#x2922; Full View</button></div>
+          <div class="ic-leg"><span class="ic-leg-item" data-highlight="Code Lines"><span class="ic-dot" style="background:#C45C10"></span><span style="color:#C45C10;font-weight:600">Code Lines</span></span><span class="ic-leg-item" data-highlight="Files Analyzed"><span class="ic-dot" style="background:#2A6846"></span><span style="color:#2A6846;font-weight:600">Files</span></span><span class="ic-leg-item" data-highlight="Comments"><span class="ic-dot" style="background:#D4A017"></span><span style="color:#D4A017;font-weight:600">Comments</span></span></div>
           <div id="ic-c1"></div>
         </div>
         <div class="ic-card" id="ic-lang-card">
-          <div class="ic-card-h2">Language Code Delta</div>
+          <div class="ic-card-h2-row"><span class="ic-card-h2">Language Code Delta</span><button class="ic-expand-btn" data-expand-src="ic-c3" data-expand-title="Language Code Delta">&#x2922; Full View</button></div>
           <div id="ic-c3"></div>
         </div>
         <div class="ic-card">
-          <div class="ic-card-h2">Delta by Metric</div>
+          <div class="ic-card-h2-row"><span class="ic-card-h2">Delta by Metric</span><button class="ic-expand-btn" data-expand-src="ic-c2" data-expand-title="Delta by Metric">&#x2922; Full View</button></div>
           <div id="ic-c2"></div>
         </div>
         <div class="ic-card">
-          <div class="ic-card-h2">File Change Distribution</div>
+          <div class="ic-card-h2-row"><span class="ic-card-h2">File Change Distribution</span><button class="ic-expand-btn" data-expand-src="ic-c4" data-expand-title="File Change Distribution">&#x2922; Full View</button></div>
           <div id="ic-c4"></div>
+        </div>
+      </div>
+      <div class="ic-svg-modal-ov" id="ic-svg-modal-ov">
+        <div class="ic-svg-modal">
+          <div class="ic-svg-modal-hdr">
+            <span class="ic-svg-modal-title" id="ic-svg-modal-title"></span>
+            <button type="button" class="ic-svg-modal-close" id="ic-svg-modal-close">&times; Close</button>
+          </div>
+          <div id="ic-svg-modal-body"></div>
         </div>
       </div>
     </section>
 
     <section class="panel">
-      <div class="panel-title">File Matrix <span style="font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;text-transform:none;letter-spacing:0;">{{ files_modified + files_added + files_removed + files_unchanged }} files</span></div>
+      <div class="panel-title">File Matrix <span style="font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;text-transform:none;letter-spacing:0;">{{ (files_modified + files_added + files_removed + files_unchanged)|commas }} files</span></div>
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
         <div class="filter-tabs" style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="tab-btn tab-all active" data-filter="all">All ({{ files_modified + files_added + files_removed + files_unchanged }})</button>
-          <button class="tab-btn tab-modified" data-filter="modified">Modified ({{ files_modified }})</button>
-          <button class="tab-btn tab-added" data-filter="added">Added ({{ files_added }})</button>
-          <button class="tab-btn tab-removed" data-filter="removed">Removed ({{ files_removed }})</button>
-          <button class="tab-btn tab-unchanged" data-filter="unchanged">Unchanged ({{ files_unchanged }})</button>
+          <button class="tab-btn tab-all active" data-filter="all">All ({{ (files_modified + files_added + files_removed + files_unchanged)|commas }})</button>
+          <button class="tab-btn tab-modified" data-filter="modified">Modified ({{ files_modified|commas }})</button>
+          <button class="tab-btn tab-added" data-filter="added">Added ({{ files_added|commas }})</button>
+          <button class="tab-btn tab-removed" data-filter="removed">Removed ({{ files_removed|commas }})</button>
+          <button class="tab-btn tab-unchanged" data-filter="unchanged">Unchanged ({{ files_unchanged|commas }})</button>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
           <span class="delta-note">* &Delta; = delta (change from baseline &rarr; current)</span>
@@ -29195,7 +29309,6 @@ struct CompareSelectTemplate {
       // ── Chart 1: Baseline vs Current grouped bars (height fills the card to
       //    match the Language Code Delta column height) ────────────
       var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:'#E3A876',cc:'#C45C10'},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:'#9FC3AE',cc:'#2A6846'},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:'#E0C58A',cc:'#BE8A2E'}];
-      var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
       var FONT_C="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif";
       var C1W=600,c1mt=36,c1mb=30,c1ml=14,c1mr=14,c1bw=56,c1gap=10,C1H=380;
       var c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length;
@@ -29204,7 +29317,9 @@ struct CompareSelectTemplate {
       c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="#CCC" stroke-width="1.5"/>';
       c1mets.forEach(function(m,i){
         var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
-        var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
+        // Per-metric scale so small magnitudes (files) stay visible next to large ones (code).
+        var gMax=Math.max(m.b,m.c)*1.15||1;
+        var bh0=Math.max(c1ph*m.b/gMax,2),bh1=Math.max(c1ph*m.c/gMax,2);
         c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="'+FONT_C+'" font-size="12" font-weight="600" fill="#444">'+esc(m.l)+'</text>';
         c1+='<rect class="cb" x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="5"'+barTT(m.l,'Baseline: '+fmt(m.b))+'/>';
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="'+m.bc+'">'+fmt(m.b)+'</text>';
@@ -29213,6 +29328,7 @@ struct CompareSelectTemplate {
         c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="#999">Before</text>';
         c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="'+m.cc+'">After</text>';
       });
+      c1+='<text x="'+px(C1W/2)+'" y="'+(C1H-8)+'" text-anchor="middle" font-family="'+FONT_C+'" font-size="9" fill="#999">Each metric uses its own scale — compare Before vs After within a metric</text>';
       c1+='</svg>';
 
       // ── Chart 2: Delta by Metric ─────────────────────────────────────────
@@ -29375,6 +29491,9 @@ struct CompareSelectTemplate {
       var cs=getComputedStyle(document.body),dark=document.body.classList.contains('dark-theme');
       function cv(n,fb){var v=cs.getPropertyValue(n);return(v&&v.trim())||fb;}
       var OX='#C45C10',GN='#2A6846',GD='#D4A017',RD='#B23030';
+      // Deeper shade of each metric hue for "before"/baseline bars — bold (not
+      // washed) so the chart reads with the same weight as /test-metrics.
+      var OXD='#8a3f0a',GND='#1d4a30',GDD='#9c7610';
       var FADE=dark?'#524238':'#e6d0bf';
       var textCol=cv('--text','#43342d'),mutedCol=cv('--muted','#7b675b'),LGY=cv('--line','#e6d0bf'),axisCol=cv('--line-strong','#d8bfad'),surfCol=cv('--surface','#fbf7f2');
       function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
@@ -29386,25 +29505,42 @@ struct CompareSelectTemplate {
       var dr=getDeltaExportRows(),sd=_sd,lm={};
       dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
       var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,12);
-      // Chart 1: Baseline vs Current grouped bars
-      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:FADE,cc:OX},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:FADE,cc:GN},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:FADE,cc:GD}];
-      var maxV1=Math.max.apply(null,c1mets.map(function(m){return Math.max(m.b,m.c);}))*1.15||1;
-      var C1W=600,C1H=188,c1mt=36,c1mb=26,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
-      var c1='<svg viewBox="0 0 '+C1W+' '+C1H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
-      for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
-      c1+='<line x1="'+c1ml+'" y1="'+(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+(c1mt+c1ph)+'" stroke="'+axisCol+'" stroke-width="1.5"/>';
-      c1mets.forEach(function(m,i){
-        var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
-        var bh0=Math.max(c1ph*m.b/maxV1,2),bh1=Math.max(c1ph*m.c/maxV1,2);
-        c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+textCol+'">'+esc(m.l)+'</text>';
-        c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">'+fmt(m.b)+'</text>';
-        c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"/>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
-        c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">Before</text>';
-        c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">After</text>';
-      });
-      c1+='</svg>';
+      // Chart 1: Baseline vs Current grouped bars. Height grows to fill the card so
+      // the bars are as tall as the (usually taller) Language Code Delta sibling that
+      // shares the same grid row, instead of sitting short at the top.
+      var c1mets=[{l:'Code Lines',b:sd.bc,c:sd.cc,bc:OXD,cc:OX},{l:'Files Analyzed',b:sd.bf,c:sd.cf,bc:GND,cc:GN},{l:'Comments',b:sd.bcm,c:sd.ccm,bc:GDD,cc:GD}];
+      function drawC1(){
+        var C1W=600,C1H=188;
+        var host=document.getElementById('ic-c1'),card=host?host.closest('.ic-card'):null;
+        if(host&&card&&host.clientWidth>0){
+          var avW=host.clientWidth;
+          var availPx=(card.getBoundingClientRect().bottom-16)-host.getBoundingClientRect().top;
+          var wantH=availPx*C1W/avW;
+          if(wantH>C1H)C1H=wantH;
+        }
+        var c1mt=36,c1mb=44,c1ml=14,c1mr=14,c1ph=C1H-c1mt-c1mb,c1gW=(C1W-c1ml-c1mr)/c1mets.length,c1bw=56,c1gap=10;
+        var c1='<svg viewBox="0 0 '+C1W+' '+px(C1H)+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
+        for(var gi=1;gi<=4;gi++){var gy=c1mt+c1ph*(1-gi/4);c1+='<line x1="'+c1ml+'" y1="'+px(gy)+'" x2="'+(C1W-c1mr)+'" y2="'+px(gy)+'" stroke="'+LGY+'" stroke-width="0.5" stroke-dasharray="4,3"/>';}
+        c1+='<line x1="'+c1ml+'" y1="'+px(c1mt+c1ph)+'" x2="'+(C1W-c1mr)+'" y2="'+px(c1mt+c1ph)+'" stroke="'+axisCol+'" stroke-width="1.5"/>';
+        c1mets.forEach(function(m,i){
+          var cx=px(c1ml+i*c1gW+c1gW/2),c1x0=px(cx-c1gap/2-c1bw),c1x1=px(cx+c1gap/2);
+          // Each metric scales to its OWN max so wildly different magnitudes (e.g. 4.5M
+          // code lines vs 28K files) are all readable — a shared scale buries the small ones.
+          var gMax=Math.max(m.b,m.c)*1.15||1;
+          var bh0=Math.max(c1ph*m.b/gMax,2),bh1=Math.max(c1ph*m.c/gMax,2);
+          c1+='<text x="'+cx+'" y="16" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+textCol+'">'+esc(m.l)+'</text>';
+          c1+='<rect'+btt(m.l,'Baseline: '+fmt(m.b))+' x="'+c1x0+'" y="'+px(c1mt+c1ph-bh0)+'" width="'+c1bw+'" height="'+px(bh0)+'" fill="'+m.bc+'" rx="3"/>';
+          c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph-bh0-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">'+fmt(m.b)+'</text>';
+          c1+='<rect'+btt(m.l,'Current: '+fmt(m.c))+' x="'+c1x1+'" y="'+px(c1mt+c1ph-bh1)+'" width="'+c1bw+'" height="'+px(bh1)+'" fill="'+m.cc+'" rx="3"/>';
+          c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph-bh1-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">'+fmt(m.c)+'</text>';
+          c1+='<text x="'+px(c1x0+c1bw/2)+'" y="'+px(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">Before</text>';
+          c1+='<text x="'+px(c1x1+c1bw/2)+'" y="'+px(c1mt+c1ph+16)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+m.cc+'">After</text>';
+        });
+        c1+='<text x="'+px(C1W/2)+'" y="'+px(C1H-6)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="8.5" fill="'+mutedCol+'">Each metric uses its own scale — compare Before vs After within a metric</text>';
+        c1+='</svg>';
+        return c1;
+      }
+      var c1=drawC1();
       // Chart 2: Delta by Metric
       var mets=[{l:'Code Lines',v:sd.cc-sd.bc,mc:OX},{l:'Files Analyzed',v:sd.cf-sd.bf,mc:GN},{l:'Comment Lines',v:sd.ccm-sd.bcm,mc:GD}];
       var maxD=Math.max.apply(null,mets.map(function(m){return Math.abs(m.v);}))||1;
@@ -29412,11 +29548,11 @@ struct CompareSelectTemplate {
       var c2='<svg viewBox="0 0 '+C2W+' '+C2H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
       c2+='<line x1="'+cx2+'" y1="6" x2="'+cx2+'" y2="'+(C2H-6)+'" stroke="'+LGY+'" stroke-width="1.5"/>';
       mets.forEach(function(m,i){
-        var y=16+i*rH,bw=Math.max(Math.abs(m.v)/maxD*maxBW,2),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
-        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+m.mc+'">'+esc(m.l)+'</text>';
+        var y=16+i*rH,bw=(m.v===0?0:Math.max(Math.abs(m.v)/maxD*maxBW,2)),col=m.v>=0?GN:RD,bx=m.v>=0?cx2:cx2-bw,sign=m.v>=0?'+':'',vStr=sign+fmt(m.v);
+        c2+='<text x="'+(c2LW-8)+'" y="'+(y+20)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" fill="'+textCol+'">'+esc(m.l)+'</text>';
         c2+='<rect'+btt(m.l,'Delta: '+vStr)+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="32" fill="'+col+'" rx="3"/>';
         if(bw>=52){c2+='<text x="'+px(bx+bw/2)+'" y="'+(y+26)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
-        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+        else{var vx2=m.v>=0?px(bx+bw)+5:px(bx)-5,anc2=m.v>=0?'start':'end';c2+='<text x="'+vx2+'" y="'+(y+26)+'" text-anchor="'+anc2+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="700" fill="'+textCol+'">'+esc(vStr)+'</text>';}
       });
       c2+='</svg>';
       // Chart 3: Language Code Delta
@@ -29427,53 +29563,70 @@ struct CompareSelectTemplate {
         c3='<svg viewBox="0 0 '+C3W+' '+C3H+'" width="100%" xmlns="http://www.w3.org/2000/svg">';
         c3+='<line x1="'+cx3+'" y1="0" x2="'+cx3+'" y2="'+C3H+'" stroke="'+LGY+'" stroke-width="1.5"/>';
         langs.forEach(function(l,i){
-          var e=lm[l],y=8+i*L3rH,bw=Math.max(Math.abs(e.d)/maxLD*maxLBW,2),col=e.d>=0?GN:RD,bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
+          var e=lm[l],y=8+i*L3rH,bw=(e.d===0?0:Math.max(Math.abs(e.d)/maxLD*maxLBW,2)),col=e.d>=0?GN:RD,vcol=(e.d===0?textCol:col),bx=e.d>=0?cx3:cx3-bw,sign=e.d>=0?'+':'',vStr=sign+fmt(e.d);
           c3+='<text x="'+(c3LW-7)+'" y="'+(y+18)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="'+textCol+'">'+esc(l)+'</text>';
           c3+='<rect'+btt(l,'Delta: '+vStr+' code lines \u2022 '+e.f+' file'+(e.f!==1?'s':''))+' x="'+px(bx)+'" y="'+(y+5)+'" width="'+px(bw)+'" height="20" fill="'+col+'" rx="3"/>';
           if(bw>=48){c3+='<text x="'+px(bx+bw/2)+'" y="'+(y+19)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="white">'+esc(vStr)+'</text>';}
-          else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="'+col+'">'+esc(vStr)+'</text>';}
+          else{var vx3=e.d>=0?px(bx+bw)+4:px(bx)-4,anc3=e.d>=0?'start':'end';c3+='<text x="'+vx3+'" y="'+(y+19)+'" text-anchor="'+anc3+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="700" fill="'+vcol+'">'+esc(vStr)+'</text>';}
           c3+='<text x="'+(C3W-5)+'" y="'+(y+19)+'" text-anchor="end" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="'+mutedCol+'">'+e.f+' file'+(e.f!==1?'s':'')+'</text>';
         });
         c3+='</svg>';
       }
-      // Chart 4: File Change Donut — centered pie with legend below
+      // Chart 4: File Change Donut — pie left, legend to the right (vertically centered)
+      var FONT4='Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
       var segs=[{l:'Modified',v:sd.fm,c:OX},{l:'Added',v:sd.fa,c:GN},{l:'Removed',v:sd.fr,c:RD},{l:'Unchanged',v:sd.fu,c:FADE}].filter(function(s){return s.v>0;});
       var tot=segs.reduce(function(a,s){return a+s.v;},0)||1;
-      var C4W=240,Ro=75,Ri=48,cx4=120,cy4=88,legY=172,legRowH=18,C4H=legY+Math.ceil(segs.length/2)*legRowH+8;
-      var c4='<svg viewBox="0 0 '+C4W+' '+C4H+'" width="100%" style="max-width:336px;display:block;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
+      var DW=395,DH=Math.max(200,segs.length*30+44),cx4=104,cy4=Math.round(DH/2),Ro=88,Ri=48;
+      var legX=212,legCount=segs.length,legSpacing=Math.max(18,Math.min(30,Math.floor((DH-24)/Math.max(legCount,1)))),legYStart=Math.round((DH-legCount*legSpacing)/2);
+      var c4='<svg viewBox="0 0 '+DW+' '+DH+'" width="100%" style="display:block;max-width:480px;margin:0 auto;" xmlns="http://www.w3.org/2000/svg">',ang=-Math.PI/2;
       if(segs.length===1){
-        c4+='<circle'+btt(segs[0].l,fmt(segs[0].v)+' files \u2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+Ro+'" fill="'+segs[0].c+'"/>';
-        c4+='<circle cx="'+cx4+'" cy="'+cy4+'" r="'+Ri+'" fill="var(--surface)"/>';
+        var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
+        c4+='<circle'+btt(segs[0].l,fmt(segs[0].v)+' files \u2022 100%')+' cx="'+cx4+'" cy="'+cy4+'" r="'+rm+'" fill="none" stroke="'+segs[0].c+'" stroke-width="'+rsw+'"/>';
       } else {
-        segs.forEach(function(s){
-          var sw=Math.min(s.v/tot*2*Math.PI,2*Math.PI-0.001),a2=ang+sw;
+        // Give every visible slice a small minimum sweep, taken from the largest
+        // slice. Without this a ~100% slice (e.g. all-Unchanged) spans a full 360°
+        // arc whose start and end points coincide, so SVG renders nothing (blank).
+        var TWO=2*Math.PI,minSw=0.06,raw=segs.map(function(s){return s.v/tot*TWO;}),maxIdx=0;
+        for(var k=1;k<raw.length;k++){if(raw[k]>raw[maxIdx])maxIdx=k;}
+        var deficit=0,sweeps=raw.map(function(rw,k){if(k!==maxIdx&&rw<minSw){deficit+=(minSw-rw);return minSw;}return rw;});
+        sweeps[maxIdx]=Math.max(0.001,sweeps[maxIdx]-deficit);
+        segs.forEach(function(s,si){
+          var sw=Math.min(sweeps[si],TWO-0.06),a2=ang+sw;
           var x1=cx4+Ro*Math.cos(ang),y1=cy4+Ro*Math.sin(ang),x2=cx4+Ro*Math.cos(a2),y2=cy4+Ro*Math.sin(a2);
           var xi1=cx4+Ri*Math.cos(a2),yi1=cy4+Ri*Math.sin(a2),xi2=cx4+Ri*Math.cos(ang),yi2=cy4+Ri*Math.sin(ang);
-          c4+='<path'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="'+surfCol+'" stroke-width="2.5"/>';
+          var pct=Math.round(s.v/tot*100);
+          c4+='<path'+btt(s.l,fmt(s.v)+' files \u2022 '+pct+'%')+' d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+s.c+'" stroke="'+surfCol+'" stroke-width="2"/>';
+          if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;c4+='<text x="'+px(cx4+mR*Math.cos(mAng))+'" y="'+px(cy4+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT4+'" font-size="11" font-weight="700" fill="'+(s.c===FADE?textCol:'#fff')+'" style="pointer-events:none;">'+pct+'%</text>';}
           ang+=sw;
         });
       }
-      c4+='<text x="'+cx4+'" y="'+(cy4-4)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="22" font-weight="bold" fill="'+textCol+'">'+fmt(tot)+'</text>';
-      c4+='<text x="'+cx4+'" y="'+(cy4+15)+'" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" fill="'+mutedCol+'">total files</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4-7)+'" text-anchor="middle" font-family="'+FONT4+'" font-size="21" font-weight="800" fill="'+textCol+'">'+fmt(tot)+'</text>';
+      c4+='<text x="'+cx4+'" y="'+(cy4+14)+'" text-anchor="middle" font-family="'+FONT4+'" font-size="11" fill="'+mutedCol+'">total files</text>';
       segs.forEach(function(s,i){
-        var col=i%2===0?14:C4W/2+6,row=Math.floor(i/2);
-        c4+='<rect'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+col+'" y="'+(legY+row*legRowH)+'" width="12" height="12" fill="'+s.c+'" rx="2" style="cursor:pointer;"/>';
-        c4+='<text'+btt(s.l,fmt(s.v)+' files \u2022 '+px(s.v/tot*100)+'%')+' x="'+(col+16)+'" y="'+(legY+row*legRowH+10)+'" font-family="Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" fill="'+textCol+'" style="cursor:pointer;">'+esc(s.l)+': '+fmt(s.v)+'</text>';
+        var ly=legYStart+i*legSpacing,pct=Math.round(s.v/tot*100);
+        c4+='<g'+btt(s.l,fmt(s.v)+' files \u2022 '+pct+'%')+' style="cursor:pointer;">';
+        c4+='<rect x="'+legX+'" y="'+(ly-2)+'" width="'+(DW-legX)+'" height="'+legSpacing+'" fill="transparent"/>';
+        c4+='<rect x="'+legX+'" y="'+ly+'" width="11" height="11" rx="2" fill="'+s.c+'"/>';
+        c4+='<text x="'+(legX+16)+'" y="'+(ly+10)+'" font-family="'+FONT4+'" font-size="'+Math.min(13,legSpacing-3)+'" fill="'+textCol+'">'+esc(s.l)+'</text>';
+        c4+='<text x="'+(legX+92)+'" y="'+(ly+10)+'" font-family="'+FONT4+'" font-size="'+Math.min(12,legSpacing-4)+'" font-weight="700" fill="'+mutedCol+'">'+fmt(s.v)+' ('+pct+'%)</text>';
+        c4+='</g>';
       });
       c4+='</svg>';
-      var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=c1;addTT(e1);}
+      // Inject the fixed-height siblings first so the grid row settles to the (taller)
+      // Language Code Delta height, then draw Code Metrics (c1) to fill that height.
       var e2=document.getElementById('ic-c2');if(e2){e2.innerHTML=c2;addTT(e2);}
       var e3=document.getElementById('ic-c3');if(e3){e3.innerHTML=langs.length?c3:'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No language delta.</p>';addTT(e3);}
       var e4=document.getElementById('ic-c4');if(e4){e4.innerHTML=c4;addTT(e4);}
       var lc=document.getElementById('ic-lang-card');if(lc)lc.style.display=langs.length?'':'none';
+      var e1=document.getElementById('ic-c1');if(e1){e1.innerHTML=drawC1();addTT(e1);}
 
       // Compare Timeline chart (Baseline vs Current, 2 points)
       (function() {
         var activeCmpMetric='code';
         var cmpMetricLabel={code:'Code Lines',files:'Files',comments:'Comments',tests:'Tests',cov:'Coverage'};
-        function renderCmpTL(metric) {
-          var svg=document.getElementById('cmp-tl-svg');if(!svg)return;
-          var W=svg.getBoundingClientRect().width||800,H=280;
+        function renderCmpTL(metric, targetSvg, targetH) {
+          var svg=targetSvg||document.getElementById('cmp-tl-svg');if(!svg)return;
+          var W=svg.getBoundingClientRect().width||800,H=targetH||280;
           svg.setAttribute('height',H);
           var pad={l:62,r:20,t:32,b:72};
           var dark=document.body.classList.contains('dark-theme');
@@ -29551,11 +29704,15 @@ struct CompareSelectTemplate {
           });
         });
         var ttgl=document.getElementById('theme-toggle');
-        if(ttgl)ttgl.addEventListener('click',function(){setTimeout(function(){renderCmpTL(activeCmpMetric);},0);});
+        if(ttgl)ttgl.addEventListener('click',function(){setTimeout(function(){renderCmpTL(activeCmpMetric);if(window.__sdFvTL)renderCmpTL(window.__sdFvTL.metric,window.__sdFvTL.svg,window.__sdFvTL.h);},0);});
         if(typeof ResizeObserver!=='undefined'){
           var cmpSvg=document.getElementById('cmp-tl-svg');
           if(cmpSvg)new ResizeObserver(function(){renderCmpTL(activeCmpMetric);}).observe(cmpSvg);
         }
+        // Expose the timeline renderer + current metric so the Full View modal can
+        // re-draw it live (pixel-sized chart can't be snapshot-scaled like the bars).
+        window.__sdRenderTL=function(m,svgEl,h){renderCmpTL(m,svgEl,h);};
+        window.__sdGetMetric=function(){return activeCmpMetric;};
         renderCmpTL(activeCmpMetric);
       })();
 
@@ -29575,9 +29732,70 @@ struct CompareSelectTemplate {
           chartEl.querySelectorAll('[data-ttl]').forEach(function(x){x.style.filter='';x.style.opacity='';});
         });
       });
+
+      // ── Full View: enlarge any chart in a modal (snapshots current SVG) ──────
+      (function(){
+        var ov=document.getElementById('ic-svg-modal-ov');
+        var body=document.getElementById('ic-svg-modal-body');
+        var ttl=document.getElementById('ic-svg-modal-title');
+        var closeBtn=document.getElementById('ic-svg-modal-close');
+        if(!ov||!body)return;
+        function close(){
+          ov.classList.remove('open');body.innerHTML='';
+          if(window.__sdFvTL){if(window.__sdFvTL.ro)window.__sdFvTL.ro.disconnect();window.__sdFvTL=null;}
+          var tt=document.getElementById('ic-tt');if(tt)tt.style.display='none';
+        }
+        function open(srcId,title){
+          var src=document.getElementById(srcId);if(!src)return;
+          if(ttl)ttl.textContent=title||'';
+          // The Timeline is pixel-sized (viewBox locked to its render width), so a static
+          // snapshot stretches and loses interactivity. Re-render it live into the modal at
+          // full size instead — keeps proportions, animation, crosshair, tooltip and the
+          // metric tabs working exactly like the inline chart.
+          if(srcId==='cmp-tl-svg'&&window.__sdRenderTL){
+            var curM=window.__sdGetMetric?window.__sdGetMetric():'code';
+            var mets=[['code','Code Lines'],['files','Files'],['comments','Comments'],['tests','Tests'],['cov','Coverage']];
+            var btnsHtml=mets.map(function(p){return '<button class="chart-metric-btn'+(p[0]===curM?' active':'')+'" data-fv-metric="'+p[0]+'">'+p[1]+'</button>';}).join('');
+            body.innerHTML='<div class="cmp-tl-btns" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">'+btnsHtml+'</div><div class="chart-wrap" style="width:100%;"><svg id="cmp-tl-fv-svg" width="100%" height="440" style="display:block;width:100%;"></svg></div>';
+            var fvSvg=body.querySelector('#cmp-tl-fv-svg');
+            window.__sdFvTL={svg:fvSvg,h:440,metric:curM,ro:null};
+            ov.classList.add('open');
+            requestAnimationFrame(function(){window.__sdRenderTL(window.__sdFvTL.metric,fvSvg,440);});
+            if(typeof ResizeObserver!=='undefined'){var ro=new ResizeObserver(function(){if(window.__sdFvTL)window.__sdRenderTL(window.__sdFvTL.metric,window.__sdFvTL.svg,window.__sdFvTL.h);});ro.observe(fvSvg);window.__sdFvTL.ro=ro;}
+            body.querySelectorAll('[data-fv-metric]').forEach(function(b){
+              b.addEventListener('click',function(){
+                if(!window.__sdFvTL)return;
+                window.__sdFvTL.metric=this.getAttribute('data-fv-metric');
+                body.querySelectorAll('[data-fv-metric]').forEach(function(x){x.classList.remove('active');});
+                this.classList.add('active');
+                window.__sdRenderTL(window.__sdFvTL.metric,window.__sdFvTL.svg,window.__sdFvTL.h);
+              });
+            });
+            return;
+          }
+          var card=src.closest('.ic-card');
+          var legHtml='';
+          if(card){var leg=card.querySelector('.ic-leg');if(leg)legHtml='<div class="ic-leg" style="margin-bottom:14px;">'+leg.innerHTML+'</div>';}
+          var inner=src.tagName.toLowerCase()==='svg'?src.outerHTML:src.innerHTML;
+          if(!inner||!inner.replace(/\s/g,'')){body.innerHTML=legHtml+'<p style="color:var(--muted);font-size:13px;padding:8px 0 0;">No chart data to display.</p>';ov.classList.add('open');return;}
+          body.innerHTML=legHtml+inner;
+          var svg=body.querySelector('svg');
+          if(svg){svg.removeAttribute('width');svg.removeAttribute('height');svg.style.width='100%';svg.style.height='auto';svg.style.maxWidth='none';}
+          addTT(body);
+          ov.classList.add('open');
+        }
+        document.querySelectorAll('.ic-expand-btn[data-expand-src]').forEach(function(btn){
+          btn.addEventListener('click',function(){open(btn.getAttribute('data-expand-src'),btn.getAttribute('data-expand-title'));});
+        });
+        if(closeBtn)closeBtn.addEventListener('click',close);
+        ov.addEventListener('click',function(e){if(e.target===ov)close();});
+        document.addEventListener('keydown',function(e){if(e.key==='Escape'&&ov.classList.contains('open'))close();});
+      })();
+
       document.querySelectorAll('.cmp-author-val').forEach(function(el){var h=el.nextElementSibling;if(h)h.textContent='/'+el.textContent.replace(/\s+/g,'');});
     })();
   </script>
+  {{ toast_assets|safe }}
   <script nonce="{{ csp_nonce }}">
   (function(){
     var S=[{n:'Classic',a:'#b85d33',b:'#7a371b'},{n:'Navy',a:'#283790',b:'#1e1e24'},{n:'Ember',a:'#ce5d3d',b:'#1e1e24'},{n:'Ocean',a:'#1f439b',b:'#1e1e24'},{n:'Royal',a:'#003184',b:'#1e1e24'}];
@@ -29676,6 +29894,8 @@ struct CompareTemplate {
     /// True when `scope=super` is active — viewing super-repo only (no submodule files).
     super_scope_active: bool,
     csp_nonce: String,
+    /// Shared toast + PDF-export helper block (see `sloc_toast_assets`).
+    toast_assets: String,
     /// Pre-built HTML for the coverage delta card, or empty string when no coverage data.
     coverage_delta_card: String,
     baseline_test_count: u64,

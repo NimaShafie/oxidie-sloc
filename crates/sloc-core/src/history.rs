@@ -90,6 +90,9 @@ pub struct RegistryEntry {
     /// Short git commit SHA active at scan time.
     #[serde(default)]
     pub git_commit: Option<String>,
+    /// Full-length git commit SHA active at scan time (shown on hover).
+    #[serde(default)]
+    pub git_commit_long: Option<String>,
     /// Author of the last git commit at scan time.
     #[serde(default)]
     pub git_author: Option<String>,
