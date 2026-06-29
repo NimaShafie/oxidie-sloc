@@ -10,6 +10,50 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.74] — 2026-06-28
+
+### Added
+
+- **Richer Scan Delta PDF** (`crates/sloc-web`, `crates/sloc-report`): the Scan
+  Delta export now carries the full metric set with a dedicated **File Changes**
+  section, code-line composition, optional tests/coverage detail, a per-page
+  footer, and a repeating header. The file listing reports only the files that
+  actually changed rather than capping or dumping every path.
+- **Interactive Git Hotspots table** (`crates/sloc-report`): the Hotspots table
+  in HTML reports is now sortable, paginated, resizable, and has header
+  tooltips.
+
+### Changed
+
+- **Windowed Scan Delta file matrix** (`crates/sloc-web`): the Compare page's
+  file-delta table now lifts its rows into a data model and renders only the
+  visible page (~25 rows) instead of touching every node on each sort/filter.
+  Large diffs (tens of thousands of files) that previously froze the page during
+  sort, filter, or column resize now stay responsive. The table uses
+  `table-layout:fixed` with a colgroup, and column resize pins pixel widths so a
+  dragged column actually grows while the wrapper scrolls.
+- **Theme-aware Compare page charts** (`crates/sloc-web`, `crates/sloc-report`):
+  the Scan Delta and Multi Compare charts now resolve their palette from the
+  shared theme tokens so they render correctly in dark mode.
+
+### Fixed
+
+- **Full commit SHA in tables** (`crates/sloc-web`): history and compare tables
+  show the full commit SHA via a custom JS tooltip, and the full SHA is now
+  recovered for older runs; the skipped label is simplified and skipped/file
+  counts are comma-formatted.
+- **PDF rendering robustness** (`crates/sloc-web`, `crates/sloc-report`): the
+  headless-Chrome PDF timeout is raised to 90s to survive a loaded host, the
+  `/export/pdf` body limit is raised to 64 MB to stop 413s on large reports,
+  PDF headers no longer overlap content or drop rows, and the Scan Delta footer
+  is pinned to the absolute page bottom. Git invocations are non-interactive and
+  drop `origin/HEAD`.
+- **Dependency advisories** (deps): upgraded `printpdf` 0.7 → 0.9, clearing the
+  `lopdf` audit advisory, with `osv-scanner.toml` ignoring the remaining
+  printpdf-transitive advisories.
+
+---
+
 ## [1.5.73] — 2026-06-25
 
 ### Added
