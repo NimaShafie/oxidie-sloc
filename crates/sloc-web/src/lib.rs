@@ -28979,7 +28979,7 @@ struct CompareSelectTemplate {
           'tr:nth-child(even) td{background:#faf8f6;}'+
           '.rfoot{position:fixed;left:0;right:0;bottom:0;height:20px;background:#1a2035;color:#9fb0c8;font-size:9px;display:flex;justify-content:space-between;align-items:center;padding:0 14px;box-sizing:border-box;z-index:99;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           '.rfoot-spacer{height:30px!important;border:none!important;padding:0!important;background:#fff!important;}';
-        var fileRows=dr.slice(0,200).map(function(r){
+        var fileRows=dr.map(function(r){
           var st=r[2]||'',ss=st==='added'?'color:#2a6846;font-weight:700':st==='removed'?'color:#b23030;font-weight:700':'';
           return '<tr><td style="word-break:break-all">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td>'+
             '<td style="'+ss+'">'+esc(st)+'</td>'+
@@ -28987,7 +28987,7 @@ struct CompareSelectTemplate {
             '<td style="text-align:right">'+fmtN(r[4])+'</td>'+
             '<td style="text-align:right">'+delt(r[5])+'</td></tr>';
         }).join('');
-        var more=dr.length>200?'<tr><td colspan="6" style="color:#888;font-style:italic;text-align:center">\u2026 '+fmtN(dr.length-200)+' more files \u2014 export to XLS for full list</td></tr>':'';
+        var more='';
         var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
         return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC \u2014 Scan Delta</title><style>'+css+'</style></head><body>'+
           '<div class="pdf-header">'+
