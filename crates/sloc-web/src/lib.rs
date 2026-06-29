@@ -29176,8 +29176,8 @@ struct CompareSelectTemplate {
         function fullN(n){var v=Number(n);return isNaN(v)?'\u2014':v.toLocaleString();}
         function delt(v){var s=String(v==null?'\u2014':v);if(!s||s==='0'||s==='\u2014')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
         var lm={};
-        dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
-        var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
+        dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0,c=parseInt(r[4])||0;if(!lm[l])lm[l]={f:0,d:0,c:0};lm[l].f++;lm[l].d+=d;lm[l].c+=c;});
+        var langs=Object.keys(lm).sort(function(a,b){return lm[b].c-lm[a].c;}).slice(0,15);
         var tfTotal=sd.fm+sd.fa+sd.fr+sd.fu;
         // The header/footer flow in normal document order (NOT position:fixed).
         // A fixed header repeats on every printed page in Chromium and overlaps
@@ -29219,14 +29219,14 @@ struct CompareSelectTemplate {
           'tr:nth-child(even) td{background:#faf8f6;}'+
           '.rfoot{position:fixed;left:0;right:0;bottom:0;height:20px;background:#1a2035;color:#9fb0c8;font-size:9px;display:flex;justify-content:space-between;align-items:center;padding:0 14px;box-sizing:border-box;z-index:99;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           '.rfoot-spacer{height:30px!important;border:none!important;padding:0!important;background:#fff!important;}'+
-          '.msec{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;}'+
+          '.msec{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;margin-bottom:10px;}'+
           '.mcard{border:1px solid #ddd;border-radius:8px;padding:8px 11px;}'+
           '.mc-l{font-size:9px;font-weight:700;text-transform:uppercase;color:#888;letter-spacing:.05em;}'+
           '.mc-v{font-size:17px;font-weight:900;color:#1a2035;margin-top:3px;}'+
           '.mc-b{font-size:10px;color:#999;margin-top:2px;}'+
           '.mc-p{font-size:11px;font-weight:700;margin-top:2px;}'+
           '.mc-p.pos{color:#2a6846;}.mc-p.neg{color:#b23030;}.mc-p.zero{color:#999;}'+
-          '.fcsec{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}'+
+          '.fcsec{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px;margin-bottom:10px;}'+
           '.fcc{border:1px solid #e5e0d8;border-radius:8px;padding:8px 11px;display:flex;align-items:center;gap:9px;background:#faf8f6;}'+
           '.fcc-n{font-size:18px;font-weight:900;}'+
           '.fcc-l{font-size:10px;font-weight:600;color:#666;line-height:1.25;}';
@@ -29239,7 +29239,10 @@ struct CompareSelectTemplate {
             '<td style="text-align:right">'+delt(r[5])+'</td></tr>';
         }).join('')||'<tr><td colspan="6" style="text-align:center;color:#888;font-style:italic;padding:10px">No file changes between these scans.</td></tr>';
         var more='';
-        var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
+        var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+fmtN(e.c)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
+        var extraCards='';
+        if(Number(sd.btests||0)>0||Number(sd.ctests||0)>0){extraCards+='<div class="mcard"><div class="mc-l">Tests Detected</div><div class="mc-v">'+fullN(sd.ctests)+'</div><div class="mc-b">Before: '+fullN(sd.btests)+'</div><div class="mc-p '+pcls(sd.btests,sd.ctests)+'">'+pct(sd.btests,sd.ctests)+'</div></div>';}
+        if(sd.bcov!=null||sd.ccov!=null){var _cc=(sd.ccov!=null?Number(sd.ccov).toFixed(1)+'%':'—'),_cb=(sd.bcov!=null?Number(sd.bcov).toFixed(1)+'%':'—');extraCards+='<div class="mcard"><div class="mc-l">Coverage</div><div class="mc-v">'+_cc+'</div><div class="mc-b">Before: '+_cb+'</div></div>';}
         return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC \u2014 Scan Delta</title><style>'+css+'</style></head><body>'+
           '<div class="pdf-header">'+
           '<div class="page-hdr"><div class="ph-brand"><em>oxide</em>-sloc</div><div class="ph-title">Scan Delta</div><div class="ph-date">'+esc(now)+'</div></div>'+
@@ -29255,7 +29258,7 @@ struct CompareSelectTemplate {
           '<div class="mcard"><div class="mc-l">Lines Added</div><div class="mc-v" style="color:#2a6846">+'+fullN(sd.cla)+'</div><div class="mc-b">New or grown source lines</div></div>'+
           '<div class="mcard"><div class="mc-l">Lines Removed</div><div class="mc-v" style="color:#b23030">−'+fullN(sd.clr)+'</div><div class="mc-b">Deleted or shrunk source lines</div></div>'+
           '<div class="mcard"><div class="mc-l">Churn Rate</div><div class="mc-v" style="color:#1a2035">'+esc(String(sd.churn))+'</div><div class="mc-b">(added + removed) ÷ baseline</div></div>'+
-          '</div></div>'+
+          extraCards+'</div></div>'+
           '<div class="sec"><p class="sh">File Changes</p>'+
           '<div class="fcsec">'+
           '<div class="fcc"><span class="fcc-n" style="color:#d4a017">'+fullN(sd.fm)+'</span><span class="fcc-l">Modified</span></div>'+
@@ -29263,7 +29266,7 @@ struct CompareSelectTemplate {
           '<div class="fcc"><span class="fcc-n" style="color:#b23030">'+fullN(sd.fr)+'</span><span class="fcc-l">Removed</span></div>'+
           '<div class="fcc"><span class="fcc-n" style="color:#555">'+fullN(sd.fu)+'</span><span class="fcc-l">Unchanged (identical code counts)</span></div>'+
           '</div></div>'+
-          (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
+          (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files</th><th style="text-align:right">Code Lines</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
           '<div class="sec">'+
           '<table><thead>'+
           '<tr class="pg-rhdr"><th colspan="6"><div class="pg-rhdr-in"><span>File Delta &middot; '+fmtN(dchg.length)+' changed of '+fmtN(dr.length)+' files</span><span class="pg-rhdr-r"><em>oxide</em>-sloc &middot; Scan Delta &middot; '+esc(projName)+'</span></div></th></tr>'+
