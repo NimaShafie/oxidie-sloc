@@ -7438,6 +7438,50 @@ fn fmt_git_date(iso: &str) -> Option<String> {
         .map(|d| fmt_la_time(d.with_timezone(&chrono::Utc)))
 }
 
+/// Recover the full-length commit SHA for a registry entry whose stored record
+/// predates the `git_commit_long` field, by scanning the tail of its result JSON.
+///
+/// Result JSONs can be very large (100 MB+ for big repos), but the git metadata
+/// is serialized after the per-file records, near the end of the file. We read a
+/// bounded tail and pick the `git_commit_long` value whose hash begins with the
+/// known short SHA — this disambiguates the super-repo commit from any submodule
+/// commits that also appear. Returns `None` if the file is unreadable or no match.
+fn extract_long_commit_from_json(path: &Path, short: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    if short.is_empty() {
+        return None;
+    }
+    let len = std::fs::metadata(path).ok()?.len();
+    const TAIL: u64 = 4 * 1024 * 1024; // 4 MiB is ample to cover the git metadata block
+    let start = len.saturating_sub(TAIL);
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let short_lower = short.to_ascii_lowercase();
+    let key = "\"git_commit_long\"";
+    let mut found: Option<String> = None;
+    let mut cursor = 0usize;
+    while let Some(idx) = text[cursor..].find(key) {
+        let after_key = cursor + idx + key.len();
+        cursor = after_key;
+        let rest = &text[after_key..];
+        let Some(colon) = rest.find(':') else { break };
+        let value_region = rest[colon + 1..].trim_start();
+        // Skip `null` (or any non-string) values without consuming the next field.
+        if let Some(open) = value_region.strip_prefix('"') {
+            if let Some(close) = open.find('"') {
+                let val = &open[..close];
+                if val.len() >= short.len() && val.to_ascii_lowercase().starts_with(&short_lower) {
+                    found = Some(val.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
 fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
     reg.entries
         .iter()
@@ -7504,11 +7548,18 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                 test_count: e.summary.test_count,
                 git_branch: e.git_branch.clone().unwrap_or_default(),
                 git_commit: e.git_commit.clone().unwrap_or_default(),
-                git_commit_long: e
-                    .git_commit_long
-                    .clone()
-                    .or_else(|| e.git_commit.clone())
-                    .unwrap_or_default(),
+                git_commit_long: {
+                    let short = e.git_commit.clone().unwrap_or_default();
+                    e.git_commit_long
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            e.json_path
+                                .as_ref()
+                                .and_then(|p| extract_long_commit_from_json(p, &short))
+                        })
+                        .unwrap_or(short)
+                },
                 has_html: e.html_path.as_ref().is_some_and(|p| p.exists()),
                 has_json: e.json_path.as_ref().is_some_and(|p| p.exists()),
                 has_pdf: e.pdf_path.as_ref().is_some_and(|p| p.exists()),
@@ -26299,9 +26350,7 @@ struct RelocateScanTemplate {
     body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
     .metric-num{font-weight:700;color:var(--text);}
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:3px;}
-    .skipped-pill{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:1px 8px;line-height:1.5;font-variant-numeric:tabular-nums;}
-    .skipped-pill::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--muted);opacity:.6;}
-    body.dark-theme .skipped-pill{background:rgba(255,255,255,0.04);border-color:rgba(255,255,255,0.10);}
+    .skipped-pill{font-size:10px;font-weight:600;font-style:italic;color:var(--muted);opacity:.9;font-variant-numeric:tabular-nums;white-space:nowrap;}
     .git-commit-chip{cursor:help;}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn:hover{background:var(--line);}
@@ -29051,7 +29100,7 @@ struct CompareSelectTemplate {
         function fullN(n){var v=Number(n);return isNaN(v)?'\u2014':v.toLocaleString();}
         function delt(v){var s=String(v==null?'\u2014':v);if(!s||s==='0'||s==='\u2014')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
         var lm={};
-        dchg.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
+        dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
         var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
         var tfTotal=sd.fm+sd.fa+sd.fr+sd.fu;
         // The header/footer flow in normal document order (NOT position:fixed).
@@ -31653,6 +31702,31 @@ mod form_config_tests {
     }
 
     // ── activity_window (git hotspots — on by default) ──
+
+    #[test]
+    fn extract_long_commit_picks_super_repo_by_short_prefix() {
+        // A pretty-printed JSON tail containing several submodule git_commit_long
+        // values plus the super-repo's; the helper must return the one whose hash
+        // starts with the known short SHA, ignoring the others and any null value.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        let body = r#"{
+  "submodules": [
+    { "git_commit_long": "aaaa111122223333444455556666777788889999" },
+    { "git_commit_long": null }
+  ],
+  "git_commit_short": "4c2cd9b",
+  "git_commit_long": "4c2cd9b2b46e4dc3efb86ccd560f33e6aa0be55b"
+}"#;
+        std::fs::write(&path, body).unwrap();
+        assert_eq!(
+            super::extract_long_commit_from_json(&path, "4c2cd9b").as_deref(),
+            Some("4c2cd9b2b46e4dc3efb86ccd560f33e6aa0be55b")
+        );
+        // No match for an unrelated short SHA, and empty short yields None.
+        assert_eq!(super::extract_long_commit_from_json(&path, "deadbee"), None);
+        assert_eq!(super::extract_long_commit_from_json(&path, ""), None);
+    }
 
     #[test]
     fn activity_window_defaults_on_when_field_blank() {
