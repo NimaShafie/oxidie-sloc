@@ -26352,6 +26352,7 @@ struct RelocateScanTemplate {
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:3px;}
     .skipped-pill{font-size:10px;font-weight:600;font-style:italic;color:var(--muted);opacity:.9;font-variant-numeric:tabular-nums;white-space:nowrap;}
     .git-commit-chip{cursor:help;}
+    .commit-tip{position:fixed;z-index:9999;display:none;background:var(--text);color:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;font-weight:600;letter-spacing:.02em;padding:7px 11px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.28);pointer-events:none;white-space:nowrap;}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
     .btn:hover{background:var(--line);}
     .btn.primary{background:var(--oxide-2);border-color:var(--oxide-2);color:#fff;}
@@ -26622,7 +26623,7 @@ struct RelocateScanTemplate {
               <td><span class="metric-num">{{ entry.comment_lines }}</span></td>
               <td><span class="metric-num">{{ entry.blank_lines }}</span></td>
               <td>{% if !entry.git_branch.is_empty() %}<span class="git-chip">{{ entry.git_branch }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
-              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip git-commit-chip" title="{{ entry.git_commit_long }}" data-full-commit="{{ entry.git_commit_long }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
+              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip git-commit-chip" data-full-commit="{{ entry.git_commit_long }}">{{ entry.git_commit }}</span>{% else %}<span class="metric-secondary">&#8212;</span>{% endif %}</td>
               <td class="report-cell">
                 <div class="actions-cell">
                   {% if entry.has_json %}<a class="btn primary rpt-btn" href="/runs/result/{{ entry.run_id }}" target="_blank" rel="noopener" title="Open full interactive result report">View</a>{% else %}<a class="btn primary rpt-btn" href="/runs/html/{{ entry.run_id }}" target="_blank" rel="noopener" title="View HTML report">View</a>{% endif %}
@@ -26804,6 +26805,42 @@ struct RelocateScanTemplate {
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
           });
+        });
+      })();
+
+      // ── Full-commit hover tooltip ─────────────────────────────────────────
+      // The commit chips live inside an overflow:auto table wrapper, which would
+      // clip a pure-CSS ::after tooltip. Render a fixed-position bubble on <body>
+      // (escaping the scroll container) and follow the cursor. Event delegation
+      // keeps it working after pagination/sorting re-renders the rows.
+      (function() {
+        var tip = document.createElement('div');
+        tip.className = 'commit-tip';
+        tip.setAttribute('role', 'tooltip');
+        document.body.appendChild(tip);
+        var shown = false;
+        function chipFrom(t) { return t && t.closest ? t.closest('.git-commit-chip[data-full-commit]') : null; }
+        function place(e) {
+          var pad = 14, r = tip.getBoundingClientRect();
+          var x = e.clientX + pad, y = e.clientY + pad;
+          if (x + r.width > window.innerWidth - 8) x = e.clientX - r.width - pad;
+          if (y + r.height > window.innerHeight - 8) y = e.clientY - r.height - pad;
+          tip.style.left = x + 'px'; tip.style.top = y + 'px';
+        }
+        function hide() { tip.style.display = 'none'; shown = false; }
+        document.addEventListener('mouseover', function(e) {
+          var chip = chipFrom(e.target);
+          if (!chip) return;
+          var full = chip.getAttribute('data-full-commit');
+          if (!full) return;
+          tip.textContent = full; tip.style.display = 'block'; shown = true; place(e);
+        });
+        document.addEventListener('mousemove', function(e) {
+          if (!shown) return;
+          if (chipFrom(e.target)) place(e); else hide();
+        });
+        document.addEventListener('mouseout', function(e) {
+          if (chipFrom(e.target)) hide();
         });
       })();
 
@@ -27372,6 +27409,7 @@ struct HistoryTemplate {
     body.dark-theme .git-chip{background:rgba(111,155,255,0.12);border-color:rgba(111,155,255,0.25);color:var(--accent);}
     .metric-num{font-weight:700;color:var(--text);}
     .metric-secondary{font-size:11px;color:var(--muted);margin-top:2px;}
+    .commit-tip{position:fixed;z-index:9999;display:none;background:var(--text);color:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;font-weight:600;letter-spacing:.02em;padding:7px 11px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.28);pointer-events:none;white-space:nowrap;}
     .sel-badge{display:block;width:22px;height:22px;margin:0 auto;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--surface-2);line-height:20px;text-align:center;font-size:11px;font-weight:900;color:var(--muted-2);transition:background .12s,border-color .12s;}
     tr.selected .sel-badge{background:var(--sel-border);border-color:var(--sel-border);color:#fff;}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line);background:var(--surface-2);color:var(--text);text-decoration:none;transition:background .12s ease;white-space:nowrap;}
@@ -27635,7 +27673,7 @@ struct HistoryTemplate {
               <td><span class="metric-num">{{ entry.comment_lines }}</span></td>
               <td><span class="metric-num">{{ entry.blank_lines }}</span></td>
               <td>{% if !entry.git_branch.is_empty() %}<span class="git-chip">{{ entry.git_branch }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
-              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip" style="cursor:help;" title="{{ entry.git_commit_long }}">{{ entry.git_commit }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
+              <td>{% if !entry.git_commit.is_empty() %}<span class="git-chip git-commit-chip" style="cursor:help;" data-full-commit="{{ entry.git_commit_long }}">{{ entry.git_commit }}</span>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
               <td style="white-space:normal;vertical-align:middle;">{% if !entry.submodule_links.is_empty() %}<div class="submod-chips-cell">{% for sub in entry.submodule_links %}<span class="submod-chip">{{ sub.name }}</span>{% endfor %}</div>{% else %}<span style="color:var(--muted)">&#8212;</span>{% endif %}</td>
             </tr>
             {% endfor %}
@@ -27815,6 +27853,42 @@ struct HistoryTemplate {
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
           });
+        });
+      })();
+
+      // ── Full-commit hover tooltip ─────────────────────────────────────────
+      // The commit chips live inside an overflow:auto table wrapper, which would
+      // clip a pure-CSS ::after tooltip. Render a fixed-position bubble on <body>
+      // (escaping the scroll container) and follow the cursor. Event delegation
+      // keeps it working after pagination/sorting re-renders the rows.
+      (function() {
+        var tip = document.createElement('div');
+        tip.className = 'commit-tip';
+        tip.setAttribute('role', 'tooltip');
+        document.body.appendChild(tip);
+        var shown = false;
+        function chipFrom(t) { return t && t.closest ? t.closest('.git-commit-chip[data-full-commit]') : null; }
+        function place(e) {
+          var pad = 14, r = tip.getBoundingClientRect();
+          var x = e.clientX + pad, y = e.clientY + pad;
+          if (x + r.width > window.innerWidth - 8) x = e.clientX - r.width - pad;
+          if (y + r.height > window.innerHeight - 8) y = e.clientY - r.height - pad;
+          tip.style.left = x + 'px'; tip.style.top = y + 'px';
+        }
+        function hide() { tip.style.display = 'none'; shown = false; }
+        document.addEventListener('mouseover', function(e) {
+          var chip = chipFrom(e.target);
+          if (!chip) return;
+          var full = chip.getAttribute('data-full-commit');
+          if (!full) return;
+          tip.textContent = full; tip.style.display = 'block'; shown = true; place(e);
+        });
+        document.addEventListener('mousemove', function(e) {
+          if (!shown) return;
+          if (chipFrom(e.target)) place(e); else hide();
+        });
+        document.addEventListener('mouseout', function(e) {
+          if (chipFrom(e.target)) hide();
         });
       })();
 
