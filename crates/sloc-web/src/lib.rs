@@ -28927,6 +28927,7 @@ struct CompareSelectTemplate {
       // PDF export — clean document-style report, not a web page screenshot
       function buildDeltaPdfHtml() {
         var sd=_sd, dr=getDeltaExportRows();
+        var dchg=dr.filter(function(r){return (r[2]||'')!=='unchanged';});
         var projEl=document.querySelector('[data-folder]'), proj=projEl?projEl.getAttribute('data-folder'):'';
         var projName=proj?(String(proj).replace(/[\\/]+$/,'').split(/[\\/]/).pop()||proj):proj;
         var tz;try{tz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){tz='America/Los_Angeles';}
@@ -28936,7 +28937,7 @@ struct CompareSelectTemplate {
         function fullN(n){var v=Number(n);return isNaN(v)?'\u2014':v.toLocaleString();}
         function delt(v){var s=String(v==null?'\u2014':v);if(!s||s==='0'||s==='\u2014')return'<span>'+esc(s)+'</span>';return s.charAt(0)==='-'?'<span style="color:#b23030;font-weight:700">'+esc(s)+'</span>':'<span style="color:#2a6846;font-weight:700">'+esc(s)+'</span>';}
         var lm={};
-        dr.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
+        dchg.forEach(function(r){var l=r[1]||'Unknown',d=parseInt(r[5])||0;if(!lm[l])lm[l]={f:0,d:0};lm[l].f++;lm[l].d+=d;});
         var langs=Object.keys(lm).sort(function(a,b){return Math.abs(lm[b].d)-Math.abs(lm[a].d);}).slice(0,15);
         var tfTotal=sd.fm+sd.fa+sd.fr+sd.fu;
         // The header/footer flow in normal document order (NOT position:fixed).
@@ -28979,14 +28980,14 @@ struct CompareSelectTemplate {
           'tr:nth-child(even) td{background:#faf8f6;}'+
           '.rfoot{position:fixed;left:0;right:0;bottom:0;height:20px;background:#1a2035;color:#9fb0c8;font-size:9px;display:flex;justify-content:space-between;align-items:center;padding:0 14px;box-sizing:border-box;z-index:99;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           '.rfoot-spacer{height:30px!important;border:none!important;padding:0!important;background:#fff!important;}';
-        var fileRows=dr.map(function(r){
+        var fileRows=dchg.map(function(r){
           var st=r[2]||'',ss=st==='added'?'color:#2a6846;font-weight:700':st==='removed'?'color:#b23030;font-weight:700':'';
           return '<tr><td style="word-break:break-all">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td>'+
             '<td style="'+ss+'">'+esc(st)+'</td>'+
             '<td style="text-align:right">'+fmtN(r[3])+'</td>'+
             '<td style="text-align:right">'+fmtN(r[4])+'</td>'+
             '<td style="text-align:right">'+delt(r[5])+'</td></tr>';
-        }).join('');
+        }).join('')||'<tr><td colspan="6" style="text-align:center;color:#888;font-style:italic;padding:10px">No file changes between these scans.</td></tr>';
         var more='';
         var langRows=langs.map(function(l){var e=lm[l],dv=e.d>=0?'+'+e.d:String(e.d);return'<tr><td>'+esc(l)+'</td><td style="text-align:right">'+fmtN(e.f)+'</td><td style="text-align:right">'+delt(dv)+'</td></tr>';}).join('');
         return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>OxideSLOC \u2014 Scan Delta</title><style>'+css+'</style></head><body>'+
@@ -29013,7 +29014,7 @@ struct CompareSelectTemplate {
           (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
           '<div class="sec">'+
           '<table><thead>'+
-          '<tr class="pg-rhdr"><th colspan="6"><div class="pg-rhdr-in"><span>File Delta &middot; '+fmtN(dr.length)+' files</span><span class="pg-rhdr-r"><em>oxide</em>-sloc &middot; Scan Delta &middot; '+esc(projName)+'</span></div></th></tr>'+
+          '<tr class="pg-rhdr"><th colspan="6"><div class="pg-rhdr-in"><span>File Delta &middot; '+fmtN(dchg.length)+' changed of '+fmtN(dr.length)+' files</span><span class="pg-rhdr-r"><em>oxide</em>-sloc &middot; Scan Delta &middot; '+esc(projName)+'</span></div></th></tr>'+
           '<tr><th>File</th><th>Language</th><th>Status</th>'+
           '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code \u0394</th>'+
           '</tr></thead><tbody>'+fileRows+more+'</tbody><tfoot><tr><td colspan="6" class="rfoot-spacer"></td></tr></tfoot></table></div>'+
