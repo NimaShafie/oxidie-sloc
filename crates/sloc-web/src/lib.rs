@@ -28976,7 +28976,9 @@ struct CompareSelectTemplate {
           'table{width:100%;border-collapse:collapse;font-size:12px;}'+
           'th{background:#1a2035;color:#fff;padding:4px 8px;font-size:11px;font-weight:700;text-align:left;letter-spacing:.03em;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
           'td{border-bottom:1px solid #eee;padding:3px 8px;vertical-align:middle;}'+
-          'tr:nth-child(even) td{background:#faf8f6;}';
+          'tr:nth-child(even) td{background:#faf8f6;}'+
+          '.rfoot{position:fixed;left:0;right:0;bottom:0;height:20px;background:#1a2035;color:#9fb0c8;font-size:9px;display:flex;justify-content:space-between;align-items:center;padding:0 14px;box-sizing:border-box;z-index:99;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
+          '.rfoot-spacer{height:30px!important;border:none!important;padding:0!important;background:#fff!important;}';
         var fileRows=dr.slice(0,200).map(function(r){
           var st=r[2]||'',ss=st==='added'?'color:#2a6846;font-weight:700':st==='removed'?'color:#b23030;font-weight:700':'';
           return '<tr><td style="word-break:break-all">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td>'+
@@ -29014,13 +29016,12 @@ struct CompareSelectTemplate {
           '<tr class="pg-rhdr"><th colspan="6"><div class="pg-rhdr-in"><span>File Delta &middot; '+fmtN(dr.length)+' files</span><span class="pg-rhdr-r"><em>oxide</em>-sloc &middot; Scan Delta &middot; '+esc(projName)+'</span></div></th></tr>'+
           '<tr><th>File</th><th>Language</th><th>Status</th>'+
           '<th style="text-align:right">Code Before</th><th style="text-align:right">Code After</th><th style="text-align:right">Code \u0394</th>'+
-          '</tr></thead><tbody>'+fileRows+more+'</tbody></table></div>'+
+          '</tr></thead><tbody>'+fileRows+more+'</tbody><tfoot><tr><td colspan="6" class="rfoot-spacer"></td></tr></tfoot></table></div>'+
           '</div>'+
-          '<div id="pdf-native-footer" style="display:none">'+
-          '<div style="width:100%;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#9fb0c8;background:#1a2035;-webkit-print-color-adjust:exact;print-color-adjust:exact;padding:5px 14px;display:flex;justify-content:space-between;align-items:center;">'+
+          '<div class="rfoot">'+
           '<span>oxide-sloc v{{ version }} | AGPL-3.0-or-later</span><span>Scan Delta Report</span>'+
           '<span>'+esc(sd.bid)+' → '+esc(sd.cid)+'</span>'+
-          '</div></div>'+
+          '</div>'+
           '</body></html>';
       }
       function doDeltaPdf(btn) {
