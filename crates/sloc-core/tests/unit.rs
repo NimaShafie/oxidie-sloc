@@ -1390,6 +1390,7 @@ fn resolve_baselines_path_default_when_env_unset() {
 #[test]
 fn resolve_coverage_file_from_config_path() {
     use sloc_core::coverage::resolve_coverage_file;
+    let _guard = env_lock();
     std::env::remove_var("SLOC_COVERAGE_FILE");
     let path = std::path::Path::new("/tmp/coverage.info");
     let result = resolve_coverage_file(Some(path));
@@ -1399,6 +1400,7 @@ fn resolve_coverage_file_from_config_path() {
 #[test]
 fn resolve_coverage_file_none_when_no_config_and_no_env() {
     use sloc_core::coverage::resolve_coverage_file;
+    let _guard = env_lock();
     std::env::remove_var("SLOC_COVERAGE_FILE");
     let result = resolve_coverage_file(None);
     assert!(result.is_none());
