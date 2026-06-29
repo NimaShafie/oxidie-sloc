@@ -29165,6 +29165,8 @@ struct CompareSelectTemplate {
       function buildDeltaPdfHtml() {
         var sd=_sd, dr=getDeltaExportRows();
         var dchg=dr.filter(function(r){return (r[2]||'')!=='unchanged';});
+        function pct(b,c){b=Number(b);c=Number(c);if(!b)return c>0?'new':'±0%';var v=(c-b)/b*100,t=v.toFixed(1);return(t==='0.0'||t==='-0.0')?'±0%':(v>0?'+':'')+t+'%';}
+        function pcls(b,c){var v=Number(c)-Number(b);return v>0?'pos':(v<0?'neg':'zero');}
         var projEl=document.querySelector('[data-folder]'), proj=projEl?projEl.getAttribute('data-folder'):'';
         var projName=proj?(String(proj).replace(/[\\/]+$/,'').split(/[\\/]/).pop()||proj):proj;
         var tz;try{tz=localStorage.getItem('sloc-tz')||'America/Los_Angeles';}catch(e){tz='America/Los_Angeles';}
@@ -29216,7 +29218,18 @@ struct CompareSelectTemplate {
           'td{border-bottom:1px solid #eee;padding:3px 8px;vertical-align:middle;}'+
           'tr:nth-child(even) td{background:#faf8f6;}'+
           '.rfoot{position:fixed;left:0;right:0;bottom:0;height:20px;background:#1a2035;color:#9fb0c8;font-size:9px;display:flex;justify-content:space-between;align-items:center;padding:0 14px;box-sizing:border-box;z-index:99;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'+
-          '.rfoot-spacer{height:30px!important;border:none!important;padding:0!important;background:#fff!important;}';
+          '.rfoot-spacer{height:30px!important;border:none!important;padding:0!important;background:#fff!important;}'+
+          '.msec{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;}'+
+          '.mcard{border:1px solid #ddd;border-radius:8px;padding:8px 11px;}'+
+          '.mc-l{font-size:9px;font-weight:700;text-transform:uppercase;color:#888;letter-spacing:.05em;}'+
+          '.mc-v{font-size:17px;font-weight:900;color:#1a2035;margin-top:3px;}'+
+          '.mc-b{font-size:10px;color:#999;margin-top:2px;}'+
+          '.mc-p{font-size:11px;font-weight:700;margin-top:2px;}'+
+          '.mc-p.pos{color:#2a6846;}.mc-p.neg{color:#b23030;}.mc-p.zero{color:#999;}'+
+          '.fcsec{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;}'+
+          '.fcc{border:1px solid #e5e0d8;border-radius:8px;padding:8px 11px;display:flex;align-items:center;gap:9px;background:#faf8f6;}'+
+          '.fcc-n{font-size:18px;font-weight:900;}'+
+          '.fcc-l{font-size:10px;font-weight:600;color:#666;line-height:1.25;}';
         var fileRows=dchg.map(function(r){
           var st=r[2]||'',ss=st==='added'?'color:#2a6846;font-weight:700':st==='removed'?'color:#b23030;font-weight:700':'';
           return '<tr><td style="word-break:break-all">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td>'+
@@ -29234,20 +29247,22 @@ struct CompareSelectTemplate {
           '<div class="ib-right">Baseline: '+esc(_blabel)+'<br>Current: '+esc(_clabel)+'</div></div>'+
           '</div>'+
           '<div class="body">'+
-          '<div class="sg">'+
-          '<div class="sc"><div class="sv">'+delt(sd.cd)+'</div><div class="sl">Code Lines \u0394</div></div>'+
-          '<div class="sc"><div class="sv">'+delt(sd.fd)+'</div><div class="sl">Files \u0394</div></div>'+
-          '<div class="sc"><div class="sv">'+delt(sd.cmd)+'</div><div class="sl">Comment Lines \u0394</div></div>'+
-          '<div class="sc"><div class="sv" style="color:#111">'+fmtN(tfTotal)+'</div><div class="sl">Total Files</div></div>'+
-          '</div>'+
-          '<div class="meta">'+
-          '<div><div class="ml">Baseline Code</div><div class="mv">'+fullN(sd.bc)+'</div></div>'+
-          '<div><div class="ml">Current Code</div><div class="mv">'+fullN(sd.cc)+'</div></div>'+
-          '<div><div class="ml">Modified</div><div class="mv">'+fullN(sd.fm)+'</div></div>'+
-          '<div><div class="ml">Added</div><div class="mv" style="color:#2a6846">+'+fullN(sd.fa)+'</div></div>'+
-          '<div><div class="ml">Removed</div><div class="mv" style="color:#b23030">-'+fullN(sd.fr)+'</div></div>'+
-          '<div><div class="ml">Unchanged</div><div class="mv">'+fullN(sd.fu)+'</div></div>'+
-          '</div>'+
+          '<div class="sec"><p class="sh">Summary Metrics</p>'+
+          '<div class="msec">'+
+          '<div class="mcard"><div class="mc-l">Code Lines</div><div class="mc-v">'+fullN(sd.cc)+'</div><div class="mc-b">Before: '+fullN(sd.bc)+'</div><div class="mc-p '+pcls(sd.bc,sd.cc)+'">'+pct(sd.bc,sd.cc)+'</div></div>'+
+          '<div class="mcard"><div class="mc-l">Files Analyzed</div><div class="mc-v">'+fullN(sd.cf)+'</div><div class="mc-b">Before: '+fullN(sd.bf)+'</div><div class="mc-p '+pcls(sd.bf,sd.cf)+'">'+pct(sd.bf,sd.cf)+'</div></div>'+
+          '<div class="mcard"><div class="mc-l">Comment Lines</div><div class="mc-v">'+fullN(sd.ccm)+'</div><div class="mc-b">Before: '+fullN(sd.bcm)+'</div><div class="mc-p '+pcls(sd.bcm,sd.ccm)+'">'+pct(sd.bcm,sd.ccm)+'</div></div>'+
+          '<div class="mcard"><div class="mc-l">Lines Added</div><div class="mc-v" style="color:#2a6846">+'+fullN(sd.cla)+'</div><div class="mc-b">New or grown source lines</div></div>'+
+          '<div class="mcard"><div class="mc-l">Lines Removed</div><div class="mc-v" style="color:#b23030">−'+fullN(sd.clr)+'</div><div class="mc-b">Deleted or shrunk source lines</div></div>'+
+          '<div class="mcard"><div class="mc-l">Churn Rate</div><div class="mc-v" style="color:#1a2035">'+esc(String(sd.churn))+'</div><div class="mc-b">(added + removed) ÷ baseline</div></div>'+
+          '</div></div>'+
+          '<div class="sec"><p class="sh">File Changes</p>'+
+          '<div class="fcsec">'+
+          '<div class="fcc"><span class="fcc-n" style="color:#d4a017">'+fullN(sd.fm)+'</span><span class="fcc-l">Modified</span></div>'+
+          '<div class="fcc"><span class="fcc-n" style="color:#2a6846">'+fullN(sd.fa)+'</span><span class="fcc-l">Added</span></div>'+
+          '<div class="fcc"><span class="fcc-n" style="color:#b23030">'+fullN(sd.fr)+'</span><span class="fcc-l">Removed</span></div>'+
+          '<div class="fcc"><span class="fcc-n" style="color:#555">'+fullN(sd.fu)+'</span><span class="fcc-l">Unchanged (identical code counts)</span></div>'+
+          '</div></div>'+
           (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files Changed</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
           '<div class="sec">'+
           '<table><thead>'+
@@ -29397,7 +29412,7 @@ struct CompareSelectTemplate {
     var _exportBase='{{ project_label }}_{{ baseline_run_id_short }}_vs_{{ current_run_id_short }}';
     function getExportFilename(ext){return _exportBase+'.'+ext;}
 
-    var _sd = {bc:{{ baseline_code }},cc:{{ current_code }},cd:'{{ code_lines_delta_str }}',bf:{{ baseline_files }},cf:{{ current_files }},fd:'{{ files_analyzed_delta_str }}',bcm:{{ baseline_comments }},ccm:{{ current_comments }},cmd:'{{ comment_lines_delta_str }}',fm:{{ files_modified }},fa:{{ files_added }},fr:{{ files_removed }},fu:{{ files_unchanged }},bts:'{{ baseline_timestamp }}',cts:'{{ current_timestamp }}',bid:'{{ baseline_run_id_short }}',cid:'{{ current_run_id_short }}',bbr:'{{ baseline_git_branch }}',cbr:'{{ current_git_branch }}',btag:'{% if let Some(t) = baseline_git_tags %}{{ t }}{% endif %}',ctag:'{% if let Some(t) = current_git_tags %}{{ t }}{% endif %}',bsha:'{{ baseline_git_commit }}',csha:'{{ current_git_commit }}',btests:{{ baseline_test_count }},ctests:{{ current_test_count }},bcov:{% if let Some(p) = baseline_coverage_pct %}{{ p }}{% else %}null{% endif %},ccov:{% if let Some(p) = current_coverage_pct %}{{ p }}{% else %}null{% endif %}};
+    var _sd = {bc:{{ baseline_code }},cc:{{ current_code }},cd:'{{ code_lines_delta_str }}',bf:{{ baseline_files }},cf:{{ current_files }},fd:'{{ files_analyzed_delta_str }}',bcm:{{ baseline_comments }},ccm:{{ current_comments }},cmd:'{{ comment_lines_delta_str }}',fm:{{ files_modified }},fa:{{ files_added }},fr:{{ files_removed }},fu:{{ files_unchanged }},bts:'{{ baseline_timestamp }}',cts:'{{ current_timestamp }}',bid:'{{ baseline_run_id_short }}',cid:'{{ current_run_id_short }}',bbr:'{{ baseline_git_branch }}',cbr:'{{ current_git_branch }}',btag:'{% if let Some(t) = baseline_git_tags %}{{ t }}{% endif %}',ctag:'{% if let Some(t) = current_git_tags %}{{ t }}{% endif %}',bsha:'{{ baseline_git_commit }}',csha:'{{ current_git_commit }}',btests:{{ baseline_test_count }},ctests:{{ current_test_count }},bcov:{% if let Some(p) = baseline_coverage_pct %}{{ p }}{% else %}null{% endif %},ccov:{% if let Some(p) = current_coverage_pct %}{{ p }}{% else %}null{% endif %},cla:{{ code_lines_added }},clr:{{ code_lines_removed }},churn:'{{ churn_rate_str }}'};
     function _mkScanLabel(pfx,tag,br,sha){var ref=tag||(br||'');if(ref&&sha)return pfx+' ('+ref+' @ '+sha+')';if(ref)return pfx+' ('+ref+')';if(sha)return pfx+' ('+sha+')';return pfx;}
     var _blabel=_mkScanLabel('Baseline',_sd.btag,_sd.bbr,_sd.bsha);
     var _clabel=_mkScanLabel('Current',_sd.ctag,_sd.cbr,_sd.csha);
