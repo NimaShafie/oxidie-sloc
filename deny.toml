@@ -87,6 +87,14 @@ ignore = [
   # printpdf 0.9 (allsorts -> ouroboros -> proc-macro-error). No safe upgrade is available;
   # it runs only at build time and ships nothing into the binary.
   { id = "RUSTSEC-2024-0370", reason = "unmaintained build-time transitive dep of printpdf; no safe upgrade" },
+  # anyhow unsoundness in Error::downcast_mut(): UB only occurs when calling downcast_mut()
+  # on an error that had context added via Error::context(). The workspace never calls
+  # downcast_mut() on any anyhow error (verified across all crates), so the unsound path is
+  # unreachable. Drop this once the vendored anyhow is bumped to a patched release.
+  { id = "RUSTSEC-2026-0190", reason = "anyhow downcast_mut unsoundness unreachable; workspace never calls downcast_mut" },
+  # ttf-parser is unmaintained, pulled transitively by printpdf 0.9 (allsorts font parsing).
+  # No safe upgrade is available; same situation as the proc-macro-error advisory above.
+  { id = "RUSTSEC-2026-0192", reason = "unmaintained transitive dep of printpdf; no safe upgrade" },
 ]
 
 [sources]
