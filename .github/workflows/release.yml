@@ -862,8 +862,26 @@ jobs:
     # Non-fatal until the initial PR to microsoft/winget-pkgs is merged;
     # the action cannot create a new package — only update an existing one.
     continue-on-error: true
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
-      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
+      # The releaser needs a classic PAT (public_repo) to fork + push to
+      # microsoft/winget-pkgs. When WINGET_TOKEN is unset the action receives an
+      # empty string and aborts with "GitHub token is invalid", surfacing a red
+      # check. Gate the submission on the secret being present so the job skips
+      # cleanly until the token is configured.
+      - name: Check for WINGET_TOKEN
+        id: token
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::WINGET_TOKEN secret not set — skipping winget submission."
+          fi
+
+      - if: steps.token.outputs.present == 'true'
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
         with:
           identifier: NimaShafie.OxideSLOC
           installers-regex: 'oxide-sloc-windows-x64\.zip$'
