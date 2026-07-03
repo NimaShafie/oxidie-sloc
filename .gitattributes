@@ -41,6 +41,18 @@ toolchain/*.tar.gz    binary
 toolchain/*.tar.xz    binary
 toolchain/*.tar.gz.*  binary
 
+# ── Packing efficiency ───────────────────────────────────────────────────────
+# These archives are already compressed (xz/gz/7z/zip) and high-entropy, so git
+# never finds useful deltas — yet it still *attempts* delta-compression on every
+# gc/repack/clone, wasting CPU. -delta skips that attempt (no size change; faster
+# maintenance). Applies to the committed vendor/toolchain/dist blobs.
+vendor.tar.xz         -delta
+*.tar.xz              -delta
+*.tar.gz              -delta
+toolchain/*.tar.gz.*  -delta
+*.zip                 -delta
+*.7z                  -delta
+
 # Vendor sources must never be normalized by git — cargo checksum verification
 # compares the exact bytes on disk to the SHA-256 in .cargo-checksum.json.
 # If git rewrites CRLF→LF (or vice-versa) in any vendor file, the checksum
