@@ -31,7 +31,13 @@ UPLOAD_DELAY  = 16   # seconds between uploads (free tier: 4 req/min)
 
 
 def vt_request(method, url, files=None, api_key=""):
-    """Minimal multipart/JSON HTTP helper using only stdlib."""
+    """Minimal multipart/JSON HTTP helper using only stdlib.
+
+    Only HTTPS destinations are permitted, so the request cannot be redirected to a
+    local file or other non-network scheme.
+    """
+    if not url.lower().startswith("https://"):
+        raise ValueError(f"refusing non-HTTPS VirusTotal URL: {url!r}")
     headers = {"x-apikey": api_key}
 
     if files:

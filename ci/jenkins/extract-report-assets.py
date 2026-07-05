@@ -57,8 +57,12 @@ def main() -> None:
             js_chunks.append(content)
         return ""
 
-    html = re.sub(r"<style[^>]*>(.*?)</style>", _replace_style, html, flags=re.DOTALL)
-    html = re.sub(r"<script[^>]*>(.*?)</script>", _replace_script, html, flags=re.DOTALL)
+    html = re.sub(
+        r"<style[^>]*>(.*?)</style>", _replace_style, html, flags=re.DOTALL | re.IGNORECASE
+    )
+    html = re.sub(
+        r"<script[^>]*>(.*?)</script>", _replace_script, html, flags=re.DOTALL | re.IGNORECASE
+    )
 
     if js_chunks:
         html = html.replace("</body>", f'<script src="{js_name}"></script>\n</body>', 1)
