@@ -51,15 +51,26 @@ from glob import glob
 from typing import Optional
 import csv
 
-# Use defusedxml when available (preferred — protects against XML bomb / entity expansion).
-# Fall back to stdlib ElementTree which in Python 3.8+ already rejects external entities
-# by default; the remaining risk (billion-laughs) is mitigated by the 10 MB size cap below.
+# XML parsing uses defusedxml exclusively — it hardens against entity expansion (billion
+# laughs), external-entity resolution, and DTD retrieval. If defusedxml is unavailable we
+# skip parsing report XML rather than fall back to a parser that does not harden entities.
 try:
     import defusedxml.ElementTree as ET
-except ImportError:
-    import xml.etree.ElementTree as ET  # type: ignore[no-redef]
+    _XML_SAFE = True
+except ImportError:  # pragma: no cover
+    ET = None  # type: ignore[assignment]
+    _XML_SAFE = False
 
 _MAX_XML_BYTES = 10 * 1024 * 1024  # 10 MB — guard against oversized JUnit/coverage files
+
+
+def _delta_color(delta: float) -> str:
+    """Colour for a signed delta: green up, red down, neutral brown at zero."""
+    if delta > 0:
+        return "#2a6846"
+    if delta < 0:
+        return "#b23030"
+    return "#8a6a5a"
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +301,12 @@ def parse_junit(path: str) -> Optional[dict]:
         return None
     if os.path.getsize(path) > _MAX_XML_BYTES:
         return None
+    if not _XML_SAFE:
+        sys.stderr.write(
+            "defusedxml is not installed; skipping JUnit XML parse. "
+            "Run 'pip install defusedxml' to enable it.\n"
+        )
+        return None
     try:
         tree = ET.parse(path)
         root = tree.getroot()
@@ -509,7 +526,7 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
         t_prev_build = trend_history[-2]
         delta = code_lines - t_prev_build["code_lines"]
         sign = "+" if delta > 0 else ""
-        delta_col = "#2a6846" if delta > 0 else "#b23030" if delta < 0 else "#8a6a5a"
+        delta_col = _delta_color(delta)
         delta_chip_html = chip(
             f'<span style="color:{delta_col}" title="vs build #{t_prev_build["build"]}">'
             f"{sign}{fmt(delta)}</span>",
@@ -679,7 +696,7 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
         t_prev_h     = trend_history[-2]
         tr_delta     = t_last_h["code_lines"] - t_prev_h["code_lines"]
         tr_sign      = "+" if tr_delta > 0 else ""
-        tr_col       = "#2a6846" if tr_delta > 0 else "#b23030" if tr_delta < 0 else "#8a6a5a"
+        tr_col       = _delta_color(tr_delta)
         n_builds     = len(trend_history)
         trend_section = f"""
 <div class="card">
