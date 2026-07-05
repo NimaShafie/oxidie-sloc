@@ -96,4 +96,8 @@ RUN set -eux; \
     cargo install cargo-llvm-cov --locked; \
     chmod -R a+rX /opt/rust-toolchain
 
+# Liveness probe against the Jenkins web endpoint.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD curl -fsS http://localhost:8080/login >/dev/null || exit 1
+
 USER jenkins

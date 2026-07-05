@@ -923,84 +923,9 @@ fn write_pdf_via_cdp(html_path: &Path, output_path: &Path) -> Result<()> {
 
     wait_for_charts_ready(&tab);
 
-    // Read the user-configured report identification banner from the DOM (set in step 3 of
-    // the scan configuration as `report_header_footer`).  When present, pass it as Chrome's
-    // native per-page header/footer templates so it appears in the margin on every PDF page.
-    let banner_text = extract_banner_text(&tab);
-
-    if let Some(ref t) = banner_text {
-        eprintln!("[oxide-sloc][pdf] report banner detected: {t}");
-    }
-
-    let has_banner = banner_text.is_some();
-
-    // Optional per-document native header/footer templates. A document can embed hidden
-    // `#pdf-native-header` / `#pdf-native-footer` elements; their innerHTML is handed to
-    // Chrome as print templates so a header repeats at the top and a footer is pinned to
-    // the bottom margin of every page (the Scan Delta report uses this for its per-page
-    // footer bar). A document supplying only a footer gets no top chrome.
-    let native_header = if has_banner {
-        None
-    } else {
-        extract_pdf_template(&tab, "pdf-native-header")
-    };
-    let native_footer = if has_banner {
-        None
-    } else {
-        extract_pdf_template(&tab, "pdf-native-footer")
-    };
-    let has_native_header = native_header.is_some();
-    let has_native_footer = native_footer.is_some();
-
-    // Build Chrome header/footer HTML templates from the banner text.
-    // The template is rendered in the margin area; `font-size` must be set explicitly.
-    let make_banner_tmpl = |text: &str| -> String {
-        let escaped = text
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;");
-        format!(
-            r#"<div style="font-size:10px;width:100%;text-align:center;\
-color:#fff;background:#b35428;padding:5px 0;\
-font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
--webkit-print-color-adjust:exact;print-color-adjust:exact;">{escaped}</div>"#
-        )
-    };
-
-    // Chrome prints both a header and a footer template whenever display_header_footer is
-    // on; an empty `<span>` suppresses its default date/title/url chrome on the side we are
-    // not populating.
-    let (header_tmpl, footer_tmpl): (Option<String>, Option<String>) = if has_banner {
-        let t = banner_text.as_deref().unwrap_or_default();
-        (Some(make_banner_tmpl(t)), Some(make_banner_tmpl(t)))
-    } else if has_native_header || has_native_footer {
-        let empty = || "<span></span>".to_string();
-        (
-            Some(native_header.unwrap_or_else(empty)),
-            Some(native_footer.unwrap_or_else(empty)),
-        )
-    } else {
-        (None, None)
-    };
-
-    let display_header_footer = has_banner || has_native_header || has_native_footer;
-    // Reserve margin only on the side(s) that actually carry chrome so content keeps the
-    // most room. Banner keeps its historical top/bottom reserve.
-    let margin_top = if has_banner {
-        0.35
-    } else if has_native_header {
-        0.55
-    } else {
-        0.0
-    };
-    let margin_bottom = if has_banner {
-        0.25
-    } else if has_native_footer {
-        0.42
-    } else {
-        0.0
-    };
+    // Resolve the per-page header/footer chrome (banner or per-document native templates)
+    // and the margins those require. Kept in a helper so this function stays flat.
+    let chrome = build_pdf_chrome(&tab);
 
     let pdf_bytes = tab
         .print_to_pdf(Some(PrintToPdfOptions {
@@ -1009,18 +934,18 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
             scale: Some(0.97),
             paper_width: Some(11.69), // A4 landscape width (inches)
             paper_height: Some(8.27), // A4 landscape height (inches)
-            margin_top: Some(margin_top),
-            margin_bottom: Some(margin_bottom),
+            margin_top: Some(chrome.margin_top),
+            margin_bottom: Some(chrome.margin_bottom),
             margin_left: Some(0.0),
             margin_right: Some(0.0),
             prefer_css_page_size: Some(false),
-            display_header_footer: if display_header_footer {
+            display_header_footer: if chrome.display_header_footer {
                 Some(true)
             } else {
                 None
             },
-            header_template: header_tmpl,
-            footer_template: footer_tmpl,
+            header_template: chrome.header_template,
+            footer_template: chrome.footer_template,
             ..Default::default()
         }))
         .context("browser failed to generate PDF")?;
@@ -1030,6 +955,112 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
 
     eprintln!("[oxide-sloc][pdf] wrote {} bytes", pdf_bytes.len());
     Ok(())
+}
+
+/// Resolved per-page print chrome for the CDP PDF export.
+struct PdfChrome {
+    header_template: Option<String>,
+    footer_template: Option<String>,
+    display_header_footer: bool,
+    margin_top: f64,
+    margin_bottom: f64,
+}
+
+/// HTML template for a centred identification banner rendered in the PDF page margin.
+/// The template renders in the margin area, so `font-size` must be set explicitly.
+fn pdf_banner_template(text: &str) -> String {
+    let escaped = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    format!(
+        r#"<div style="font-size:10px;width:100%;text-align:center;\
+color:#fff;background:#b35428;padding:5px 0;\
+font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
+-webkit-print-color-adjust:exact;print-color-adjust:exact;">{escaped}</div>"#
+    )
+}
+
+/// Reserve top/bottom margins only on the side(s) that actually carry chrome. A banner keeps
+/// its historical top/bottom reserve.
+fn pdf_margins(has_banner: bool, has_native_header: bool, has_native_footer: bool) -> (f64, f64) {
+    let top = if has_banner {
+        0.35
+    } else if has_native_header {
+        0.55
+    } else {
+        0.0
+    };
+    let bottom = if has_banner {
+        0.25
+    } else if has_native_footer {
+        0.42
+    } else {
+        0.0
+    };
+    (top, bottom)
+}
+
+/// Choose the Chrome header/footer templates. A banner wins; otherwise per-document native
+/// chrome is used. Chrome prints both a header and footer template whenever they are supplied,
+/// so an empty `<span>` suppresses default chrome on the unused side.
+fn pdf_header_footer_templates(
+    banner_text: Option<&str>,
+    native_header: Option<String>,
+    native_footer: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(t) = banner_text {
+        let tmpl = pdf_banner_template(t);
+        return (Some(tmpl.clone()), Some(tmpl));
+    }
+    if native_header.is_some() || native_footer.is_some() {
+        let empty = || "<span></span>".to_string();
+        return (
+            Some(native_header.unwrap_or_else(empty)),
+            Some(native_footer.unwrap_or_else(empty)),
+        );
+    }
+    (None, None)
+}
+
+/// Determine the header/footer templates and reserved margins for the PDF.
+///
+/// Priority: a report identification banner (set in step 3 of the scan configuration as
+/// `report_header_footer`) wins; otherwise per-document hidden `#pdf-native-header` /
+/// `#pdf-native-footer` elements are used (the Scan Delta report uses these for its per-page
+/// footer bar).
+fn build_pdf_chrome(tab: &headless_chrome::Tab) -> PdfChrome {
+    let banner_text = extract_banner_text(tab);
+    if let Some(ref t) = banner_text {
+        eprintln!("[oxide-sloc][pdf] report banner detected: {t}");
+    }
+    let has_banner = banner_text.is_some();
+
+    let native_header = if has_banner {
+        None
+    } else {
+        extract_pdf_template(tab, "pdf-native-header")
+    };
+    let native_footer = if has_banner {
+        None
+    } else {
+        extract_pdf_template(tab, "pdf-native-footer")
+    };
+    let has_native_header = native_header.is_some();
+    let has_native_footer = native_footer.is_some();
+
+    let (header_template, footer_template) =
+        pdf_header_footer_templates(banner_text.as_deref(), native_header, native_footer);
+    let (margin_top, margin_bottom) = pdf_margins(has_banner, has_native_header, has_native_footer);
+
+    PdfChrome {
+        header_template,
+        footer_template,
+        display_header_footer: has_banner || has_native_header || has_native_footer,
+        margin_top,
+        margin_bottom,
+    }
 }
 
 /// Locate the `wkhtmltopdf` binary on Linux and Windows.
