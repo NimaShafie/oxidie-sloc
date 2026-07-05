@@ -10,7 +10,8 @@ use axum::{
 use http_body_util::BodyExt;
 use sloc_web::{
     make_test_router, make_test_router_exhausted_semaphore, make_test_router_server_mode,
-    make_test_router_tight_rate_limit, make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
+    make_test_router_server_mode_with_roots, make_test_router_tight_rate_limit,
+    make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
 };
 use tower::ServiceExt;
 
@@ -87,6 +88,22 @@ async fn post_form_shared(
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8_lossy(&bytes).into_owned();
     (status, headers, body)
+}
+
+/// POST a form to a server-mode router with the server API key attached.
+async fn post_form_server_authed(app: Router, uri: &str, form_body: &str) -> (StatusCode, String) {
+    let req = Request::post(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "Authorization",
+            format!("Bearer {TEST_SERVER_MODE_API_KEY}"),
+        )
+        .body(Body::from(form_body.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Percent-encode a string for use as a URL form field value.
@@ -3347,6 +3364,56 @@ async fn server_mode_analyze_with_path_rejects_when_no_allowed_roots() {
         status.as_u16() != 500,
         "server_mode analyze must not 500, got {status}"
     );
+}
+
+#[tokio::test]
+async fn server_mode_analyze_path_outside_allowed_roots_rejected() {
+    // allowed_scan_roots is configured but the requested path is elsewhere.
+    let allowed = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let app = make_test_router_server_mode_with_roots(vec![allowed.path().to_path_buf()]);
+    let path = pct_encode(elsewhere.path().to_str().unwrap_or("."));
+    let (status, body) = post_form_server_authed(app, "/analyze", &format!("path={path}")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "out-of-root must be 403");
+    assert!(
+        body.contains("not within an allowed") || body.contains("allowed scan"),
+        "out-of-root message: {}",
+        &body[..body.len().min(300)]
+    );
+}
+
+#[tokio::test]
+async fn server_mode_analyze_unresolvable_path_rejected() {
+    // Path does not canonicalize (does not exist) → fail-closed 403.
+    let allowed = tempfile::tempdir().unwrap();
+    let app = make_test_router_server_mode_with_roots(vec![allowed.path().to_path_buf()]);
+    let missing = allowed.path().join("does/not/exist/anywhere");
+    let path = pct_encode(missing.to_str().unwrap_or("."));
+    let (status, body) = post_form_server_authed(app, "/analyze", &format!("path={path}")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unresolvable must be 403");
+    assert!(
+        body.contains("could not be resolved") || body.contains("real directory"),
+        "unresolvable message: {}",
+        &body[..body.len().min(300)]
+    );
+}
+
+#[tokio::test]
+async fn server_mode_analyze_path_inside_allowed_root_accepted() {
+    // Path is inside an allowed root → validation passes, analysis proceeds.
+    let allowed = tempfile::tempdir().unwrap();
+    std::fs::write(allowed.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let app = make_test_router_server_mode_with_roots(vec![allowed.path().to_path_buf()]);
+    let path = pct_encode(allowed.path().to_str().unwrap_or("."));
+    let (status, _) = post_form_server_authed(app, "/analyze", &format!("path={path}")).await;
+    // Not a 403 (validation passed); the analysis is dispatched (redirect/200) and
+    // must never 500.
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "in-root path must pass validation"
+    );
+    assert_ne!(status.as_u16(), 500, "in-root analyze must not 500");
 }
 
 #[tokio::test]
