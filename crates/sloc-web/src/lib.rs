@@ -878,6 +878,19 @@ pub fn make_test_router_server_mode() -> Router {
     build_router(state)
 }
 
+/// Server-mode test router with `allowed_scan_roots` configured. Exercises the
+/// `validate_server_scan_path` allow/deny branches (in-root success, unresolved
+/// path, and out-of-root rejection) that the empty-roots router cannot reach.
+pub fn make_test_router_server_mode_with_roots(roots: Vec<PathBuf>) -> Router {
+    let mut state = test_app_state("sloc_test_server_roots");
+    state.server_mode = true;
+    state.api_keys = Arc::new(vec![secrecy::SecretBox::new(Box::new(
+        TEST_SERVER_MODE_API_KEY.to_owned(),
+    ))]);
+    state.base_config.discovery.allowed_scan_roots = roots;
+    build_router(state)
+}
+
 /// Test router where the analysis semaphore is pre-exhausted (0 permits).
 /// Immediately returns 503 on POST /analyze, exercising the busy-server branch.
 pub fn make_test_router_exhausted_semaphore() -> Router {

@@ -679,6 +679,57 @@ fn analyze_detects_binary_file() {
 }
 
 #[test]
+fn analyze_binary_file_fail_policy_returns_err() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut data = b"code".to_vec();
+    data.push(0x00);
+    data.extend_from_slice(b"more");
+    std::fs::write(dir.path().join("bin.rs"), &data).unwrap();
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.analysis.binary_file_behavior = sloc_config::BinaryFileBehavior::Fail;
+    let result = analyze(&cfg, "test", None, None);
+    assert!(
+        result.is_err(),
+        "binary file with Fail policy must error the run"
+    );
+}
+
+/// A UTF-8 BOM followed by invalid continuation bytes fails `decode_bytes`.
+fn write_undecodable(dir: &std::path::Path, name: &str) {
+    // EF BB BF is the UTF-8 BOM (so it is not treated as binary), but the
+    // trailing 0xFF 0xFF bytes are invalid UTF-8, so decoding fails.
+    let data = [0xEF, 0xBB, 0xBF, 0xFF, 0xFF];
+    std::fs::write(dir.join(name), data).unwrap();
+}
+
+#[test]
+fn analyze_decode_failure_warn_skip_records_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    write_undecodable(dir.path(), "bad.rs");
+    // Default decode_failure_behavior is WarnSkip.
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(
+        run.summary_totals.files_analyzed, 0,
+        "undecodable file must not be analyzed"
+    );
+    assert_eq!(run.summary_totals.files_skipped, 1);
+}
+
+#[test]
+fn analyze_decode_failure_fail_policy_returns_err() {
+    let dir = tempfile::tempdir().unwrap();
+    write_undecodable(dir.path(), "bad.rs");
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.analysis.decode_failure_behavior = sloc_config::FailureBehavior::Fail;
+    let result = analyze(&cfg, "test", None, None);
+    assert!(
+        result.is_err(),
+        "decode failure with Fail policy must error the run"
+    );
+}
+
+#[test]
 fn analyze_multiple_files() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
