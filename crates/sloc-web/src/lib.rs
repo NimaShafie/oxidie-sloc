@@ -1398,6 +1398,8 @@ async fn add_security_headers(
     );
     let csp = format!(
         "default-src 'self'; \
+         base-uri 'self'; \
+         form-action 'self'; \
          style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob:; \
          script-src 'self' 'nonce-{nonce}'; \
@@ -1428,6 +1430,12 @@ async fn add_security_headers(
     h.insert(
         "Cross-Origin-Resource-Policy",
         HeaderValue::from_static("same-origin"),
+    );
+    // Every response also carries CORP: same-origin (above), so requiring CORP on embedded
+    // resources completes cross-origin isolation without blocking the app's own same-origin assets.
+    h.insert(
+        "Cross-Origin-Embedder-Policy",
+        HeaderValue::from_static("require-corp"),
     );
     if state.tls_enabled {
         h.insert(
