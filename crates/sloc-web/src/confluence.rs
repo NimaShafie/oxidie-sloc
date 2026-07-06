@@ -1620,4 +1620,135 @@ mod http_tests {
             .expect("server post should update the page");
         assert_eq!(id, "p9");
     }
+
+    // ── the two previously-uncovered post_to_confluence branches ──────────────
+
+    #[tokio::test]
+    async fn post_to_confluence_cloud_updates_existing_page() {
+        // spaces lookup → page search (found) → update (PUT).
+        let app = Router::new()
+            .route(
+                "/wiki/api/v2/spaces",
+                routing::get(|| async { Json(serde_json::json!({"results": [{"id": "sp1"}]})) }),
+            )
+            .route(
+                "/wiki/api/v2/pages",
+                routing::get(|| async {
+                    Json(serde_json::json!({"results": [{"id": "pg7", "version": {"number": 3}}]}))
+                }),
+            )
+            .route(
+                #[allow(clippy::literal_string_with_formatting_args)]
+                "/wiki/api/v2/pages/{id}",
+                routing::put(|| async { Json(serde_json::json!({"id": "pg7"})) }),
+            );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        let id = post_to_confluence(&client, &tiny_run(), "My Report", None)
+            .await
+            .expect("cloud post should update the existing page");
+        assert_eq!(id, "pg7");
+    }
+
+    #[tokio::test]
+    async fn post_to_confluence_server_creates_new_page() {
+        // page search (empty) → create (POST).
+        let app = Router::new().route(
+            "/rest/api/content",
+            routing::get(|| async { Json(serde_json::json!({"results": []})) })
+                .post(|| async { Json(serde_json::json!({"id": "srv-new"})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        let id = post_to_confluence(&client, &tiny_run(), "My Report", None)
+            .await
+            .expect("server post should create a new page");
+        assert_eq!(id, "srv-new");
+    }
+
+    // ── handler-level coverage via the defense-in-depth re-validation path ────
+    //
+    // The API handlers re-validate the stored base_url before any outbound
+    // request (guarding against a config written directly to disk). Seeding a
+    // loopback URL directly into the store drives each handler through all of its
+    // request-processing logic (config load, artifact/registry lookup, JSON read)
+    // and out via the SSRF 422 branch — without weakening the guard or needing a
+    // live Confluence server.
+
+    fn loopback_cfg(auto_post: HashMap<String, bool>) -> ConfluenceConfig {
+        ConfluenceConfig {
+            tier: ConfluenceTier::Cloud,
+            base_url: "https://127.0.0.1".to_owned(), // passes save-time shape, blocked at request time
+            username: "u@x.com".to_owned(),
+            credential: "tok".to_owned(),
+            space_key: "DS".to_owned(),
+            parent_page_id: None,
+            schedule_auto_post: auto_post,
+        }
+    }
+
+    #[tokio::test]
+    async fn api_test_confluence_revalidates_stored_url() {
+        use axum::extract::State;
+        setup_tls();
+        let state = crate::test_app_state("conf_didp_test");
+        state.confluence.lock().await.config = Some(loopback_cfg(HashMap::new()));
+        let resp = api_test_confluence(State(state)).await;
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "stored loopback URL must be rejected at test time"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_post_to_confluence_processes_run_then_revalidates() {
+        use axum::extract::State;
+        use axum::Json as AxumJson;
+        setup_tls();
+        let state = crate::test_app_state("conf_didp_post");
+
+        // Seed a registry entry whose JSON is a real on-disk AnalysisRun.
+        let dir = tempfile::tempdir().unwrap();
+        let jp = dir.path().join("result_conf-001.json");
+        std::fs::write(&jp, serde_json::to_string(&tiny_run()).unwrap()).unwrap();
+        let entry = crate::registry_entry_from_run(&tiny_run(), jp.clone(), jp.clone());
+        state.registry.lock().await.add_entry(entry);
+        state.confluence.lock().await.config = Some(loopback_cfg(HashMap::new()));
+
+        let resp = api_post_to_confluence(
+            State(state),
+            AxumJson(PostToConfluenceRequest {
+                run_id: "conf-001".to_owned(),
+                page_title: "My Report".to_owned(),
+                report_url: Some("/runs/result/conf-001".to_owned()),
+            }),
+        )
+        .await;
+        // Reached the JSON read + defense-in-depth re-validation → 422.
+        assert_eq!(resp.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn maybe_auto_post_confluence_enabled_revalidates() {
+        setup_tls();
+        let state = crate::test_app_state("conf_didp_auto");
+        let sched = uuid::Uuid::new_v4();
+        let mut ap = HashMap::new();
+        ap.insert(sched.to_string(), true);
+        state.confluence.lock().await.config = Some(loopback_cfg(ap));
+        // Enabled + loopback URL → runs through the auto-post body and returns
+        // after the SSRF re-validation (must not panic).
+        maybe_auto_post_confluence(&state, sched, &tiny_run(), "conf-001").await;
+    }
+
+    #[tokio::test]
+    async fn maybe_auto_post_confluence_disabled_is_noop() {
+        setup_tls();
+        let state = crate::test_app_state("conf_didp_auto_off");
+        let sched = uuid::Uuid::new_v4();
+        // schedule_auto_post empty → not enabled → early return.
+        state.confluence.lock().await.config = Some(loopback_cfg(HashMap::new()));
+        maybe_auto_post_confluence(&state, sched, &tiny_run(), "conf-001").await;
+    }
 }
