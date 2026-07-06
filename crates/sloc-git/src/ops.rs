@@ -24,6 +24,21 @@ fn git_host_allowlist() -> &'static [String] {
     })
 }
 
+/// When `SLOC_GIT_REQUIRE_ALLOWLIST` is truthy, clones are refused unless
+/// `SLOC_GIT_HOST_ALLOWLIST` names the target host. This lets internet-facing or
+/// multi-tenant deployments run allowlist-only (fail closed): only explicitly listed
+/// hostnames are clonable, so a hostname that resolves to an internal address only at
+/// clone time cannot slip through the validate-time resolution check. Unset by default,
+/// so denylist-mode deployments are unaffected.
+fn require_host_allowlist() -> bool {
+    static REQ: OnceLock<bool> = OnceLock::new();
+    *REQ.get_or_init(|| {
+        std::env::var("SLOC_GIT_REQUIRE_ALLOWLIST")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 // ── low-level git runner ───────────────────────────────────────────────────────
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -189,7 +204,14 @@ fn check_host_allowed(host: &str) -> Result<()> {
     // have it accepted unless the name itself is allowlisted. Empty = denylist mode
     // (loopback/link-local/metadata blocking only), preserving prior behaviour.
     let allow = git_host_allowlist();
-    if !allow.is_empty() && !allow.iter().any(|h| h == host) {
+    if allow.is_empty() {
+        if require_host_allowlist() {
+            bail!(
+                "git URL rejected: SLOC_GIT_REQUIRE_ALLOWLIST is set but \
+                 SLOC_GIT_HOST_ALLOWLIST is empty (no hosts are permitted)"
+            );
+        }
+    } else if !allow.iter().any(|h| h == host) {
         bail!("git URL rejected: host {host:?} is not in SLOC_GIT_HOST_ALLOWLIST");
     }
     if is_ssrf_blocked_host(host) {
@@ -541,6 +563,19 @@ mod tests {
         assert!(is_ssrf_blocked_host("127.0.0.1"));
         assert!(is_ssrf_blocked_host("[::1]"));
         assert!(is_ssrf_blocked_host("169.254.169.254"));
+    }
+
+    #[test]
+    fn require_host_allowlist_defaults_false() {
+        // With SLOC_GIT_REQUIRE_ALLOWLIST unset, allowlist enforcement is off.
+        assert!(!require_host_allowlist());
+    }
+
+    #[test]
+    fn check_host_allowed_denylist_mode_permits_public_blocks_sensitive() {
+        // Empty allowlist + enforcement off: public hosts pass, SSRF-sensitive hosts fail.
+        assert!(check_host_allowed("github.com").is_ok());
+        assert!(check_host_allowed("localhost").is_err());
     }
 
     #[test]
