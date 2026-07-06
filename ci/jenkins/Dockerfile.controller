@@ -99,12 +99,20 @@ COPY ci/jenkins/init.groovy.d/ /usr/share/jenkins/ref/init.groovy.d/
 # by this Dockerfile and the initial credentials configuration in Jenkins.
 ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
 
-# ── Update center: point at a no-op URL in air-gapped environments ─────────────
-# Jenkins still attempts to reach the update center at startup.  In a fully
-# air-gapped network this causes a long timeout before the UI becomes usable.
-# Setting the update-center URL to the bundled default (or a local mirror) avoids
-# this.  Operators may override this with their own internal update center URL.
-ENV JENKINS_OPTS="--argumentsRealm.roles.user=admin --argumentsRealm.passwd.admin=admin"
+# ── Bootstrap admin credentials ────────────────────────────────────────────────
+# Provided as build args so an operator bakes their own credentials at build time,
+# fully offline for air-gapped installs — no value is fixed in the committed source:
+#   docker build \
+#     --build-arg JENKINS_ADMIN_USER=<user> \
+#     --build-arg JENKINS_ADMIN_PASSWORD='<strong-password>' \
+#     -f ci/jenkins/Dockerfile.controller -t jenkins-oxide-sloc-controller .
+# For CI, pass the password from a secret store (e.g. --build-arg
+# JENKINS_ADMIN_PASSWORD="$(cat /run/secrets/jenkins_admin_password)").
+# The defaults below exist only so a local evaluation build boots out of the box;
+# production and air-gapped builds MUST override JENKINS_ADMIN_PASSWORD.
+ARG JENKINS_ADMIN_USER=admin
+ARG JENKINS_ADMIN_PASSWORD=admin
+ENV JENKINS_OPTS="--argumentsRealm.roles.user=${JENKINS_ADMIN_USER} --argumentsRealm.passwd.${JENKINS_ADMIN_USER}=${JENKINS_ADMIN_PASSWORD}"
 
 # Liveness probe: confirm the Jenkins HTTP port is accepting connections.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
