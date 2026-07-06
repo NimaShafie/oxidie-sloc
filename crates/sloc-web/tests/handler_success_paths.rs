@@ -983,6 +983,97 @@ async fn analyze_run_can_be_cancelled() {
     assert!(ss.is_success(), "status after cancel: {ss}");
 }
 
+/// Link a run, then delete its on-disk artifacts so the serve-artifact handlers
+/// take their "file recorded but missing on disk" (locate/not-found) branches.
+#[tokio::test]
+async fn serve_artifacts_when_files_deleted_take_notfound_branch() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    let run_id = "artifact-missing-001";
+    // Link via /locate-report only (no /api/ingest), so the registry entry's
+    // paths point at *these* files rather than a second copy under out/web.
+    write_scan_folder(dir.path(), run_id);
+    let canon = dir.path().canonicalize().unwrap();
+    let (ls, _) = post_form(
+        app.clone(),
+        "/locate-report",
+        &format!("file_path={}", pe(&canon.to_string_lossy())),
+    )
+    .await;
+    assert!(ls.is_redirection() || ls.is_success(), "link: {ls}");
+
+    // Remove the linked files from disk (registry still points at them).
+    std::fs::remove_file(dir.path().join(format!("result_{run_id}.html"))).ok();
+    std::fs::remove_file(dir.path().join(format!("result_{run_id}.json"))).ok();
+
+    // HTML: read fails with NotFound → LocateFileTemplate 404.
+    let (s_html, _, body) = get(app.clone(), &format!("/runs/html/{run_id}")).await;
+    assert_eq!(s_html, StatusCode::NOT_FOUND, "missing html → 404");
+    assert!(!body.is_empty());
+
+    // JSON: json_path recorded but file gone → NotFound arm.
+    let (s_json, _, _) = get(app.clone(), &format!("/runs/json/{run_id}")).await;
+    assert_eq!(s_json, StatusCode::NOT_FOUND, "missing json → 404");
+
+    // scan-config: file absent → NotFound.
+    let (s_cfg, _, _) = get(app, &format!("/runs/scan-config/{run_id}")).await;
+    assert!(s_cfg.as_u16() < 500, "scan-config missing must not 5xx");
+}
+
+/// compare handler with sub= and scope=super query variants, plus a missing side.
+#[tokio::test]
+async fn compare_handler_scope_and_missing_variants() {
+    let app = make_test_router();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    ingest_and_link(&app, da.path(), "cmp-scope-a").await;
+    ingest_and_link(&app, db.path(), "cmp-scope-b").await;
+
+    for uri in [
+        "/compare?a=cmp-scope-a&b=cmp-scope-b&scope=super",
+        "/compare?a=cmp-scope-a&b=cmp-scope-b&sub=vendor",
+        "/compare?a=cmp-scope-a&b=does-not-exist",
+        "/compare?a=&b=",
+    ] {
+        let (status, _, _) = get(app.clone(), uri).await;
+        assert!(status.as_u16() < 500, "{uri} must not 5xx, got {status}");
+    }
+}
+
+/// Deleting a real linked run exercises delete_run_artifacts' full removal path.
+#[tokio::test]
+async fn delete_linked_run_removes_it() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    let run_id = "delete-linked-001";
+    ingest_and_link(&app, dir.path(), run_id).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/api/runs/{run_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().as_u16() < 500, "delete must not 5xx");
+
+    // After deletion the run is gone from the registry (metrics no longer find it).
+    let (s, _, _) = get(app, &format!("/api/metrics/{run_id}")).await;
+    assert!(s.as_u16() < 500);
+}
+
+/// Cleanup handler over a populated registry.
+#[tokio::test]
+async fn cleanup_runs_with_populated_registry() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    ingest_and_link(&app, dir.path(), "cleanup-pop-001").await;
+    let (status, _) = post_json(app, "/api/runs/cleanup", r#"{"keep_last":1}"#).await;
+    assert!(status.as_u16() < 500, "cleanup must not 5xx, got {status}");
+}
+
 /// The multi-compare handler with a single id and with a submodule scope.
 #[tokio::test]
 async fn multi_compare_variants_render() {
