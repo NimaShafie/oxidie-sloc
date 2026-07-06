@@ -24,7 +24,10 @@
 #   docker build -f Dockerfile.rhel-build \
 #     --build-arg BUILDER_IMAGE=registry1.dso.mil/ironbank/redhat/ubi/ubi8:8.10 .
 # NOTE: an ARG used in FROM must be declared before the first FROM (global scope).
-ARG BUILDER_IMAGE=registry.access.redhat.com/ubi8/ubi:8.10
+# Digest pinned to prevent silent base-image substitution (Scorecard Pinned-Dependencies).
+# To update: docker buildx imagetools inspect registry.access.redhat.com/ubi8/ubi:8.10
+#            (copy the top-level "Digest:" manifest-list sha256).
+ARG BUILDER_IMAGE=registry.access.redhat.com/ubi8/ubi:8.10@sha256:8e573e1d76ff27f9e1219b33c114e48b0f7b86f2e6858cd8861e84431c7416e4
 FROM ${BUILDER_IMAGE} AS builder
 
 # Rust toolchain version — keep in lockstep with rust-toolchain.toml (channel).
@@ -48,11 +51,20 @@ RUN dnf -y --setopt=install_weak_deps=false install \
 # Install the pinned Rust toolchain via rustup (network is required here, and
 # only here). Components mirror rust-toolchain.toml so that cargo — which honours
 # the workspace override file — never tries to fetch a missing component mid-build.
+#
+# The rustup bootstrap script is downloaded to a file and verified against a
+# pinned SHA-256 before execution rather than piped straight into a shell
+# (Scorecard Pinned-Dependencies). To update after a rustup.rs change:
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+#   sha256sum rustup-init.sh
+ARG RUSTUP_INIT_SHA256=6c30b75a75b28a96fd913a037c8581b580080b6ee9b8169a3c0feb1af7fe8caf
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo \
     PATH=/opt/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh \
+    && echo "${RUSTUP_INIT_SHA256}  rustup-init.sh" | sha256sum -c - \
+    && sh rustup-init.sh -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+    && rm rustup-init.sh \
     && rustup component add rustfmt clippy llvm-tools \
     && rustc --version
 
