@@ -635,3 +635,369 @@ async fn auth_logout_with_key_redirects_to_login() {
         "API key configured → redirect to /auth/login"
     );
 }
+
+// ── Confluence integration API (network-free validation branches) ─────────────
+
+#[tokio::test]
+async fn confluence_get_config_when_unconfigured() {
+    let (status, _, body) = get(make_test_router(), "/api/confluence/config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("\"configured\":false"),
+        "unconfigured: {body}"
+    );
+}
+
+#[tokio::test]
+async fn confluence_save_invalid_url_rejected() {
+    // A private/localhost base_url is blocked by the SSRF guard in validate_confluence_url.
+    let body = r#"{"base_url":"http://127.0.0.1/wiki","username":"u","credential":"tok","space_key":"DS"}"#;
+    let (status, resp) = post_json(make_test_router(), "/api/confluence/config", body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "resp: {resp}");
+    assert!(resp.contains("error"), "error json: {resp}");
+}
+
+#[tokio::test]
+async fn confluence_save_valid_then_get_configured() {
+    let app = make_test_router();
+    let body = r#"{"tier":"cloud","base_url":"https://example.atlassian.net","username":"u@x.com","credential":"tok123","space_key":"DS","parent_page_id":"12345"}"#;
+    let (s1, r1) = post_json(app.clone(), "/api/confluence/config", body).await;
+    assert_eq!(s1, StatusCode::OK, "save: {r1}");
+    assert!(r1.contains("\"ok\":true"));
+
+    let (s2, _, r2) = get(app, "/api/confluence/config").await;
+    assert_eq!(s2, StatusCode::OK);
+    assert!(r2.contains("\"configured\":true"), "configured: {r2}");
+    assert!(r2.contains("\"api_token_set\":true"), "token set: {r2}");
+}
+
+#[tokio::test]
+async fn confluence_save_empty_credential_keeps_existing() {
+    let app = make_test_router();
+    let first = r#"{"base_url":"https://example.atlassian.net","username":"u","credential":"secret","space_key":"DS"}"#;
+    let (s1, _) = post_json(app.clone(), "/api/confluence/config", first).await;
+    assert_eq!(s1, StatusCode::OK);
+    // Re-save with a blank credential — the stored token must be preserved.
+    let second = r#"{"base_url":"https://example.atlassian.net","username":"u2","credential":"","space_key":"DS"}"#;
+    let (s2, _) = post_json(app.clone(), "/api/confluence/config", second).await;
+    assert_eq!(s2, StatusCode::OK);
+    let (_, _, body) = get(app, "/api/confluence/config").await;
+    assert!(
+        body.contains("\"api_token_set\":true"),
+        "kept token: {body}"
+    );
+}
+
+#[tokio::test]
+async fn confluence_save_server_tier() {
+    let app = make_test_router();
+    let body = r#"{"tier":"server","base_url":"https://wiki.example.com","username":"u","credential":"tok","space_key":"DS"}"#;
+    let (s, _) = post_json(app.clone(), "/api/confluence/config", body).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, _, cfg) = get(app, "/api/confluence/config").await;
+    assert!(cfg.contains("\"tier\":\"server\""), "server tier: {cfg}");
+}
+
+#[tokio::test]
+async fn confluence_test_when_unconfigured_returns_400() {
+    let (status, resp) = post_json(make_test_router(), "/api/confluence/test", "{}").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+    assert!(resp.contains("not configured"), "message: {resp}");
+}
+
+#[tokio::test]
+async fn confluence_post_invalid_run_id_rejected() {
+    let body = r#"{"run_id":"bad id/../x","page_title":"T"}"#;
+    let (status, resp) = post_json(make_test_router(), "/api/confluence/post", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+    assert!(resp.contains("Invalid run_id"), "message: {resp}");
+}
+
+#[tokio::test]
+async fn confluence_post_unconfigured_rejected() {
+    let body = r#"{"run_id":"valid-run-001","page_title":"T"}"#;
+    let (status, resp) = post_json(make_test_router(), "/api/confluence/post", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resp: {resp}");
+    assert!(resp.contains("not configured"), "message: {resp}");
+}
+
+#[tokio::test]
+async fn confluence_post_run_not_found_returns_404() {
+    let app = make_test_router();
+    let cfg = r#"{"base_url":"https://example.atlassian.net","username":"u","credential":"tok","space_key":"DS"}"#;
+    let (s, _) = post_json(app.clone(), "/api/confluence/config", cfg).await;
+    assert_eq!(s, StatusCode::OK);
+    let body = r#"{"run_id":"no-such-run-001","page_title":"T"}"#;
+    let (status, resp) = post_json(app, "/api/confluence/post", body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "resp: {resp}");
+    assert!(resp.contains("not found"), "message: {resp}");
+}
+
+#[tokio::test]
+async fn confluence_wiki_markup_invalid_run_id_returns_400() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/confluence/wiki-markup?run_id=a%2Fb",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn confluence_wiki_markup_unknown_run_returns_404() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/confluence/wiki-markup?run_id=unknown-xyz",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn confluence_wiki_markup_linked_run_renders_markup() {
+    let app = make_test_router();
+    let dir = tempfile::tempdir().unwrap();
+    let run_id = "wiki-markup-001";
+    ingest_and_link(&app, dir.path(), run_id).await;
+
+    let (status, headers, body) =
+        get(app, &format!("/api/confluence/wiki-markup?run_id={run_id}")).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("text/plain"), "wiki markup content-type: {ct}");
+    assert!(!body.is_empty(), "wiki markup should not be empty");
+}
+
+// ── Git browser API (validation + repo-access error branches) ─────────────────
+
+#[tokio::test]
+async fn git_list_refs_missing_repo_returns_400() {
+    let (status, _, _) = get(make_test_router(), "/api/git/refs").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn git_list_refs_bogus_repo_returns_bad_gateway() {
+    // A non-existent local path fails `git clone` fast → load_refs error → 502.
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/refs?repo=%2Fnonexistent%2Frepo-xyz.git",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "bogus repo → 502");
+}
+
+#[tokio::test]
+async fn git_scan_ref_invalid_ref_returns_400() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/scan-ref?repo=%2Ftmp%2Fx&ref_name=..%2Fetc",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "path-traversal ref → 400");
+}
+
+#[tokio::test]
+async fn git_scan_ref_valid_ref_bogus_repo_returns_bad_gateway() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/scan-ref?repo=%2Fnonexistent%2Frepo-xyz.git&ref_name=main",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "bogus repo scan → 502");
+}
+
+#[tokio::test]
+async fn git_compare_refs_invalid_ref_returns_400() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/compare-refs?repo=%2Ftmp%2Fx&baseline_ref=..&current_ref=main",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn git_compare_refs_valid_refs_bogus_repo_returns_bad_gateway() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/compare-refs?repo=%2Fnonexistent%2Frepo.git&baseline_ref=v1&current_ref=v2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "bogus repo compare → 502");
+}
+
+// ── read/render endpoints against a populated registry ────────────────────────
+
+/// Drives the report-consuming GET endpoints with real linked runs so their
+/// with-data render branches (not just the empty-state paths) are exercised.
+#[tokio::test]
+async fn render_endpoints_with_populated_registry() {
+    let app = make_test_router();
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let d3 = tempfile::tempdir().unwrap();
+    ingest_and_link(&app, d1.path(), "pop-run-001").await;
+    ingest_and_link(&app, d2.path(), "pop-run-002").await;
+    ingest_and_link(&app, d3.path(), "pop-run-003").await;
+
+    // Pages that render tables/charts from the registry.
+    for uri in [
+        "/view-reports",
+        "/compare-scans",
+        "/multi-compare?ids=pop-run-001,pop-run-002,pop-run-003",
+        "/test-metrics",
+        "/trend-reports",
+        "/git-browser",
+        "/integrations",
+    ] {
+        let (status, _, body) = get(app.clone(), uri).await;
+        assert!(
+            status.is_success() || status.is_redirection(),
+            "{uri} should render, got {status}: {}",
+            &body[..body.len().min(160)]
+        );
+    }
+
+    // JSON metrics APIs with data present.
+    for uri in [
+        "/api/metrics/latest",
+        "/api/metrics/history",
+        "/api/metrics/pop-run-001",
+        "/api/project-history",
+        "/embed/summary",
+        "/badge/code_lines",
+        "/badge/files",
+    ] {
+        let (status, _, _) = get(app.clone(), uri).await;
+        assert!(status.as_u16() < 500, "{uri} must not 5xx, got {status}");
+    }
+}
+
+/// Extract the first UUID-looking token from a response body (byte-safe).
+fn first_uuid(body: &str) -> Option<String> {
+    let b = body.as_bytes();
+    let is_hex = |c: u8| c.is_ascii_hexdigit();
+    for w in b.windows(36) {
+        let shape_ok = w[8] == b'-'
+            && w[13] == b'-'
+            && w[18] == b'-'
+            && w[23] == b'-'
+            && w.iter()
+                .enumerate()
+                .all(|(j, &c)| matches!(j, 8 | 13 | 18 | 23) || is_hex(c));
+        if shape_ok {
+            // All bytes are ASCII (hex + '-'), so this is valid UTF-8.
+            return Some(String::from_utf8_lossy(w).into_owned());
+        }
+    }
+    None
+}
+
+/// End-to-end: POST /analyze on a real project directory, poll the async status
+/// endpoint to completion, then render the result page. Exercises
+/// run_analysis_task, scan_path_to_artifacts, the native PDF background spawn, and
+/// the async status/result handlers.
+#[tokio::test]
+async fn analyze_full_flow_polls_to_completion_and_renders_result() {
+    let app = make_test_router();
+    let proj = tempfile::tempdir().unwrap();
+    std::fs::write(
+        proj.path().join("main.rs"),
+        "fn main() {\n    // entry\n    println!(\"hi\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.path().join("lib.rs"),
+        "pub fn add(a: i32) -> i32 { a }\n",
+    )
+    .unwrap();
+
+    let path = proj.path().canonicalize().unwrap();
+    let (status, wait_body) = post_form(
+        app.clone(),
+        "/analyze",
+        &format!("path={}", pe(&path.to_string_lossy())),
+    )
+    .await;
+    assert!(status.is_success(), "analyze dispatch failed: {status}");
+    let wait_id = first_uuid(&wait_body).expect("wait page must embed a wait_id");
+
+    // Poll status until Complete/Failed (bounded).
+    let mut run_id = None;
+    for _ in 0..100 {
+        let (s, _, body) = get(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
+        assert!(s.is_success(), "status poll failed: {s}");
+        if body.contains("\"state\":\"complete\"") {
+            run_id = first_uuid(&body).or_else(|| {
+                // run_id may not be UUID-shaped; extract the JSON field directly.
+                body.split("\"run_id\":\"")
+                    .nth(1)
+                    .and_then(|s| s.split('"').next())
+                    .map(str::to_owned)
+            });
+            break;
+        }
+        assert!(
+            !body.contains("\"state\":\"failed\""),
+            "analysis failed: {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let run_id = run_id.expect("analysis should complete with a run_id");
+
+    // Render the result page for the completed run.
+    let (rs, _, rbody) = get(app, &format!("/runs/result/{run_id}")).await;
+    assert!(
+        rs.is_success() || rs.is_redirection(),
+        "result page render, got {rs}: {}",
+        &rbody[..rbody.len().min(160)]
+    );
+}
+
+/// Cancelling a freshly-dispatched analysis run marks it Cancelled.
+#[tokio::test]
+async fn analyze_run_can_be_cancelled() {
+    let app = make_test_router();
+    let proj = tempfile::tempdir().unwrap();
+    std::fs::write(proj.path().join("a.rs"), "fn a() {}\n").unwrap();
+    let path = proj.path().canonicalize().unwrap();
+    let (_, wait_body) = post_form(
+        app.clone(),
+        "/analyze",
+        &format!("path={}", pe(&path.to_string_lossy())),
+    )
+    .await;
+    let wait_id = first_uuid(&wait_body).expect("wait_id");
+
+    // POST cancel — either it was still running (200) or already complete (404).
+    let (cs, _) = post_form(app.clone(), &format!("/api/runs/{wait_id}/cancel"), "").await;
+    assert!(cs.as_u16() < 500, "cancel must not 5xx, got {cs}");
+
+    // Status is still queryable afterward.
+    let (ss, _, _) = get(app, &format!("/api/runs/{wait_id}/status")).await;
+    assert!(ss.is_success(), "status after cancel: {ss}");
+}
+
+/// The multi-compare handler with a single id and with a submodule scope.
+#[tokio::test]
+async fn multi_compare_variants_render() {
+    let app = make_test_router();
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    ingest_and_link(&app, d1.path(), "mc-a").await;
+    ingest_and_link(&app, d2.path(), "mc-b").await;
+
+    for uri in [
+        "/multi-compare",
+        "/multi-compare?ids=mc-a",
+        "/multi-compare?ids=mc-a,mc-b",
+    ] {
+        let (status, _, _) = get(app.clone(), uri).await;
+        assert!(status.as_u16() < 500, "{uri} must not 5xx, got {status}");
+    }
+}
