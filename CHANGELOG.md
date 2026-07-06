@@ -10,6 +10,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.75] — 2026-07-05
+
+### Security Hardening
+
+- **Tighter Content-Security-Policy** (`crates/sloc-web`): added the `base-uri`
+  and `form-action` directives to lock down base-tag and form-submission targets,
+  and set a `Cross-Origin-Embedder-Policy` (COEP) response header on served pages.
+- **Hardened git-clone target checks** (`crates/sloc-git`): stricter validation of
+  clone targets, and the release workflow now validates its tag inputs before use.
+- **Signed Docker provenance** (CI): the container image build now emits
+  GitHub-signed build provenance and verifies the image signature.
+
+### Changed
+
+- **Parameterized Jenkins credentials** (`ci/jenkins`): the Jenkins controller
+  admin credentials are supplied via build args instead of being baked in.
+- **Faster archive packing** (`scripts`): committed archives skip git
+  delta-compression for quicker packing, and a reusable git-history purge tool was
+  added under `scripts/`. Repository history was pruned of superseded
+  vendor/toolchain/dist blobs.
+- **Dependency + vendor refresh** (deps): updated dependencies and the vendor
+  archive; the security audit ignores the quick-xml `RUSTSEC-2026-0194/0195`
+  advisories.
+
+### Fixed
+
+- **Code quality and coverage** (workspace): broad clippy/quality cleanups, CI
+  hardening, and substantially expanded test coverage across the web handlers,
+  Confluence/git-browser API branches, server-scan validation, and core decode
+  policies.
+
+---
+
 ## [1.5.74] — 2026-06-28
 
 ### Added
