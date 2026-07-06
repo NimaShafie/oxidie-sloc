@@ -3,6 +3,10 @@ name: Update dist bundles
 # Run manually from the Actions tab, or automatically after every release tag.
 # Builds fresh platform binaries, packages them as zip / tar.gz, builds an RPM
 # for RHEL 8/9, and uploads everything as assets on the corresponding GitHub release.
+#
+# The Linux binary is built inside a UBI 8 container (Dockerfile.rhel-build) so
+# it links against glibc 2.28 and is forward-compatible with RHEL 8, 9 and 10.
+# It is then smoke-tested on both UBI 8 and UBI 9 before release.
 on:
   workflow_run:
     workflows: ["Release"]
@@ -35,11 +39,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            binary: oxide-sloc
-            bundle: oxide-sloc-linux-x86_64.tar.gz
-
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: oxide-sloc.exe
@@ -70,23 +69,11 @@ jobs:
         with:
           key: dist-${{ matrix.target }}
 
-      - name: Install musl tools (Linux only)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends musl-tools
-
       - name: Add cross-compilation target
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
         run: bash ci/release.sh ${{ matrix.target }}
-
-      - name: Package — Linux tar.gz
-        if: runner.os == 'Linux'
-        run: |
-          cp target/${{ matrix.target }}/release/oxide-sloc /tmp/oxide-sloc
-          tar czf ${{ matrix.bundle }} -C /tmp oxide-sloc
 
       - name: Sign Windows binary
         if: runner.os == 'Windows'
@@ -136,12 +123,76 @@ jobs:
           name: ${{ matrix.bundle }}
           path: ${{ matrix.bundle }}
 
+  # ── Build the Linux binary inside a UBI 8 container ───────────────────────
+  # Compiles against glibc 2.28 (Dockerfile.rhel-build) so the artifact runs on
+  # RHEL 8, 9 and 10. BuildKit exports just the bare binary to ./out, which is
+  # then packaged as the canonical oxide-sloc-linux-x86_64.tar.gz.
+  build-linux:
+    name: Build Linux (RHEL 8/9 · UBI 8)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate dispatch tag input
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [[ ! "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+            echo "::error::Invalid tag input '$INPUT_TAG' — expected vMAJOR.MINOR.PATCH (e.g. v1.3.1)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Build binary in UBI 8 container
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          docker build \
+            --file Dockerfile.rhel-build \
+            --output type=local,dest=./out \
+            .
+          test -f out/oxide-sloc || { echo "::error::UBI 8 build produced no binary"; exit 1; }
+          chmod +x out/oxide-sloc
+
+      - name: Verify glibc floor (must not exceed 2.28 / RHEL 8)
+        run: |
+          # Every versioned GLIBC symbol the binary imports must be <= 2.28, or it
+          # will fail to load on RHEL 8. objdump -T lists dynamic symbol versions.
+          reqs="$(objdump -T out/oxide-sloc 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/GLIBC_//' | sort -uV || true)"
+          echo "Required GLIBC symbol versions:"
+          echo "${reqs:-  (none — fully static)}"
+          maxg="$(echo "$reqs" | tail -1)"
+          if [ -n "$maxg" ] && [ "$(printf '%s\n2.28\n' "$maxg" | sort -V | tail -1)" != "2.28" ]; then
+            echo "::error::binary requires GLIBC_$maxg > 2.28 — would not load on RHEL 8"
+            exit 1
+          fi
+          echo "OK: highest required GLIBC is ${maxg:-none} (<= 2.28)"
+
+      - name: Package — Linux tar.gz
+        run: |
+          cp out/oxide-sloc /tmp/oxide-sloc
+          tar czf oxide-sloc-linux-x86_64.tar.gz -C /tmp oxide-sloc
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: oxide-sloc-linux-x86_64.tar.gz
+          path: oxide-sloc-linux-x86_64.tar.gz
+
   # ── Build RHEL RPM from the Linux binary ─────────────────────────────────
   # Produces an RPM that installs only /usr/local/bin/oxide-sloc.
   # No Rust toolchain extraction on the target — safe for Carbon Black / Trellix.
   build-rpm:
     name: Build RHEL RPM
-    needs: build
+    needs: build-linux
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -185,7 +236,7 @@ jobs:
   # ── Build Debian / Ubuntu DEB from the Linux binary ──────────────────────
   build-deb:
     name: Build DEB package
-    needs: build
+    needs: build-linux
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -287,10 +338,11 @@ jobs:
           ./oxide-sloc.exe --version
           echo "PASS: Windows --online install succeeded"
 
-  # ── Smoke test: RHEL RPM install via UBI9 ────────────────────────────────
-  # Validates rpm -ivh works on a RHEL 9-compatible image.
+  # ── Smoke test: RHEL 9 RPM install via UBI 9 ─────────────────────────────
+  # Validates rpm -ivh works, AND that the UBI 8-built binary actually loads
+  # (glibc 2.34) on a RHEL 9-compatible image.
   smoke-rhel-rpm:
-    name: Smoke test — RHEL RPM install
+    name: Smoke test — RHEL RPM install (UBI 9)
     needs: build-rpm
     runs-on: ubuntu-latest
     permissions:
@@ -313,7 +365,39 @@ jobs:
         run: |
           [[ -f /usr/local/bin/oxide-sloc ]] || { echo "FAIL: binary not at /usr/local/bin/oxide-sloc"; exit 1; }
           /usr/local/bin/oxide-sloc --version
-          echo "PASS: RHEL RPM install succeeded"
+          echo "PASS: RHEL 9 RPM install succeeded"
+
+      - name: Uninstall RPM
+        run: rpm -e oxide-sloc
+
+  # ── Smoke test: RHEL 8 RPM install via UBI 8 ─────────────────────────────
+  # The critical gate: proves the binary runs on the OLDEST supported RHEL
+  # (glibc 2.28). If the build ever regresses to a newer glibc, this fails.
+  smoke-rhel8-rpm:
+    name: Smoke test — RHEL RPM install (UBI 8)
+    needs: build-rpm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: registry.access.redhat.com/ubi8/ubi:latest
+    steps:
+      - name: Download RPM artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: oxide-sloc-rpm
+          path: .
+
+      - name: Install RPM
+        run: |
+          RPM_FILE="$(ls oxide-sloc-*.rpm | head -1)"
+          rpm -ivh "$RPM_FILE"
+
+      - name: Verify binary
+        run: |
+          [[ -f /usr/local/bin/oxide-sloc ]] || { echo "FAIL: binary not at /usr/local/bin/oxide-sloc"; exit 1; }
+          /usr/local/bin/oxide-sloc --version
+          echo "PASS: RHEL 8 RPM install succeeded"
 
       - name: Uninstall RPM
         run: rpm -e oxide-sloc
@@ -321,7 +405,7 @@ jobs:
   # ── Attach all bundles to the GitHub release ──────────────────────────────
   upload-release-assets:
     name: Upload release assets
-    needs: [build, build-rpm, build-deb, smoke-windows-online, smoke-rhel-rpm, smoke-ubuntu-deb]
+    needs: [build, build-linux, build-rpm, build-deb, smoke-windows-online, smoke-rhel-rpm, smoke-rhel8-rpm, smoke-ubuntu-deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write

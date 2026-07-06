@@ -1,0 +1,96 @@
+# Dockerfile.rhel-build — produce a RHEL 8/9-compatible oxide-sloc Linux binary.
+#
+# WHY UBI 8: the binary is compiled against the glibc that ships in the builder
+# image. UBI 8 carries glibc 2.28, so the resulting binary is forward-compatible
+# with RHEL 8 (glibc 2.28), RHEL 9 (glibc 2.34) and RHEL 10 — the classic
+# "build on the OLDEST glibc you must support" rule. Building on Debian
+# bookworm (glibc 2.36, the runtime Dockerfile's base) would emit a binary that
+# fails on RHEL 8/9 with "GLIBC_2.3x not found", which is exactly what this file
+# exists to avoid.
+#
+# This is a BUILD-ONLY image: its sole output is the bare binary, exported via
+# BuildKit to the host with no runtime layers. Extract it with:
+#
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.rhel-build \
+#     --output type=local,dest=./out .
+#   # -> ./out/oxide-sloc  (RHEL 8/9/10-compatible)
+#
+# The crate build is fully offline: it consumes the committed vendor.tar.xz
+# (verified by sha256) via ci/docker-cargo-config.toml, so no crates.io access
+# is required. Only the one-time rustup bootstrap needs the network.
+#
+# DoD / hardened builds may substitute an approved UBI mirror WITHOUT editing
+# this file, e.g.:
+#   docker build -f Dockerfile.rhel-build \
+#     --build-arg BUILDER_IMAGE=registry1.dso.mil/ironbank/redhat/ubi/ubi8:8.10 .
+# NOTE: an ARG used in FROM must be declared before the first FROM (global scope).
+ARG BUILDER_IMAGE=registry.access.redhat.com/ubi8/ubi:8.10
+FROM ${BUILDER_IMAGE} AS builder
+
+# Rust toolchain version — keep in lockstep with rust-toolchain.toml (channel).
+# Passing the minor series ("1.96") lets rustup select the latest matching patch,
+# which is what the workspace's rust-toolchain.toml also resolves to.
+ARG RUST_VERSION=1.96
+
+# gcc (+ its binutils dependency) is the linker; tar/gzip/xz unpack the vendor
+# archive; findutils/coreutils provide sha256sum. UBI repos serve all of these
+# without a subscription.
+RUN dnf -y --setopt=install_weak_deps=false install \
+        gcc \
+        binutils \
+        tar \
+        gzip \
+        xz \
+        findutils \
+        ca-certificates \
+    && dnf clean all
+
+# Install the pinned Rust toolchain via rustup (network is required here, and
+# only here). Components mirror rust-toolchain.toml so that cargo — which honours
+# the workspace override file — never tries to fetch a missing component mid-build.
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+    && rustup component add rustfmt clippy llvm-tools \
+    && rustc --version
+
+WORKDIR /app
+
+# Manifests + toolchain pin first so this layer caches across source-only edits.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+RUN mkdir -p .cargo
+COPY ci/docker-cargo-config.toml .cargo/config.toml
+COPY crates/ crates/
+COPY docs/ docs/
+COPY vendor.tar.xz vendor.tar.xz.sha256 ./
+
+# Verify the vendored crate archive against its committed checksum, then extract.
+# This must precede `cargo build` because .cargo/config.toml points cargo at the
+# vendor/ directory as the sole (offline) crate source.
+RUN sha256sum -c vendor.tar.xz.sha256 \
+    && tar -xJf vendor.tar.xz \
+    && rm vendor.tar.xz
+
+# Pre-flight: fail loudly if crates/ was accidentally excluded from the context
+# (e.g. re-added to .dockerignore) rather than emitting a cryptic manifest error.
+RUN test -d crates/sloc-config \
+    || { \
+         echo "ERROR: crates/sloc-config is missing from the Docker build context." >&2; \
+         echo "Check .dockerignore — crates/ must not be excluded." >&2; \
+         exit 1; \
+       }
+
+# --no-default-features drops the rfd/GTK desktop file-picker, which is neither
+# available nor wanted in a headless RHEL deployment (matches ci/release.sh).
+# --offline guarantees the build never reaches for the network.
+# strip shrinks the binary; RPM/tar consumers expect an already-stripped artifact.
+RUN cargo build --release -p oxide-sloc --no-default-features --offline \
+    && strip target/release/oxide-sloc \
+    && ./target/release/oxide-sloc --version
+
+# Export stage: an empty base holding only the bare binary, so
+# `docker build --output type=local` emits just the file (no image layers).
+FROM scratch AS export
+COPY --from=builder /app/target/release/oxide-sloc /oxide-sloc
