@@ -20,7 +20,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write  # required for SLSA provenance attestation and cosign OIDC signing
+      id-token: write       # required for SLSA provenance attestation and cosign OIDC signing
+      attestations: write   # required to write the GitHub-signed build-provenance attestation
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -75,8 +76,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # provenance: true is the default — SLSA build provenance attestations are generated
+          # BuildKit-generated SLSA provenance (mode=max = full build metadata) + SBOM,
+          # both attached to the image as in-toto attestations.
+          provenance: mode=max
           sbom: true
+
+      # GitHub-signed SLSA build provenance, generated in GitHub's control plane (not by the
+      # build itself) and attached to the image by digest — the non-forgeable provenance that
+      # takes the release from SLSA Build L2 toward L3.
+      - name: Generate SLSA build provenance attestation
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build-push.outputs.digest }}
+          push-to-registry: true
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
@@ -84,7 +97,17 @@ jobs:
       - name: Sign image with cosign (keyless via GitHub OIDC)
         env:
           DIGEST: ${{ steps.build-push.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           IMAGE_REF="ghcr.io/${{ github.repository }}@${DIGEST}"
           cosign sign --yes "${IMAGE_REF}"
+
+      # Fail the release if the published image signature is not verifiable — proves the image
+      # carries a valid cosign signature bound to this workflow's identity before it ships.
+      - name: Verify image signature
+        env:
+          DIGEST: ${{ steps.build-push.outputs.digest }}
+        run: |
+          IMAGE_REF="ghcr.io/${{ github.repository }}@${DIGEST}"
+          cosign verify "${IMAGE_REF}" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
