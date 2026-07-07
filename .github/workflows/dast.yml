@@ -52,6 +52,11 @@ jobs:
           # Non-blocking: report findings without failing the build. Flip to `false`
           # (and curate the rules file) once the baseline is triaged.
           fail_action: false
+          # Don't open a GitHub issue for findings. The default (true) needs
+          # `issues: write`, which this least-privilege token deliberately lacks —
+          # attempting it returns 403 and fails the step. Findings stay in the job
+          # log and the uploaded ZAP report artifact.
+          allow_issue_writing: false
           cmd_options: "-a"
 
       - name: Stop server
