@@ -1674,6 +1674,10 @@ fn print_plain_summary(run: &AnalysisRun) {
         println!("style_col_compliant_pct={}", ss.line_col_compliant_pct);
         println!("style_language_groups={}", ss.by_language.len());
     }
+    println!("warning_count={}", run.warnings.len());
+    for warning in &run.warnings {
+        println!("warning={warning}");
+    }
 }
 
 fn print_totals_header(run: &AnalysisRun, col: bool) {
@@ -1890,6 +1894,9 @@ fn print_summary(run: &AnalysisRun, per_file: bool, plain: bool) {
             paint!(col, "33", "Warnings:"),
             run.warnings.len()
         );
+        for warning in &run.warnings {
+            println!("    {} {warning}", paint!(col, "33", "-"));
+        }
     }
 }
 

@@ -416,6 +416,17 @@ struct GitInfo {
     remote_url: Option<String>,
 }
 
+/// Return `true` if `dir` is itself the top level of a git repository — i.e. it
+/// contains a `.git` directory, or a `.git` *file* (worktree/submodule pointer)
+/// that resolves to a real gitdir. Tests `dir` only; does not walk up.
+fn is_git_root(dir: &Path) -> bool {
+    let candidate = dir.join(".git");
+    if candidate.is_dir() {
+        return true;
+    }
+    candidate.is_file() && resolve_git_file_pointer(&candidate, dir).is_some()
+}
+
 /// Locate the `.git` directory by walking up from `start`.
 /// Handles plain repos, worktrees (`.git` is a file with `gitdir:` pointer), and
 /// submodules. Returns `None` if no git repo is found.
@@ -1246,6 +1257,11 @@ pub fn analyze(
             continue;
         }
 
+        let layout = detect_repository_layout(&root);
+        if layout.has_multiple_repos() {
+            warnings.push(format_multi_repo_warning(&layout));
+        }
+
         walk_root(
             &root,
             config,
@@ -1905,6 +1921,150 @@ fn relative_path_string(path: &Path, root: &Path) -> String {
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// Summary of the git-repository shape under a selected scan root.
+///
+/// Used to warn when a user points oxide-sloc at a folder that holds several
+/// *independent* repositories (e.g. a `projects/` directory of separate clones),
+/// which silently conflates unrelated codebases and their git metrics. A single
+/// repository that contains git *submodules* is legitimate and does not count as
+/// "multiple repos".
+#[derive(Debug, Clone, Default)]
+pub struct RepositoryLayout {
+    /// The scan root this layout was computed for.
+    pub root: PathBuf,
+    /// `true` when the root directory is itself the top of a git repository.
+    pub root_is_repo: bool,
+    /// Submodule paths declared in the root's `.gitmodules`, relative to `root`.
+    pub submodule_paths: Vec<PathBuf>,
+    /// Independent (non-submodule) repositories found beneath `root`, relative to `root`.
+    pub nested_repos: Vec<PathBuf>,
+}
+
+impl RepositoryLayout {
+    /// `true` when the selection spans more than one independent repository.
+    ///
+    /// If the root is itself a repo, any nested non-submodule repo is a foreign
+    /// checkout vendored inside it. If the root is not a repo, two or more child
+    /// repos means the user picked a parent-of-repos folder.
+    #[must_use]
+    pub fn has_multiple_repos(&self) -> bool {
+        if self.root_is_repo {
+            !self.nested_repos.is_empty()
+        } else {
+            self.nested_repos.len() >= 2
+        }
+    }
+}
+
+/// Depth (below the root) at which the nested-repo scan stops descending.
+const REPO_SCAN_MAX_DEPTH: usize = 6;
+/// Upper bound on directories visited by the nested-repo scan; a partial result
+/// is acceptable for a best-effort caution.
+const REPO_SCAN_MAX_DIRS: usize = 4000;
+
+/// Inspect `root` for independent git repositories nested beneath it.
+///
+/// Performs a bounded, prune-on-first-`.git` walk: once a directory is found to
+/// be a repository (or a declared submodule) the scan does not descend into it,
+/// so a repo's own submodules never register as independent repos. Best-effort
+/// and infallible — IO errors are swallowed and simply yield a smaller result.
+#[must_use]
+pub fn detect_repository_layout(root: &Path) -> RepositoryLayout {
+    let mut layout = RepositoryLayout {
+        root: root.to_path_buf(),
+        root_is_repo: is_git_root(root),
+        submodule_paths: detect_submodules(root)
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect(),
+        nested_repos: Vec::new(),
+    };
+
+    // Absolute paths of declared submodules, so we can prune them from the walk.
+    let submodule_dirs: HashSet<PathBuf> = layout
+        .submodule_paths
+        .iter()
+        .map(|rel| root.join(rel))
+        .collect();
+
+    // Stack of (dir, depth) to visit; start with the root's children (depth 1).
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    let mut visited = 0usize;
+
+    while let Some((dir, depth)) = stack.pop() {
+        if visited >= REPO_SCAN_MAX_DIRS {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            // Never descend into a .git directory itself.
+            if child.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                continue;
+            }
+            visited += 1;
+            if submodule_dirs.contains(&child) {
+                continue; // declared submodule — prune, it is not independent
+            }
+            if is_git_root(&child) {
+                layout.nested_repos.push(relative_path_buf(&child, root));
+                continue; // repo boundary — prune, don't recurse into it
+            }
+            if depth + 1 < REPO_SCAN_MAX_DEPTH {
+                stack.push((child, depth + 1));
+            }
+        }
+    }
+
+    layout.nested_repos.sort();
+    layout
+}
+
+/// Path of `path` relative to `root` (falling back to `path` itself), as a `PathBuf`.
+fn relative_path_buf(path: &Path, root: &Path) -> PathBuf {
+    path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+/// Build the human-readable warning for a multi-repository selection.
+fn format_multi_repo_warning(layout: &RepositoryLayout) -> String {
+    const MAX_LISTED: usize = 5;
+    let total = layout.nested_repos.len();
+    let listed: Vec<String> = layout
+        .nested_repos
+        .iter()
+        .take(MAX_LISTED)
+        .map(|p| path_to_string(p))
+        .collect();
+    let mut joined = listed.join(", ");
+    if total > MAX_LISTED {
+        joined.push_str(&format!(", … and {} more", total - MAX_LISTED));
+    }
+    if layout.root_is_repo {
+        format!(
+            "This repository contains {total} nested git {} ({joined}) that are not registered \
+             submodules. Their files are being counted as part of this project; if that is not \
+             intended, exclude them or scan each repository separately.",
+            if total == 1 {
+                "repository"
+            } else {
+                "repositories"
+            }
+        )
+    } else {
+        format!(
+            "The selected folder contains {total} independent git repositories ({joined}). \
+             oxide-sloc analyzes one repository at a time — git metrics and totals are only \
+             meaningful when the root is a single repository. Select one repository as the root \
+             (submodules are fine).",
+        )
+    }
 }
 
 /// Parse `.gitmodules` in `root` and return `(name, relative_path)` for each submodule found.
@@ -3243,5 +3403,91 @@ mod tests {
         clear_branch_env_vars();
         // HEAD value is filtered → None (or falls through to other vars, but all cleared)
         assert!(branch.is_none(), "HEAD should be filtered, got: {branch:?}");
+    }
+
+    // --- Multiple-repository detection -------------------------------------
+
+    /// Create `dir/.git/` so `is_git_root(dir)` is true (plain repo marker).
+    fn make_git_dir(dir: &Path) {
+        fs::create_dir_all(dir.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn multi_repo_dir_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for name in ["repo-a", "repo-b", "repo-c"] {
+            make_git_dir(&root.join(name));
+        }
+        let layout = detect_repository_layout(root);
+        assert!(!layout.root_is_repo);
+        assert_eq!(layout.nested_repos.len(), 3);
+        assert!(layout.has_multiple_repos());
+    }
+
+    #[test]
+    fn repo_with_submodules_does_not_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        make_git_dir(root);
+        fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"vendor/json\"]\n\tpath = vendor/json\n\turl = https://example/json.git\n\
+             [submodule \"vendor/gtest\"]\n\tpath = vendor/gtest\n\turl = https://example/gtest.git\n",
+        )
+        .unwrap();
+        // Submodule working trees carry a `.git` *file* pointer, but we prune them
+        // by declared path regardless, so a plain marker dir is enough here.
+        make_git_dir(&root.join("vendor/json"));
+        make_git_dir(&root.join("vendor/gtest"));
+        let layout = detect_repository_layout(root);
+        assert!(layout.root_is_repo);
+        assert!(layout.nested_repos.is_empty());
+        assert!(!layout.has_multiple_repos());
+    }
+
+    #[test]
+    fn repo_with_vendored_foreign_repo_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        make_git_dir(root); // root is a repo
+        make_git_dir(&root.join("vendor/foreign")); // not a declared submodule
+        let layout = detect_repository_layout(root);
+        assert!(layout.root_is_repo);
+        assert_eq!(layout.nested_repos, vec![PathBuf::from("vendor/foreign")]);
+        assert!(layout.has_multiple_repos());
+    }
+
+    #[test]
+    fn single_plain_dir_no_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let layout = detect_repository_layout(root);
+        assert!(!layout.root_is_repo);
+        assert!(layout.nested_repos.is_empty());
+        assert!(!layout.has_multiple_repos());
+    }
+
+    #[test]
+    fn analyze_surfaces_multi_repo_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for name in ["repo-a", "repo-b"] {
+            let repo = root.join(name);
+            make_git_dir(&repo);
+            fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+        }
+        let mut config = AppConfig::default();
+        config.discovery.root_paths = vec![root.to_path_buf()];
+        let run = analyze(&config, "analyze", None, None).unwrap();
+        assert!(
+            run.warnings
+                .iter()
+                .any(|w| w.contains("independent git repositories")),
+            "expected multi-repo warning, got: {:?}",
+            run.warnings
+        );
     }
 }
