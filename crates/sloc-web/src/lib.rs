@@ -13441,10 +13441,10 @@ async fn test_metrics_handler(
     // Build the watched-dirs bar HTML. In Network Server mode show a locked notice instead
     // of interactive controls — folder watching is managed by the host administrator.
     let watched_dirs_html: String = if state.server_mode {
-        r#"<div class="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips"><span class="watched-none">Network Server mode \u2014 watched folder settings can only be modified by the host administrator.</span></div></div></div>"#.to_string()
+        r#"<div class="watched-bar"><div class="watched-bar-left"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg><span class="watched-label">Watched Folders</span><div class="watched-chips"><span class="watched-none">Network Server mode — watched folder settings can only be modified by the host administrator.</span></div></div></div>"#.to_string()
     } else {
         let watched_dirs_chips: String = if watched_dirs_list.is_empty() {
-            r#"<span class="watched-none">No folders watched \u2014 click Choose to add one</span>"#
+            r#"<span class="watched-none">No folders watched — click Choose to add one</span>"#
                 .to_string()
         } else {
             watched_dirs_list
@@ -16582,6 +16582,57 @@ fn render_submodule_chips(
     out.push_str(r"</div>");
 }
 
+/// Amber caution banner shown when the selected folder spans multiple independent
+/// git repositories. Each repo is a one-click button that re-selects it as the
+/// scan root; a checkbox gates advancing past step 1 (wired up in front-end JS).
+fn render_multi_repo_warning(root: &Path, layout: &sloc_core::RepositoryLayout, out: &mut String) {
+    use std::fmt::Write as _;
+    const MAX_LISTED: usize = 5;
+    let total = layout.nested_repos.len();
+
+    out.push_str(r#"<div class="preview-warning" data-multi-repo="1">"#);
+    if layout.root_is_repo {
+        write!(
+            out,
+            r#"<strong>Nested repositories detected</strong><p>This repository contains {total} nested git {} that are not registered submodules. Their files will be counted as part of this project. Submodules are fine — but if these are unrelated repositories, scan one repository at a time. Pick a repository to scan on its own:</p>"#,
+            if total == 1 { "repository" } else { "repositories" }
+        )
+        .ok();
+    } else {
+        write!(
+            out,
+            r#"<strong>Multiple repositories detected</strong><p>This folder contains {total} independent git repositories. oxide-sloc analyzes one repository at a time — git metrics and totals are only meaningful when the root is a single repository (submodules are fine). Pick one repository as the scan root:</p>"#
+        )
+        .ok();
+    }
+
+    out.push_str(r#"<div class="repo-pick-row">"#);
+    for rel in layout.nested_repos.iter().take(MAX_LISTED) {
+        let abs = root.join(rel);
+        let abs_display = display_path(&abs);
+        let label = rel.to_string_lossy().replace('\\', "/");
+        write!(
+            out,
+            r#"<button type="button" class="repo-pick" data-repo-path="{}">{}</button>"#,
+            escape_html(&abs_display),
+            escape_html(&label)
+        )
+        .ok();
+    }
+    if total > MAX_LISTED {
+        write!(
+            out,
+            r#"<span class="repo-pick-more">and {} more</span>"#,
+            total - MAX_LISTED
+        )
+        .ok();
+    }
+    out.push_str(r"</div>");
+
+    out.push_str(r#"<label class="multi-repo-ack-label"><input type="checkbox" class="multi-repo-ack" /> I understand — scan this folder anyway</label>"#);
+    out.push_str(r"</div>");
+}
+
 fn render_language_pills_row(languages: &[&str], out: &mut String) {
     use std::fmt::Write as _;
     if languages.is_empty() {
@@ -16694,6 +16745,11 @@ fn build_preview_html(
     let submodules = sloc_core::detect_submodules(root);
     if !submodules.is_empty() {
         render_submodule_chips(root, &submodules, &mut out);
+    }
+
+    let repo_layout = sloc_core::detect_repository_layout(root);
+    if repo_layout.has_multiple_repos() {
+        render_multi_repo_warning(root, &repo_layout, &mut out);
     }
 
     out.push_str(r#"<div class="scope-info-row">"#);
@@ -17731,6 +17787,15 @@ struct SubmoduleRow {
     .tree-status-cell .badge { font-size: 10px; padding: 1px 7px; }
     .tree-status-cell { display:flex; justify-content:flex-start; }
     .preview-error { color: var(--danger-text); background: var(--danger-bg); border:1px solid #efc2c2; padding: 12px; border-radius: 12px; }
+    .preview-warning { color: var(--warn-text); background: var(--warn-bg); border:1px solid var(--warn-text); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; font-size: 13px; line-height: 1.5; }
+    .preview-warning strong { display:block; font-size: 14px; margin-bottom: 4px; }
+    .preview-warning p { margin: 0 0 10px; }
+    .repo-pick-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom: 10px; }
+    .repo-pick { font-family: inherit; font-size: 12px; font-weight: 600; color: var(--warn-text); background: transparent; border:1px solid var(--warn-text); border-radius: 999px; padding: 4px 12px; cursor: pointer; transition: background .15s ease, color .15s ease; }
+    .repo-pick:hover { background: var(--warn-text); color: var(--warn-bg); }
+    .repo-pick-more { font-size: 12px; font-style: italic; opacity: 0.85; }
+    .multi-repo-ack-label { display:flex; align-items:center; gap:8px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .multi-repo-ack { width:15px; height:15px; accent-color: var(--warn-text); cursor: pointer; }
     .preview-hint { color: var(--muted); background: var(--surface-2); border:1px solid var(--line); padding: 18px 20px; border-radius: 12px; font-size:14px; text-align:center; }
     .preview-loading { display:flex; align-items:center; gap:12px; padding:14px 16px; border-radius:12px; background:var(--surface-2); border:1px solid var(--line); }
     .preview-spinner { width:18px; height:18px; border:2.5px solid var(--line); border-top-color:var(--oxide); border-radius:50%; animation:prevSpin 0.75s linear infinite; flex:0 0 18px; }
@@ -18085,7 +18150,7 @@ struct SubmoduleRow {
           <div class="ws-divider"></div>
           <div class="ws-stat ws-stat-clamp" data-wb-tip="Directory path of the project currently selected or most recently analyzed."><span class="ws-label">Active project</span><span class="ws-value" id="live-report-title">—</span></div>
           <div class="ws-divider"></div>
-          <div class="ws-stat ws-stat-output" data-wb-tip="Folder where scan artifacts \u2014 JSON, HTML, and PDF reports \u2014 are written after each completed scan.">
+          <div class="ws-stat ws-stat-output" data-wb-tip="Folder where scan artifacts — JSON, HTML, and PDF reports — are written after each completed scan.">
             <span class="ws-label">Output</span>
             <span class="ws-value">
               <button type="button" class="ws-path-link open-folder-button" id="ws-output-link" data-folder="" title="Click to open in file explorer">
@@ -18208,9 +18273,9 @@ struct SubmoduleRow {
                     <div class="scope-legend-row">
                       <span class="scope-legend-label">Scope legend:</span>
                       <span class="scope-legend-badges">
-                        <span class="badge badge-scan" data-tooltip="Files with a supported language analyzer \u2014 counted in SLOC totals.">supported</span>
+                        <span class="badge badge-scan" data-tooltip="Files with a supported language analyzer — counted in SLOC totals.">supported</span>
                         <span class="badge badge-skip" data-tooltip="Files excluded by a policy rule such as vendor, generated, or minified detection.">skipped by policy</span>
-                        <span class="badge badge-unsupported" data-tooltip="Files outside the supported language set \u2014 listed but not counted.">unsupported</span>
+                        <span class="badge badge-unsupported" data-tooltip="Files outside the supported language set — listed but not counted.">unsupported</span>
                       </span>
                     </div>
                   </div>
@@ -18559,7 +18624,7 @@ int main() { … }   ← code
                     </select>
                   </div>
                   <div class="explainer-card prominent" style="margin:0;">
-                    <div class="advanced-rule-description"><strong>Purpose:</strong> Controls whether lexical style-guide heuristics run at all.<br /><strong>Enable</strong> \u2014 every supported file is scored against its language's style guides and the results appear in the report (default).<br /><strong>Disable</strong> \u2014 style scoring is skipped entirely; useful for very large repos where you only need SLOC counts.</div>
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> Controls whether lexical style-guide heuristics run at all.<br /><strong>Enable</strong> — every supported file is scored against its language's style guides and the results appear in the report (default).<br /><strong>Disable</strong> — style scoring is skipped entirely; useful for very large repos where you only need SLOC counts.</div>
                     <div class="code-sample" style="margin-top:10px;font-size:12px;"># style_analysis_enabled = true   (default)
 # style_analysis_enabled = false  (skip, faster scan)
 # Disabling removes the Code Style section from the report.</div>
@@ -19016,14 +19081,25 @@ int main() { … }   ← code
       // flight. The step 1 -> 2 "Next" button is blocked until it settles so the
       // user can't advance past a project whose scope/upload isn't ready yet.
       var previewLoading = false;
+      // Set when the current preview reports multiple independent git repos under
+      // the selected root. Advancing past step 1 is blocked until the user ticks
+      // the acknowledgement checkbox (or re-selects a single repository).
+      var multiRepoBlocked = false;
+      function step1ForwardBlocked() {
+        return previewLoading || multiRepoBlocked;
+      }
+      function refreshStep1Gate() {
+        var nextBtn = document.getElementById("step1-next");
+        if (nextBtn) {
+          var blocked = step1ForwardBlocked();
+          nextBtn.classList.toggle("is-blocked", blocked);
+          nextBtn.setAttribute("aria-disabled", blocked ? "true" : "false");
+        }
+      }
       function setPreviewLoading(loading) {
         previewLoading = !!loading;
-        var nextBtn = document.getElementById("step1-next");
         var gate = document.getElementById("preview-gate-status");
-        if (nextBtn) {
-          nextBtn.classList.toggle("is-blocked", previewLoading);
-          nextBtn.setAttribute("aria-disabled", previewLoading ? "true" : "false");
-        }
+        refreshStep1Gate();
         if (gate) {
           var txt = gate.querySelector(".preview-gate-text");
           if (txt) txt.textContent = SERVER_MODE
@@ -19607,6 +19683,34 @@ int main() { … }   ← code
       }
 
       function attachPreviewInteractions() {
+        // Multiple-repository caution banner: gate step 1 until acknowledged, and
+        // let each listed repo be picked as the scan root with one click.
+        var multiRepoBanner = previewPanel.querySelector(".preview-warning[data-multi-repo]");
+        if (multiRepoBanner) {
+          multiRepoBlocked = true;
+          refreshStep1Gate();
+          var ackBox = multiRepoBanner.querySelector(".multi-repo-ack");
+          if (ackBox) {
+            ackBox.addEventListener("change", function () {
+              multiRepoBlocked = !ackBox.checked;
+              refreshStep1Gate();
+            });
+          }
+          var repoButtons = Array.prototype.slice.call(multiRepoBanner.querySelectorAll(".repo-pick"));
+          repoButtons.forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              var repoPath = btn.getAttribute("data-repo-path") || "";
+              if (!repoPath || !pathInput) return;
+              pathInput.value = repoPath;
+              scrollInputToEnd(pathInput);
+              updateReportTitleFromPath();
+              autoSetOutputDir(repoPath);
+              fetchProjectHistory(repoPath);
+              loadPreview();
+              updateReview();
+            });
+          });
+        }
         var buttons = Array.prototype.slice.call(previewPanel.querySelectorAll(".scope-stat-button"));
         var treeContainer = previewPanel.querySelector(".file-explorer-tree");
         var rows = Array.prototype.slice.call(previewPanel.querySelectorAll(".tree-row"));
@@ -19919,6 +20023,9 @@ int main() { … }   ← code
 
       function loadPreview() {
         if (!previewPanel || !pathInput) return;
+        // A fresh preview re-establishes the multi-repo gate; clear any prior ack.
+        multiRepoBlocked = false;
+        refreshStep1Gate();
         if (GIT_MODE) {
           previewPanel.innerHTML = '<div class="preview-error" style="color:var(--muted);font-style:italic;">Preview is not available for remote git refs. The scan will check out the source at runtime.</div>';
           setPreviewLoading(false);
@@ -20362,8 +20469,9 @@ int main() { … }   ← code
       stepButtons.forEach(function (button) {
         button.addEventListener("click", function () {
           var target = Number(button.getAttribute("data-step-target"));
-          // Block jumping forward off step 1 while the preview / upload is running.
-          if (previewLoading && currentStep === 1 && target > 1) return;
+          // Block jumping forward off step 1 while the preview / upload is running
+          // or while a multi-repository selection is unacknowledged.
+          if (step1ForwardBlocked() && currentStep === 1 && target > 1) return;
           setStep(target);
         });
       });
@@ -20371,7 +20479,7 @@ int main() { … }   ← code
       Array.prototype.slice.call(document.querySelectorAll(".jump-step")).forEach(function (button) {
         button.addEventListener("click", function () {
           var target = Number(button.getAttribute("data-step-target")) || 1;
-          if (previewLoading && currentStep === 1 && target > 1) return;
+          if (step1ForwardBlocked() && currentStep === 1 && target > 1) return;
           setStep(target);
         });
       });
@@ -20394,8 +20502,9 @@ int main() { … }   ← code
         // that borrow the .next-step style class but carry no data-next target).
         if (!button.hasAttribute("data-next")) return;
         button.addEventListener("click", function () {
-          // Guard step 1 → 2: block while the scope preview / upload is still running.
-          if (button.getAttribute("data-next") === "2" && previewLoading) return;
+          // Guard step 1 → 2: block while the scope preview / upload is still running
+          // or while a multi-repository selection is unacknowledged.
+          if (button.getAttribute("data-next") === "2" && step1ForwardBlocked()) return;
           // Guard step 1 → 2: warn when the project path is still the sample default.
           if (button.getAttribute("data-next") === "2" && isDefaultSamplePath()) {
             openDefaultPathModal();
@@ -20445,7 +20554,7 @@ int main() { … }   ← code
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
         if (e.altKey || e.ctrlKey || e.metaKey) return;
         if (e.key === "ArrowRight" && currentStep < 4) {
-          if (currentStep === 1 && previewLoading) return;
+          if (currentStep === 1 && step1ForwardBlocked()) return;
           if (currentStep === 1 && isDefaultSamplePath()) { openDefaultPathModal(); return; }
           updateReview(); setStep(currentStep + 1);
         }
@@ -28897,7 +29006,7 @@ struct CompareSelectTemplate {
 
   <footer class="site-footer">
     local code analysis - metrics, history and reports
-    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} \u2014 Mode: Local</em>
+    &nbsp;·&nbsp; <em class="footer-mode" id="footer-mode" style="font-style:italic;font-weight:700;color:var(--oxide);">oxide-sloc v{{ version }} — Mode: Local</em>
     &nbsp;·&nbsp; Built by <a href="https://github.com/NimaShafie" target="_blank" rel="noopener">Nima Shafie</a>
     &nbsp;·&nbsp; <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">View on GitHub</a>
     &nbsp;·&nbsp; <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL-3.0-or-later</a>
