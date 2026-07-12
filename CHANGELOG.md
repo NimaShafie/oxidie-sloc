@@ -10,6 +10,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.76] — 2026-07-12
+
+### Added
+
+- **Multi-repository directory warning** (`crates/sloc-git`, `crates/sloc-web`):
+  when a selected directory contains more than one git repository, the analysis
+  now surfaces a warning so activity/hotspot data is not silently attributed to
+  the wrong repo.
+
+### Fixed
+
+- **Advisory: crossbeam-epoch** (deps): bumped `crossbeam-epoch`
+  `0.9.18` → `0.9.20` to clear `RUSTSEC-2026-0204`.
+
+### Changed
+
+- **CI dependency + workflow refresh**: bumped `docker/build-push-action`
+  `7.2.0` → `7.3.0`, and disabled ZAP DAST issue writing to fix a `403` caused by
+  the least-privilege workflow token.
+
+---
+
 ## [1.5.75] — 2026-07-05
 
 ### Security Hardening
