@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "oxide-sloc"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "base64",
@@ -2482,7 +2482,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sloc-config"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "clap",
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-core"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-git"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2527,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-languages"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "serde",
  "tree-sitter",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-mcp"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "axum",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-report"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "askama",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "sloc-web"
-version = "1.5.75"
+version = "1.5.76"
 dependencies = [
  "anyhow",
  "askama",
