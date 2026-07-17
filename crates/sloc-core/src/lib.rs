@@ -1555,6 +1555,70 @@ fn decode_file_contents(
     }
 }
 
+/// Result of resolving a candidate file's language: either a concrete language or a pre-built
+/// skipped `FileRecord` (unsupported/undetected, or disabled by the enabled-languages policy).
+enum LanguageOutcome {
+    Resolved(Language),
+    Skip(Box<FileRecord>),
+}
+
+/// Detect the file's language, apply the `.h` C→C++ reclassification, and enforce the
+/// enabled-languages policy. Returns `LanguageOutcome::Skip` (with the ready-to-return record)
+/// when the language is undetected/unsupported or disabled by configuration.
+fn resolve_language(
+    path: &Path,
+    root: &Path,
+    size_bytes: u64,
+    text: &str,
+    config: &AppConfig,
+    enabled_languages: Option<&BTreeSet<Language>>,
+) -> LanguageOutcome {
+    let first_line = text.lines().next();
+    let language = detect_language(
+        path,
+        first_line,
+        &config.analysis.extension_overrides,
+        config.analysis.shebang_detection,
+    );
+
+    let Some(mut language) = language else {
+        return LanguageOutcome::Skip(Box::new(skipped_record(
+            path,
+            root,
+            size_bytes,
+            FileStatus::SkippedUnsupported,
+            vec!["unsupported or undetected language".into()],
+        )));
+    };
+
+    // The `.h` extension is ambiguous between C and C++; `detect_language` defaults it to C.
+    // Reclassify as C++ when the file uses C++-only constructs (namespaces, classes, templates,
+    // `std::`, …) so class/namespace and class-typed function signatures are counted correctly.
+    if language == Language::C
+        && path.extension().and_then(|e| e.to_str()) == Some("h")
+        && sloc_languages::looks_like_cpp(text)
+    {
+        language = Language::Cpp;
+    }
+
+    if let Some(enabled) = enabled_languages {
+        if !enabled.contains(&language) {
+            return LanguageOutcome::Skip(Box::new(skipped_record(
+                path,
+                root,
+                size_bytes,
+                FileStatus::SkippedByPolicy,
+                vec![format!(
+                    "language {} disabled by configuration",
+                    language.display_name()
+                )],
+            )));
+        }
+    }
+
+    LanguageOutcome::Resolved(language)
+}
+
 #[allow(clippy::too_many_lines)]
 fn analyze_candidate_file(
     path: &Path,
@@ -1646,48 +1710,11 @@ fn analyze_candidate_file(
             }
         };
 
-    let first_line = text.lines().next();
-    let language = detect_language(
-        path,
-        first_line,
-        &config.analysis.extension_overrides,
-        config.analysis.shebang_detection,
-    );
-
-    let Some(mut language) = language else {
-        return Ok(Some(skipped_record(
-            path,
-            root,
-            metadata.len(),
-            FileStatus::SkippedUnsupported,
-            vec!["unsupported or undetected language".into()],
-        )));
-    };
-
-    // The `.h` extension is ambiguous between C and C++; `detect_language` defaults it to C.
-    // Reclassify as C++ when the file uses C++-only constructs (namespaces, classes, templates,
-    // `std::`, …) so class/namespace and class-typed function signatures are counted correctly.
-    if language == Language::C
-        && path.extension().and_then(|e| e.to_str()) == Some("h")
-        && sloc_languages::looks_like_cpp(&text)
-    {
-        language = Language::Cpp;
-    }
-
-    if let Some(enabled) = enabled_languages {
-        if !enabled.contains(&language) {
-            return Ok(Some(skipped_record(
-                path,
-                root,
-                metadata.len(),
-                FileStatus::SkippedByPolicy,
-                vec![format!(
-                    "language {} disabled by configuration",
-                    language.display_name()
-                )],
-            )));
-        }
-    }
+    let language =
+        match resolve_language(path, root, metadata.len(), &text, config, enabled_languages) {
+            LanguageOutcome::Resolved(language) => language,
+            LanguageOutcome::Skip(record) => return Ok(Some(*record)),
+        };
 
     let style_scope = match config.analysis.style_lang_scope.as_str() {
         "c_family" => StyleLangScope::CFamilyOnly,
@@ -2042,29 +2069,46 @@ pub fn detect_repository_layout(root: &Path) -> RepositoryLayout {
         };
         for entry in entries.flatten() {
             let child = entry.path();
-            if !child.is_dir() {
-                continue;
-            }
-            // Never descend into a .git directory itself.
-            if child.file_name().and_then(|n| n.to_str()) == Some(".git") {
+            // Skip non-directories and any `.git` directory without counting them.
+            if !child.is_dir() || child.file_name().and_then(|n| n.to_str()) == Some(".git") {
                 continue;
             }
             visited += 1;
-            if submodule_dirs.contains(&child) {
-                continue; // declared submodule — prune, it is not independent
-            }
-            if is_git_root(&child) {
-                layout.nested_repos.push(relative_path_buf(&child, root));
-                continue; // repo boundary — prune, don't recurse into it
-            }
-            if depth + 1 < REPO_SCAN_MAX_DEPTH {
-                stack.push((child, depth + 1));
+            match classify_child(&child, &submodule_dirs, root) {
+                ChildAction::Skip => {}
+                ChildAction::RecordRepo(rel) => layout.nested_repos.push(rel),
+                ChildAction::Recurse if depth + 1 < REPO_SCAN_MAX_DEPTH => {
+                    stack.push((child, depth + 1));
+                }
+                ChildAction::Recurse => {}
             }
         }
     }
 
     layout.nested_repos.sort();
     layout
+}
+
+/// What the nested-repo walk should do with one candidate child directory.
+enum ChildAction {
+    /// Prune without recording (a declared submodule — not an independent repo).
+    Skip,
+    /// A nested independent repository at this root-relative path; record it and do not recurse.
+    RecordRepo(PathBuf),
+    /// Not a repo boundary — descend into it (subject to the depth bound).
+    Recurse,
+}
+
+/// Classify one child directory during the nested-repo walk. Callers have already excluded
+/// non-directories and `.git` directories.
+fn classify_child(child: &Path, submodule_dirs: &HashSet<PathBuf>, root: &Path) -> ChildAction {
+    if submodule_dirs.contains(child) {
+        ChildAction::Skip
+    } else if is_git_root(child) {
+        ChildAction::RecordRepo(relative_path_buf(child, root))
+    } else {
+        ChildAction::Recurse
+    }
 }
 
 /// Path of `path` relative to `root` (falling back to `path` itself), as a `PathBuf`.

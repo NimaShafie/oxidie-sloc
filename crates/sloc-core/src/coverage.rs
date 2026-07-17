@@ -108,6 +108,63 @@ impl LcovRecord {
             },
         }
     }
+
+    /// Apply one LCOV record line (a summary `LF/LH/…` or a raw `DA/FN/FNDA/BRDA`) to this
+    /// accumulator. `SF:` and `end_of_record` are structural and handled by the caller, so they
+    /// are not matched here.
+    fn apply(&mut self, line: &str) {
+        if let Some(val) = line.strip_prefix("LF:") {
+            self.lf = val.parse().unwrap_or(0);
+            self.saw_lf = true;
+        } else if let Some(val) = line.strip_prefix("LH:") {
+            self.lh = val.parse().unwrap_or(0);
+            self.saw_lh = true;
+        } else if let Some(val) = line.strip_prefix("FNF:") {
+            self.fnf = val.parse().unwrap_or(0);
+            self.saw_fnf = true;
+        } else if let Some(val) = line.strip_prefix("FNH:") {
+            self.fnh = val.parse().unwrap_or(0);
+            self.saw_fnh = true;
+        } else if let Some(val) = line.strip_prefix("BRF:") {
+            self.brf = val.parse().unwrap_or(0);
+            self.saw_brf = true;
+        } else if let Some(val) = line.strip_prefix("BRH:") {
+            self.brh = val.parse().unwrap_or(0);
+            self.saw_brh = true;
+        } else if let Some(val) = line.strip_prefix("DA:") {
+            self.record_da(val);
+        } else if line.starts_with("FN:") {
+            // FN:<line>,<name> — one function definition.
+            self.fn_found += 1;
+        } else if let Some(val) = line.strip_prefix("FNDA:") {
+            self.record_fnda(val);
+        } else if let Some(val) = line.strip_prefix("BRDA:") {
+            self.record_brda(val);
+        }
+    }
+
+    /// `DA:<line>,<hits>[,checksum]` — one instrumented line and whether it was executed.
+    fn record_da(&mut self, val: &str) {
+        self.da_found += 1;
+        if val.split(',').nth(1).is_some_and(lcov_count_nonzero) {
+            self.da_hit += 1;
+        }
+    }
+
+    /// `FNDA:<hits>,<name>` — execution count for a function.
+    fn record_fnda(&mut self, val: &str) {
+        if val.split(',').next().is_some_and(lcov_count_nonzero) {
+            self.fnda_hit += 1;
+        }
+    }
+
+    /// `BRDA:<line>,<block>,<branch>,<taken>` — `taken` is `-` when the branch was not reached.
+    fn record_brda(&mut self, val: &str) {
+        self.brda_found += 1;
+        if val.split(',').nth(3).is_some_and(lcov_count_nonzero) {
+            self.brda_hit += 1;
+        }
+    }
 }
 
 /// True when an LCOV `DA:`/`FNDA:` hit count field is non-zero (execution count > 0).
@@ -141,44 +198,8 @@ pub fn parse_lcov(content: &str) -> HashMap<PathBuf, FileCoverage> {
                 result.insert(path, rec.finalize());
             }
             rec = LcovRecord::default();
-        } else if let Some(val) = line.strip_prefix("LF:") {
-            rec.lf = val.parse().unwrap_or(0);
-            rec.saw_lf = true;
-        } else if let Some(val) = line.strip_prefix("LH:") {
-            rec.lh = val.parse().unwrap_or(0);
-            rec.saw_lh = true;
-        } else if let Some(val) = line.strip_prefix("FNF:") {
-            rec.fnf = val.parse().unwrap_or(0);
-            rec.saw_fnf = true;
-        } else if let Some(val) = line.strip_prefix("FNH:") {
-            rec.fnh = val.parse().unwrap_or(0);
-            rec.saw_fnh = true;
-        } else if let Some(val) = line.strip_prefix("BRF:") {
-            rec.brf = val.parse().unwrap_or(0);
-            rec.saw_brf = true;
-        } else if let Some(val) = line.strip_prefix("BRH:") {
-            rec.brh = val.parse().unwrap_or(0);
-            rec.saw_brh = true;
-        } else if let Some(val) = line.strip_prefix("DA:") {
-            // DA:<line>,<hits>[,checksum]
-            rec.da_found += 1;
-            if val.split(',').nth(1).is_some_and(lcov_count_nonzero) {
-                rec.da_hit += 1;
-            }
-        } else if line.starts_with("FN:") {
-            // FN:<line>,<name> — one function definition.
-            rec.fn_found += 1;
-        } else if let Some(val) = line.strip_prefix("FNDA:") {
-            // FNDA:<hits>,<name> — execution count for a function.
-            if val.split(',').next().is_some_and(lcov_count_nonzero) {
-                rec.fnda_hit += 1;
-            }
-        } else if let Some(val) = line.strip_prefix("BRDA:") {
-            // BRDA:<line>,<block>,<branch>,<taken> — taken is "-" when the branch was not reached.
-            rec.brda_found += 1;
-            if val.split(',').nth(3).is_some_and(lcov_count_nonzero) {
-                rec.brda_hit += 1;
-            }
+        } else {
+            rec.apply(line);
         }
     }
 
