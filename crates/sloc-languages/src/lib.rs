@@ -727,6 +727,32 @@ pub fn detect_language(
     None
 }
 
+/// Best-effort test: does this source text use C++-only constructs?
+///
+/// The `.h` extension is shared by C and C++ headers. When a `.h` file (detected as C by
+/// extension) contains any unambiguously C++ construct, callers should reclassify it as C++ so
+/// namespaces, classes, templates, and class-typed function signatures are counted correctly.
+/// Markers chosen to not appear in valid C: `namespace`, `template`, `class`, access specifiers,
+/// `::` scope resolution, and `std::`.
+#[must_use]
+pub fn looks_like_cpp(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "namespace ",
+        "template<",
+        "template <",
+        "class ",
+        "public:",
+        "private:",
+        "protected:",
+        "std::",
+        "::",
+        "nullptr",
+        "constexpr ",
+        "noexcept",
+    ];
+    MARKERS.iter().any(|m| text.contains(m))
+}
+
 #[must_use]
 pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) -> RawFileAnalysis {
     // tree-sitter fast-paths (compiled out when feature is disabled)
@@ -3343,9 +3369,168 @@ fn var_prefix_no_paren_hit(patterns: &SymbolPatterns, trimmed: &str) -> u64 {
         .map_or(1, |pp| u64::from(trimmed[..pp].contains('=')))
 }
 
+/// Statement/expression keywords that can legally precede `(` or a declarator but are NOT a
+/// function or variable definition. Used to reject false positives in the C/C++ heuristics.
+const C_STMT_KEYWORDS: &[&str] = &[
+    "if",
+    "for",
+    "while",
+    "switch",
+    "return",
+    "catch",
+    "sizeof",
+    "do",
+    "else",
+    "case",
+    "throw",
+    "goto",
+    "using",
+    "namespace",
+    "typedef",
+    "friend",
+    "decltype",
+    "alignof",
+    "new",
+    "delete",
+    "static_assert",
+    "template",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "assert",
+    "default",
+    "class",
+    "struct",
+    "union",
+    "enum",
+    "public",
+    "private",
+    "protected",
+    "try",
+];
+
+/// True when `c` may appear inside a C/C++ return type or declarator (identifier chars, pointer
+/// / reference markers, template brackets, scope resolution, qualifiers with spaces).
+fn c_type_char_ok(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '_' | ':' | '<' | '>' | '*' | '&' | '~' | ' ' | '\t' | ','
+        )
+}
+
+/// True when `name` (the token immediately before `(` or the assignment/terminator) is a
+/// plausible C/C++ identifier — allowing leading `*`/`&`/`~` and a `Scope::` qualifier.
+fn c_name_is_identifier(name: &str) -> bool {
+    let core = name.trim_start_matches(['*', '&', '~']);
+    let seg = core.rsplit("::").next().unwrap_or(core);
+    let mut chars = seg.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Heuristic: does `trimmed` look like a C/C++ function definition or prototype?
+///
+/// Recognises `<return-type> <name>(...)` regardless of the return type, so functions returning
+/// user-defined or namespaced types (`std::string foo(...)`, `MyClass bar(...)`) are counted —
+/// the fixed keyword list in `functions_prefix_paren` only caught built-in return types. Rejects
+/// calls (`foo(x)`, `obj.m(x)`, `std::sort(v)`), control flow (`if (...)`), and initialisers
+/// (`T x = f(y)`).
+fn looks_like_c_function(trimmed: &str) -> u64 {
+    let Some(paren) = trimmed.find('(') else {
+        return 0;
+    };
+    let pre = trimmed[..paren].trim();
+    // The segment before `(` must be a clean `<type> <name>` — reject anything containing
+    // assignment, statement terminators, member access, indexing, or arithmetic/logical
+    // operators, all of which indicate an expression or call rather than a definition.
+    if pre.is_empty() || pre.contains("->") || !pre.chars().all(c_type_char_ok) {
+        return 0;
+    }
+    // Need at least "<return type> <name>": two whitespace-separated tokens.
+    let mut toks = pre.split_whitespace();
+    let Some(first) = toks.next() else {
+        return 0;
+    };
+    if C_STMT_KEYWORDS.contains(&first) || toks.next().is_none() {
+        return 0;
+    }
+    let Some(name) = pre.split_whitespace().next_back() else {
+        return 0;
+    };
+    if !c_name_is_identifier(name) {
+        return 0;
+    }
+    // Disambiguate the "most vexing parse": `T v(expr);` is a variable direct-initialisation, not
+    // a function. Only the `;`-terminated form is ambiguous — a definition ends with `{` (or a
+    // continued signature). Treat it as a function only when the parentheses hold a parameter
+    // list (empty, comma-separated, or containing type markers) rather than a lone value.
+    if trimmed.ends_with(';') {
+        let args = trimmed[paren + 1..]
+            .rsplit_once(')')
+            .map_or("", |(a, _)| a)
+            .trim();
+        let looks_like_params = args.is_empty()
+            || args.contains(',')
+            || args.contains('&')
+            || args.contains('*')
+            || args.contains("::")
+            || args.split_whitespace().count() >= 2;
+        if !looks_like_params {
+            return 0;
+        }
+    }
+    1
+}
+
+/// Heuristic: does `trimmed` look like a C/C++ variable declaration?
+///
+/// Recognises `<type> <name>;`, `<type> <name> = …;`, and `<type> <name>{…};` for any type,
+/// including user-defined / namespaced / templated types. Rejects function definitions and calls
+/// (declarator immediately followed by `(`), labels, control flow, and bare expressions.
+fn looks_like_c_variable(trimmed: &str) -> u64 {
+    // Locate the first declarator-terminating delimiter. A leading `(` covers both calls
+    // (`foo(x);`) and direct-init variables (`std::istringstream ss(s);`); the `<type> <name>`
+    // shape test below rejects calls, while `count_symbols` only consults this heuristic when the
+    // line was not already classified as a function, so real prototypes are not double-counted.
+    let Some(delim_pos) = trimmed.find(['=', ';', '{', '(']) else {
+        return 0;
+    };
+    let head = trimmed[..delim_pos].trim();
+    if head.is_empty() || head.contains("->") || !head.chars().all(c_type_char_ok) {
+        return 0;
+    }
+    let mut toks = head.split_whitespace();
+    let Some(first) = toks.next() else {
+        return 0;
+    };
+    if C_STMT_KEYWORDS.contains(&first) || toks.next().is_none() {
+        return 0;
+    }
+    let Some(name) = head.split_whitespace().next_back() else {
+        return 0;
+    };
+    u64::from(c_name_is_identifier(name))
+}
+
 fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64, u64, u64) {
     let hit = |pats: &[&str]| prefix_hit(pats, trimmed);
-    let fn_pp = fn_prefix_paren_hit(patterns, trimmed);
+    // C and C++ are the only languages with a non-empty `functions_prefix_paren` list; for them
+    // the generic `looks_like_c_*` heuristics detect definitions with arbitrary return types
+    // (the fixed keyword lists only caught built-in types like `int`/`void`).
+    // C and C++ are the only languages with a non-empty `functions_prefix_paren` list. For them
+    // the generic `looks_like_c_*` heuristics fully replace the fixed keyword lists (which only
+    // caught built-in return types like `int`/`void` and mis-fired on prototype continuation
+    // lines); every other language keeps its prefix-based detection.
+    let c_style = !patterns.functions_prefix_paren.is_empty();
+    let fn_extra = if c_style {
+        looks_like_c_function(trimmed)
+    } else {
+        fn_prefix_paren_hit(patterns, trimmed)
+    };
     let test_hit = hit(patterns.tests);
     // Lines matching a test pattern count as tests, not as plain functions or classes.
     // This prevents double-counting in Python (`def test_` / `class Test`) and Go
@@ -3354,7 +3539,7 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     // standalone attribute line; the `fn` declaration on the next line does not match any
     // test pattern and still increments functions correctly.
     let fn_hit = if test_hit == 0 {
-        hit(patterns.functions) | fn_pp
+        hit(patterns.functions) | fn_extra
     } else {
         0
     };
@@ -3363,11 +3548,21 @@ fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u6
     } else {
         0
     };
-    let var_pnp = var_prefix_no_paren_hit(patterns, trimmed);
+    let var_hit = if c_style {
+        // For C/C++, use only the generic heuristic, and only when the line is not already a
+        // test, function, or class definition (avoids double-counting).
+        if test_hit == 0 && fn_hit == 0 && class_hit == 0 {
+            looks_like_c_variable(trimmed)
+        } else {
+            0
+        }
+    } else {
+        hit(patterns.variables) | var_prefix_no_paren_hit(patterns, trimmed)
+    };
     (
         fn_hit,
         class_hit,
-        hit(patterns.variables) | var_pnp,
+        var_hit,
         hit(patterns.imports),
         test_hit,
         hit(patterns.assertions),

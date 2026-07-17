@@ -1661,6 +1661,30 @@ fn print_plain_summary(run: &AnalysisRun) {
         println!("dryness_pct={dry:.1}");
     }
     println!("duplicate_groups={}", run.duplicate_groups.len());
+    let st = &run.summary_totals;
+    println!("functions={}", st.functions);
+    println!("classes={}", st.classes);
+    println!("variables={}", st.variables);
+    println!("imports={}", st.imports);
+    println!("unit_tests={}", st.test_count);
+    println!("test_assertions={}", st.test_assertion_count);
+    println!("test_suites={}", st.test_suite_count);
+    if st.coverage_lines_found > 0 {
+        println!("coverage_lines_found={}", st.coverage_lines_found);
+        println!("coverage_lines_hit={}", st.coverage_lines_hit);
+        println!(
+            "coverage_line_pct={:.1}",
+            line_pct(st.coverage_lines_hit, st.coverage_lines_found)
+        );
+    }
+    if st.coverage_functions_found > 0 {
+        println!("coverage_functions_found={}", st.coverage_functions_found);
+        println!("coverage_functions_hit={}", st.coverage_functions_hit);
+    }
+    if st.coverage_branches_found > 0 {
+        println!("coverage_branches_found={}", st.coverage_branches_found);
+        println!("coverage_branches_hit={}", st.coverage_branches_hit);
+    }
     if let Some(ref c) = run.cocomo {
         println!("cocomo_ksloc={:.2}", c.ksloc);
         println!("cocomo_effort_person_months={:.2}", c.effort_person_months);
@@ -1747,6 +1771,8 @@ fn print_totals_header(run: &AnalysisRun, col: bool) {
             run.duplicate_groups.len()
         );
     }
+    print_semantic_metrics(run, col);
+    print_test_coverage(run, col);
     if let Some(ref c) = run.cocomo {
         println!();
         println!("{}", paint!(col, "1", "COCOMO I Estimate (Organic)"));
@@ -1765,6 +1791,105 @@ fn print_totals_header(run: &AnalysisRun, col: bool) {
             paint!(col, "36", "Team size      :"),
             c.avg_staff
         );
+    }
+}
+
+/// Line-coverage percentage helper for terminal display.
+#[allow(clippy::cast_precision_loss)]
+fn line_pct(hit: u64, found: u64) -> f64 {
+    if found == 0 {
+        0.0
+    } else {
+        hit as f64 / found as f64 * 100.0
+    }
+}
+
+/// Print structural symbol counts (functions / classes / variables / imports) when any are
+/// detected. These are best-effort lexical counts, not full semantic analysis.
+fn print_semantic_metrics(run: &AnalysisRun, col: bool) {
+    let s = &run.summary_totals;
+    if s.functions == 0 && s.classes == 0 && s.variables == 0 && s.imports == 0 {
+        return;
+    }
+    println!();
+    println!("{}", paint!(col, "1", "Semantic Metrics"));
+    println!(
+        "  {}  {}",
+        paint!(col, "36", "Functions      :"),
+        paint!(col, "32", s.functions)
+    );
+    if s.classes > 0 {
+        println!("  {}  {}", paint!(col, "36", "Classes/Types  :"), s.classes);
+    }
+    if s.variables > 0 {
+        println!(
+            "  {}  {}",
+            paint!(col, "36", "Variables      :"),
+            s.variables
+        );
+    }
+    if s.imports > 0 {
+        println!("  {}  {}", paint!(col, "36", "Imports        :"), s.imports);
+    }
+}
+
+/// Print unit-test and coverage metrics when any tests are detected or coverage was ingested.
+fn print_test_coverage(run: &AnalysisRun, col: bool) {
+    let s = &run.summary_totals;
+    let has_tests = s.test_count > 0 || s.test_assertion_count > 0 || s.test_suite_count > 0;
+    let has_cov = s.coverage_lines_found > 0;
+    if !has_tests && !has_cov {
+        return;
+    }
+    println!();
+    println!("{}", paint!(col, "1", "Tests & Coverage"));
+    if has_tests {
+        println!(
+            "  {}  {}",
+            paint!(col, "36", "Unit tests     :"),
+            paint!(col, "32;1", s.test_count)
+        );
+        if s.test_assertion_count > 0 {
+            println!(
+                "  {}  {}",
+                paint!(col, "36", "Assertions     :"),
+                s.test_assertion_count
+            );
+        }
+        if s.test_suite_count > 0 {
+            println!(
+                "  {}  {}",
+                paint!(col, "36", "Test suites    :"),
+                s.test_suite_count
+            );
+        }
+    }
+    if has_cov {
+        println!(
+            "  {}  {:.1}%  ({} / {} lines)",
+            paint!(col, "36", "Line coverage  :"),
+            line_pct(s.coverage_lines_hit, s.coverage_lines_found),
+            s.coverage_lines_hit,
+            s.coverage_lines_found
+        );
+        if s.coverage_functions_found > 0 {
+            println!(
+                "  {}  {:.1}%  ({} / {} functions)",
+                paint!(col, "36", "Func coverage  :"),
+                line_pct(s.coverage_functions_hit, s.coverage_functions_found),
+                s.coverage_functions_hit,
+                s.coverage_functions_found
+            );
+        }
+        if s.coverage_branches_found > 0 {
+            println!(
+                "  {}  {:.1}%  ({} / {} branches)",
+                paint!(col, "36", "Branch coverage:"),
+                line_pct(s.coverage_branches_hit, s.coverage_branches_found),
+                s.coverage_branches_hit,
+                s.coverage_branches_found
+            );
+        }
     }
 }
 

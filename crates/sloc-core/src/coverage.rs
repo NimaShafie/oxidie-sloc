@@ -45,58 +45,136 @@ impl FileCoverage {
     }
 }
 
+/// Per-record accumulator for a single `SF:` block while parsing LCOV.
+///
+/// LCOV files may carry the `LF/LH/FNF/FNH/BRF/BRH` summary records, the raw per-line
+/// `DA:`/`FNDA:`/`BRDA:` records, or both. Some producers (notably `llvm-cov export -format=lcov`
+/// and certain `geninfo` configurations) emit only the raw records and omit the summaries. We
+/// track both and prefer the explicit summary when present, falling back to counts derived from
+/// the raw records so coverage is never silently reported as zero.
+#[derive(Default)]
+struct LcovRecord {
+    // Explicit summary records (and whether each was seen).
+    lf: u32,
+    lh: u32,
+    fnf: u32,
+    fnh: u32,
+    brf: u32,
+    brh: u32,
+    saw_lf: bool,
+    saw_lh: bool,
+    saw_fnf: bool,
+    saw_fnh: bool,
+    saw_brf: bool,
+    saw_brh: bool,
+    // Counts derived from raw DA:/FN:/FNDA:/BRDA: records.
+    da_found: u32,
+    da_hit: u32,
+    fn_found: u32,
+    fnda_hit: u32,
+    brda_found: u32,
+    brda_hit: u32,
+}
+
+impl LcovRecord {
+    /// Resolve the final `FileCoverage`, preferring explicit summaries over derived counts.
+    fn finalize(&self) -> FileCoverage {
+        FileCoverage {
+            lines_found: if self.saw_lf { self.lf } else { self.da_found },
+            lines_hit: if self.saw_lh { self.lh } else { self.da_hit },
+            functions_found: if self.saw_fnf {
+                self.fnf
+            } else {
+                self.fn_found
+            },
+            functions_hit: if self.saw_fnh {
+                self.fnh
+            } else {
+                self.fnda_hit
+            },
+            branches_found: if self.saw_brf {
+                self.brf
+            } else {
+                self.brda_found
+            },
+            branches_hit: if self.saw_brh {
+                self.brh
+            } else {
+                self.brda_hit
+            },
+        }
+    }
+}
+
+/// True when an LCOV `DA:`/`FNDA:` hit count field is non-zero (execution count > 0).
+fn lcov_count_nonzero(field: &str) -> bool {
+    !matches!(field.trim(), "" | "0" | "-")
+}
+
 /// Parse an LCOV `.info` file and return a map from source file path to coverage metrics.
 ///
 /// Paths in the map are normalised to forward-slash separators and stored as-is from the
 /// `SF:` record — callers are responsible for matching against `FileRecord.relative_path`.
+///
+/// Both the summary records (`LF/LH/FNF/FNH/BRF/BRH`) and the raw per-line records
+/// (`DA:`/`FN:`/`FNDA:`/`BRDA:`) are understood. When a summary record is absent, the
+/// corresponding value is derived from the raw records so files that ship only raw data still
+/// report accurate coverage.
 #[must_use]
 pub fn parse_lcov(content: &str) -> HashMap<PathBuf, FileCoverage> {
     let mut result: HashMap<PathBuf, FileCoverage> = HashMap::new();
 
     let mut current_path: Option<PathBuf> = None;
-    let mut lf: u32 = 0;
-    let mut lh: u32 = 0;
-    let mut fnf: u32 = 0;
-    let mut fnh: u32 = 0;
-    let mut brf: u32 = 0;
-    let mut brh: u32 = 0;
+    let mut rec = LcovRecord::default();
 
     for line in content.lines() {
         let line = line.trim();
         if let Some(path_str) = line.strip_prefix("SF:") {
             current_path = Some(PathBuf::from(path_str.replace('\\', "/")));
-            lf = 0;
-            lh = 0;
-            fnf = 0;
-            fnh = 0;
-            brf = 0;
-            brh = 0;
+            rec = LcovRecord::default();
         } else if line == "end_of_record" {
             if let Some(path) = current_path.take() {
-                result.insert(
-                    path,
-                    FileCoverage {
-                        lines_found: lf,
-                        lines_hit: lh,
-                        functions_found: fnf,
-                        functions_hit: fnh,
-                        branches_found: brf,
-                        branches_hit: brh,
-                    },
-                );
+                result.insert(path, rec.finalize());
             }
+            rec = LcovRecord::default();
         } else if let Some(val) = line.strip_prefix("LF:") {
-            lf = val.parse().unwrap_or(0);
+            rec.lf = val.parse().unwrap_or(0);
+            rec.saw_lf = true;
         } else if let Some(val) = line.strip_prefix("LH:") {
-            lh = val.parse().unwrap_or(0);
+            rec.lh = val.parse().unwrap_or(0);
+            rec.saw_lh = true;
         } else if let Some(val) = line.strip_prefix("FNF:") {
-            fnf = val.parse().unwrap_or(0);
+            rec.fnf = val.parse().unwrap_or(0);
+            rec.saw_fnf = true;
         } else if let Some(val) = line.strip_prefix("FNH:") {
-            fnh = val.parse().unwrap_or(0);
+            rec.fnh = val.parse().unwrap_or(0);
+            rec.saw_fnh = true;
         } else if let Some(val) = line.strip_prefix("BRF:") {
-            brf = val.parse().unwrap_or(0);
+            rec.brf = val.parse().unwrap_or(0);
+            rec.saw_brf = true;
         } else if let Some(val) = line.strip_prefix("BRH:") {
-            brh = val.parse().unwrap_or(0);
+            rec.brh = val.parse().unwrap_or(0);
+            rec.saw_brh = true;
+        } else if let Some(val) = line.strip_prefix("DA:") {
+            // DA:<line>,<hits>[,checksum]
+            rec.da_found += 1;
+            if val.split(',').nth(1).is_some_and(lcov_count_nonzero) {
+                rec.da_hit += 1;
+            }
+        } else if line.starts_with("FN:") {
+            // FN:<line>,<name> — one function definition.
+            rec.fn_found += 1;
+        } else if let Some(val) = line.strip_prefix("FNDA:") {
+            // FNDA:<hits>,<name> — execution count for a function.
+            if val.split(',').next().is_some_and(lcov_count_nonzero) {
+                rec.fnda_hit += 1;
+            }
+        } else if let Some(val) = line.strip_prefix("BRDA:") {
+            // BRDA:<line>,<block>,<branch>,<taken> — taken is "-" when the branch was not reached.
+            rec.brda_found += 1;
+            if val.split(',').nth(3).is_some_and(lcov_count_nonzero) {
+                rec.brda_hit += 1;
+            }
         }
     }
 

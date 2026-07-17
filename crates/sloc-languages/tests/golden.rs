@@ -8,7 +8,7 @@
 /// immediately on CI.
 use std::path::Path;
 
-use sloc_languages::{analyze_text, detect_language, AnalysisOptions, Language};
+use sloc_languages::{analyze_text, detect_language, looks_like_cpp, AnalysisOptions, Language};
 
 fn corpus(rel: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -130,6 +130,22 @@ fn rust_entities() {
     // assert_eq! and assert!
     assert_eq!(r.test_assertion_count, 2, "assertion calls");
     assert_eq!(r.test_suite_count, 0, "no test suites");
+}
+
+#[test]
+fn cpp_entities() {
+    let text = corpus("cpp/entities.cpp");
+    let result = analyze_text(Language::Cpp, &text, AnalysisOptions::default());
+    let r = &result.raw;
+    // Widget::render prototype + Widget::render definition + add + range + is_even.
+    // Class-typed return values (std::string, std::vector<int>) are counted, not just built-ins.
+    assert_eq!(r.functions, 5, "function definitions and prototypes");
+    // class Widget, struct Point, namespace demo
+    assert_eq!(r.classes, 3, "class/struct/namespace definitions");
+    // members id, name, x, y + locals out, sum, result (for-loop `i` excluded)
+    assert_eq!(r.variables, 7, "member and local variable declarations");
+    // #include <string>, #include <vector>
+    assert_eq!(r.imports, 2, "include directives");
 }
 
 #[test]
@@ -984,6 +1000,26 @@ fn detect_by_extension_hpp_is_cpp() {
     let path = std::path::Path::new("include.hpp");
     let lang = detect_language(path, None, &std::collections::BTreeMap::new(), false);
     assert_eq!(lang, Some(Language::Cpp));
+}
+
+#[test]
+fn looks_like_cpp_detects_cpp_constructs() {
+    assert!(looks_like_cpp("namespace foo {\nint x;\n}"));
+    assert!(looks_like_cpp("class Widget { public: int id; };"));
+    assert!(looks_like_cpp("std::string greet();"));
+    assert!(looks_like_cpp("template <typename T> T id(T v);"));
+    assert!(looks_like_cpp("int add(int a, int b) noexcept;"));
+}
+
+#[test]
+fn looks_like_cpp_rejects_plain_c_headers() {
+    // A pure C header — struct + function prototypes, no C++ constructs — must stay C.
+    let c_header = "#ifndef FOO_H\n#define FOO_H\n\
+        struct point { int x; int y; };\n\
+        int add(int a, int b);\n\
+        void reset(struct point* p);\n\
+        #endif\n";
+    assert!(!looks_like_cpp(c_header));
 }
 
 #[test]
