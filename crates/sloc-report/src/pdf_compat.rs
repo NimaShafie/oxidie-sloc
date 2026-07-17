@@ -1,15 +1,15 @@
 //! Compatibility shim presenting the printpdf 0.7 high-level "layer" drawing API on
-//! top of printpdf 0.9's op-based model.
+//! top of printpdf's op-based model (0.9 through 0.11).
 //!
 //! The pure-Rust PDF renderer in [`crate`] was written against printpdf 0.7's imperative
 //! `PdfLayerReference` API (`use_text`, `set_fill_color`, `add_polygon`, `get_layer`, …).
-//! printpdf 0.9 replaced that model with a declarative `Vec<Op>` per page. This module
-//! re-implements exactly the subset of the old surface the renderer uses, accumulating the
-//! equivalent `Op`s, so the ~50 rendering helpers compile and produce identical output
-//! without being rewritten one-by-one.
+//! printpdf 0.9 replaced that model with a declarative `Vec<Op>` per page, and 0.10/0.11
+//! kept that op surface source-compatible. This module re-implements exactly the subset of
+//! the old surface the renderer uses, accumulating the equivalent `Op`s, so the ~50
+//! rendering helpers compile and produce identical output without being rewritten one-by-one.
 //!
-//! Builtin (Helvetica) fonts need no explicit registration: printpdf 0.9's serializer
-//! discovers them from the `SetFont` ops emitted here and adds the resource automatically.
+//! Builtin (Helvetica) fonts need no explicit registration: printpdf's serializer discovers
+//! them from the `SetFont` ops emitted here and adds the resource automatically.
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result};
 
-// Value types whose API is unchanged between printpdf 0.7 and 0.9 — re-exported so the
+// Value types whose API is unchanged from printpdf 0.7 through 0.11 — re-exported so the
 // renderer can keep importing them via `crate::pdf_compat::{Color, Mm, Rgb, BuiltinFont}`.
 pub use printpdf::{BuiltinFont, Color, Mm, Rgb};
 
@@ -85,7 +85,7 @@ impl PdfDocument {
 }
 
 impl PdfDocumentReference {
-    /// Builtin fonts require no registration in printpdf 0.9 — the handle is the font itself.
+    /// Builtin fonts require no registration in printpdf's op model — the handle is the font itself.
     /// Kept fallible to match the 0.7 signature the renderer calls (`.ok()?` / `.map_err(..)?`).
     pub fn add_builtin_font(&self, font: BuiltinFont) -> Result<IndirectFontRef> {
         Ok(font)
@@ -108,7 +108,7 @@ impl PdfDocumentReference {
         PdfPageHandle { ops }
     }
 
-    /// Serialize every accumulated page to a real printpdf 0.9 document and write the bytes.
+    /// Serialize every accumulated page to a real printpdf document and write the bytes.
     pub fn save<W: Write>(&self, writer: &mut W) -> Result<()> {
         let inner = self.inner.borrow();
         let mut doc = printpdf::PdfDocument::new(&inner.title);
@@ -141,7 +141,7 @@ impl PdfPageHandle {
 }
 
 /// Stand-in for printpdf 0.7's `PdfLayerReference` — a cheap clonable handle to one page's
-/// op buffer. Drawing methods push the equivalent printpdf 0.9 `Op`s in call order, so the
+/// op buffer. Drawing methods push the equivalent printpdf `Op`s in call order, so the
 /// resulting content stream matches the old imperative draw sequence.
 #[derive(Clone)]
 pub struct PdfLayerReference {
