@@ -45,8 +45,9 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from glob import glob
 from typing import Optional
 import csv
@@ -62,6 +63,73 @@ except ImportError:  # pragma: no cover
     _XML_SAFE = False
 
 _MAX_XML_BYTES = 10 * 1024 * 1024  # 10 MB — guard against oversized JUnit/coverage files
+
+
+# ---------------------------------------------------------------------------
+# Timestamp handling — render in the timezone the oxide-sloc app uses (PT by
+# default), mirroring the web UI's fmt_la_time / is_pacific_dst logic so the CI
+# dashboard agrees with the interactive report. Standard library only — no
+# tzdata dependency required for the default Pacific path.
+# ---------------------------------------------------------------------------
+
+def _parse_iso_utc(raw) -> Optional[datetime]:
+    """Parse an RFC 3339 / ISO-8601 timestamp (e.g. ``2026-06-26T03:08:00Z``) to
+    a timezone-aware UTC datetime. Returns None if it can't be parsed."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    s = raw.strip().replace("Z", "+00:00")
+    # Trim sub-second precision beyond microseconds (Rust may emit nanoseconds).
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _nth_sunday_utc(year: int, month: int, n: int, hour: int) -> datetime:
+    """UTC datetime of the nth Sunday of a month at the given hour."""
+    first = datetime(year, month, 1, tzinfo=timezone.utc)
+    # datetime.weekday(): Monday=0 … Sunday=6
+    first_sunday = 1 + (6 - first.weekday()) % 7
+    day = first_sunday + (n - 1) * 7
+    return datetime(year, month, day, hour, 0, 0, tzinfo=timezone.utc)
+
+
+def _pacific(dt_utc: datetime):
+    """Return (utc_offset, label) for US Pacific time at the given UTC instant.
+
+    DST starts the 2nd Sunday of March at 02:00 PST (10:00 UTC) and ends the
+    1st Sunday of November at 02:00 PDT (09:00 UTC) — matches sloc-web.
+    """
+    y = dt_utc.year
+    start = _nth_sunday_utc(y, 3, 2, 10)
+    end = _nth_sunday_utc(y, 11, 1, 9)
+    if start <= dt_utc < end:
+        return timedelta(hours=-7), "PDT"
+    return timedelta(hours=-8), "PST"
+
+
+def fmt_local(dt_utc: datetime) -> str:
+    """Format a UTC datetime in the app's configured timezone.
+
+    Defaults to US Pacific (PT). Set ``SLOC_REPORT_TZ`` to an IANA name (e.g.
+    ``America/New_York``) to override; falls back to Pacific if zoneinfo or the
+    tzdata for that zone is unavailable.
+    """
+    tz_name = os.environ.get("SLOC_REPORT_TZ", "").strip()
+    if tz_name and tz_name != "America/Los_Angeles":
+        try:
+            from zoneinfo import ZoneInfo  # Python 3.9+
+
+            local = dt_utc.astimezone(ZoneInfo(tz_name))
+            return local.strftime("%Y-%m-%d %H:%M %Z")
+        except Exception:
+            pass  # fall through to Pacific
+    off, label = _pacific(dt_utc)
+    return (dt_utc + off).strftime(f"%Y-%m-%d %H:%M {label}")
 
 
 def _delta_color(delta: float) -> str:
@@ -135,6 +203,7 @@ def svg_hbar(data: list) -> str:
         return '<svg width="1" height="1"></svg>'
 
     max_val = max(v for _, v in data) or 1
+    total_val = sum(v for _, v in data) or 1
     row_h = bar_h + gap
     svg_h = row_h * len(data) + gap
 
@@ -146,14 +215,21 @@ def svg_hbar(data: list) -> str:
         # Truncate long labels
         disp_label = label if len(label) <= 18 else label[:17] + "…"
         bar_w = int(bar_max * value / max_val)
+        pct = value / total_val * 100
+        # Native hover tooltip — describes the bar with the exact count and share.
+        tip = (
+            f"{label}: {fmt_full(value)} code lines "
+            f"({pct:.1f}% of the {fmt_full(total_val)} charted)"
+        )
 
         rows.append(
             f'  <!-- {html.escape(label)} -->'
             f'\n  <text x="{label_w - 6}" y="{y + bar_h - 8}"'
             f' text-anchor="end" fill="#2d1a0e" font-size="13" font-family="system-ui,sans-serif"'
             f' font-weight="600">{html.escape(disp_label)}</text>'
-            f'\n  <rect x="{label_w}" y="{y}" width="{bar_w}" height="{bar_h}"'
-            f' rx="4" fill="{colour}"/>'
+            f'\n  <rect class="bar-rect" x="{label_w}" y="{y}" width="{bar_w}" height="{bar_h}"'
+            f' rx="4" fill="{colour}">'
+            f'<title>{html.escape(tip)}</title></rect>'
             f'\n  <text x="{label_w + bar_w + 8}" y="{y + bar_h - 8}"'
             f' fill="#5a3820" font-size="12" font-family="system-ui,sans-serif"'
             f' font-weight="700">{html.escape(fmt(value))}</text>'
@@ -240,6 +316,22 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
     if min_i != n - 1 and min_i != max_i:
         extra_dots += f'\n  <circle cx="{min_x}" cy="{min_y}" r="3" fill="#b23030" opacity="0.85"/>'
 
+    # Transparent, generously sized hit-target dots at every build so hovering
+    # anywhere near a point reveals a native tooltip with the exact figures.
+    hover_dots = ""
+    for i, (x, y) in enumerate(coords):
+        b = builds[i]
+        v = values[i]
+        note = ""
+        if i > 0:
+            d = v - values[i - 1]
+            note = f" ({'+' if d > 0 else ''}{fmt_full(d)} vs #{builds[i - 1]})"
+        tip = f"Build #{b}: {fmt_full(v)} code lines{note}"
+        hover_dots += (
+            f'\n  <circle class="spark-dot" cx="{x}" cy="{y}" r="7" fill="#b04a00"'
+            f' fill-opacity="0"><title>{html.escape(tip)}</title></circle>'
+        )
+
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"'
         f' role="img" aria-label="SLOC trend over last {n} builds">'
@@ -248,6 +340,7 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
         f' stroke-linejoin="round" stroke-linecap="round"/>'
         f'\n  <circle cx="{lx}" cy="{ly}" r="4" fill="#b04a00"/>'
         f"{extra_dots}"
+        f"{hover_dots}"
         f'\n  <text x="{pad_l}" y="{height - 3}" font-size="10" fill="#8a6a5a"'
         f' font-family="system-ui,sans-serif">#{html.escape(str(builds[0]))}</text>'
         f'\n  <text x="{width - pad_r}" y="{height - 3}" font-size="10" fill="#8a6a5a"'
@@ -260,7 +353,12 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
 # HTML component helpers
 # ---------------------------------------------------------------------------
 
-def chip(val_html: str, label: str, sub: Optional[str] = None) -> str:
+def chip(
+    val_html: str,
+    label: str,
+    sub: Optional[str] = None,
+    tip: Optional[str] = None,
+) -> str:
     """Render a stat chip card.
 
     Parameters
@@ -272,15 +370,22 @@ def chip(val_html: str, label: str, sub: Optional[str] = None) -> str:
         Short uppercase label shown below the value.  Will be html-escaped.
     sub
         Optional small supplementary text below the label.  Will be html-escaped.
+    tip
+        Optional description shown in a hover tooltip explaining the metric.
+        Will be html-escaped.
     """
     sub_html = (
         f'<div class="chip-sub">{html.escape(str(sub))}</div>' if sub is not None else ""
+    )
+    tip_html = (
+        f'<div class="stat-chip-tip">{html.escape(str(tip))}</div>' if tip else ""
     )
     return (
         f'<div class="stat-chip">'
         f'<div class="stat-chip-val">{val_html}</div>'
         f'<div class="stat-chip-label">{html.escape(str(label))}</div>'
         f'{sub_html}'
+        f'{tip_html}'
         f'</div>'
     )
 
@@ -385,6 +490,21 @@ def parse_lcov(path: str) -> tuple:
         return (0, 0)
 
 
+def _reset_dir(path: str) -> None:
+    """Create an empty directory, removing any previous contents."""
+    if os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+
+
+def _copy_into(src_dir: str, names: list, dst_dir: str) -> None:
+    """Copy each existing file in ``names`` from src_dir into dst_dir (flat)."""
+    for name in names:
+        src = os.path.join(src_dir, name)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(dst_dir, os.path.basename(name)))
+
+
 def parse_trend_history(path: str) -> list:
     """Parse the persistent per-job trend CSV written by the Jenkinsfile.
 
@@ -449,9 +569,18 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
         data = json.load(fh)
 
     # oxide-sloc result.json structure:
+    #   data["tool"]              → {name, version, run_id, timestamp_utc}
     #   data["summary_totals"]    → aggregate counts
     #   data["totals_by_language"] → list of per-language dicts
     #       each entry: {"language": str|dict, "code_lines": int, ...}
+    tool_meta = data.get("tool") if isinstance(data.get("tool"), dict) else {}
+    # Version: prefer the value baked into the scan result so the dashboard shows
+    # the exact oxide-sloc build that produced it; fall back to the env override.
+    app_version = str(tool_meta.get("version") or os.environ.get("SLOC_VERSION", "")).strip()
+    # Timestamp: use the scan's own instant, not "now", so re-generating the
+    # dashboard from archived artifacts keeps the original time.
+    scan_dt = _parse_iso_utc(tool_meta.get("timestamp_utc")) or datetime.now(timezone.utc)
+
     totals = data.get("summary_totals", {})
     code_lines     = int(totals.get("code_lines",    0))
     comment_lines  = int(totals.get("comment_lines", 0))
@@ -511,12 +640,23 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     history_file  = os.environ.get("SLOC_HISTORY_FILE", "")
     trend_history = parse_trend_history(history_file) if history_file else []
 
+    # ── Load CI capabilities (plugin-install permission / degradation state) ──
+    capabilities = None
+    caps_path = os.path.join(out_dir, "capabilities.json")
+    if os.path.isfile(caps_path):
+        try:
+            with open(caps_path, encoding="utf-8") as fh:
+                capabilities = json.load(fh)
+        except (OSError, ValueError):
+            capabilities = None
+
     # ── Environment ─────────────────────────────────────────────────────────
     build_number = os.environ.get("BUILD_NUMBER", "")
     build_url    = os.environ.get("BUILD_URL", "")
     job_name     = os.environ.get("JOB_NAME", "")
     scan_path    = os.environ.get("SCAN_PATH", "")
-    timestamp    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # Render in the app's timezone (Pacific by default) to match the web report.
+    timestamp    = fmt_local(scan_dt)
 
     # ── Build chip sections ─────────────────────────────────────────────────
 
@@ -532,6 +672,10 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
             f"{sign}{fmt(delta)}</span>",
             "Code Lines Δ",
             f"vs build #{t_prev_build['build']}",
+            tip=(
+                f"Net change in code lines since build #{t_prev_build['build']} "
+                "— positive means the codebase grew, negative means it shrank."
+            ),
         )
 
     # SLOC summary chips
@@ -540,21 +684,35 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
             f'<span title="{fmt_full(code_lines)}">{fmt(code_lines)}</span>',
             "Code Lines",
             f"exact: {fmt_full(code_lines)}",
+            tip=(
+                "Source lines of code: physical lines containing executable code, "
+                "excluding blank and comment-only lines."
+            ),
         ),
         chip(
             f'<span title="{fmt_full(comment_lines)}">{fmt(comment_lines)}</span>',
             "Comment Lines",
             f"exact: {fmt_full(comment_lines)}",
+            tip=(
+                "Lines that are entirely comments or documentation (line comments, "
+                "block comments, and docstrings)."
+            ),
         ),
         chip(
             f'<span title="{fmt_full(blank_lines)}">{fmt(blank_lines)}</span>',
             "Blank Lines",
             f"exact: {fmt_full(blank_lines)}",
+            tip="Empty or whitespace-only lines used for visual spacing.",
         ),
         chip(
             f'<span title="{fmt_full(files_analyzed)}">{fmt(files_analyzed)}</span>',
             "Files Analyzed",
             f"top: {top_lang}" if top_lang else None,
+            tip=(
+                "Number of source files that were detected, decoded, and counted "
+                + (f"in this scan. Most code is in {top_lang}." if top_lang
+                   else "in this scan.")
+            ),
         ),
         delta_chip_html,
     ])
@@ -562,7 +720,10 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
 
     # Language chart
     lang_chart = svg_hbar(lang_rows[:20])
-    lang_caption = f"{len(lang_rows)} language{'s' if len(lang_rows) != 1 else ''} detected"
+    lang_caption = (
+        f"{len(lang_rows)} language{'s' if len(lang_rows) != 1 else ''} detected"
+        " · hover a bar for its exact count and share of the total"
+    )
 
     # Per-language metrics table
     if lang_table_rows:
@@ -632,20 +793,25 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
             else f"{junit['failures']} failed, {junit['errors']} error(s)."
         )
         test_chips = "".join([
-            chip(fmt(junit["tests"]),    "Total Tests"),
+            chip(fmt(junit["tests"]), "Total Tests",
+                 tip="Total number of test cases executed by cargo-nextest."),
             chip(
                 f'<span style="color:{pass_colour}">{fmt(junit["passed"])}</span>',
                 "Passed",
+                tip="Tests that completed successfully.",
             ),
             chip(
                 f'<span style="color:#b23030">{fmt(junit["failures"])}</span>',
                 "Failed",
+                tip="Tests that ran but did not meet their assertions.",
             ),
             chip(
                 f'<span style="color:#b23030">{fmt(junit["errors"])}</span>',
                 "Errors",
+                tip="Tests that could not complete due to a runtime error.",
             ),
-            chip(fmt(junit["skipped"]), "Skipped"),
+            chip(fmt(junit["skipped"]), "Skipped",
+                 tip="Tests that were ignored or filtered out of this run."),
         ])
         time_str = f"{junit['time']:.2f}s" if junit["time"] > 0 else ""
         test_section = f"""
@@ -688,6 +854,76 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
   generate LCOV coverage data.</p>
 </div>"""
 
+    # ── CI capabilities banner ──────────────────────────────────────────────
+    # When richer visualization plugins could not be installed (no system-admin
+    # rights, or an air-gapped controller with no offline bundle), show a calm
+    # warning banner explaining it — never an error. When plugins are active, or
+    # no capability probe ran, show nothing (or a subtle confirmation).
+    capability_banner = ""
+    if isinstance(capabilities, dict) and capabilities.get("degraded"):
+        reason = str(capabilities.get("degraded_reason", "")).strip() or (
+            "Enhanced Jenkins visualization plugins could not be enabled for this "
+            "build; the native oxide-sloc dashboard is shown instead."
+        )
+        requested = [str(p) for p in capabilities.get("requested_plugins", []) if p]
+        plugin_list = ""
+        if requested:
+            chips = "".join(
+                f'<span class="plugin-chip">{html.escape(p)}</span>' for p in requested
+            )
+            plugin_list = (
+                '<div class="banner-plugins"><span class="banner-plugins-label">'
+                "Plugins that would add richer views:</span>"
+                f'<div class="plugin-chip-row">{chips}</div></div>'
+            )
+        capability_banner = f"""
+<div class="capability-banner" role="status">
+  <div class="capability-banner-icon" aria-hidden="true">&#9888;</div>
+  <div class="capability-banner-body">
+    <div class="capability-banner-title">Running in native mode &mdash; enhanced plugins not enabled</div>
+    <p class="capability-banner-text">{html.escape(reason)}</p>
+    {plugin_list}
+  </div>
+</div>"""
+
+    # ── Report & Exports section ────────────────────────────────────────────
+    # Link to the sibling artifacts so the dashboard is the single entry point:
+    # open the full interactive report or download any export from one place.
+    # Every href is a plain filename resolved relative to this HTML, so the links
+    # work identically in the Jenkins-published view and in the downloaded bundle.
+    export_defs = [
+        (f"report_{slug}.html", "Full HTML report", "Interactive per-file report", "open"),
+        (f"report_{slug}.pdf", "PDF", "Print-ready PDF export", "download"),
+        (f"report_{slug}.xlsx", "Excel workbook", "Per-language + per-file sheets", "download"),
+        (f"report_{slug}.csv", "CSV", "Per-file metrics as CSV", "download"),
+        (f"result_{slug}.json", "JSON", "Raw machine-readable result", "download"),
+    ]
+    export_links = []
+    for fname, label, desc, action in export_defs:
+        if not os.path.isfile(os.path.join(out_dir, fname)):
+            continue
+        dl_attr = "" if action == "open" else " download"
+        target = ' target="_blank" rel="noopener"' if action == "open" else ""
+        verb = "Open" if action == "open" else "Download"
+        export_links.append(
+            f'<a class="export-link" href="{html.escape(fname)}"{dl_attr}{target}'
+            f' title="{verb} {html.escape(desc.lower())}">'
+            f'<span class="export-link-label">{html.escape(label)}</span>'
+            f'<span class="export-link-desc">{html.escape(desc)}</span>'
+            f'<span class="export-link-verb">{verb} &#8594;</span>'
+            f"</a>"
+        )
+    if export_links:
+        downloads_section = f"""
+<div class="card">
+  <div class="card-title">Report &amp; Exports</div>
+  <div class="export-grid">
+    {''.join(export_links)}
+  </div>
+</div>"""
+    else:
+        downloads_section = ""
+
     # ── Trend sparkline section ─────────────────────────────────────────────
     if len(trend_history) >= 2:
         trend_points = [(r["build"], r["code_lines"]) for r in trend_history]
@@ -704,6 +940,7 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
   <div class="sparkline-wrap">
     {sparkline}
   </div>
+  <p class="chart-hint">Hover any point to see that build's code-line total and its change.</p>
   <p class="trend-delta" style="color:{tr_col}">
     {html.escape(f"{tr_sign}{fmt(tr_delta)}")} code lines since build #{t_prev_h["build"]}
     &nbsp;&middot;&nbsp;
@@ -718,13 +955,20 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
 
     # ── Header meta ─────────────────────────────────────────────────────────
     header_meta_parts = []
+    if app_version:
+        header_meta_parts.append(
+            f'<span title="oxide-sloc application version">oxide-sloc '
+            f"v{html.escape(app_version)}</span>"
+        )
     if job_name:
         header_meta_parts.append(f"<span>Job: {html.escape(job_name)}</span>")
     if build_number:
         header_meta_parts.append(f"<span>Build #{html.escape(build_number)}</span>")
     if scan_path:
         header_meta_parts.append(f"<span>Scan path: <code>{html.escape(scan_path)}</code></span>")
-    header_meta_parts.append(f"<span>{html.escape(timestamp)}</span>")
+    header_meta_parts.append(
+        f'<span title="Scan time, shown in US Pacific time">{html.escape(timestamp)}</span>'
+    )
 
     back_link = ""
     if build_url:
@@ -876,6 +1120,7 @@ body {{
   grid-template-columns: repeat(5, 1fr);
 }}
 .stat-chip {{
+  position: relative;
   background: #f9f5f0;
   border: 1px solid #e0d8d0;
   border-radius: 12px;
@@ -904,6 +1149,142 @@ body {{
   font-size: 11px;
   color: #8a6a5a;
   margin-top: 3px;
+}}
+/* Hover description tooltip for stat chips */
+.stat-chip-tip {{
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  width: max-content;
+  max-width: 240px;
+  background: #2d1a0e;
+  color: #f9f5f0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-transform: none;
+  letter-spacing: normal;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.28);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 30;
+}}
+.stat-chip-tip::after {{
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #2d1a0e;
+}}
+.stat-chip:hover .stat-chip-tip {{
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}}
+
+/* ── Chart hover affordances ─────────────────────────────────────────────── */
+.chart-hint {{
+  font-size: 11px;
+  color: #a08876;
+  margin-top: 6px;
+  font-style: italic;
+}}
+.bar-rect {{
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}}
+.bar-rect:hover {{ opacity: 0.82; }}
+.spark-dot {{ cursor: pointer; }}
+.spark-dot:hover {{ fill-opacity: 0.28 !important; }}
+
+/* ── Report & Exports ────────────────────────────────────────────────────── */
+.export-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+}}
+.export-link {{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: #f9f5f0;
+  border: 1px solid #e0d8d0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  text-decoration: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}}
+.export-link:hover {{
+  transform: translateY(-3px);
+  border-color: #d4691c;
+  box-shadow: 0 8px 22px rgba(176,74,0,0.16);
+}}
+.export-link-label {{ font-size: 14px; font-weight: 800; color: #b04a00; }}
+.export-link-desc {{ font-size: 11px; color: #8a6a5a; }}
+.export-link-verb {{
+  font-size: 11px;
+  font-weight: 700;
+  color: #d4691c;
+  margin-top: 2px;
+}}
+
+/* ── CI capabilities / degradation banner ────────────────────────────────── */
+.capability-banner {{
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: #fff8ec;
+  border: 1px solid #e8c37a;
+  border-left: 5px solid #d4a017;
+  border-radius: 12px;
+  padding: 16px 20px;
+}}
+.capability-banner-icon {{
+  font-size: 22px;
+  line-height: 1;
+  color: #b8860b;
+  flex-shrink: 0;
+  margin-top: 1px;
+}}
+.capability-banner-title {{
+  font-size: 14px;
+  font-weight: 800;
+  color: #8a5a00;
+  margin-bottom: 4px;
+}}
+.capability-banner-text {{
+  font-size: 13px;
+  line-height: 1.55;
+  color: #6a5030;
+}}
+.banner-plugins {{ margin-top: 10px; }}
+.banner-plugins-label {{
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #a07c3a;
+}}
+.plugin-chip-row {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}}
+.plugin-chip {{
+  background: #f3e3c2;
+  border: 1px solid #e0c78a;
+  border-radius: 20px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #7a5a1a;
+  font-family: ui-monospace, "Cascadia Code", monospace;
 }}
 
 /* ── Language chart ─────────────────────────────────────────────────────── */
@@ -1026,6 +1407,9 @@ body {{
 <!-- ── Main content ────────────────────────────────────────────────────── -->
 <main class="main">
 
+  <!-- CI capabilities notice (only when plugins were unavailable) -->
+  {capability_banner}
+
   <!-- SLOC Summary (code lines + delta when trend history available) -->
   <div class="card">
     <div class="card-title">SLOC Summary</div>
@@ -1056,11 +1440,15 @@ body {{
   <!-- Code Coverage -->
   {coverage_section}
 
+  <!-- Report & Exports (single entry point to open / download everything) -->
+  {downloads_section}
+
 </main>
 
 <!-- ── Footer ──────────────────────────────────────────────────────────── -->
 <footer class="site-footer">
-  oxide-sloc Graphical Report &nbsp;&middot;&nbsp;
+  oxide-sloc{(' v' + html.escape(app_version)) if app_version else ''} Graphical Report
+  &nbsp;&middot;&nbsp;
   generated {html.escape(timestamp)} &nbsp;&middot;&nbsp;
   <a href="https://github.com/oxide-sloc/oxide-sloc" target="_blank" rel="noopener">
     oxide-sloc on GitHub
@@ -1092,6 +1480,56 @@ body {{
     out_path = os.path.join(out_dir, f"dashboard_{slug}.html")
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(html_out)
+
+    # ── Curated single-entry-point bundles ─────────────────────────────────
+    # Jenkins' htmlpublisher zips the entire reportDir, so publishing from the
+    # full output dir yields a cluttered zip with no obvious file to open. We
+    # instead lay down two self-contained bundles whose root file is always
+    # index.html, and point publishHTML at them:
+    #   ci-report/   → this dashboard as index.html (summary + exports)
+    #   html-report/ → the full interactive oxide-sloc report as index.html
+    # Each carries the export artifacts so the downloaded zip opens and exports
+    # offline. Every internal link is a bare filename, so it resolves in both
+    # the Jenkins-served view and the extracted zip.
+    export_assets = [
+        f"report_{slug}.pdf",
+        f"report_{slug}.xlsx",
+        f"report_{slug}.csv",
+        f"result_{slug}.json",
+    ]
+    sub_reports = sorted(
+        os.path.basename(p) for p in glob(os.path.join(out_dir, "sub_*.html"))
+    )
+
+    # 1. CI dashboard bundle — the dashboard is the entry point.
+    ci_dir = os.path.join(out_dir, "ci-report")
+    _reset_dir(ci_dir)
+    with open(os.path.join(ci_dir, "index.html"), "w", encoding="utf-8") as fh:
+        fh.write(html_out)
+    _copy_into(
+        out_dir,
+        [
+            f"dashboard_{slug}.css",
+            f"report_{slug}.html",
+            f"report_{slug}.css",
+            f"report_{slug}.js",
+            *export_assets,
+            *sub_reports,
+        ],
+        ci_dir,
+    )
+
+    # 2. Full interactive report bundle — only when the report was generated.
+    report_html = os.path.join(out_dir, f"report_{slug}.html")
+    if os.path.isfile(report_html):
+        html_dir = os.path.join(out_dir, "html-report")
+        _reset_dir(html_dir)
+        shutil.copyfile(report_html, os.path.join(html_dir, "index.html"))
+        _copy_into(
+            out_dir,
+            [f"report_{slug}.css", f"report_{slug}.js", *export_assets, *sub_reports],
+            html_dir,
+        )
 
     print(out_path)
 

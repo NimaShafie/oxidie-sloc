@@ -1,6 +1,10 @@
 # Build output
 /target/
 
+# Python bytecode caches (from CI helper scripts under ci/jenkins/)
+__pycache__/
+*.py[cod]
+
 # Uncompressed vendor sources — always extract from vendor.tar.xz; never commit the directory
 /vendor/
 

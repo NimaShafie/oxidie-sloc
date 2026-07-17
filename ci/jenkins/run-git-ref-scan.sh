@@ -5,14 +5,17 @@
 #   OUTPUT_SUBDIR  — artifact output directory (relative to WORKSPACE)
 #   BINARY         — path to compiled oxide-sloc binary (set in Jenkinsfile environment{})
 #   WORKSPACE      — Jenkins workspace root (set by Jenkins)
+#   SCAN_ROOT      — repo whose history holds GIT_REF: workspace root for a self-scan,
+#                    or ./_target when TARGET_REPO_URL was checked out. Defaults to WORKSPACE.
 set -euo pipefail
 
 REF="${GIT_REF:-}"
 OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
+REPO="${SCAN_ROOT:-$WORKSPACE}"
 WT="${WORKSPACE}/.wt-ref-scan"
 
-echo "=== Git-Ref Scan: ${REF} ==="
-git worktree add --detach "${WT}" "${REF}"
+echo "=== Git-Ref Scan: ${REF} (repo: ${REPO}) ==="
+git -C "${REPO}" worktree add --detach "${WT}" "${REF}"
 
 "${BINARY}" analyze "${WT}" \
     --json-out  "${OUT}/ref-scan.json" \
@@ -21,4 +24,4 @@ git worktree add --detach "${WT}" "${REF}"
     --report-title "Ref scan: ${REF}" \
     --plain
 
-git worktree remove --force "${WT}" || true
+git -C "${REPO}" worktree remove --force "${WT}" || true

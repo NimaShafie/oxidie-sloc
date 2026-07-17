@@ -237,23 +237,50 @@ def runAnalyze() {
     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
     sh "mkdir -p '${outDir}'"
 
+    // scanRoot is where the project-under-analysis lives: the workspace root for a
+    // self-scan, or ./_target when TARGET_REPO_URL was checked out (set in Checkout).
+    // All scan commands and git-based features resolve against it.
+    def scanRoot         = env.SCAN_ROOT?.trim() ?: env.WORKSPACE
+    def scanningExternal = scanRoot != env.WORKSPACE
+
+    // Resolve SCAN_PATH against scanRoot ONLY when scanning an external project, so a
+    // plain self-scan keeps its exact previous behaviour (relative path, cwd=WORKSPACE).
+    def effScan = params.SCAN_PATH?.trim() ?: '.'
+    if (scanningExternal) {
+        effScan = effScan.startsWith('/') ? effScan : "${scanRoot}/${effScan}"
+        // Fail fast with a helpful message when SCAN_PATH does not exist in the target —
+        // the default (tests/fixtures/basic) only exists in the oxide-sloc repo.
+        if (!fileExists(effScan)) {
+            error("SCAN_PATH '${params.SCAN_PATH}' was not found in the target project (${scanRoot}). " +
+                  "Set SCAN_PATH to a path inside TARGET_REPO_URL, e.g. '.' for the whole repo or 'src'.")
+        }
+    }
+
     // Derive a project slug that matches the local-run naming convention:
     //   {repo-name}_{short-sha}  (e.g. airgap-devkit_a78a632)
-    // Repo name comes from the last path segment of REPO_URL (strip .git suffix).
-    // Short SHA comes from GIT_COMMIT set by the GitSCM checkout, falling back
-    // to `git rev-parse --short HEAD` for edge cases (manual/scripted checkouts).
-    def repoSlug = (params.REPO_URL?.trim()
-                        ? params.REPO_URL.trim()
+    // Name comes from the last path segment of the scanned repo's URL (strip .git).
+    // When scanning an external project that is TARGET_REPO_URL, otherwise REPO_URL.
+    def slugSource = scanningExternal ? params.TARGET_REPO_URL : params.REPO_URL
+    def repoSlug = (slugSource?.trim()
+                        ? slugSource.trim()
                               .replaceAll(/\.git$/, '')
                               .replaceAll(/.*[\/:]/, '')
                               .replaceAll(/[^a-zA-Z0-9_\-]/, '-')
                               .replaceAll(/-+/, '-')
                               .replaceAll(/^-|-$/, '')
                         : '') ?: 'project'
-    def rawSha   = env.GIT_COMMIT?.trim() ?: ''
-    def shortSha = (rawSha.length() >= 7)
+    // Short SHA: from GIT_COMMIT (the tooling checkout) for a self-scan, or from the
+    // target checkout's HEAD when scanning an external project.
+    def shortSha
+    if (scanningExternal) {
+        shortSha = sh(script: "git -C '${scanRoot}' rev-parse --short HEAD 2>/dev/null || echo unknown",
+                      returnStdout: true).trim()
+    } else {
+        def rawSha = env.GIT_COMMIT?.trim() ?: ''
+        shortSha = (rawSha.length() >= 7)
                         ? rawSha[0..6]
                         : sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+    }
     def projectSlug = "${repoSlug}_${shortSha}"
     env.SLOC_PROJECT = projectSlug
 
@@ -295,7 +322,7 @@ def runAnalyze() {
         : ''
 
     // a. Quick plain summary
-    withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
+    withEnv(["SCAN_PATH=${effScan}"]) {
         sh '''
             "${BINARY}" analyze "${SCAN_PATH}" --plain ''' + configArg + '''
         '''
@@ -309,7 +336,7 @@ def runAnalyze() {
     def branchArg  = branchName ? "--git-branch '${branchName}'" : ''
 
     withEnv([
-        "SCAN_PATH=${params.SCAN_PATH}",
+        "SCAN_PATH=${effScan}",
         "REPORT_TITLE=${params.REPORT_TITLE}",
         "MIXED_LINE_POLICY=${params.MIXED_LINE_POLICY}",
     ]) {
@@ -330,7 +357,7 @@ def runAnalyze() {
     if (params.GENERATE_HTML) { sh "test -s '${outDir}/report_${projectSlug}.html'" }
 
     // c. Per-file breakdown
-    withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
+    withEnv(["SCAN_PATH=${effScan}"]) {
         sh '''
             "${BINARY}" analyze "${SCAN_PATH}" --per-file --plain ''' + configArg + '''
         '''
@@ -353,7 +380,7 @@ def runAnalyze() {
 
     // f. Mixed-line policy matrix — spot-checks all four policies
     for (def policy in ['code-only', 'code-and-comment', 'comment-only', 'separate-mixed-category']) {
-        withEnv(["SCAN_PATH=${params.SCAN_PATH}"]) {
+        withEnv(["SCAN_PATH=${effScan}"]) {
             sh '''
                 "${BINARY}" analyze "${SCAN_PATH}" --plain --mixed-line-policy ''' + policy + '''
             '''
@@ -369,34 +396,72 @@ def runArchivePublish() {
 
     sh "python3 ci/jenkins/generate-trend-csv.py '${outDir}' '${proj}' '${histFile}'"
 
-    archiveArtifacts artifacts: "${params.OUTPUT_SUBDIR}/**",
-        fingerprint: true,
-        allowEmptyArchive: true
+    // Detect what this build is allowed to do (system-admin ⇒ may install the
+    // richer visualization plugins; otherwise degrade to the native dashboard).
+    // The auth-API probe uses the 'jenkins-api-token' credential when present;
+    // every step here is best-effort and never fails the build.
+    try {
+        def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
+        // 'jenkins-api-token' is a secret-text credential (a token); the API user
+        // defaults to 'admin' to match runSetup, overridable via JENKINS_API_USER.
+        withCredentials([string(credentialsId: 'jenkins-api-token',
+                                variable: 'SLOC_JTOKEN')]) {
+            withEnv(["JENKINS_BASE_URL=${base}",
+                     "JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}",
+                     "JENKINS_AUTH_TOKEN=${env.SLOC_JTOKEN ?: ''}"]) {
+                sh "python3 ci/jenkins/detect-capabilities.py '${outDir}' || true"
+                sh "bash ci/jenkins/install-plugins.sh '${outDir}' || true"
+            }
+        }
+    } catch (Exception ex) {
+        // No 'jenkins-api-token' credential — still probe anonymously so the
+        // dashboard can show the correct (degraded) banner.
+        echo "Capability probe running without API credentials: ${ex.message}"
+        def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
+        withEnv(["JENKINS_BASE_URL=${base}"]) {
+            sh "python3 ci/jenkins/detect-capabilities.py '${outDir}' || true"
+        }
+    }
 
+    // Generate the dashboard (and the curated ci-report/ + html-report/ bundles)
+    // BEFORE archiving so the bundle layout is present for both archive + publish.
+    def dashboardBuilt = false
     try {
         sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}' '${histFile}'"
-        if (fileExists("${outDir}/dashboard_${proj}.html")) {
-            publishHTML(target: [
-                allowMissing         : true,
-                alwaysLinkToLastBuild: true,
-                keepAll              : true,
-                reportDir            : params.OUTPUT_SUBDIR,
-                reportFiles          : "dashboard_${env.SLOC_PROJECT ?: 'project'}.html",
-                reportName           : "OxideSLOC — Jenkins CI Report",
-            ])
-        }
+        dashboardBuilt = fileExists("${outDir}/ci-report/index.html")
     } catch (Exception ex) {
         echo "generate-dashboard.py did not run (Python 3 unavailable or script error): ${ex.message}"
     }
 
-    if (params.GENERATE_HTML) {
+    // Archive everything except the curated bundle dirs — those are duplicated
+    // copies published separately below, so keeping them out keeps the archive lean.
+    archiveArtifacts artifacts: "${params.OUTPUT_SUBDIR}/**",
+        excludes: "${params.OUTPUT_SUBDIR}/ci-report/**,${params.OUTPUT_SUBDIR}/html-report/**",
+        fingerprint: true,
+        allowEmptyArchive: true
+
+    // Zip names come from the report name (htmlpublisher sanitises it), so we use
+    // project-scoped, space/em-dash-free names → e.g. OxideSLOC_CI_Report_<proj>.zip.
+    // reportFiles is always index.html, so the zip has one obvious entry point.
+    if (dashboardBuilt) {
+        publishHTML(target: [
+            allowMissing         : true,
+            alwaysLinkToLastBuild: true,
+            keepAll              : true,
+            reportDir            : "${params.OUTPUT_SUBDIR}/ci-report",
+            reportFiles          : "index.html",
+            reportName           : "OxideSLOC_CI_Report_${proj}",
+        ])
+    }
+
+    if (params.GENERATE_HTML && fileExists("${outDir}/html-report/index.html")) {
         publishHTML(target: [
             allowMissing         : false,
             alwaysLinkToLastBuild: true,
             keepAll              : true,
-            reportDir            : params.OUTPUT_SUBDIR,
-            reportFiles          : "report_${env.SLOC_PROJECT ?: 'project'}.html",
-            reportName           : "OxideSLOC — Jenkins HTML Report",
+            reportDir            : "${params.OUTPUT_SUBDIR}/html-report",
+            reportFiles          : "index.html",
+            reportName           : "OxideSLOC_HTML_Report_${proj}",
         ])
     }
 
@@ -577,15 +642,19 @@ def runGitRefCompare() {
         "COMPARE_TO_REF=${params.COMPARE_TO_REF}",
         "COMPARE_TO_PREV_TAG=${params.COMPARE_TO_PREV_TAG}",
         "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
+        "SCAN_ROOT=${env.SCAN_ROOT ?: env.WORKSPACE}",
     ]) {
         sh '''
             OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
             BINARY="${WORKSPACE}/target/release/oxide-sloc"
+            # Git operations target the scanned repo (workspace root for a self-scan,
+            # ./_target when TARGET_REPO_URL was checked out).
+            REPO="${SCAN_ROOT:-$WORKSPACE}"
 
             # Resolve baseline ref
             if [ "${COMPARE_TO_PREV_TAG:-false}" = "true" ]; then
-                CURRENT_TAG=$(git tag --sort=-version:refname | head -1)
-                BASELINE_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
+                CURRENT_TAG=$(git -C "${REPO}" tag --sort=-version:refname | head -1)
+                BASELINE_TAG=$(git -C "${REPO}" tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
                 BASELINE_REF="${BASELINE_TAG}"
                 echo "Auto-detected previous tag: ${BASELINE_REF} (current: ${CURRENT_TAG})"
             else
@@ -609,14 +678,14 @@ def runGitRefCompare() {
 
             echo "=== Scanning baseline: ${BASELINE_REF} ==="
             WT_BASE="${WORKSPACE}/.wt-baseline"
-            git worktree add --detach "${WT_BASE}" "${BASELINE_REF}"
+            git -C "${REPO}" worktree add --detach "${WT_BASE}" "${BASELINE_REF}"
 
             "${BINARY}" analyze "${WT_BASE}" \
                 --json-out  "${OUT}/baseline-scan.json" \
                 --report-title "Baseline: ${BASELINE_REF}" \
                 --plain
 
-            git worktree remove --force "${WT_BASE}" || true
+            git -C "${REPO}" worktree remove --force "${WT_BASE}" || true
 
             echo "=== Computing diff ==="
             "${BINARY}" diff \
@@ -700,6 +769,20 @@ def runPostSuccess() {
 
         currentBuild.description = desc
         currentBuild.displayName = "#${env.BUILD_NUMBER} — ${params.SCAN_PATH}"
+
+        // Highlight the headline metrics on the run row itself via the 'badge'
+        // plugin. Wrapped so a controller without the plugin (degraded mode)
+        // silently skips — the description above already carries the same info.
+        try {
+            addShortText(text: "${fmtN(t.code_lines)} SLOC",
+                         background: '#c45c10', color: '#ffffff',
+                         border: 0, borderColor: '#c45c10')
+            addBadge(icon: 'symbol-analytics-outline plugin-ionicons-api',
+                     text: "oxide-sloc: ${fmtN(t.code_lines)} code · " +
+                           "${fmtN(t.files_analyzed)} files")
+        } catch (Exception ignore) {
+            // badge plugin not installed — non-fatal by design.
+        }
     } catch (Exception ex) {
         echo "Could not set build metadata: ${ex.message}"
     }
@@ -718,9 +801,13 @@ def runPostSuccess() {
 }
 
 def runBitbucketNotify() {
+    def result = currentBuild.result ?: 'SUCCESS'
+    def state  = result == 'SUCCESS' ? 'SUCCESSFUL' :
+                 result == 'FAILURE' ? 'FAILED' : 'STOPPED'
+
+    // 1. Plugin path — used when the bitbucket-build-status-notifier plugin is
+    //    installed (i.e. a system-admin build was able to enable it).
     if (env.BITBUCKET_SOURCE_BRANCH || env.GIT_COMMIT) {
-        def state = currentBuild.result == 'SUCCESS' ? 'SUCCESSFUL' :
-                    currentBuild.result == 'FAILURE'  ? 'FAILED' : 'STOPPED'
         try {
             bitbucketStatusNotify(
                 buildState: state,
@@ -729,8 +816,51 @@ def runBitbucketNotify() {
                 buildUrl:   env.BUILD_URL
             )
         } catch (e) {
-            echo "Bitbucket status notify skipped (plugin not installed): ${e.message}"
+            echo "Bitbucket status notify via plugin skipped (plugin not installed): ${e.message}"
         }
+    }
+
+    // 2. Plugin-independent path — post the status + a link to the published
+    //    report to Bitbucket, and upsert a Confluence summary page. Both are
+    //    fully opt-in via credentials and no-op (exit 0) when unconfigured, so
+    //    they work with or without the plugins and never fail the build.
+    def proj      = env.SLOC_PROJECT ?: 'project'
+    def reportUrl = env.BUILD_URL ? "${env.BUILD_URL}OxideSLOC_CI_Report_${proj}/" : ''
+    def outDir    = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    def bbState   = result == 'FAILURE' ? 'FAILED' : 'SUCCESSFUL'
+
+    try {
+        withCredentials([string(credentialsId: 'bitbucket-build-token',
+                                variable: 'SLOC_BB_TOKEN')]) {
+            withEnv(["BITBUCKET_BASE_URL=${env.BITBUCKET_BASE_URL ?: ''}",
+                     "BITBUCKET_TOKEN=${env.SLOC_BB_TOKEN ?: ''}",
+                     "BITBUCKET_WORKSPACE=${env.BITBUCKET_WORKSPACE ?: ''}",
+                     "BITBUCKET_REPO=${env.BITBUCKET_REPO ?: ''}",
+                     "GIT_COMMIT=${env.GIT_COMMIT ?: ''}",
+                     "BUILD_KEY=${env.JOB_NAME ?: 'oxide-sloc'}",
+                     "BUILD_NAME=oxide-sloc CI #${env.BUILD_NUMBER}",
+                     "REPORT_URL=${reportUrl}"]) {
+                sh "bash ci/jenkins/notify-bitbucket.sh ${bbState} || true"
+            }
+        }
+    } catch (Exception ex) {
+        echo "Bitbucket direct notify skipped (no 'bitbucket-build-token' credential): ${ex.message}"
+    }
+
+    try {
+        withCredentials([string(credentialsId: 'confluence-api-token',
+                                variable: 'SLOC_CF_TOKEN')]) {
+            withEnv(["CONFLUENCE_BASE_URL=${env.CONFLUENCE_BASE_URL ?: ''}",
+                     "CONFLUENCE_TOKEN=${env.SLOC_CF_TOKEN ?: ''}",
+                     "CONFLUENCE_USER=${env.CONFLUENCE_USER ?: ''}",
+                     "CONFLUENCE_SPACE_KEY=${env.CONFLUENCE_SPACE_KEY ?: ''}",
+                     "CONFLUENCE_PARENT_ID=${env.CONFLUENCE_PARENT_ID ?: ''}",
+                     "REPORT_URL=${reportUrl}"]) {
+                sh "python3 ci/jenkins/notify-confluence.py '${outDir}' '${proj}' || true"
+            }
+        }
+    } catch (Exception ex) {
+        echo "Confluence notify skipped (no 'confluence-api-token' credential): ${ex.message}"
     }
 }
 
