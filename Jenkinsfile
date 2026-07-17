@@ -47,65 +47,63 @@ pipeline {
     // stays compact for normal scan runs.
     parameters {
 
-        // ── Tooling repository (provides the oxide-sloc binary) ────────────────
-        // REPO_URL is the repo that CONTAINS oxide-sloc's source + CI scripts.
-        // The pipeline checks it out and builds the scanner from it. To analyze a
-        // DIFFERENT project, leave this at the default and set TARGET_REPO_URL below —
-        // do NOT point REPO_URL at the project you want to scan (there would be no
-        // oxide-sloc source to build).
+        // ═══════════════════════════════════════════════════════════════════════
+        //  REQUIRED — WHAT TO SCAN
+        //  Set SCAN_PATH (and TARGET_REPO_URL to point at another project). Every
+        //  parameter after the ADVANCED_OPTIONS divider is optional and already
+        //  matches oxide-sloc's application defaults — leave them for a normal run.
+        // ═══════════════════════════════════════════════════════════════════════
         string(
-            name:         'REPO_URL',
-            defaultValue: 'https://github.com/oxide-sloc/oxide-sloc.git',
-            description:  'Tooling repo that provides the oxide-sloc source + CI scripts (branch: main). ' +
-                          'The scanner binary is built from this checkout. ' +
-                          'Leave at the default (or your fork) — to scan another project, use TARGET_REPO_URL instead. ' +
-                          'Use file:///path/to/repo for air-gapped local repos.'
+            name:         'SCAN_PATH',
+            defaultValue: 'tests/fixtures/basic',
+            description:  '★ REQUIRED — directory to scan (repo-relative or absolute). ' +
+                          'Use "." for a whole project or "src" for a subtree. ' +
+                          'The default only exists in the oxide-sloc repo, so change it for your project.'
         )
-
-        // ── Project under analysis ─────────────────────────────────────────────
-        // Point the job at ANY project without editing the pipeline: set
-        // TARGET_REPO_URL and Jenkins checks it out into ./_target and scans it.
-        // Leave empty to scan the tooling repo itself (oxide-sloc self-CI / demo).
         string(
             name:         'TARGET_REPO_URL',
             defaultValue: '',
-            description:  'Git URL of the project you want to analyze (empty = scan the tooling repo itself). ' +
-                          'When set, it is checked out into ./_target and SCAN_PATH is resolved inside it. ' +
-                          'This is how you run oxide-sloc against any project from a single Jenkins job. ' +
+            description:  '★ Scan a DIFFERENT project: its Git URL (empty = scan this tooling repo). ' +
+                          'Checked out into ./_target; SCAN_PATH is resolved inside it. ' +
                           'Use file:///path/to/repo for air-gapped local repos.'
         )
         string(
             name:         'TARGET_REF',
             defaultValue: '',
-            description:  'Branch, tag, or commit SHA to check out for TARGET_REPO_URL (empty = the default branch, main). ' +
-                          'Ignored when TARGET_REPO_URL is empty. Example: develop  or  v2.1.0  or  a3f9d2c'
+            description:  'Branch/tag/SHA for TARGET_REPO_URL (empty = default branch). e.g. develop, v2.1.0, a3f9d2c'
         )
-
-        // ── Scan target ────────────────────────────────────────────────────────
         string(
-            name:         'SCAN_PATH',
-            defaultValue: 'tests/fixtures/basic',
-            description:  'Directory (or space-separated paths) to scan, relative to the scanned repo root (or absolute). ' +
-                          'When TARGET_REPO_URL is set, this is relative to ./_target — set it to a path inside your ' +
-                          'project, e.g. "." for the whole repo or "src" for a subtree. The default ' +
-                          '(tests/fixtures/basic) only exists in the oxide-sloc repo, so change it when scanning your project.'
+            name:         'REPO_URL',
+            defaultValue: 'https://github.com/oxide-sloc/oxide-sloc.git',
+            description:  'Tooling repo the scanner is built from — leave at the default (or your fork). ' +
+                          'This is NOT the project to scan; use TARGET_REPO_URL for that.'
         )
         string(
             name:         'REPORT_TITLE',
             defaultValue: 'oxide-sloc CI Report',
-            description:  'Title embedded in generated HTML and PDF reports.'
+            description:  'Title shown in the generated HTML and PDF reports.'
         )
         string(
             name:         'OUTPUT_SUBDIR',
             defaultValue: 'ci-out',
-            description:  'Output sub-directory for generated artifacts (relative to the workspace root). ' +
-                          'The directory is created automatically if it does not exist. ' +
-                          'All artifacts — result.json, report.html, report.csv, report.xlsx, report.pdf, and trend CSVs — ' +
-                          'are written here and then archived to Jenkins at the end of each build. ' +
-                          'Only safe path characters are allowed (letters, digits, hyphens, underscores, slashes).'
+            description:  'Workspace sub-directory for generated artifacts (letters, digits, - _ / only).'
         )
 
-        // ── Pipeline switches ──────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        //  ADVANCED — OPTIONAL (pre-set to oxide-sloc's application defaults)
+        //  Leave everything below unchanged for a standard scan. Scroll past it
+        //  unless you specifically need to customize. To make this a real
+        //  collapsible section, install the "Parameter Separator" plugin.
+        // ═══════════════════════════════════════════════════════════════════════
+        booleanParam(
+            name:         'ADVANCED_OPTIONS',
+            defaultValue: false,
+            description:  '▼ Section divider (no effect on the build). The parameters below are ' +
+                          'optional and already match oxide-sloc\'s defaults — leave them as-is ' +
+                          'for a standard run; adjust only what you need.'
+        )
+
+        // ── Pipeline switches (optional) ───────────────────────────────────────
         booleanParam(
             name:         'SKIP_QUALITY_GATES',
             defaultValue: false,
@@ -513,10 +511,13 @@ pipeline {
                             steps {
                                 sh '''
                                     set -o pipefail
+                                    # Matches the rest of the repo's lint gates
+                                    # (.gitlab-ci.yml, Makefile, ci/lint.sh): plain
+                                    # -D warnings, no pedantic/nursery. Keeping the
+                                    # stricter groups here made feature commits pass
+                                    # GitHub/GitLab CI but break only this gate.
                                     cargo clippy --workspace --all-targets --all-features \
                                         -- -D warnings \
-                                           -W clippy::pedantic \
-                                           -W clippy::nursery \
                                            -A clippy::multiple_crate_versions \
                                         2>&1 | tee clippy-output.txt
                                     CLIPPY_RC=$?
