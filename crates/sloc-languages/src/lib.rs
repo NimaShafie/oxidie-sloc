@@ -845,6 +845,7 @@ fn language_scan_config(language: Language) -> (ScanConfig, bool) {
             allow_double_quote_strings: cfg.allow_double_quote_strings,
             allow_triple_quote_strings: cfg.allow_triple_quote_strings,
             allow_csharp_verbatim_strings: cfg.allow_csharp_verbatim_strings,
+            allow_raw_strings: cfg.allow_raw_strings,
             skip_lines: HashSet::new(),
             symbol_patterns: cfg.symbol_patterns,
             branch_keywords,
@@ -2309,6 +2310,9 @@ struct StaticLangConfig {
     allow_double_quote_strings: bool,
     allow_triple_quote_strings: bool,
     allow_csharp_verbatim_strings: bool,
+    /// `true` for Rust: `r"…"`, `r#"…"#`, `br#"…"#` raw strings where inner `"` do not close
+    /// the literal. Prevents branch keywords in embedded templates (HTML/JS) from being counted.
+    allow_raw_strings: bool,
     symbol_patterns: SymbolPatterns,
     /// `true` for C, C++, and Objective-C (languages that have a C preprocessor).
     has_preprocessor: bool,
@@ -2323,6 +2327,7 @@ struct ScanConfig {
     allow_double_quote_strings: bool,
     allow_triple_quote_strings: bool,
     allow_csharp_verbatim_strings: bool,
+    allow_raw_strings: bool,
     skip_lines: HashSet<usize>,
     symbol_patterns: SymbolPatterns,
     /// Branch keywords used to approximate cyclomatic complexity.
@@ -2347,6 +2352,7 @@ const C_SLASH_BASE: StaticLangConfig = StaticLangConfig {
     allow_double_quote_strings: true,
     allow_triple_quote_strings: false,
     allow_csharp_verbatim_strings: false,
+    allow_raw_strings: false,
     symbol_patterns: SP_NONE,
     has_preprocessor: false,
 };
@@ -2361,6 +2367,7 @@ const HASH_BASE: StaticLangConfig = StaticLangConfig {
     allow_double_quote_strings: true,
     allow_triple_quote_strings: false,
     allow_csharp_verbatim_strings: false,
+    allow_raw_strings: false,
     symbol_patterns: SP_NONE,
     has_preprocessor: false,
 };
@@ -2486,6 +2493,7 @@ static LANG_SCAN_TABLE: &[(Language, StaticLangConfig)] = &[
         StaticLangConfig {
             symbol_patterns: SP_RUST,
             allow_single_quote_strings: false,
+            allow_raw_strings: true,
             ..C_SLASH_BASE
         },
     ),
@@ -2945,6 +2953,9 @@ enum StringState {
     Single(char),
     Triple(&'static str),
     VerbatimDouble,
+    /// Rust raw string `r#…"…"#…` with the given number of `#` hashes. Closed only by a `"`
+    /// followed by exactly that many `#`; inner `"` and `\` are literal (no escaping).
+    RawHash(usize),
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -2992,7 +3003,52 @@ fn process_string_char(
                 (Some(state), 1)
             }
         }
+        StringState::RawHash(hashes) => {
+            // Close only on `"` followed by at least `hashes` consecutive `#`. No escaping.
+            if chars[i] == '"' && count_leading_hashes(chars, i + 1) >= hashes {
+                (None, 1 + hashes)
+            } else {
+                (Some(state), 1)
+            }
+        }
     }
+}
+
+/// Count consecutive `#` characters starting at `index`.
+fn count_leading_hashes(chars: &[char], index: usize) -> usize {
+    let mut n = 0;
+    while chars.get(index + n) == Some(&'#') {
+        n += 1;
+    }
+    n
+}
+
+/// Detect a Rust raw-string opener at `i`: optional `b`, `r`, zero or more `#`, then `"`.
+///
+/// Returns `Some((hashes, advance))` where `advance` is the opener length. Requires a preceding
+/// non-word boundary so `r`/`br` inside an identifier is not misread as a raw string.
+fn try_open_raw_string(chars: &[char], i: usize) -> Option<(usize, usize)> {
+    let word_before = i
+        .checked_sub(1)
+        .and_then(|p| chars.get(p))
+        .is_some_and(|c| c.is_alphanumeric() || *c == '_');
+    if word_before {
+        return None;
+    }
+    let mut j = i;
+    if chars.get(j) == Some(&'b') {
+        j += 1; // byte raw string: br"…"
+    }
+    if chars.get(j) != Some(&'r') {
+        return None;
+    }
+    j += 1;
+    let hashes = count_leading_hashes(chars, j);
+    j += hashes;
+    if chars.get(j) != Some(&'"') {
+        return None;
+    }
+    Some((hashes, j + 1 - i))
 }
 
 /// Process one character while the lexer is inside a block comment.
@@ -3010,6 +3066,11 @@ fn process_block_comment_char(chars: &[char], i: usize, close: &str) -> (bool, u
 ///
 /// Returns `Some((new_state, advance))` when a string opener is detected, else `None`.
 fn try_open_string(chars: &[char], i: usize, config: &ScanConfig) -> Option<(StringState, usize)> {
+    if config.allow_raw_strings {
+        if let Some((hashes, advance)) = try_open_raw_string(chars, i) {
+            return Some((StringState::RawHash(hashes), advance));
+        }
+    }
     if config.allow_csharp_verbatim_strings && starts_with(chars, i, "@\"") {
         return Some((StringState::VerbatimDouble, 2));
     }
@@ -4441,6 +4502,54 @@ def fn_a():
         let result = analyze_text(Language::C, input, AnalysisOptions::default());
         assert_eq!(result.raw.mixed_code_single_comment_lines, 1);
         assert_eq!(result.raw.multi_comment_only_lines, 1);
+    }
+
+    #[test]
+    fn branch_keywords_inside_strings_are_not_counted() {
+        // Branch operators inside a normal string literal are not control flow → 0.
+        let s = analyze_text(
+            Language::Rust,
+            "let s = \"if a && b || c ? d : e\";\n",
+            AnalysisOptions::default(),
+        );
+        assert_eq!(s.raw.cyclomatic_complexity, 0);
+
+        // Same, inside a Rust raw string whose inner `\"` must not end the literal
+        // (the HTML/JS-template shape that previously inflated cyclomatic complexity).
+        let raw = analyze_text(
+            Language::Rust,
+            "let h = r#\"<a href=\"x\">a && b ? c : d</a>\"#;\n",
+            AnalysisOptions::default(),
+        );
+        assert_eq!(raw.raw.cyclomatic_complexity, 0);
+
+        // Real control flow outside string literals is still counted.
+        let code = analyze_text(
+            Language::Rust,
+            "if a && b { c } else { d }\n",
+            AnalysisOptions::default(),
+        );
+        assert!(code.raw.cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn multiline_raw_string_does_not_swallow_following_code() {
+        // Regression: a multi-line r##"..."## template with inner quotes must close cleanly so
+        // the code after it stays classified as code (it was previously swallowed as string).
+        let input = concat!(
+            "let cfg = r##\"\n",
+            "# looks like a comment but is string content\n",
+            "key = \"value with \"\" inner quotes\"\n",
+            "\"##;\n",
+            "let x = 1;\n",
+        );
+        let r = analyze_text(Language::Rust, input, AnalysisOptions::default());
+        assert!(
+            r.raw.code_only_lines >= 1,
+            "code after the raw string was swallowed"
+        );
+        assert_eq!(r.raw.single_comment_only_lines, 0);
+        assert_eq!(r.raw.cyclomatic_complexity, 0);
     }
 
     #[test]

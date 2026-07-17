@@ -3,8 +3,8 @@
 
 Surfaces two actionable, per-file signals oxide-sloc already computes:
 
-  * high cyclomatic complexity  → warning (>= warn) / note (>= note)
-  * large-file hotspots         → note (code_lines >= hotspot threshold)
+  * high complexity density  → warning (>= warn) / note (>= note)
+  * large-file hotspots       → note (code_lines >= hotspot threshold)
 
 so they show up inline in the PR "Files changed" tab via upload-sarif. Standard
 library only.
@@ -16,14 +16,18 @@ docs tooling, and test files are intentionally *not* complexity-gated: their
 branch counts are dominated by sequential setup/dispatch, not maintainability
 risk, so gating them only produces noise.
 
-The cyclomatic-complexity value oxide-sloc emits is a *whole-file* sum of
-branch-decision keywords, so the thresholds below are calibrated for a file
-total (hundreds), not a single function (tens). Function-level complexity is
+Complexity is scored by *density* — cyclomatic complexity per code line — not by
+the whole-file branch-keyword sum. The raw sum is dominated by file size (a big
+but flat file trips it), which merely duplicates the large-file-hotspot signal.
+Density measures how branch-dense the code actually is, independent of length, so
+this rule flags genuinely convoluted files while large-but-linear files are left
+to the size rule. A minimum code-line gate avoids flagging tiny utility files
+where a couple of branches yield a high ratio. Function-level complexity is
 enforced separately by SonarQube's rust:S3776 cognitive-complexity rule.
 
 Usage:
     python3 ci/github/sloc-to-sarif.py <result.json> <out.sarif> \
-        [--cc-warn 200] [--cc-note 100] [--hotspot 800]
+        [--dens-warn 0.30] [--dens-note 0.20] [--min-code 200] [--hotspot 800]
 """
 
 import json
@@ -37,10 +41,11 @@ TOOL = {
             {
                 "id": "high-cyclomatic-complexity",
                 "name": "HighCyclomaticComplexity",
-                "shortDescription": {"text": "High cyclomatic complexity"},
+                "shortDescription": {"text": "High complexity density"},
                 "fullDescription": {"text":
-                    "This file has a high approximate cyclomatic complexity "
-                    "(sum of branch-decision keywords). Consider splitting it."},
+                    "This file has a high cyclomatic-complexity density "
+                    "(branch-decision points per code line). Dense branching is "
+                    "harder to test and maintain; consider simplifying it."},
                 "defaultConfiguration": {"level": "warning"},
                 "helpUri": "https://en.wikipedia.org/wiki/Cyclomatic_complexity",
             },
@@ -58,10 +63,10 @@ TOOL = {
 }
 
 
-def _arg(flag, default):
+def _arg(flag, default, cast=int):
     if flag in sys.argv:
         try:
-            return int(sys.argv[sys.argv.index(flag) + 1])
+            return cast(sys.argv[sys.argv.index(flag) + 1])
         except (ValueError, IndexError):
             return default
     return default
@@ -110,9 +115,10 @@ def main() -> None:
         sys.stderr.write("usage: sloc-to-sarif.py <result.json> <out.sarif>\n")
         sys.exit(2)
     src, dst = sys.argv[1], sys.argv[2]
-    # File-level (whole-file sum) thresholds — see module docstring.
-    cc_warn = _arg("--cc-warn", 200)
-    cc_note = _arg("--cc-note", 100)
+    # Complexity-density thresholds (branches per code line) — see module docstring.
+    dens_warn = _arg("--dens-warn", 0.30, float)
+    dens_note = _arg("--dens-note", 0.20, float)
+    min_code = _arg("--min-code", 200)
     hotspot = _arg("--hotspot", 800)
 
     with open(src, encoding="utf-8") as fh:
@@ -126,17 +132,20 @@ def main() -> None:
         if not uri or not _is_production_source(uri):
             continue
         cc = rec.get("cyclomatic_complexity")
-        if isinstance(cc, int):
-            if cc >= cc_warn:
+        code = (rec.get("effective_counts") or {}).get("code_lines", 0)
+        if isinstance(cc, int) and isinstance(code, int) and code >= min_code:
+            density = cc / code
+            if density >= dens_warn:
                 results.append(_result(
                     "high-cyclomatic-complexity", "warning", uri,
-                    f"Cyclomatic complexity ~{cc} (threshold {cc_warn}). "
-                    "Consider refactoring into smaller units."))
-            elif cc >= cc_note:
+                    f"Complexity density {density:.2f} branches/line "
+                    f"(~{cc} over {code:,} code lines; threshold {dens_warn:.2f}). "
+                    "Consider simplifying the branch-heavy logic."))
+            elif density >= dens_note:
                 results.append(_result(
                     "high-cyclomatic-complexity", "note", uri,
-                    f"Cyclomatic complexity ~{cc} (threshold {cc_note})."))
-        code = (rec.get("effective_counts") or {}).get("code_lines", 0)
+                    f"Complexity density {density:.2f} branches/line "
+                    f"(~{cc} over {code:,} code lines; threshold {dens_note:.2f})."))
         if isinstance(code, int) and code >= hotspot:
             results.append(_result(
                 "large-file-hotspot", "note", uri,
