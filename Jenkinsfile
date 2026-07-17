@@ -47,19 +47,48 @@ pipeline {
     // stays compact for normal scan runs.
     parameters {
 
-        // ── Source repository ──────────────────────────────────────────────────
+        // ── Tooling repository (provides the oxide-sloc binary) ────────────────
+        // REPO_URL is the repo that CONTAINS oxide-sloc's source + CI scripts.
+        // The pipeline checks it out and builds the scanner from it. To analyze a
+        // DIFFERENT project, leave this at the default and set TARGET_REPO_URL below —
+        // do NOT point REPO_URL at the project you want to scan (there would be no
+        // oxide-sloc source to build).
         string(
             name:         'REPO_URL',
             defaultValue: 'https://github.com/oxide-sloc/oxide-sloc.git',
-            description:  'Git repository URL to check out (branch: main). ' +
+            description:  'Tooling repo that provides the oxide-sloc source + CI scripts (branch: main). ' +
+                          'The scanner binary is built from this checkout. ' +
+                          'Leave at the default (or your fork) — to scan another project, use TARGET_REPO_URL instead. ' +
                           'Use file:///path/to/repo for air-gapped local repos.'
+        )
+
+        // ── Project under analysis ─────────────────────────────────────────────
+        // Point the job at ANY project without editing the pipeline: set
+        // TARGET_REPO_URL and Jenkins checks it out into ./_target and scans it.
+        // Leave empty to scan the tooling repo itself (oxide-sloc self-CI / demo).
+        string(
+            name:         'TARGET_REPO_URL',
+            defaultValue: '',
+            description:  'Git URL of the project you want to analyze (empty = scan the tooling repo itself). ' +
+                          'When set, it is checked out into ./_target and SCAN_PATH is resolved inside it. ' +
+                          'This is how you run oxide-sloc against any project from a single Jenkins job. ' +
+                          'Use file:///path/to/repo for air-gapped local repos.'
+        )
+        string(
+            name:         'TARGET_REF',
+            defaultValue: '',
+            description:  'Branch, tag, or commit SHA to check out for TARGET_REPO_URL (empty = the default branch, main). ' +
+                          'Ignored when TARGET_REPO_URL is empty. Example: develop  or  v2.1.0  or  a3f9d2c'
         )
 
         // ── Scan target ────────────────────────────────────────────────────────
         string(
             name:         'SCAN_PATH',
             defaultValue: 'tests/fixtures/basic',
-            description:  'Directory (or space-separated paths) to scan — relative to the workspace root or absolute.'
+            description:  'Directory (or space-separated paths) to scan, relative to the scanned repo root (or absolute). ' +
+                          'When TARGET_REPO_URL is set, this is relative to ./_target — set it to a path inside your ' +
+                          'project, e.g. "." for the whole repo or "src" for a subtree. The default ' +
+                          '(tests/fixtures/basic) only exists in the oxide-sloc repo, so change it when scanning your project.'
         )
         string(
             name:         'REPORT_TITLE',
@@ -409,11 +438,36 @@ pipeline {
     stages {
 
         // ── 0. Checkout ────────────────────────────────────────────────────────
+        // Always check out the tooling repo (REPO_URL) at the workspace root — the
+        // scanner is built from it. When TARGET_REPO_URL is set, also check the
+        // project-under-analysis out into ./_target and point SCAN_ROOT at it, so a
+        // single job can scan any project. SCAN_ROOT is consumed by the analyze,
+        // git-ref, and compare stages; it defaults to the workspace root (self-scan).
         stage('Checkout') {
             steps {
                 checkout([$class: 'GitSCM',
                           branches: [[name: '*/main']],
                           userRemoteConfigs: [[url: params.REPO_URL]]])
+                script {
+                    if (params.TARGET_REF?.trim() &&
+                            !(params.TARGET_REF.trim() ==~ /^[A-Za-z0-9_\-\.\/]+$/)) {
+                        error("TARGET_REF contains invalid characters: ${params.TARGET_REF}")
+                    }
+                    if (params.TARGET_REPO_URL?.trim()) {
+                        def ref = params.TARGET_REF?.trim() ?: 'main'
+                        // Accept a bare branch/tag (map to origin) or an explicit ref/SHA.
+                        def branchSpec = (ref ==~ /^[0-9a-fA-F]{7,40}$/ || ref.contains('/')) ? ref : "*/${ref}"
+                        dir('_target') {
+                            checkout([$class: 'GitSCM',
+                                      branches: [[name: branchSpec]],
+                                      userRemoteConfigs: [[url: params.TARGET_REPO_URL.trim()]]])
+                        }
+                        env.SCAN_ROOT = "${env.WORKSPACE}/_target"
+                        echo "Scanning external project checked out at ${env.SCAN_ROOT} (ref: ${ref})"
+                    } else {
+                        env.SCAN_ROOT = env.WORKSPACE
+                    }
+                }
             }
         }
 
@@ -607,6 +661,7 @@ pipeline {
                 withEnv([
                     "GIT_REF=${params.GIT_REF}",
                     "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
+                    "SCAN_ROOT=${env.SCAN_ROOT ?: env.WORKSPACE}",
                 ]) {
                     sh 'bash ci/jenkins/run-git-ref-scan.sh'
                 }

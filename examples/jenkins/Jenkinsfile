@@ -1,22 +1,32 @@
-// oxide-sloc Jenkins Declarative Pipeline
+// oxide-sloc Jenkins Declarative Pipeline — DROP-IN for any project
+//
+// Copy this file into your OWN project's repository (as `Jenkinsfile`, or point a
+// Pipeline-from-SCM job at it). It scans the checked-out workspace — your project —
+// with zero project-specific edits. It does NOT need the oxide-sloc source tree:
+// the scanner is installed from crates.io (or reused if already on PATH / prebuilt).
+//
+// For the full-featured, parameterized pipeline (quality gates, coverage, trend
+// charts, artifact-repo push, git-ref diffing, and a TARGET_REPO_URL parameter so a
+// SINGLE central job can scan any repo), use the canonical Jenkinsfile at the repo
+// root instead — see docs/ci-integrations.md § "Scan any project".
 //
 // Prerequisites (Jenkins plugins):
-//   - Plot Plugin          — renders code-lines/files trend graphs per build
-//   - HTML Publisher Plugin — serves the clickable HTML report
+//   - Plot Plugin           — renders code-lines/files trend graphs per build
+//   - HTML Publisher Plugin  — serves the clickable HTML report
 //
-// Configure once in Jenkins > Manage Jenkins > Global Tool Configuration:
-//   OXIDESLOC_BIN  path to the oxidesloc binary (or install via cargo in the
-//                  "Install oxidesloc" stage and set it to "target/release/oxidesloc")
+// Optional — skip the install stage entirely by pre-installing the binary and setting
+//   OXIDE_SLOC_BIN  (Global Tool Configuration or a job env var) to its absolute path.
 //
 // Required credentials (Jenkins credentials store):
-//   SLOC_API_KEY   (Secret Text) — the X-API-Key value set on the oxide-sloc server
+//   SLOC_API_KEY   (Secret Text) — the X-API-Key value set on the oxide-sloc server.
 //                  Only needed when OXIDE_SLOC_URL is configured.
 
 pipeline {
     agent any
 
     environment {
-        // Path to analyze. Override per-job with a parameter if needed.
+        // Path to analyze. Defaults to the whole checked-out project; narrow to e.g.
+        // "${WORKSPACE}/src" for a subtree, or override per-job with a parameter.
         SLOC_TARGET = "${WORKSPACE}"
 
         // Output directory for artifacts produced by this run.
@@ -30,14 +40,20 @@ pipeline {
 
     stages {
 
-        stage('Install oxidesloc') {
-            // Only needed when oxidesloc is not already on PATH.
-            // Remove this stage and set OXIDESLOC_BIN to a pre-installed path.
-            when { expression { sh(script: 'command -v oxidesloc', returnStatus: true) != 0 } }
+        stage('Install oxide-sloc') {
+            // Only runs when oxide-sloc is not already on PATH and OXIDE_SLOC_BIN is unset.
+            // Installs from crates.io into a workspace-local prefix — no oxide-sloc source
+            // checkout required, so this works dropped into any project's repository.
+            when {
+                expression {
+                    !env.OXIDE_SLOC_BIN?.trim() &&
+                        sh(script: 'command -v oxide-sloc', returnStatus: true) != 0
+                }
+            }
             steps {
-                sh 'cargo install --path . --bin oxidesloc --root "${WORKSPACE}/.cargo-install"'
+                sh 'cargo install oxide-sloc --root "${WORKSPACE}/.cargo-install"'
                 script {
-                    env.OXIDESLOC_BIN = "${WORKSPACE}/.cargo-install/bin/oxidesloc"
+                    env.OXIDE_SLOC_BIN = "${WORKSPACE}/.cargo-install/bin/oxide-sloc"
                 }
             }
         }
@@ -46,7 +62,7 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p "${SLOC_OUT}"
-                    ${OXIDESLOC_BIN:-oxidesloc} analyze "${SLOC_TARGET}" \
+                    "${OXIDE_SLOC_BIN:-oxide-sloc}" analyze "${SLOC_TARGET}" \
                         --json-out  "${SLOC_OUT}/result.json" \
                         --csv-out   "${SLOC_OUT}/report.csv" \
                         --xlsx-out  "${SLOC_OUT}/report.xlsx" \

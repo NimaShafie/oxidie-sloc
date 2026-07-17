@@ -786,9 +786,12 @@ jobs:
             gpg --import oxide-sloc-signing-key.asc
             gpg --verify oxide-sloc-linux-x86_64.sig oxide-sloc-linux-x86_64
 
-            # Verify cosign bundle (requires cosign installed)
+            # Verify cosign bundle (keyless — requires cosign installed).
+            # The identity flags pin the signature to this repo's release workflow.
             cosign verify-blob \
               --bundle oxide-sloc-linux-x86_64.bundle \
+              --certificate-identity-regexp '^https://github.com/oxide-sloc/oxide-sloc/\.github/workflows/release\.yml@refs/tags/v' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               oxide-sloc-linux-x86_64
             ```
 
