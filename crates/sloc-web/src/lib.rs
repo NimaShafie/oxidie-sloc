@@ -9209,7 +9209,7 @@ async fn multi_compare_handler(
                 "<p style='font-family:sans-serif;padding:2rem'>Scan <code>{}</code> has no \
                  JSON data — re-run the analysis to enable comparison. \
                  <a href=\"/compare-scans\">Go back</a></p>",
-                &entry.run_id
+                entry.run_id
             );
             return Html(html).into_response();
         }
@@ -9228,7 +9228,7 @@ async fn multi_compare_handler(
                 let html = format!(
                     "<p style='font-family:sans-serif;padding:2rem'>Could not load scan \
                      <code>{}</code>: {e}. <a href=\"/compare-scans\">Go back</a></p>",
-                    &entry.run_id
+                    entry.run_id
                 );
                 return Html(html).into_response();
             }
