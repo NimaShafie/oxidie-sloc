@@ -56,14 +56,14 @@ pipeline {
         string(
             name:         'SCAN_PATH',
             defaultValue: 'tests/fixtures/basic',
-            description:  '★ REQUIRED — directory to scan (repo-relative or absolute). ' +
+            description:  'REQUIRED — directory to scan (repo-relative or absolute). ' +
                           'Use "." for a whole project or "src" for a subtree. ' +
                           'The default only exists in the oxide-sloc repo, so change it for your project.'
         )
         string(
             name:         'TARGET_REPO_URL',
             defaultValue: '',
-            description:  '★ Scan a DIFFERENT project: its Git URL (empty = scan this tooling repo). ' +
+            description:  'Scan a DIFFERENT project: its Git URL (empty = scan this tooling repo). ' +
                           'Checked out into ./_target; SCAN_PATH is resolved inside it. ' +
                           'Use file:///path/to/repo for air-gapped local repos.'
         )
@@ -98,7 +98,7 @@ pipeline {
         booleanParam(
             name:         'ADVANCED_OPTIONS',
             defaultValue: false,
-            description:  '▼ Section divider (no effect on the build). The parameters below are ' +
+            description:  'Section divider (no effect on the build). The parameters below are ' +
                           'optional and already match oxide-sloc\'s defaults — leave them as-is ' +
                           'for a standard run; adjust only what you need.'
         )
