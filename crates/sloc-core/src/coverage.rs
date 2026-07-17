@@ -52,6 +52,10 @@ impl FileCoverage {
 /// and certain `geninfo` configurations) emit only the raw records and omit the summaries. We
 /// track both and prefer the explicit summary when present, falling back to counts derived from
 /// the raw records so coverage is never silently reported as zero.
+// The six `saw_*` flags track presence of each explicit summary record
+// independently of its value (0 is a valid count), so they are genuinely
+// distinct fields rather than a state that a bitfield/enum would model better.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 struct LcovRecord {
     // Explicit summary records (and whether each was seen).
@@ -78,7 +82,7 @@ struct LcovRecord {
 
 impl LcovRecord {
     /// Resolve the final `FileCoverage`, preferring explicit summaries over derived counts.
-    fn finalize(&self) -> FileCoverage {
+    const fn finalize(&self) -> FileCoverage {
         FileCoverage {
             lines_found: if self.saw_lf { self.lf } else { self.da_found },
             lines_hit: if self.saw_lh { self.lh } else { self.da_hit },
