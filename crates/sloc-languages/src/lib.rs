@@ -2976,41 +2976,67 @@ fn process_string_char(
     i: usize,
 ) -> (Option<StringState>, usize) {
     match state {
-        StringState::Single(delim) => {
-            if chars[i] == '\\' {
-                return (Some(state), 2); // skip escaped character
-            }
-            if chars[i] == delim {
-                (None, 1)
-            } else {
-                (Some(state), 1)
-            }
-        }
-        StringState::Triple(delim) => {
-            if starts_with(chars, i, delim) {
-                (None, delim.len())
-            } else {
-                (Some(state), 1)
-            }
-        }
-        StringState::VerbatimDouble => {
-            if starts_with(chars, i, "\"\"") {
-                return (Some(state), 2); // escaped quote-quote inside verbatim string
-            }
-            if chars[i] == '"' {
-                (None, 1)
-            } else {
-                (Some(state), 1)
-            }
-        }
-        StringState::RawHash(hashes) => {
-            // Close only on `"` followed by at least `hashes` consecutive `#`. No escaping.
-            if chars[i] == '"' && count_leading_hashes(chars, i + 1) >= hashes {
-                (None, 1 + hashes)
-            } else {
-                (Some(state), 1)
-            }
-        }
+        StringState::Single(delim) => step_single(state, delim, chars, i),
+        StringState::Triple(delim) => step_triple(state, delim, chars, i),
+        StringState::VerbatimDouble => step_verbatim(state, chars, i),
+        StringState::RawHash(hashes) => step_raw_hash(state, hashes, chars, i),
+    }
+}
+
+/// One step inside a single-char-delimited string (`'…'` or `"…"`), honouring `\` escapes.
+fn step_single(
+    state: StringState,
+    delim: char,
+    chars: &[char],
+    i: usize,
+) -> (Option<StringState>, usize) {
+    if chars[i] == '\\' {
+        return (Some(state), 2); // skip escaped character
+    }
+    if chars[i] == delim {
+        (None, 1)
+    } else {
+        (Some(state), 1)
+    }
+}
+
+/// One step inside a triple-quoted string (`"""…"""` / `'''…'''`).
+fn step_triple(
+    state: StringState,
+    delim: &'static str,
+    chars: &[char],
+    i: usize,
+) -> (Option<StringState>, usize) {
+    if starts_with(chars, i, delim) {
+        (None, delim.len())
+    } else {
+        (Some(state), 1)
+    }
+}
+
+/// One step inside a C# verbatim string (`@"…"`), where `""` is an escaped quote.
+fn step_verbatim(state: StringState, chars: &[char], i: usize) -> (Option<StringState>, usize) {
+    if starts_with(chars, i, "\"\"") {
+        return (Some(state), 2); // escaped quote-quote inside verbatim string
+    }
+    if chars[i] == '"' {
+        (None, 1)
+    } else {
+        (Some(state), 1)
+    }
+}
+
+/// One step inside a Rust raw string (`r#"…"#`); closes on `"` + at least `hashes` `#`, no escapes.
+fn step_raw_hash(
+    state: StringState,
+    hashes: usize,
+    chars: &[char],
+    i: usize,
+) -> (Option<StringState>, usize) {
+    if chars[i] == '"' && count_leading_hashes(chars, i + 1) >= hashes {
+        (None, 1 + hashes)
+    } else {
+        (Some(state), 1)
     }
 }
 
@@ -3121,6 +3147,38 @@ fn try_open_block_comment(
     starts_with(chars, i, open).then_some(open.len())
 }
 
+/// When the scanner is already inside a string literal or block comment, consume the character at
+/// `i`, update the running state/mask, and return how many chars were advanced. Returns `None`
+/// when the scanner is not currently inside any such span.
+fn advance_inside_span(
+    chars: &[char],
+    i: usize,
+    config: &ScanConfig,
+    facts: &mut LineFacts,
+    in_block_comment: &mut bool,
+    string_state: &mut Option<StringState>,
+    code: &mut Vec<u8>,
+) -> Option<usize> {
+    // Inside a string literal — string content is not code, so blank it out of the mask.
+    if let Some(state) = *string_state {
+        facts.has_code = true;
+        let (new_state, advance) = process_string_char(state, chars, i);
+        *string_state = new_state;
+        blank_mask(code, advance);
+        return Some(advance);
+    }
+
+    // Inside a block comment — advance until the closing delimiter.
+    if *in_block_comment {
+        facts.has_multi_comment = true;
+        let advance = step_through_block_comment(chars, i, config.block_comment, in_block_comment);
+        blank_mask(code, advance);
+        return Some(advance);
+    }
+
+    None
+}
+
 /// Scan a single physical line and update `facts`, `in_block_comment`, and `string_state`.
 ///
 /// Returns `true` when the caller should break out of the per-line loop early (line comment hit).
@@ -3134,23 +3192,16 @@ fn scan_line(
 ) {
     let mut i = 0usize;
     while i < chars.len() {
-        // Inside a string literal — advance until the closing delimiter. String content is
-        // not code, so blank it out of the branch-counting mask.
-        if let Some(state) = *string_state {
-            facts.has_code = true;
-            let (new_state, advance) = process_string_char(state, chars, i);
-            *string_state = new_state;
-            blank_mask(code, advance);
-            i += advance;
-            continue;
-        }
-
-        // Inside a block comment — advance until the closing delimiter.
-        if *in_block_comment {
-            facts.has_multi_comment = true;
-            let advance =
-                step_through_block_comment(chars, i, config.block_comment, in_block_comment);
-            blank_mask(code, advance);
+        // Already inside a string literal or block comment — advance until its closing delimiter.
+        if let Some(advance) = advance_inside_span(
+            chars,
+            i,
+            config,
+            facts,
+            in_block_comment,
+            string_state,
+            code,
+        ) {
             i += advance;
             continue;
         }
@@ -3325,61 +3376,90 @@ fn process_physical_line(
     classify_line(raw, &emit, trimmed);
 
     if emit.has_code {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let (f, c, v, i, t, a, s) = count_symbols(&config.symbol_patterns, trimmed);
-        raw.functions += f;
-        raw.classes += c;
-        raw.variables += v;
-        raw.imports += i;
-        raw.test_count += t;
-        raw.test_assertion_count += a;
-        raw.test_suite_count += s;
+        accumulate_code_line(raw, config, trimmed, scope, &code_mask);
+    }
+}
 
-        // C/C++ only: split variables by scope (member/local/global), count object-like macro
-        // constants, and advance the brace-scope tracker. Gated on the C/C++ marker (non-empty
-        // `functions_prefix_paren`); other languages leave the breakdown fields at zero.
-        if !config.symbol_patterns.functions_prefix_paren.is_empty() {
-            if v == 1 {
-                match scope.current_var_kind() {
-                    VarKind::Member => raw.variables_member += 1,
-                    VarKind::Local => raw.variables_local += 1,
-                    VarKind::Global => raw.variables_global += 1,
-                }
-            }
-            if is_object_like_macro(trimmed) {
-                raw.macro_definitions += 1;
-            }
-            scope.update(trimmed);
+/// Accumulate all per-line code metrics (symbols, C/C++ scope breakdown, cyclomatic complexity,
+/// logical SLOC, and the ULOC hash) for a physical line already classified as containing code.
+#[allow(clippy::many_single_char_names)] // destructuring return from count_symbols; names match roles
+fn accumulate_code_line(
+    raw: &mut RawLineCounts,
+    config: &ScanConfig,
+    trimmed: &str,
+    scope: &mut CScopeState,
+    code_mask: &[u8],
+) {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let (f, c, v, i, t, a, s) = count_symbols(&config.symbol_patterns, trimmed);
+    raw.functions += f;
+    raw.classes += c;
+    raw.variables += v;
+    raw.imports += i;
+    raw.test_count += t;
+    raw.test_assertion_count += a;
+    raw.test_suite_count += s;
+
+    // C/C++ only: split variables by scope (member/local/global), count object-like macro
+    // constants, and advance the brace-scope tracker. Gated on the C/C++ marker (non-empty
+    // `functions_prefix_paren`); other languages leave the breakdown fields at zero.
+    if !config.symbol_patterns.functions_prefix_paren.is_empty() {
+        accumulate_c_family(raw, v, trimmed, scope);
+    }
+
+    // Cyclomatic complexity: count branch decision keywords in real code only (the
+    // masked line excludes string-literal and comment content).
+    raw.cyclomatic_complexity += count_branch_in_line(code_mask, config.branch_keywords);
+
+    // Logical SLOC (language-specific strategy).
+    accumulate_lsloc(raw, trimmed, config.lsloc_strategy);
+
+    // ULOC: hash each trimmed code line for cross-file unique-line counting.
+    let mut h = DefaultHasher::new();
+    trimmed.hash(&mut h);
+    raw.code_line_hashes.push(h.finish());
+}
+
+/// C/C++ per-line breakdown: bucket a single variable declaration by enclosing scope, count
+/// object-like macro constants, and advance the brace-scope tracker.
+fn accumulate_c_family(
+    raw: &mut RawLineCounts,
+    var_count: u64,
+    trimmed: &str,
+    scope: &mut CScopeState,
+) {
+    if var_count == 1 {
+        match scope.current_var_kind() {
+            VarKind::Member => raw.variables_member += 1,
+            VarKind::Local => raw.variables_local += 1,
+            VarKind::Global => raw.variables_global += 1,
         }
+    }
+    if is_object_like_macro(trimmed) {
+        raw.macro_definitions += 1;
+    }
+    scope.update(trimmed);
+}
 
-        // Cyclomatic complexity: count branch decision keywords in real code only (the
-        // masked line excludes string-literal and comment content).
-        raw.cyclomatic_complexity += count_branch_in_line(&code_mask, config.branch_keywords);
-
-        // Logical SLOC (language-specific strategy).
-        match config.lsloc_strategy {
-            LslocStrategy::Semicolons => {
-                let semi = u32::try_from(trimmed.bytes().filter(|&b| b == b';').count())
-                    .unwrap_or(u32::MAX);
-                *raw.lsloc.get_or_insert(0) += semi;
-            }
-            LslocStrategy::NonContinuationNewlines => {
-                let cont = trimmed.ends_with('\\')
-                    || trimmed.ends_with(',')
-                    || trimmed.ends_with('(')
-                    || trimmed.ends_with('[')
-                    || trimmed.ends_with('{');
-                if !cont {
-                    *raw.lsloc.get_or_insert(0) += 1;
-                }
-            }
-            LslocStrategy::Unsupported => {}
+/// Apply the language-specific logical-SLOC counting strategy for one code line.
+fn accumulate_lsloc(raw: &mut RawLineCounts, trimmed: &str, strategy: LslocStrategy) {
+    match strategy {
+        LslocStrategy::Semicolons => {
+            let semi =
+                u32::try_from(trimmed.bytes().filter(|&b| b == b';').count()).unwrap_or(u32::MAX);
+            *raw.lsloc.get_or_insert(0) += semi;
         }
-
-        // ULOC: hash each trimmed code line for cross-file unique-line counting.
-        let mut h = DefaultHasher::new();
-        trimmed.hash(&mut h);
-        raw.code_line_hashes.push(h.finish());
+        LslocStrategy::NonContinuationNewlines => {
+            let cont = trimmed.ends_with('\\')
+                || trimmed.ends_with(',')
+                || trimmed.ends_with('(')
+                || trimmed.ends_with('[')
+                || trimmed.ends_with('{');
+            if !cont {
+                *raw.lsloc.get_or_insert(0) += 1;
+            }
+        }
+        LslocStrategy::Unsupported => {}
     }
 }
 
@@ -3694,18 +3774,12 @@ impl CScopeState {
         let mut i = 0;
         let mut in_str: Option<u8> = None;
         while i < bytes.len() {
-            let b = bytes[i];
-            if let Some(q) = in_str {
-                if b == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if b == q {
-                    in_str = None;
-                }
-                i += 1;
+            // While inside a string/char literal, consume the byte and skip the brace logic.
+            if let Some(next) = skip_string_literal(bytes, i, &mut in_str) {
+                i = next;
                 continue;
             }
+            let b = bytes[i];
             match b {
                 b'"' | b'\'' => in_str = Some(b),
                 b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => break, // line comment
@@ -3728,6 +3802,21 @@ impl CScopeState {
             i += 1;
         }
     }
+}
+
+/// While the brace scanner is inside a C/C++ string or char literal, consume the byte at `i` and
+/// return the next index to visit, honouring `\` escapes and clearing `in_str` on the closing
+/// quote. Returns `None` when the scanner is not currently inside a literal.
+fn skip_string_literal(bytes: &[u8], i: usize, in_str: &mut Option<u8>) -> Option<usize> {
+    let q = (*in_str)?;
+    let b = bytes[i];
+    if b == b'\\' {
+        return Some(i + 2); // skip escaped character
+    }
+    if b == q {
+        *in_str = None;
+    }
+    Some(i + 1)
 }
 
 /// Determine whether a C/C++ code line opens a named scope, to label the `{` it introduces.
