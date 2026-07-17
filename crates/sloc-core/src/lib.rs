@@ -158,6 +158,15 @@ pub struct SummaryTotals {
     pub classes: u64,
     #[serde(default)]
     pub variables: u64,
+    /// C/C++ variable-scope breakdown (member/local/global) and object-like macro constants.
+    #[serde(default)]
+    pub variables_member: u64,
+    #[serde(default)]
+    pub variables_local: u64,
+    #[serde(default)]
+    pub variables_global: u64,
+    #[serde(default)]
+    pub macro_definitions: u64,
     #[serde(default)]
     pub imports: u64,
     #[serde(default)]
@@ -204,6 +213,15 @@ pub struct LanguageSummary {
     pub classes: u64,
     #[serde(default)]
     pub variables: u64,
+    /// C/C++ variable-scope breakdown (member/local/global) and object-like macro constants.
+    #[serde(default)]
+    pub variables_member: u64,
+    #[serde(default)]
+    pub variables_local: u64,
+    #[serde(default)]
+    pub variables_global: u64,
+    #[serde(default)]
+    pub macro_definitions: u64,
     #[serde(default)]
     pub imports: u64,
     #[serde(default)]
@@ -1796,6 +1814,10 @@ fn build_summary(analyzed: &[FileRecord], skipped: &[FileRecord]) -> SummaryTota
         summary.functions += record.raw_line_categories.functions;
         summary.classes += record.raw_line_categories.classes;
         summary.variables += record.raw_line_categories.variables;
+        summary.variables_member += record.raw_line_categories.variables_member;
+        summary.variables_local += record.raw_line_categories.variables_local;
+        summary.variables_global += record.raw_line_categories.variables_global;
+        summary.macro_definitions += record.raw_line_categories.macro_definitions;
         summary.imports += record.raw_line_categories.imports;
         summary.test_count += record.raw_line_categories.test_count;
         summary.test_assertion_count += record.raw_line_categories.test_assertion_count;
@@ -1831,6 +1853,10 @@ const fn zeroed_summary(language: Language) -> LanguageSummary {
         functions: 0,
         classes: 0,
         variables: 0,
+        variables_member: 0,
+        variables_local: 0,
+        variables_global: 0,
+        macro_definitions: 0,
         imports: 0,
         test_count: 0,
         test_assertion_count: 0,
@@ -1858,6 +1884,10 @@ fn accumulate_record_into_summary(entry: &mut LanguageSummary, record: &FileReco
     entry.functions += r.functions;
     entry.classes += r.classes;
     entry.variables += r.variables;
+    entry.variables_member += r.variables_member;
+    entry.variables_local += r.variables_local;
+    entry.variables_global += r.variables_global;
+    entry.macro_definitions += r.macro_definitions;
     entry.imports += r.imports;
     entry.test_count += r.test_count;
     entry.test_assertion_count += r.test_assertion_count;

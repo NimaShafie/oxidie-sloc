@@ -296,9 +296,24 @@ pub struct RawLineCounts {
     /// Best-effort count of class/struct/trait/type definition lines detected lexically.
     #[serde(default)]
     pub classes: u64,
-    /// Best-effort count of variable declaration lines detected lexically.
+    /// Best-effort count of variable declaration lines detected lexically. Equals the sum of
+    /// `variables_member + variables_local + variables_global` for C/C++ (where scope is tracked);
+    /// for other languages it is the flat total with the breakdown fields left at zero.
     #[serde(default)]
     pub variables: u64,
+    /// C/C++ only: variable declarations that are members of a class/struct/union body.
+    #[serde(default)]
+    pub variables_member: u64,
+    /// C/C++ only: variable declarations local to a function or block body.
+    #[serde(default)]
+    pub variables_local: u64,
+    /// C/C++ only: variable declarations at file / namespace scope (globals, file-statics).
+    #[serde(default)]
+    pub variables_global: u64,
+    /// C/C++ only: object-like preprocessor macro definitions (`#define NAME value`) — named
+    /// compile-time constants. Function-like macros (`#define F(x) …`) are excluded.
+    #[serde(default)]
+    pub macro_definitions: u64,
     /// Best-effort count of import/use/include statement lines detected lexically.
     #[serde(default)]
     pub imports: u64,
@@ -3182,6 +3197,7 @@ fn process_physical_line(
     string_state: &mut Option<StringState>,
     pending_continuation: &mut Option<LineFacts>,
     ieee: IeeeFlags,
+    scope: &mut CScopeState,
 ) {
     raw.total_physical_lines += 1;
 
@@ -3228,6 +3244,23 @@ fn process_physical_line(
         raw.test_assertion_count += a;
         raw.test_suite_count += s;
 
+        // C/C++ only: split variables by scope (member/local/global), count object-like macro
+        // constants, and advance the brace-scope tracker. Gated on the C/C++ marker (non-empty
+        // `functions_prefix_paren`); other languages leave the breakdown fields at zero.
+        if !config.symbol_patterns.functions_prefix_paren.is_empty() {
+            if v == 1 {
+                match scope.current_var_kind() {
+                    VarKind::Member => raw.variables_member += 1,
+                    VarKind::Local => raw.variables_local += 1,
+                    VarKind::Global => raw.variables_global += 1,
+                }
+            }
+            if is_object_like_macro(trimmed) {
+                raw.macro_definitions += 1;
+            }
+            scope.update(trimmed);
+        }
+
         // Cyclomatic complexity: count branch decision keywords on code lines.
         raw.cyclomatic_complexity +=
             count_branch_in_line(trimmed.as_bytes(), config.branch_keywords);
@@ -3271,6 +3304,8 @@ fn analyze_generic(text: &str, config: ScanConfig, ieee: IeeeFlags) -> RawFileAn
     let mut string_state: Option<StringState> = None;
     // IEEE continuation-line state: accumulates facts across a backslash-continued sequence.
     let mut pending_continuation: Option<LineFacts> = None;
+    // C/C++ brace-scope tracker for member/local/global variable classification.
+    let mut scope = CScopeState::default();
 
     for (line_idx, line) in lines.iter().enumerate() {
         process_physical_line(
@@ -3282,6 +3317,7 @@ fn analyze_generic(text: &str, config: ScanConfig, ieee: IeeeFlags) -> RawFileAn
             &mut string_state,
             &mut pending_continuation,
             ieee,
+            &mut scope,
         );
     }
 
@@ -3514,6 +3550,149 @@ fn looks_like_c_variable(trimmed: &str) -> u64 {
         return 0;
     };
     u64::from(c_name_is_identifier(name))
+}
+
+/// The kind of brace-delimited scope currently open, tracked to classify variable declarations
+/// as member / local / global in C and C++.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CScope {
+    /// `class` / `struct` / `union` body — declarations inside are member variables.
+    Aggregate,
+    /// Function body — declarations inside are local variables.
+    Function,
+    /// `namespace` body — declarations inside are global-scope variables.
+    Namespace,
+    /// Control / other block (`if`/`for`/`{ … }`) — treated as local (blocks live in functions).
+    Block,
+}
+
+/// Which bucket a detected variable declaration belongs to, from the enclosing scope.
+#[derive(Clone, Copy)]
+enum VarKind {
+    Member,
+    Local,
+    Global,
+}
+
+/// Best-effort brace-based scope tracker for C/C++, threaded across the lines of one file.
+#[derive(Default)]
+struct CScopeState {
+    stack: Vec<CScope>,
+    /// Scope kind established by an opener line whose `{` has not yet appeared (handles
+    /// Allman/K&R style where the brace is on the following line).
+    pending: Option<CScope>,
+}
+
+impl CScopeState {
+    /// Classify a variable declaration by the current innermost scope.
+    fn current_var_kind(&self) -> VarKind {
+        match self.stack.last() {
+            Some(CScope::Aggregate) => VarKind::Member,
+            Some(CScope::Function | CScope::Block) => VarKind::Local,
+            _ => VarKind::Global, // namespace or file scope
+        }
+    }
+
+    /// Update the brace stack for one C/C++ code line. Braces inside string / char literals and
+    /// comments (`//` and same-line `/* … */`) are skipped so they cannot corrupt the stack.
+    fn update(&mut self, trimmed: &str) {
+        if let Some(kind) = c_line_scope_kind(trimmed) {
+            self.pending = Some(kind);
+        }
+        let bytes = trimmed.as_bytes();
+        let mut i = 0;
+        let mut in_str: Option<u8> = None;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if let Some(q) = in_str {
+                if b == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b == q {
+                    in_str = None;
+                }
+                i += 1;
+                continue;
+            }
+            match b {
+                b'"' | b'\'' => in_str = Some(b),
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => break, // line comment
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                    // Skip a same-line block comment; if unterminated, stop scanning the line.
+                    match trimmed[i + 2..].find("*/") {
+                        Some(off) => i += 2 + off + 2,
+                        None => break,
+                    }
+                    continue;
+                }
+                b'{' => self
+                    .stack
+                    .push(self.pending.take().unwrap_or(CScope::Block)),
+                b'}' => {
+                    self.stack.pop();
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Determine whether a C/C++ code line opens a named scope, to label the `{` it introduces.
+/// Returns `None` for lines that merely declare (`struct Foo f;`), forward-declare (`struct Foo;`),
+/// or prototype (`int f(int);`) — none of which open a body.
+fn c_line_scope_kind(trimmed: &str) -> Option<CScope> {
+    // A `;` with no `{` on the line is a declaration/prototype, not a body opener.
+    if trimmed.contains(';') && !trimmed.contains('{') {
+        return None;
+    }
+    if trimmed.starts_with("namespace") {
+        return Some(CScope::Namespace);
+    }
+    if is_c_aggregate_opener(trimmed) {
+        return Some(CScope::Aggregate);
+    }
+    if looks_like_c_function(trimmed) == 1 {
+        return Some(CScope::Function);
+    }
+    None
+}
+
+/// True when the line is a `class` / `struct` / `union` body definition (keyword present as a
+/// standalone token and no `(`, which would make it a function returning that aggregate type).
+fn is_c_aggregate_opener(trimmed: &str) -> bool {
+    if trimmed.contains('(') {
+        return false;
+    }
+    trimmed
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|tok| matches!(tok, "class" | "struct" | "union"))
+}
+
+/// True when `trimmed` is an object-like preprocessor macro definition (`#define NAME value`).
+/// Function-like macros (`#define F(x) …`) and value-less defines (include guards) are excluded.
+fn is_object_like_macro(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix('#') else {
+        return false;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix("define") else {
+        return false;
+    };
+    if !rest.starts_with(char::is_whitespace) {
+        return false; // `#defineFOO` is not a define
+    }
+    let rest = rest.trim_start();
+    let name_end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    if name_end == 0 {
+        return false; // no macro name
+    }
+    let after = &rest[name_end..];
+    // Function-like macro: name immediately followed by `(`. Require a non-empty replacement
+    // (skips bare include-guard defines like `#define FOO_H`).
+    !after.starts_with('(') && !after.trim().is_empty()
 }
 
 fn count_symbols(patterns: &SymbolPatterns, trimmed: &str) -> (u64, u64, u64, u64, u64, u64, u64) {

@@ -1,6 +1,11 @@
 #include <string>
 #include <vector>
 
+#define MAX_WIDGETS 100
+#define SQUARE(x) ((x) * (x))
+
+int g_widget_count = 0;
+
 namespace demo {
 
 class Widget {
