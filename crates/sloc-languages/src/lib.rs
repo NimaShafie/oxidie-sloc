@@ -3069,14 +3069,17 @@ fn scan_line(
     facts: &mut LineFacts,
     in_block_comment: &mut bool,
     string_state: &mut Option<StringState>,
+    code: &mut Vec<u8>,
 ) {
     let mut i = 0usize;
     while i < chars.len() {
-        // Inside a string literal — advance until the closing delimiter.
+        // Inside a string literal — advance until the closing delimiter. String content is
+        // not code, so blank it out of the branch-counting mask.
         if let Some(state) = *string_state {
             facts.has_code = true;
             let (new_state, advance) = process_string_char(state, chars, i);
             *string_state = new_state;
+            blank_mask(code, advance);
             i += advance;
             continue;
         }
@@ -3084,20 +3087,25 @@ fn scan_line(
         // Inside a block comment — advance until the closing delimiter.
         if *in_block_comment {
             facts.has_multi_comment = true;
-            i += step_through_block_comment(chars, i, config.block_comment, in_block_comment);
+            let advance =
+                step_through_block_comment(chars, i, config.block_comment, in_block_comment);
+            blank_mask(code, advance);
+            i += advance;
             continue;
         }
 
-        // Whitespace outside any string/comment — skip.
+        // Whitespace outside any string/comment — preserve as a boundary in the mask.
         if chars[i].is_whitespace() {
+            code.push(b' ');
             i += 1;
             continue;
         }
 
-        // Attempt to open a string literal.
+        // Attempt to open a string literal — the opening delimiter is not code.
         if let Some((new_state, advance)) = try_open_string(chars, i, config) {
             facts.has_code = true;
             *string_state = Some(new_state);
+            blank_mask(code, advance);
             i += advance;
             continue;
         }
@@ -3106,6 +3114,7 @@ fn scan_line(
         if let Some(advance) = try_open_block_comment(chars, i, config.block_comment) {
             facts.has_multi_comment = true;
             *in_block_comment = true;
+            blank_mask(code, advance);
             i += advance;
             continue;
         }
@@ -3120,10 +3129,19 @@ fn scan_line(
             break;
         }
 
-        // Plain code character.
+        // Plain code character — copy it into the mask (ASCII bytes only; branch keywords are
+        // ASCII, so non-ASCII code is blanked without affecting the count).
         facts.has_code = true;
+        let ch = chars[i];
+        code.push(if ch.is_ascii() { ch as u8 } else { b' ' });
         i += 1;
     }
+}
+
+/// Append `n` blank (space) bytes to the code mask, preserving positions/word boundaries while
+/// excluding non-code (string/comment) regions from branch counting.
+fn blank_mask(code: &mut Vec<u8>, n: usize) {
+    code.resize(code.len() + n, b' ');
 }
 
 /// Apply IEEE 1045-1992 §4.2 preprocessor-directive tracking and continuation-line merging,
@@ -3217,7 +3235,19 @@ fn process_physical_line(
     }
 
     let chars: Vec<char> = line.chars().collect();
-    scan_line(&chars, config, &mut facts, in_block_comment, string_state);
+    // `code_mask` receives only the line's actual code bytes; string-literal and comment
+    // regions are blanked to spaces (positions preserved for word-boundary matching) so that
+    // branch keywords embedded in string constants — e.g. `&&`, `||`, `?`, `=>` inside an
+    // HTML/JS template literal — are not miscounted as control-flow branches.
+    let mut code_mask: Vec<u8> = Vec::with_capacity(chars.len());
+    scan_line(
+        &chars,
+        config,
+        &mut facts,
+        in_block_comment,
+        string_state,
+        &mut code_mask,
+    );
 
     let Some(emit) = finalize_line_facts(
         facts,
@@ -3261,9 +3291,9 @@ fn process_physical_line(
             scope.update(trimmed);
         }
 
-        // Cyclomatic complexity: count branch decision keywords on code lines.
-        raw.cyclomatic_complexity +=
-            count_branch_in_line(trimmed.as_bytes(), config.branch_keywords);
+        // Cyclomatic complexity: count branch decision keywords in real code only (the
+        // masked line excludes string-literal and comment content).
+        raw.cyclomatic_complexity += count_branch_in_line(&code_mask, config.branch_keywords);
 
         // Logical SLOC (language-specific strategy).
         match config.lsloc_strategy {
@@ -3447,7 +3477,7 @@ const C_STMT_KEYWORDS: &[&str] = &[
 
 /// True when `c` may appear inside a C/C++ return type or declarator (identifier chars, pointer
 /// / reference markers, template brackets, scope resolution, qualifiers with spaces).
-fn c_type_char_ok(c: char) -> bool {
+const fn c_type_char_ok(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
             c,
