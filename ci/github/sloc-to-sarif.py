@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Convert an oxide-sloc result.json into SARIF 2.1.0 for GitHub code scanning.
 
-Surfaces two actionable, per-file signals oxide-sloc already computes:
+Surfaces one actionable, per-file signal oxide-sloc computes:
 
   * high complexity density  → warning (>= warn) / note (>= note)
-  * large-file hotspots       → note (code_lines >= hotspot threshold)
 
-so they show up inline in the PR "Files changed" tab via upload-sarif. Standard
-library only.
+so it shows up inline in the PR "Files changed" tab via upload-sarif. Standard
+library only. (A file-size "hotspot" note used to be emitted too, but it only
+restated the obvious — big files are big — without a maintainability signal, so
+it was dropped.)
 
 Scope: only production Rust source under ``crates/<crate>/src`` is considered —
 the same source set SonarQube analyzes (``sonar.sources=crates`` with tests,
@@ -18,16 +19,16 @@ risk, so gating them only produces noise.
 
 Complexity is scored by *density* — cyclomatic complexity per code line — not by
 the whole-file branch-keyword sum. The raw sum is dominated by file size (a big
-but flat file trips it), which merely duplicates the large-file-hotspot signal.
+but flat file trips it), which is just a proxy for line count, not complexity.
 Density measures how branch-dense the code actually is, independent of length, so
-this rule flags genuinely convoluted files while large-but-linear files are left
-to the size rule. A minimum code-line gate avoids flagging tiny utility files
+this rule flags genuinely convoluted files while large-but-linear files are not
+flagged at all. A minimum code-line gate avoids flagging tiny utility files
 where a couple of branches yield a high ratio. Function-level complexity is
 enforced separately by SonarQube's rust:S3776 cognitive-complexity rule.
 
 Usage:
     python3 ci/github/sloc-to-sarif.py <result.json> <out.sarif> \
-        [--dens-warn 0.30] [--dens-note 0.20] [--min-code 200] [--hotspot 800]
+        [--dens-warn 0.30] [--dens-note 0.20] [--min-code 200]
 """
 
 import json
@@ -48,15 +49,6 @@ TOOL = {
                     "harder to test and maintain; consider simplifying it."},
                 "defaultConfiguration": {"level": "warning"},
                 "helpUri": "https://en.wikipedia.org/wiki/Cyclomatic_complexity",
-            },
-            {
-                "id": "large-file-hotspot",
-                "name": "LargeFileHotspot",
-                "shortDescription": {"text": "Large source file"},
-                "fullDescription": {"text":
-                    "This file is unusually large (code lines). Large files are "
-                    "harder to review and maintain."},
-                "defaultConfiguration": {"level": "note"},
             },
         ],
     }
@@ -119,7 +111,6 @@ def main() -> None:
     dens_warn = _arg("--dens-warn", 0.30, float)
     dens_note = _arg("--dens-note", 0.20, float)
     min_code = _arg("--min-code", 200)
-    hotspot = _arg("--hotspot", 800)
 
     with open(src, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -146,10 +137,6 @@ def main() -> None:
                     "high-cyclomatic-complexity", "note", uri,
                     f"Complexity density {density:.2f} branches/line "
                     f"(~{cc} over {code:,} code lines; threshold {dens_note:.2f})."))
-        if isinstance(code, int) and code >= hotspot:
-            results.append(_result(
-                "large-file-hotspot", "note", uri,
-                f"{code:,} code lines (hotspot threshold {hotspot:,})."))
 
     sarif = {
         "version": "2.1.0",
