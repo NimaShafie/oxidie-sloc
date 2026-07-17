@@ -1989,7 +1989,7 @@ impl RepositoryLayout {
     /// checkout vendored inside it. If the root is not a repo, two or more child
     /// repos means the user picked a parent-of-repos folder.
     #[must_use]
-    pub fn has_multiple_repos(&self) -> bool {
+    pub const fn has_multiple_repos(&self) -> bool {
         if self.root_is_repo {
             !self.nested_repos.is_empty()
         } else {
@@ -2084,7 +2084,8 @@ fn format_multi_repo_warning(layout: &RepositoryLayout) -> String {
         .collect();
     let mut joined = listed.join(", ");
     if total > MAX_LISTED {
-        joined.push_str(&format!(", … and {} more", total - MAX_LISTED));
+        use std::fmt::Write as _;
+        let _ = write!(joined, ", … and {} more", total - MAX_LISTED);
     }
     if layout.root_is_repo {
         format!(

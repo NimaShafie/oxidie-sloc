@@ -34,8 +34,7 @@ fn require_host_allowlist() -> bool {
     static REQ: OnceLock<bool> = OnceLock::new();
     *REQ.get_or_init(|| {
         std::env::var("SLOC_GIT_REQUIRE_ALLOWLIST")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     })
 }
 
