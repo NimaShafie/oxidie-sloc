@@ -1489,6 +1489,53 @@ end_of_record\n";
 }
 
 #[test]
+fn parse_lcov_derives_counts_when_summaries_absent() {
+    // Valid LCOV with only raw DA:/FN:/FNDA:/BRDA: records and no LF/LH/FNF/FNH/BRF/BRH
+    // summaries (as emitted by `llvm-cov export -format=lcov` and some geninfo configs).
+    let lcov = "\
+SF:src/lib.rs\n\
+FN:1,alpha\n\
+FN:5,beta\n\
+FNDA:3,alpha\n\
+FNDA:0,beta\n\
+DA:1,3\n\
+DA:2,2\n\
+DA:3,0\n\
+DA:4,7\n\
+BRDA:1,0,0,1\n\
+BRDA:1,0,1,-\n\
+BRDA:2,0,0,0\n\
+end_of_record\n";
+    let map = parse_lcov(lcov);
+    let cov = map
+        .get(&std::path::PathBuf::from("src/lib.rs"))
+        .expect("should have coverage for src/lib.rs");
+    assert_eq!(cov.lines_found, 4, "4 DA records");
+    assert_eq!(cov.lines_hit, 3, "3 DA records with hits > 0");
+    assert_eq!(cov.functions_found, 2, "2 FN records");
+    assert_eq!(cov.functions_hit, 1, "1 FNDA record with hits > 0");
+    assert_eq!(cov.branches_found, 3, "3 BRDA records");
+    assert_eq!(cov.branches_hit, 1, "1 BRDA taken (not '-' or '0')");
+}
+
+#[test]
+fn parse_lcov_prefers_explicit_summaries_over_raw_records() {
+    // When both summaries and raw records are present, summaries win (they may reflect
+    // post-processing/aggregation the raw records don't).
+    let lcov = "\
+SF:src/lib.rs\n\
+DA:1,1\n\
+DA:2,1\n\
+LF:10\n\
+LH:9\n\
+end_of_record\n";
+    let map = parse_lcov(lcov);
+    let cov = map.get(&std::path::PathBuf::from("src/lib.rs")).unwrap();
+    assert_eq!(cov.lines_found, 10);
+    assert_eq!(cov.lines_hit, 9);
+}
+
+#[test]
 fn parse_lcov_multiple_files() {
     let lcov = "\
 SF:src/a.rs\n\

@@ -1636,7 +1636,7 @@ fn analyze_candidate_file(
         config.analysis.shebang_detection,
     );
 
-    let Some(language) = language else {
+    let Some(mut language) = language else {
         return Ok(Some(skipped_record(
             path,
             root,
@@ -1645,6 +1645,16 @@ fn analyze_candidate_file(
             vec!["unsupported or undetected language".into()],
         )));
     };
+
+    // The `.h` extension is ambiguous between C and C++; `detect_language` defaults it to C.
+    // Reclassify as C++ when the file uses C++-only constructs (namespaces, classes, templates,
+    // `std::`, …) so class/namespace and class-typed function signatures are counted correctly.
+    if language == Language::C
+        && path.extension().and_then(|e| e.to_str()) == Some("h")
+        && sloc_languages::looks_like_cpp(&text)
+    {
+        language = Language::Cpp;
+    }
 
     if let Some(enabled) = enabled_languages {
         if !enabled.contains(&language) {

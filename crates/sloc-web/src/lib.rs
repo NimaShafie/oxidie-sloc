@@ -8169,6 +8169,8 @@ async fn compare_handler(
         comment_lines_pct_str: fmt_pct(s.comment_lines_delta, s.baseline_comments),
         code_lines_added: lines_added,
         code_lines_removed: lines_removed,
+        code_lines_modified: sum_modified_code_lines(&comparison),
+        code_lines_unmodified: sum_unmodified_code_lines(&comparison),
         new_scope: churn.new_scope,
         churn_rate_str: churn.churn_rate_str,
         churn_rate_class: churn.churn_rate_class,
@@ -28852,6 +28854,18 @@ struct CompareSelectTemplate {
           <div class="insight-sub">Deleted or shrunk source lines</div>
         </div>
         <div class="insight-card">
+          <div class="dc-tip up">Total current-scan code lines living in files that changed between the two scans.<br>Counts every code line in a modified file, not just the changed lines.</div>
+          <div class="insight-label">Lines Modified</div>
+          <div class="insight-val">{{ code_lines_modified }}</div>
+          <div class="insight-sub">Code lines in modified files</div>
+        </div>
+        <div class="insight-card">
+          <div class="dc-tip up">Code lines in files that are byte-for-byte identical (same code/comment/blank counts) in both scans.<br>These lines carried over unchanged.</div>
+          <div class="insight-label">Lines Unmodified</div>
+          <div class="insight-val">{{ code_lines_unmodified }}</div>
+          <div class="insight-sub">Code lines in unchanged files</div>
+        </div>
+        <div class="insight-card">
           <div class="dc-tip up">Measures total editing activity relative to codebase size.<br>Formula: (lines added + lines removed) &divide; baseline code lines &times; 100%.<br>Above 20% = high activity<br>5&ndash;20% = normal velocity<br>Below 5% = stable baseline.</div>
           <div class="insight-label">Churn Rate</div>
           <div class="insight-val {{ churn_rate_class }}">{{ churn_rate_str }}</div>
@@ -30185,6 +30199,10 @@ struct CompareTemplate {
     comment_lines_pct_str: String,
     code_lines_added: i64,
     code_lines_removed: i64,
+    /// Code lines residing in files modified between the two scans (current-scan counts).
+    code_lines_modified: i64,
+    /// Code lines residing in files identical between the two scans.
+    code_lines_unmodified: i64,
     /// True when baseline had 0 code lines — the scope is entirely new in the current scan.
     new_scope: bool,
     churn_rate_str: String,
