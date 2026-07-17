@@ -87,6 +87,13 @@ impl PdfDocument {
 impl PdfDocumentReference {
     /// Builtin fonts require no registration in printpdf's op model — the handle is the font itself.
     /// Kept fallible to match the 0.7 signature the renderer calls (`.ok()?` / `.map_err(..)?`).
+    // Signature intentionally mirrors printpdf 0.7's fallible `&self` method so the renderer's
+    // call sites keep compiling unchanged; the implementation is trivially infallible.
+    #[allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        clippy::missing_const_for_fn
+    )]
     pub fn add_builtin_font(&self, font: BuiltinFont) -> Result<IndirectFontRef> {
         Ok(font)
     }
@@ -163,7 +170,7 @@ impl PdfLayerReference {
         font_size: f32,
         x: Mm,
         y: Mm,
-        font: &IndirectFontRef,
+        font: IndirectFontRef,
     ) {
         let mut ops = self.ops.borrow_mut();
         ops.push(Op::StartTextSection);
@@ -174,7 +181,7 @@ impl PdfLayerReference {
             },
         });
         ops.push(Op::SetFont {
-            font: PdfFontHandle::Builtin(*font),
+            font: PdfFontHandle::Builtin(font),
             size: Pt(font_size),
         });
         ops.push(Op::ShowText {

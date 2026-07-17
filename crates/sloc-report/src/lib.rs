@@ -984,7 +984,11 @@ font-family:sans-serif;font-weight:700;letter-spacing:0.05em;\
 
 /// Reserve top/bottom margins only on the side(s) that actually carry chrome. A banner keeps
 /// its historical top/bottom reserve.
-fn pdf_margins(has_banner: bool, has_native_header: bool, has_native_footer: bool) -> (f64, f64) {
+const fn pdf_margins(
+    has_banner: bool,
+    has_native_header: bool,
+    has_native_footer: bool,
+) -> (f64, f64) {
     let top = if has_banner {
         0.35
     } else if has_native_header {
@@ -1183,8 +1187,8 @@ fn write_pdf_via_wkhtmltopdf(html_path: &Path, pdf_path: &Path) -> Result<()> {
 
 struct PdfCtx<'a> {
     layer: &'a crate::pdf_compat::PdfLayerReference,
-    font_reg: &'a crate::pdf_compat::IndirectFontRef,
-    font_bold: &'a crate::pdf_compat::IndirectFontRef,
+    font_reg: crate::pdf_compat::IndirectFontRef,
+    font_bold: crate::pdf_compat::IndirectFontRef,
     w: f32,
     margin: f32,
     row_h: f32,
@@ -1610,11 +1614,11 @@ fn pdf_info_emit_line(
     parts: &[String],
 ) -> f32 {
     use crate::pdf_compat::{Color, Mm, Rgb};
+    const SEP: &str = "  |  ";
     if parts.is_empty() {
         return y;
     }
-    const SEP: &str = "  |  ";
-    let usable = ctx.w - 2.0 * ctx.margin;
+    let usable = ctx.margin.mul_add(-2.0, ctx.w);
     ctx.layer
         .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
     let mut line = String::new();
@@ -2268,7 +2272,7 @@ fn pdf_page_header_meta(run: &AnalysisRun) -> String {
 /// right-edge alignment against the page margin.
 fn pdf_draw_header_meta(
     layer: &crate::pdf_compat::PdfLayerReference,
-    font: &crate::pdf_compat::IndirectFontRef,
+    font: crate::pdf_compat::IndirectFontRef,
     w: f32,
     margin: f32,
     baseline_y: f32,
@@ -2350,8 +2354,8 @@ fn pdf_page_footer_band(ctx: &PdfCtx<'_>, footer_h: f32, version: &str) {
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
 fn pdf_render_tests_coverage_page(
     doc: &crate::pdf_compat::PdfDocumentReference,
-    font_reg: &crate::pdf_compat::IndirectFontRef,
-    font_bold: &crate::pdf_compat::IndirectFontRef,
+    font_reg: crate::pdf_compat::IndirectFontRef,
+    font_bold: crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     w: f32,
     h: f32,
@@ -2455,8 +2459,8 @@ const PDF_PERFILE_TABLE_GAP: f32 = 3.0;
 /// because the page layer is created inside `pdf_draw_perfile_header`.
 struct PdfPerFileCtx<'a> {
     doc: &'a crate::pdf_compat::PdfDocumentReference,
-    font_reg: &'a crate::pdf_compat::IndirectFontRef,
-    font_bold: &'a crate::pdf_compat::IndirectFontRef,
+    font_reg: crate::pdf_compat::IndirectFontRef,
+    font_bold: crate::pdf_compat::IndirectFontRef,
     w: f32,
     h: f32,
     margin: f32,
@@ -2621,8 +2625,8 @@ fn pdf_draw_perfile_rows(
 )]
 fn pdf_render_per_file_pages(
     doc: &crate::pdf_compat::PdfDocumentReference,
-    font_reg: &crate::pdf_compat::IndirectFontRef,
-    font_bold: &crate::pdf_compat::IndirectFontRef,
+    font_reg: crate::pdf_compat::IndirectFontRef,
+    font_bold: crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     w: f32,
     h: f32,
@@ -3243,8 +3247,8 @@ fn pdf_render_hotspots_section(ctx: &PdfCtx<'_>, rows: &[HotspotRow], section_to
 #[allow(clippy::too_many_arguments)]
 fn pdf_render_hotspots_page(
     doc: &crate::pdf_compat::PdfDocumentReference,
-    font_reg: &crate::pdf_compat::IndirectFontRef,
-    font_bold: &crate::pdf_compat::IndirectFontRef,
+    font_reg: crate::pdf_compat::IndirectFontRef,
+    font_bold: crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     rows: &[HotspotRow],
     w: f32,
@@ -3309,8 +3313,8 @@ fn measure_terminal_tc_page_height(
         let layer = doc.get_page(page).get_layer(layer_idx);
         let ctx = PdfCtx {
             layer: &layer,
-            font_reg: &font_reg,
-            font_bold: &font_bold,
+            font_reg,
+            font_bold,
             w,
             margin,
             row_h,
@@ -3344,8 +3348,8 @@ fn measure_terminal_tc_page_height(
 )]
 fn pdf_render_cocomo_or_tc_page(
     doc: &crate::pdf_compat::PdfDocumentReference,
-    font_reg: &crate::pdf_compat::IndirectFontRef,
-    font_bold: &crate::pdf_compat::IndirectFontRef,
+    font_reg: crate::pdf_compat::IndirectFontRef,
+    font_bold: crate::pdf_compat::IndirectFontRef,
     run: &AnalysisRun,
     dims: PdfPageDims,
     title: &str,
@@ -3506,8 +3510,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
 
     let ctx = PdfCtx {
         layer: &layer,
-        font_reg: &font_reg,
-        font_bold: &font_bold,
+        font_reg,
+        font_bold,
         w: W,
         margin: MARGIN,
         row_h: ROW_H,
@@ -3558,8 +3562,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     };
     let cocomo_page_ctx = pdf_render_cocomo_or_tc_page(
         &doc,
-        &font_reg,
-        &font_bold,
+        font_reg,
+        font_bold,
         run,
         page_dims,
         &title,
@@ -3579,8 +3583,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
     } else {
         Some(pdf_render_hotspots_page(
             &doc,
-            &font_reg,
-            &font_bold,
+            font_reg,
+            font_bold,
             run,
             &hotspot_rows,
             W,
@@ -3596,8 +3600,8 @@ pub fn write_pdf_from_run(run: &AnalysisRun, pdf_path: &Path) -> Result<()> {
         // Per-file continues on the same page as T&C / COCOMO / Hotspots — no blank page between.
         pdf_render_per_file_pages(
             &doc,
-            &font_reg,
-            &font_bold,
+            font_reg,
+            font_bold,
             run,
             W,
             H,

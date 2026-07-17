@@ -24,6 +24,9 @@ use std::path::Path;
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
+// Fixture builder dominated by one large struct literal; splitting it would only
+// scatter the fixture, so the line count is inherent rather than a smell.
+#[allow(clippy::too_many_lines)]
 fn make_run(run_id: &str) -> AnalysisRun {
     let raw = RawLineCounts {
         total_physical_lines: 12,
@@ -139,13 +142,16 @@ fn make_run(run_id: &str) -> AnalysisRun {
 
 /// Minimal percent-encoder for form values (Windows paths contain `:` and `\`).
 fn pe(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out
@@ -476,9 +482,9 @@ async fn watched_dir_add_then_remove_then_refresh() {
     let dir = tempfile::tempdir().unwrap();
     write_scan_folder(dir.path(), "watched-cycle-001");
     let path = dir.path().canonicalize().unwrap();
-    let pth = pe(&path.to_string_lossy());
+    let encoded = pe(&path.to_string_lossy());
 
-    let add_body = format!("folder_path={pth}&redirect_to=%2Fview-reports");
+    let add_body = format!("folder_path={encoded}&redirect_to=%2Fview-reports");
     let (s1, _) = post_form(app.clone(), "/watched-dirs/add", &add_body).await;
     assert!(s1.is_redirection());
 
@@ -492,7 +498,7 @@ async fn watched_dir_add_then_remove_then_refresh() {
     assert!(s2.is_redirection(), "refresh should redirect, got {s2}");
 
     // Remove.
-    let rm_body = format!("folder_path={pth}&redirect_to=%2Fview-reports");
+    let rm_body = format!("folder_path={encoded}&redirect_to=%2Fview-reports");
     let (s3, _) = post_form(app, "/watched-dirs/remove", &rm_body).await;
     assert!(s3.is_redirection(), "remove should redirect, got {s3}");
 }
@@ -519,8 +525,8 @@ async fn auth_logout_no_key_redirects_to_root() {
         "no API key configured → redirect to /"
     );
     // Both cookie variants are expired.
-    let set_cookies: Vec<_> = headers.get_all("set-cookie").iter().collect();
-    assert_eq!(set_cookies.len(), 2, "expires plain + __Host- cookie");
+    let set_cookie_count = headers.get_all("set-cookie").iter().count();
+    assert_eq!(set_cookie_count, 2, "expires plain + __Host- cookie");
 }
 
 #[tokio::test]
@@ -564,8 +570,9 @@ async fn serve_linked_html_and_json_artifacts() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .contains("json"));
-    let (s_jdl, _, _) = get(app.clone(), &format!("/runs/json/{run_id}?download=1")).await;
-    assert_eq!(s_jdl, StatusCode::OK);
+    let (s_json_download, _, _) =
+        get(app.clone(), &format!("/runs/json/{run_id}?download=1")).await;
+    assert_eq!(s_json_download, StatusCode::OK);
 
     // scan-config arm (reads config out of the JSON's directory).
     let (s_cfg, _, _) = get(app.clone(), &format!("/runs/scan-config/{run_id}")).await;
@@ -903,8 +910,8 @@ fn first_uuid(body: &str) -> Option<String> {
 
 /// End-to-end: POST /analyze on a real project directory, poll the async status
 /// endpoint to completion, then render the result page. Exercises
-/// run_analysis_task, scan_path_to_artifacts, the native PDF background spawn, and
-/// the async status/result handlers.
+/// `run_analysis_task`, `scan_path_to_artifacts`, the native PDF background spawn,
+/// and the async status/result handlers.
 #[tokio::test]
 async fn analyze_full_flow_polls_to_completion_and_renders_result() {
     let app = make_test_router();
@@ -1044,7 +1051,7 @@ async fn compare_handler_scope_and_missing_variants() {
     }
 }
 
-/// Deleting a real linked run exercises delete_run_artifacts' full removal path.
+/// Deleting a real linked run exercises `delete_run_artifacts`' full removal path.
 #[tokio::test]
 async fn delete_linked_run_removes_it() {
     let app = make_test_router();
