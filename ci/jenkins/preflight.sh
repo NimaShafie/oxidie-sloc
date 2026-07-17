@@ -226,15 +226,22 @@ if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
     fi
 fi
 
-# ── Check g: agent system libraries for cargo --all-features ───────────────
-# The Jenkinsfile runs `cargo clippy --workspace --all-targets --all-features`.
-# Activating --all-features pulls in the optional `rfd` crate, which transitively
-# requires libwayland-dev, libgtk-3-dev, libxdo-dev at build time. These are
-# baked into ci/jenkins/Dockerfile.agent — but a stale running container can
-# lack them. Detect that here so the build doesn't fail 20 s into clippy with
-# a multi-screen Rust error that disguises itself as a code problem.
+# ── Check g: agent build toolchain + system libraries ─────────────────────
+# The Setup stage decompresses vendor.tar.xz (needs `xz`) and the Jenkinsfile
+# runs `cargo clippy --workspace --all-targets --all-features`. Activating
+# --all-features pulls in the optional `rfd` crate, which transitively requires
+# libwayland-dev, libgtk-3-dev, libxdo-dev at build time, and building the
+# scanner needs a C toolchain (cc, make), pkg-config, python3, and openssl.
+# These are baked into ci/jenkins/Dockerfile.agent — but a stale running
+# container recreated from the stock image can lack them. Detect that here so
+# the build doesn't fail seconds into Setup/Lint with an error that disguises
+# itself as a code problem (the very first drift was `xz: Cannot exec`).
 #
-# Wrapped in a single pkg-config invocation so we only round-trip once.
+# NOTE: libxdo is intentionally NOT probed via pkg-config — Debian's
+# libxdo-dev ships no .pc file, so `pkg-config --exists libxdo` is a false
+# negative; the `xdo` crate links against it directly.
+#
+# Wrapped in a single remote script so we only round-trip once.
 
 cookies=$(mktemp)
 crumb=$(curl -sS -c "$cookies" --max-time 10 \
@@ -244,15 +251,17 @@ if [ -n "$crumb" ]; then
     SYSLIB_OUT=$(curl -sS -b "$cookies" --max-time 15 \
         -u "${JENKINS_USER}:${JENKINS_TOKEN}" -H "$crumb" \
         --data-urlencode 'script=
-            def proc = ["sh","-c","pkg-config --exists wayland-client gtk+-3.0 && echo OK || echo MISSING:\$(pkg-config --print-errors wayland-client gtk+-3.0 2>&1 | head -1)"].execute()
+            def check = "for t in xz cc make pkg-config python3; do command -v \$t >/dev/null 2>&1 || echo MISSING:\$t; done; pkg-config --exists wayland-client gtk+-3.0 openssl || echo MISSING:pkg-config-libs(\$(pkg-config --print-errors wayland-client gtk+-3.0 openssl 2>&1 | head -1)); true"
+            def proc = ["sh","-c","{ " + check + "; } | head -1; echo DONE"].execute()
             proc.waitFor()
-            print proc.in.text.trim()
+            def out = proc.in.text.trim()
+            print out == "DONE" ? "OK" : out.replaceAll(/\nDONE$/, "")
         ' \
         "${JENKINS_URL}/scriptText" 2>/dev/null) || SYSLIB_OUT=""
     if [ "$SYSLIB_OUT" = "OK" ]; then
-        ok "Agent has libwayland/libgtk/libxdo (cargo --all-features will compile)"
+        ok "Agent has xz/cc/make/pkg-config/python3 + libwayland/libgtk/openssl (Setup + --all-features will build)"
     elif [[ "$SYSLIB_OUT" == MISSING:* ]]; then
-        fail "Agent is missing system libraries (${SYSLIB_OUT#MISSING:}). Rebuild the Jenkins agent image: see docs/ci-integrations.md \"Rebuilding the agent image\"."
+        fail "Agent is missing build deps (${SYSLIB_OUT#MISSING:}). Rebuild the Jenkins agent image or run ci/jenkins/install-system-deps.sh in the container: see docs/ci-integrations.md \"Rebuilding the agent image\"."
     else
         # Script console may be locked down or unreachable. Demote to info.
         info "Could not query agent system libraries via /scriptText. If clippy fails with \"Package wayland-client was not found\", rebuild the agent image."

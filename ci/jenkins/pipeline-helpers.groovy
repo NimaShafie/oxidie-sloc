@@ -773,17 +773,20 @@ def runPostSuccess() {
         // Highlight the headline metrics on the run row itself via the 'badge'
         // plugin. Wrapped so a controller without the plugin (degraded mode)
         // silently skips — the description above already carries the same info.
+        //
+        // Catch Throwable, not Exception: a missing pipeline step (e.g. no
+        // badge plugin) throws NoSuchMethodError, which is an Error, not an
+        // Exception — catching only Exception would let it bubble up and flip
+        // an otherwise-successful build to FAILURE. addShortText was removed in
+        // Badge plugin 2.x, so only addBadge is called here.
         try {
-            addShortText(text: "${fmtN(t.code_lines)} SLOC",
-                         background: '#c45c10', color: '#ffffff',
-                         border: 0, borderColor: '#c45c10')
             addBadge(icon: 'symbol-analytics-outline plugin-ionicons-api',
                      text: "oxide-sloc: ${fmtN(t.code_lines)} code · " +
                            "${fmtN(t.files_analyzed)} files")
-        } catch (Exception ignore) {
+        } catch (Throwable ignore) {
             // badge plugin not installed — non-fatal by design.
         }
-    } catch (Exception ex) {
+    } catch (Throwable ex) {
         echo "Could not set build metadata: ${ex.message}"
     }
     echo 'All stages passed. Artifacts and reports archived.'
