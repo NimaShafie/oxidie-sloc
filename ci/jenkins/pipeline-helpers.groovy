@@ -717,16 +717,23 @@ def runPostSuccess() {
             if (a >= 10_000L) return "${Math.round(v / 1_000.0d)}K"
             return String.format('%,d', v)
         }
+        // Plain one-line fallback (used if the rich generator can't run).
         def desc = "${fmtN(t.code_lines)} code · " +
                    "${fmtN(t.comment_lines)} cmts · " +
                    "${fmtN(t.blank_lines)} blank · " +
                    "${fmtN(t.files_analyzed)} files | ${params.SCAN_PATH}"
 
+        // Capture the sub-metrics so the rich summary generator can lay them out.
+        def styleStr = ''
+        def testsStr = ''
+        def covStr   = ''
+
         def ss = result.style_summary
         if (ss) {
             def colThreshold = ss.col_threshold ?: 80
             def colPct       = ss.line_col_compliant_pct ?: 0
-            desc += " · Style: ${ss.common_indent_style} · ${colPct}% ${colThreshold}-col"
+            styleStr = "${ss.common_indent_style} · ${colPct}% ${colThreshold}-col"
+            desc += " · Style: ${styleStr}"
         }
 
         def junitPath = "${outDir}/test-results/junit.xml"
@@ -741,7 +748,8 @@ def runPostSuccess() {
                 def errCount   = em ? (em[0][1] as long) : 0L
                 def passCount  = Math.max(0L, totalTests - failCount - errCount)
                 def testStatus = (failCount == 0 && errCount == 0) ? 'OK' : "FAIL(${fmtN(failCount)})"
-                desc += " · ${fmtN(passCount)}/${fmtN(totalTests)} tests ${testStatus}"
+                testsStr = "${passCount}/${totalTests}"
+                desc += " · ${testsStr} tests ${testStatus}"
             } catch (Exception ex) {
                 echo "Could not parse JUnit XML for description: ${ex.message}"
             }
@@ -760,6 +768,7 @@ def runPostSuccess() {
                     returnStdout: true
                 ).trim()
                 if (pct != 'N/A') {
+                    covStr = pct
                     desc += " · ${pct}% cov"
                 }
             } catch (Exception ex) {
@@ -767,18 +776,51 @@ def runPostSuccess() {
             }
         }
 
-        currentBuild.description = desc
+        // Rich, multi-line Unicode bar-chart description + HTML summary panel.
+        // build-summary.py renders both; the .txt is set as the description
+        // (renders under the default Plain-text formatter — newlines + block
+        // glyphs, no HTML needed) and the .html feeds the badge summary box.
+        def richDesc = desc
+        try {
+            withEnv(["SLOC_SCAN_PATH=${params.SCAN_PATH ?: ''}",
+                     "SLOC_TESTS=${testsStr}",
+                     "SLOC_COV=${covStr}",
+                     "SLOC_STYLE=${styleStr}"]) {
+                sh """
+                    python3 ci/jenkins/build-summary.py \
+                        '${outDir}/result_${proj}.json' '${outDir}' \
+                        --scan-path "\${SLOC_SCAN_PATH}" \
+                        --tests "\${SLOC_TESTS}" \
+                        --coverage "\${SLOC_COV}" \
+                        --style "\${SLOC_STYLE}" >/dev/null || true
+                """
+            }
+            if (fileExists("${outDir}/build-description.txt")) {
+                richDesc = readFile(file: "${outDir}/build-description.txt")
+            }
+        } catch (Exception ex) {
+            echo "Rich build summary generation skipped: ${ex.message}"
+        }
+
+        currentBuild.description = richDesc
         currentBuild.displayName = "#${env.BUILD_NUMBER} — ${params.SCAN_PATH}"
 
-        // Highlight the headline metrics on the run row itself via the 'badge'
-        // plugin. Wrapped so a controller without the plugin (degraded mode)
-        // silently skips — the description above already carries the same info.
-        //
-        // Catch Throwable, not Exception: a missing pipeline step (e.g. no
-        // badge plugin) throws NoSuchMethodError, which is an Error, not an
-        // Exception — catching only Exception would let it bubble up and flip
-        // an otherwise-successful build to FAILURE. addShortText was removed in
-        // Badge plugin 2.x, so only addBadge is called here.
+        // A boxed HTML summary panel (metric table + coloured language bars) on
+        // the build page, via the badge plugin's createSummary. Catch Throwable,
+        // not Exception: a missing pipeline step (no badge plugin) throws
+        // NoSuchMethodError (an Error), which would otherwise flip a successful
+        // build to FAILURE. Degrades to the Unicode description above.
+        try {
+            if (fileExists("${outDir}/build-summary.html")) {
+                def panel = readFile(file: "${outDir}/build-summary.html")
+                createSummary(icon: 'symbol-analytics-outline plugin-ionicons-api',
+                              text: panel)
+            }
+        } catch (Throwable ignore) {
+            // badge/summary plugin not installed — non-fatal by design.
+        }
+
+        // Compact headline badge on the run row itself (also badge-plugin gated).
         try {
             addBadge(icon: 'symbol-analytics-outline plugin-ionicons-api',
                      text: "oxide-sloc: ${fmtN(t.code_lines)} code · " +
