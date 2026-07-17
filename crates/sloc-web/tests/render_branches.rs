@@ -597,6 +597,9 @@ async fn result_page_renders_with_zero_code_lines_no_cocomo() {
 
 // ── render_result_page: multiple language summaries + semantic data ─────────────
 
+// Dominated by large struct-literal fixtures for the multi-language render path;
+// the length is inherent test data, not branching logic worth splitting.
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn result_page_renders_with_multi_language_and_semantic_data() {
     let app = make_test_router();

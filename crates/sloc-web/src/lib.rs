@@ -878,9 +878,11 @@ pub fn make_test_router_server_mode() -> Router {
     build_router(state)
 }
 
-/// Server-mode test router with `allowed_scan_roots` configured. Exercises the
-/// `validate_server_scan_path` allow/deny branches (in-root success, unresolved
-/// path, and out-of-root rejection) that the empty-roots router cannot reach.
+/// Server-mode test router with `allowed_scan_roots` configured.
+///
+/// Exercises the `validate_server_scan_path` allow/deny branches (in-root
+/// success, unresolved path, and out-of-root rejection) that the empty-roots
+/// router cannot reach.
 pub fn make_test_router_server_mode_with_roots(roots: Vec<PathBuf>) -> Router {
     let mut state = test_app_state("sloc_test_server_roots");
     state.server_mode = true;
@@ -1697,7 +1699,7 @@ body.dark-theme .rpt-progress{background:rgba(196,92,16,.2);}
 ///   restores the button. Centralising this guarantees identical, obvious feedback
 ///   everywhere instead of a silent `alert()`-only failure path.
 fn sloc_toast_assets(nonce: &str) -> String {
-    const TPL: &str = r##"<style nonce="__N__">
+    const TPL: &str = r#"<style nonce="__N__">
 #sloc-toast-wrap{position:fixed;right:18px;top:18px;z-index:11000;display:flex;flex-direction:column;gap:10px;max-width:min(380px,calc(100vw - 36px));pointer-events:none;}
 .sloc-toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-radius:12px;background:#fcfaf7;color:#2f241c;border:1px solid #dfcfbf;box-shadow:0 12px 32px rgba(77,44,20,0.22);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:13px;font-weight:600;line-height:1.35;opacity:0;transform:translateY(12px) scale(.96);transition:opacity .26s ease,transform .26s cubic-bezier(.22,.68,0,1.12);}
 .sloc-toast.sloc-toast-in{opacity:1;transform:none;}
@@ -1774,7 +1776,7 @@ body.dark-theme .sloc-toast-spin{border-color:rgba(232,147,47,.25);border-top-co
       .finally(function(){if(btn){btn.disabled=false;btn.style.opacity='';btn.style.cursor='';btn.innerHTML=orig;}});
   };
 })();
-</script>"##;
+</script>"#;
     TPL.replace("__N__", nonce)
 }
 
@@ -7469,11 +7471,11 @@ fn fmt_git_date(iso: &str) -> Option<String> {
 /// commits that also appear. Returns `None` if the file is unreadable or no match.
 fn extract_long_commit_from_json(path: &Path, short: &str) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 4 * 1024 * 1024; // 4 MiB is ample to cover the git metadata block
     if short.is_empty() {
         return None;
     }
     let len = std::fs::metadata(path).ok()?.len();
-    const TAIL: u64 = 4 * 1024 * 1024; // 4 MiB is ample to cover the git metadata block
     let start = len.saturating_sub(TAIL);
     let mut file = std::fs::File::open(path).ok()?;
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -16597,14 +16599,14 @@ fn render_multi_repo_warning(root: &Path, layout: &sloc_core::RepositoryLayout, 
     if layout.root_is_repo {
         write!(
             out,
-            r#"<strong>Nested repositories detected</strong><p>This repository contains {total} nested git {} that are not registered submodules. Their files will be counted as part of this project. Submodules are fine — but if these are unrelated repositories, scan one repository at a time. Pick a repository to scan on its own:</p>"#,
+            r"<strong>Nested repositories detected</strong><p>This repository contains {total} nested git {} that are not registered submodules. Their files will be counted as part of this project. Submodules are fine — but if these are unrelated repositories, scan one repository at a time. Pick a repository to scan on its own:</p>",
             if total == 1 { "repository" } else { "repositories" }
         )
         .ok();
     } else {
         write!(
             out,
-            r#"<strong>Multiple repositories detected</strong><p>This folder contains {total} independent git repositories. oxide-sloc analyzes one repository at a time — git metrics and totals are only meaningful when the root is a single repository (submodules are fine). Pick one repository as the scan root:</p>"#
+            r"<strong>Multiple repositories detected</strong><p>This folder contains {total} independent git repositories. oxide-sloc analyzes one repository at a time — git metrics and totals are only meaningful when the root is a single repository (submodules are fine). Pick one repository as the scan root:</p>"
         )
         .ok();
     }

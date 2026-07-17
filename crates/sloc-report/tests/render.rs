@@ -2015,7 +2015,7 @@ fn write_pdf_from_run_tc_page_trimmed_when_hotspots_follow() {
     let mut run = make_run_with_submodules();
     // Give the per-file records git activity so a Git Hotspots page is emitted.
     for (i, rec) in run.per_file_records.iter_mut().enumerate() {
-        rec.commit_count = Some((i as u32) + 1);
+        rec.commit_count = Some(u32::try_from(i).unwrap() + 1);
         rec.last_commit_date = Some("2026-06-01T10:00:00+00:00".into());
     }
     run.cocomo = Some(CocomoEstimate {
@@ -2029,7 +2029,7 @@ fn write_pdf_from_run_tc_page_trimmed_when_hotspots_follow() {
 
     let bytes = std::fs::read(tmp.path()).unwrap();
     let heights = pdf_mediabox_heights(&bytes);
-    let min_h = heights.iter().cloned().fold(f32::INFINITY, f32::min);
+    let min_h = heights.iter().copied().fold(f32::INFINITY, f32::min);
     assert!(
         min_h < 590.0,
         "T&C page should be trimmed even when a Hotspots page follows; got heights {heights:?}"
