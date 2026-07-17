@@ -16272,6 +16272,7 @@ pub fn build_sub_run(
             coverage_branches_hit,
             cyclomatic_complexity: 0,
             lsloc: None,
+            ..Default::default()
         },
         totals_by_language: sub.language_summaries.clone(),
         per_file_records: sub_files,

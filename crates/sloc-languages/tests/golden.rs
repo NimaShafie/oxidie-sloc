@@ -142,8 +142,22 @@ fn cpp_entities() {
     assert_eq!(r.functions, 5, "function definitions and prototypes");
     // class Widget, struct Point, namespace demo
     assert_eq!(r.classes, 3, "class/struct/namespace definitions");
-    // members id, name, x, y + locals out, sum, result (for-loop `i` excluded)
-    assert_eq!(r.variables, 7, "member and local variable declarations");
+    // members id, name, x, y (4) + locals out, sum, result (3) + global g_widget_count (1)
+    assert_eq!(r.variables, 8, "all variable declarations");
+    assert_eq!(r.variables_member, 4, "class/struct member fields");
+    assert_eq!(
+        r.variables_local, 3,
+        "function-local variables (for-loop `i` excluded)"
+    );
+    assert_eq!(r.variables_global, 1, "file-scope global");
+    // member + local + global always reconstruct the C/C++ variable total.
+    assert_eq!(
+        r.variables_member + r.variables_local + r.variables_global,
+        r.variables,
+        "scope breakdown must sum to the total"
+    );
+    // #define MAX_WIDGETS 100 (object-like); SQUARE(x) is function-like and excluded.
+    assert_eq!(r.macro_definitions, 1, "object-like macro constants");
     // #include <string>, #include <vector>
     assert_eq!(r.imports, 2, "include directives");
 }

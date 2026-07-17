@@ -1665,6 +1665,14 @@ fn print_plain_summary(run: &AnalysisRun) {
     println!("functions={}", st.functions);
     println!("classes={}", st.classes);
     println!("variables={}", st.variables);
+    if st.variables_member + st.variables_local + st.variables_global > 0 {
+        println!("variables_member={}", st.variables_member);
+        println!("variables_local={}", st.variables_local);
+        println!("variables_global={}", st.variables_global);
+    }
+    if st.macro_definitions > 0 {
+        println!("macro_definitions={}", st.macro_definitions);
+    }
     println!("imports={}", st.imports);
     println!("unit_tests={}", st.test_count);
     println!("test_assertions={}", st.test_assertion_count);
@@ -1822,10 +1830,29 @@ fn print_semantic_metrics(run: &AnalysisRun, col: bool) {
         println!("  {}  {}", paint!(col, "36", "Classes/Types  :"), s.classes);
     }
     if s.variables > 0 {
+        // For C/C++ the total splits into member/local/global; annotate inline when tracked.
+        let breakdown = if s.variables_member + s.variables_local + s.variables_global > 0 {
+            // Scope is only tracked for C/C++; label it so the subset does not imply it sums to
+            // the (possibly multi-language) total.
+            format!(
+                "  (C/C++: {} member, {} local, {} global)",
+                s.variables_member, s.variables_local, s.variables_global
+            )
+        } else {
+            String::new()
+        };
+        println!(
+            "  {}  {}{}",
+            paint!(col, "36", "Variables      :"),
+            s.variables,
+            paint!(col, "2", breakdown)
+        );
+    }
+    if s.macro_definitions > 0 {
         println!(
             "  {}  {}",
-            paint!(col, "36", "Variables      :"),
-            s.variables
+            paint!(col, "36", "Macro consts   :"),
+            s.macro_definitions
         );
     }
     if s.imports > 0 {
