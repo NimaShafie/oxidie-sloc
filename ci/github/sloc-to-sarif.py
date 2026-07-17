@@ -9,9 +9,21 @@ Surfaces two actionable, per-file signals oxide-sloc already computes:
 so they show up inline in the PR "Files changed" tab via upload-sarif. Standard
 library only.
 
+Scope: only production Rust source under ``crates/<crate>/src`` is considered —
+the same source set SonarQube analyzes (``sonar.sources=crates`` with tests,
+benches, and examples classified as test code). Shell/CI/build helper scripts,
+docs tooling, and test files are intentionally *not* complexity-gated: their
+branch counts are dominated by sequential setup/dispatch, not maintainability
+risk, so gating them only produces noise.
+
+The cyclomatic-complexity value oxide-sloc emits is a *whole-file* sum of
+branch-decision keywords, so the thresholds below are calibrated for a file
+total (hundreds), not a single function (tens). Function-level complexity is
+enforced separately by SonarQube's rust:S3776 cognitive-complexity rule.
+
 Usage:
     python3 ci/github/sloc-to-sarif.py <result.json> <out.sarif> \
-        [--cc-warn 50] [--cc-note 25] [--hotspot 800]
+        [--cc-warn 200] [--cc-note 100] [--hotspot 800]
 """
 
 import json
@@ -55,6 +67,28 @@ def _arg(flag, default):
     return default
 
 
+# Path segments that mark a Rust file as test/bench/example code rather than
+# production source (mirrors sonar.test.inclusions in ci/sonar).
+_NON_PRODUCTION_SEGMENTS = ("/tests/", "/benches/", "/examples/")
+
+
+def _is_production_source(uri):
+    """True only for production Rust source under crates/<crate>/src.
+
+    Excludes shell/CI/build scripts, docs tooling, and test/bench/example code —
+    the same scope SonarQube gates. Keeps the complexity signal focused on code
+    a reviewer would actually be asked to split up.
+    """
+    path = uri.replace("\\", "/")
+    if not path.endswith(".rs"):
+        return False
+    if not (path.startswith("crates/") and "/src/" in path):
+        return False
+    if path.endswith("_test.rs") or "/test_" in path:
+        return False
+    return not any(seg in path for seg in _NON_PRODUCTION_SEGMENTS)
+
+
 def _result(rule_id, level, uri, message):
     return {
         "ruleId": rule_id,
@@ -76,8 +110,9 @@ def main() -> None:
         sys.stderr.write("usage: sloc-to-sarif.py <result.json> <out.sarif>\n")
         sys.exit(2)
     src, dst = sys.argv[1], sys.argv[2]
-    cc_warn = _arg("--cc-warn", 50)
-    cc_note = _arg("--cc-note", 25)
+    # File-level (whole-file sum) thresholds — see module docstring.
+    cc_warn = _arg("--cc-warn", 200)
+    cc_note = _arg("--cc-note", 100)
     hotspot = _arg("--hotspot", 800)
 
     with open(src, encoding="utf-8") as fh:
@@ -88,7 +123,7 @@ def main() -> None:
         if not isinstance(rec, dict):
             continue
         uri = rec.get("relative_path") or rec.get("path") or ""
-        if not uri:
+        if not uri or not _is_production_source(uri):
             continue
         cc = rec.get("cyclomatic_complexity")
         if isinstance(cc, int):
