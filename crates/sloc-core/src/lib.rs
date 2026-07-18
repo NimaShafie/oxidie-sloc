@@ -3439,6 +3439,48 @@ mod tests {
         assert_eq!(info.branch.as_deref(), Some("main"));
     }
 
+    #[test]
+    fn detect_git_for_run_reads_origin_remote_url() {
+        // A .git/config with an [remote "origin"] section exercises
+        // read_git_remote_url + parse_url_line, which the dir-only tests miss.
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let sha = "deadbeef00000000000000000000000000000000";
+        fs::write(git_dir.join("HEAD"), sha).unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://example.com/repo.git\n\tfetch = +refs/heads/*\n",
+        )
+        .unwrap();
+        let info = detect_git_for_run(dir.path());
+        assert_eq!(
+            info.remote_url.as_deref(),
+            Some("https://example.com/repo.git")
+        );
+    }
+
+    #[test]
+    fn detect_git_for_run_follows_git_file_worktree_pointer() {
+        // A worktree/submodule uses a `.git` *file* (not dir) containing
+        // `gitdir: <path>`. This drives find_git_dir's is_file branch and
+        // resolve_git_file_pointer, resolving to the real git data directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let gitdata = tmp.path().join("gitdata");
+        fs::create_dir_all(&gitdata).unwrap();
+        let sha = "abc1234567890abcdef1234567890abcdef12345";
+        fs::write(gitdata.join("HEAD"), sha).unwrap();
+
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        // Forward-slash path is normalised to the OS separator by the resolver.
+        let pointer = format!("gitdir: {}\n", gitdata.to_string_lossy().replace('\\', "/"));
+        fs::write(project.join(".git"), pointer).unwrap();
+
+        let info = detect_git_for_run(&project);
+        assert_eq!(info.commit_long.as_deref(), Some(sha));
+    }
+
     // ── ci_branch_from_env ───────────────────────────────────────────────────
 
     // Note: ci_branch_from_env env-var tests share a mutex to avoid parallel interference.
@@ -3534,6 +3576,44 @@ mod tests {
         assert!(layout.root_is_repo);
         assert!(layout.nested_repos.is_empty());
         assert!(!layout.has_multiple_repos());
+    }
+
+    #[test]
+    fn format_multi_repo_warning_root_repo_singular_and_truncated() {
+        // root_is_repo=true with a single nested repo → the singular "repository"
+        // wording. The dir-layout tests never format this branch.
+        let one = RepositoryLayout {
+            root: PathBuf::from("/proj"),
+            root_is_repo: true,
+            submodule_paths: vec![],
+            nested_repos: vec![PathBuf::from("vendor/foreign")],
+        };
+        let msg = format_multi_repo_warning(&one);
+        assert!(
+            msg.contains("1 nested git repository"),
+            "singular wording: {msg}"
+        );
+        assert!(!msg.contains("repositories"), "must not pluralise: {msg}");
+
+        // root_is_repo=true with more than MAX_LISTED (5) nested repos → the
+        // "… and N more" truncation plus plural wording.
+        let many = RepositoryLayout {
+            root: PathBuf::from("/proj"),
+            root_is_repo: true,
+            submodule_paths: vec![],
+            nested_repos: (0..7)
+                .map(|i| PathBuf::from(format!("nested-{i}")))
+                .collect(),
+        };
+        let msg = format_multi_repo_warning(&many);
+        assert!(
+            msg.contains("7 nested git repositories"),
+            "plural wording: {msg}"
+        );
+        assert!(
+            msg.contains("and 2 more"),
+            "must truncate the listed set: {msg}"
+        );
     }
 
     #[test]
