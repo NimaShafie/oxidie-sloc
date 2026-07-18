@@ -10,6 +10,11 @@
 // Add new helper functions here rather than in the Jenkinsfile.
 
 def runSetup() {
+    // Disk preflight FIRST: fail fast on a low-space volume and prune the
+    // persistent Rust cache if it has grown past its cap, so a build never dies
+    // mid-run with ENOSPC and the cache that survives cleanWs() stays bounded.
+    sh 'bash ci/jenkins/check-disk-space.sh'
+
     sh 'bash ci/jenkins/setup-toolchain.sh'
     sh 'bash ci/jenkins/setup-vendor.sh'
 
@@ -190,7 +195,7 @@ def runCoverage() {
         publishHTML(target: [
             allowMissing         : false,
             alwaysLinkToLastBuild: true,
-            keepAll              : true,
+            keepAll              : false,
             reportDir            : "${params.OUTPUT_SUBDIR}/coverage/html",
             reportFiles          : 'index.html',
             reportName           : 'Coverage Source',
@@ -447,7 +452,7 @@ def runArchivePublish() {
         publishHTML(target: [
             allowMissing         : true,
             alwaysLinkToLastBuild: true,
-            keepAll              : true,
+            keepAll              : false,
             reportDir            : "${params.OUTPUT_SUBDIR}/ci-report",
             reportFiles          : "index.html",
             reportName           : "OxideSLOC_CI_Report_${proj}",
@@ -458,7 +463,7 @@ def runArchivePublish() {
         publishHTML(target: [
             allowMissing         : false,
             alwaysLinkToLastBuild: true,
-            keepAll              : true,
+            keepAll              : false,
             reportDir            : "${params.OUTPUT_SUBDIR}/html-report",
             reportFiles          : "index.html",
             reportName           : "OxideSLOC_HTML_Report_${proj}",
