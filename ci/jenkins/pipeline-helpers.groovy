@@ -411,11 +411,15 @@ def runArchivePublish() {
         // defaults to 'admin' to match runSetup, overridable via JENKINS_API_USER.
         withCredentials([string(credentialsId: 'jenkins-api-token',
                                 variable: 'SLOC_JTOKEN')]) {
+            // The token must be read as $SLOC_JTOKEN INSIDE sh — a withCredentials
+            // binding is injected into the shell env (masked) but is NOT visible via
+            // ${env.SLOC_JTOKEN} in Groovy. Interpolating it in Groovy sent an empty
+            // token (so the probe ran anonymously and the dashboard wrongly showed
+            // "degraded / read-only") and would also defeat Jenkins' secret masking.
             withEnv(["JENKINS_BASE_URL=${base}",
-                     "JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}",
-                     "JENKINS_AUTH_TOKEN=${env.SLOC_JTOKEN ?: ''}"]) {
-                sh "python3 ci/jenkins/detect-capabilities.py '${outDir}' || true"
-                sh "bash ci/jenkins/install-plugins.sh '${outDir}' || true"
+                     "JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}"]) {
+                sh "JENKINS_AUTH_TOKEN=\"\$SLOC_JTOKEN\" python3 ci/jenkins/detect-capabilities.py '${outDir}' || true"
+                sh "JENKINS_AUTH_TOKEN=\"\$SLOC_JTOKEN\" bash ci/jenkins/install-plugins.sh '${outDir}' || true"
             }
         }
     } catch (Exception ex) {
@@ -893,15 +897,18 @@ def runBitbucketNotify() {
     try {
         withCredentials([string(credentialsId: 'bitbucket-build-token',
                                 variable: 'SLOC_BB_TOKEN')]) {
+            // Read the token as $SLOC_BB_TOKEN inside sh (masked) — a withCredentials
+            // binding is not visible via ${env.SLOC_BB_TOKEN} in Groovy, so
+            // interpolating it here would pass an empty token and the notifier would
+            // silently treat itself as "not configured" and skip.
             withEnv(["BITBUCKET_BASE_URL=${env.BITBUCKET_BASE_URL ?: ''}",
-                     "BITBUCKET_TOKEN=${env.SLOC_BB_TOKEN ?: ''}",
                      "BITBUCKET_WORKSPACE=${env.BITBUCKET_WORKSPACE ?: ''}",
                      "BITBUCKET_REPO=${env.BITBUCKET_REPO ?: ''}",
                      "GIT_COMMIT=${env.GIT_COMMIT ?: ''}",
                      "BUILD_KEY=${env.JOB_NAME ?: 'oxide-sloc'}",
                      "BUILD_NAME=oxide-sloc CI #${env.BUILD_NUMBER}",
                      "REPORT_URL=${reportUrl}"]) {
-                sh "bash ci/jenkins/notify-bitbucket.sh ${bbState} || true"
+                sh "BITBUCKET_TOKEN=\"\$SLOC_BB_TOKEN\" bash ci/jenkins/notify-bitbucket.sh ${bbState} || true"
             }
         }
     } catch (Exception ex) {
@@ -911,13 +918,13 @@ def runBitbucketNotify() {
     try {
         withCredentials([string(credentialsId: 'confluence-api-token',
                                 variable: 'SLOC_CF_TOKEN')]) {
+            // Same masking rule: read $SLOC_CF_TOKEN inside sh, not via Groovy env.
             withEnv(["CONFLUENCE_BASE_URL=${env.CONFLUENCE_BASE_URL ?: ''}",
-                     "CONFLUENCE_TOKEN=${env.SLOC_CF_TOKEN ?: ''}",
                      "CONFLUENCE_USER=${env.CONFLUENCE_USER ?: ''}",
                      "CONFLUENCE_SPACE_KEY=${env.CONFLUENCE_SPACE_KEY ?: ''}",
                      "CONFLUENCE_PARENT_ID=${env.CONFLUENCE_PARENT_ID ?: ''}",
                      "REPORT_URL=${reportUrl}"]) {
-                sh "python3 ci/jenkins/notify-confluence.py '${outDir}' '${proj}' || true"
+                sh "CONFLUENCE_TOKEN=\"\$SLOC_CF_TOKEN\" python3 ci/jenkins/notify-confluence.py '${outDir}' '${proj}' || true"
             }
         }
     } catch (Exception ex) {
