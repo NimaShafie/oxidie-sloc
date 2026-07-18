@@ -217,7 +217,7 @@ center cannot replace them, and restarts Jenkins.
    | Plugin (search term) | Purpose |
    |---------------------|---------|
    | `Pipeline: Stage View` | Stage visualization in the job UI |
-   | `HTML Publisher` | "OxideSLOC — Jenkins CI Report" / "OxideSLOC — Jenkins HTML Report" / "Coverage Source" sidebar links |
+   | `HTML Publisher` | `OxideSLOC_CI_Report_<proj-slug>` / `OxideSLOC_HTML_Report_<proj-slug>` / "Coverage Source" sidebar links (`<proj-slug>` = `oxide-sloc_<short-sha>`) |
    | `Plot` | Build-over-build SLOC trend charts |
    | `JUnit` | "Test Result" sidebar link (cargo-nextest builds) |
    | `Coverage` | Native LCOV/Cobertura integration — line/branch % on build pages |
@@ -566,24 +566,32 @@ From this point on, all 49 configuration parameters are visible in the build for
 
 After a successful build, confirm each feature is wired correctly:
 
-### OxideSLOC — Jenkins CI Report (HTML Publisher)
-- The left sidebar shows a **"OxideSLOC — Jenkins CI Report"** link.
-  This is a fixed name (no per-project slug); the URL is
-  `/job/<JOB>/<N>/OxideSLOC_20_e28094_20Jenkins_20CI_20Report/`
-  (Jenkins encodes the em-dash as `_e28094_`).
+### CI Report (HTML Publisher)
+- The left sidebar shows an **`OxideSLOC_CI_Report_<proj-slug>`** link, where
+  `<proj-slug>` is `oxide-sloc_<short-sha>` (the repo slug plus the short commit SHA,
+  e.g. `oxide-sloc_00b64bd`). The report name is built from the project slug in
+  [`ci/jenkins/pipeline-helpers.groovy`](../ci/jenkins/pipeline-helpers.groovy) (`reportName: "OxideSLOC_CI_Report_${proj}"`).
+- **The name carries the commit SHA, so the link text and URL change on every commit** —
+  do not hard-code or bookmark it; always reach the report from the current build's sidebar.
+- The report is published at **project level** (no build number `<N>` in the path). The URL is
+  `/job/<JOB>/OxideSLOC_5fCI_5fReport_5f<proj-slug>/` — Jenkins encodes each underscore as `_5f`,
+  e.g. `/job/oxide-sloc/OxideSLOC_5fCI_5fReport_5foxide-sloc_5f00b64bd/`.
 - Clicking it opens the report in the browser.
 - On current Jenkins LTS (2.387.x+) the CSP is `Content-Security-Policy-Report-Only`
   (non-blocking) — interactive features work without any CSP changes.
   If features are broken on an older Jenkins instance (pre-2.387.x), the enforcing
   default CSP is blocking inline scripts — see [Step 6](#6-configure-the-csp-header-html-report-viewer).
 
-### OxideSLOC — Jenkins HTML Report (HTML Publisher — standalone)
-- A second sidebar link, **"OxideSLOC — Jenkins HTML Report"**, is published from
-  `ci/jenkins/generate-dashboard.py`. This is a self-contained HTML file that works
-  even on Jenkins instances where the Plot/JUnit/Coverage plugins are absent.
-- URL: `/job/<JOB>/<N>/OxideSLOC_20_e28094_20Jenkins_20HTML_20Report/`.
-- Bookmarks from a pre-f96f53d installation (which used `/SLOC_20Report_20_e28094_20<slug>/`
-  and `/Graphical_20Report_20_e28094_20<slug>/`) will return 404 — update them once after upgrading.
+### Standalone HTML Report (HTML Publisher)
+- A second sidebar link, **`OxideSLOC_HTML_Report_<proj-slug>`**, is published from
+  `ci/jenkins/generate-dashboard.py` (`reportName: "OxideSLOC_HTML_Report_${proj}"`). This is a
+  self-contained HTML file that works even on Jenkins instances where the Plot/JUnit/Coverage
+  plugins are absent.
+- Also published at **project level**, so the URL is
+  `/job/<JOB>/OxideSLOC_5fHTML_5fReport_5f<proj-slug>/`,
+  e.g. `/job/oxide-sloc/OxideSLOC_5fHTML_5fReport_5foxide-sloc_5f00b64bd/`.
+- As with the CI Report, the name includes the commit SHA, so a saved URL 404s after the next
+  commit — always follow the sidebar link rather than a bookmark.
 
 ### Trend charts (Plot plugin)
 - The job page shows **"SLOC Trends"** charts below the build history.

@@ -404,7 +404,7 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `ENABLED_LANGUAGES` | _(all)_ | Comma-separated language filter, e.g. `rust,python`. |
 | `INCLUDE_GLOBS` | _(all)_ | Comma-separated include glob patterns, e.g. `src/**/*.py`. |
 | `EXCLUDE_GLOBS` | _(none)_ | Comma-separated exclude glob patterns, e.g. `vendor/**`. |
-| `GENERATE_HTML` | true | Write HTML report and publish as "OxideSLOC — Jenkins CI Report" sidebar link. Requires HTML Publisher plugin. |
+| `GENERATE_HTML` | true | Write HTML report and publish as the `OxideSLOC_CI_Report_<proj-slug>` sidebar link (`<proj-slug>` = `oxide-sloc_<short-sha>`; project-level, so the URL changes each commit). Requires HTML Publisher plugin. |
 | `GENERATE_PDF` | true | Write PDF report alongside the HTML report. Pure-Rust generation — no browser or external tool required on the agent. When enabled, the "View PDF" button in the HTML report opens the archived PDF directly. |
 | `SKIP_QUALITY_GATES` | false | Skip fmt / clippy / unit-test stage for scan-only runs. |
 | `SKIP_WEB_CHECK` | true | Skip the web UI health-check stage. Use on agents without loopback access or where port 4317 is unavailable. |
@@ -467,7 +467,7 @@ See `ci/jenkins/plugins.txt` for the full list. Minimum required:
 | `git` | SCM checkout |
 | `ws-cleanup` | `cleanWs()` in `post { cleanup }` |
 | `credentials-binding` | SMTP / webhook credential bindings |
-| `htmlpublisher` | "OxideSLOC — Jenkins CI Report" sidebar link |
+| `htmlpublisher` | `OxideSLOC_CI_Report_<proj-slug>` sidebar link |
 | `plot` | Build-over-build trend charts |
 
 #### Trend charts (Plot plugin)
