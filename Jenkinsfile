@@ -258,13 +258,14 @@ pipeline {
         // ── Test runner & results ──────────────────────────────────────────────
         choice(
             name:    'TEST_RUNNER',
-            choices: ['cargo-test', 'cargo-nextest'],
-            description: 'Test runner for the Unit tests stage.\n' +
-                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)\n' +
-                         '  cargo-nextest — faster parallel runner with JUnit XML output;\n' +
-                         '                  requires cargo-nextest on the agent:\n' +
-                         '                    cargo install cargo-nextest\n' +
-                         '                  Enables the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.'
+            choices: ['cargo-nextest', 'cargo-test'],
+            description: 'Test runner for the Unit tests stage. Default cargo-nextest so the ' +
+                         '"Test Result" view + trend appear; falls back to cargo test automatically ' +
+                         'if nextest is not on the agent (no failure).\n' +
+                         '  cargo-nextest — faster parallel runner with JUnit XML output (needs ' +
+                         'cargo-nextest on the agent; "cargo install cargo-nextest"). ' +
+                         'Publishes the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.\n' +
+                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)'
         )
         booleanParam(
             name:         'PUBLISH_TEST_RESULTS',
@@ -542,23 +543,44 @@ pipeline {
                         }
                         stage('Lint') {
                             steps {
+                                // Single clippy run emitting JSON: it feeds the
+                                // warnings-ng "Warnings" trend view AND still enforces
+                                // -D warnings (we re-raise the failure below, after
+                                // recording, so any issues are visible in the view even
+                                // on a failing build). Matches the repo's lint gate
+                                // (.gitlab-ci.yml, Makefile, ci/lint.sh): plain
+                                // -D warnings, no pedantic/nursery.
                                 sh '''
-                                    set -o pipefail
-                                    # Matches the rest of the repo's lint gates
-                                    # (.gitlab-ci.yml, Makefile, ci/lint.sh): plain
-                                    # -D warnings, no pedantic/nursery. Keeping the
-                                    # stricter groups here made feature commits pass
-                                    # GitHub/GitLab CI but break only this gate.
+                                    set +e
                                     cargo clippy --workspace --all-targets --all-features \
+                                        --message-format=json \
                                         -- -D warnings \
                                            -A clippy::multiple_crate_versions \
-                                        2>&1 | tee clippy-output.txt
-                                    CLIPPY_RC=$?
-                                    WARN_COUNT=$(grep -c '^warning' clippy-output.txt 2>/dev/null || echo 0)
-                                    ERR_COUNT=$(grep -c '^error'   clippy-output.txt 2>/dev/null || echo 0)
-                                    echo "Clippy: ${ERR_COUNT} errors, ${WARN_COUNT} warnings"
-                                    exit $CLIPPY_RC
+                                        > clippy.json 2> clippy-stderr.txt
+                                    echo $? > clippy-rc.txt
+                                    cat clippy-stderr.txt   # human-readable diagnostics in the console
                                 '''
+                                script {
+                                    // Publish to warnings-ng. Guarded with Throwable so a
+                                    // controller WITHOUT the plugin (missing recordIssues /
+                                    // cargo step) still passes instead of erroring out.
+                                    try {
+                                        recordIssues(
+                                            enabledForFailure: true,
+                                            tools: [cargo(pattern: 'clippy.json',
+                                                          id: 'clippy',
+                                                          name: 'Clippy')]
+                                        )
+                                    } catch (Throwable t) {
+                                        echo "recordIssues skipped (warnings-ng not installed): ${t.message}"
+                                    }
+                                    // Preserve the -D warnings gate: fail if clippy did.
+                                    def rc = readFile('clippy-rc.txt').trim()
+                                    if (rc != '0') {
+                                        error("clippy failed with -D warnings (exit ${rc}). " +
+                                              "See the Warnings view or the console output above.")
+                                    }
+                                }
                             }
                         }
                     }

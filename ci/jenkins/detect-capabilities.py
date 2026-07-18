@@ -176,13 +176,16 @@ def decide(
         scope = "project-admin" if job_admin else "read-only"
         mode = "degraded"
         reason = (
-            "This account has "
-            + ("project (Job/Configure) rights but not " if job_admin else "")
-            + "Jenkins system (Overall/Administer) permission, which is required to "
-            "install controller plugins. Richer visualization plugins were skipped "
-            "and the native oxide-sloc dashboard is shown instead. Ask a Jenkins "
-            "administrator to pre-install the plugins listed below to enable them."
-            f" (detected scope: {scope})"
+            "The build's Jenkins API token lacks Overall/Administer permission "
+            "(or is empty / not configured), which is required to install "
+            "controller plugins. Richer visualization plugins were skipped and the "
+            "native oxide-sloc dashboard is shown instead. Make sure the "
+            "'jenkins-api-token' credential holds a valid admin token — or, if the "
+            "plugins are already installed on the controller, this is only about "
+            "the token, not the plugins."
+            + (" This account does have project (Job/Configure) rights."
+               if job_admin else "")
+            + f" (detected API scope: {scope})"
         )
     else:  # system_admin but no way to obtain the plugins
         mode = "airgapped-degraded"
