@@ -217,30 +217,30 @@ def svg_hbar(data: list) -> str:
         disp_label = label if len(label) <= 18 else label[:17] + "…"
         bar_w = int(bar_max * value / max_val)
         pct = value / total_val * 100
-        # Native hover tooltip — describes the bar with the exact count and share.
-        tip = (
-            f"{label}: {fmt_full(value)} code lines "
-            f"({pct:.1f}% of the {fmt_full(total_val)} charted)"
-        )
+        # Tooltip text — e.g. "cpp = 603 code lines (73.0% of total)". Used by
+        # both the JS interactive tooltip (data-tip) and the native <title> fallback.
+        tip = f"{label} = {fmt_full(value)} code lines ({pct:.1f}% of total)"
 
         rows.append(
             f'  <!-- {html.escape(label)} -->'
             f'\n  <text x="{label_w - 6}" y="{y + bar_h - 8}"'
             f' text-anchor="end" fill="#2d1a0e" font-size="13" font-family="system-ui,sans-serif"'
             f' font-weight="600">{html.escape(disp_label)}</text>'
-            f'\n  <rect class="bar-rect" x="{label_w}" y="{y}" width="{bar_w}" height="{bar_h}"'
-            f' rx="4" fill="{colour}"/>'
+            f'\n  <rect class="bar-rect" data-i="{i}" x="{label_w}" y="{y}"'
+            f' width="{bar_w}" height="{bar_h}" rx="4" fill="{colour}"/>'
             f'\n  <text x="{label_w + bar_w + 8}" y="{y + bar_h - 8}"'
             f' fill="#5a3820" font-size="12" font-family="system-ui,sans-serif"'
             f' font-weight="700">{html.escape(fmt(value))}</text>'
         )
 
         # Full-row transparent hit target so hovering ANYWHERE on the row (label,
-        # bar, or count) shows the tooltip — essential for tiny bars whose painted
-        # width rounds to ~0 (e.g. "c: 1"). pointer-events="all" is required because
-        # a fully transparent fill is otherwise treated as not painted → no hover.
+        # bar, or count) triggers the tooltip + bar "pop" animation — essential for
+        # tiny bars whose painted width rounds to ~0 (e.g. "c = 1"). data-i links
+        # it to its .bar-rect; data-tip drives the JS tooltip; <title> is the
+        # no-JS fallback. pointer-events="all" makes the transparent fill hoverable.
         hits.append(
-            f'\n  <rect class="bar-hit" x="0" y="{i * row_h}" width="{total_w}"'
+            f'\n  <rect class="bar-hit" data-i="{i}" data-tip="{html.escape(tip)}"'
+            f' x="0" y="{i * row_h}" width="{total_w}"'
             f' height="{row_h}" fill="#000000" fill-opacity="0" pointer-events="all">'
             f'<title>{html.escape(tip)}</title></rect>'
         )
@@ -315,20 +315,31 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
         + f" L{coords[-1][0]},{pad_t + h} L{coords[0][0]},{pad_t + h} Z"
     )
 
-    lx, ly = coords[-1]
     max_i = values.index(max_v)
     min_i = values.index(min_v)
-    max_x, max_y = coords[max_i]
-    min_x, min_y = coords[min_i]
 
-    extra_dots = ""
-    if max_i != n - 1:
-        extra_dots += f'\n  <circle cx="{max_x}" cy="{max_y}" r="3" fill="#2a6846" opacity="0.85"/>'
-    if min_i != n - 1 and min_i != max_i:
-        extra_dots += f'\n  <circle cx="{min_x}" cy="{min_y}" r="3" fill="#b23030" opacity="0.85"/>'
+    # Visible per-point dots (green = peak, red = trough, oxide = latest/other),
+    # each tagged data-i so the JS can grow the exact point on hover.
+    visible_dots = ""
+    for i, (x, y) in enumerate(coords):
+        if i == n - 1:
+            col, r = "#b04a00", 4
+        elif i == max_i:
+            col, r = "#2a6846", 3
+        elif i == min_i:
+            col, r = "#b23030", 3
+        else:
+            col, r = "#b04a00", 3
+        visible_dots += (
+            f'\n  <circle class="spark-pt" data-i="{i}" cx="{x}" cy="{y}"'
+            f' r="{r}" fill="{col}"/>'
+        )
 
-    # Transparent, generously sized hit-target dots at every build so hovering
-    # anywhere near a point reveals a native tooltip with the exact figures.
+    # Transparent, generously sized hit-target dots at every build. data-i links
+    # each to its visible .spark-pt (grown on hover); data-tip drives the JS
+    # tooltip; <title> is the no-JS fallback. pointer-events="all" is essential:
+    # a fully transparent fill is "not painted" under visiblePainted, so without
+    # it the circle would receive no hover events at all.
     hover_dots = ""
     for i, (x, y) in enumerate(coords):
         b = builds[i]
@@ -337,13 +348,10 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
         if i > 0:
             d = v - values[i - 1]
             note = f" ({'+' if d > 0 else ''}{fmt_full(d)} vs #{builds[i - 1]})"
-        tip = f"Build #{b}: {fmt_full(v)} code lines{note}"
-        # pointer-events="all" is essential: a fully transparent fill (fill-opacity=0)
-        # is treated as "not painted" under the default visiblePainted policy, so the
-        # element would receive NO hover events and the <title> tooltip would never
-        # show. "all" makes the whole circle area hoverable regardless of paint.
+        tip = f"Build #{b} = {fmt_full(v)} code lines{note}"
         hover_dots += (
-            f'\n  <circle class="spark-dot" cx="{x}" cy="{y}" r="8" fill="#b04a00"'
+            f'\n  <circle class="spark-dot" data-i="{i}" data-tip="{html.escape(tip)}"'
+            f' cx="{x}" cy="{y}" r="9" fill="#b04a00"'
             f' fill-opacity="0" pointer-events="all">'
             f'<title>{html.escape(tip)}</title></circle>'
         )
@@ -354,8 +362,7 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
         f'\n  <path d="{area_d}" fill="#b04a00" fill-opacity="0.07"/>'
         f'\n  <path d="{path_d}" fill="none" stroke="#b04a00" stroke-width="2"'
         f' stroke-linejoin="round" stroke-linecap="round"/>'
-        f'\n  <circle cx="{lx}" cy="{ly}" r="4" fill="#b04a00"/>'
-        f"{extra_dots}"
+        f"{visible_dots}"
         f"{hover_dots}"
         f'\n  <text x="{pad_l}" y="{height - 3}" font-size="10" fill="#8a6a5a"'
         f' font-family="system-ui,sans-serif">#{html.escape(str(builds[0]))}</text>'
@@ -536,6 +543,62 @@ _DOWNLOAD_JS = """(function () {
         saveBlob(this.getAttribute('href'), this.getAttribute('download') || '');
       });
     }
+  });
+})();
+
+// Interactive chart hover: an instant styled tooltip (the number/name) plus a
+// "pop" animation of the hovered bar / trend point. Works on any [data-tip]
+// element and grows its partner (.bar-rect or .spark-pt with the same data-i in
+// the same SVG). ASCII-only, no async - safe under the trend-reports JS rules.
+(function () {
+  var tip = null;
+  function ensureTip() {
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.className = 'sloc-tip';
+      tip.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(tip);
+    }
+    return tip;
+  }
+  function place(e) {
+    if (!tip) { return; }
+    var pad = 14;
+    var x = e.clientX + pad;
+    var y = e.clientY + pad;
+    var w = tip.offsetWidth;
+    var h = tip.offsetHeight;
+    if (x + w > window.innerWidth - 8) { x = e.clientX - w - pad; }
+    if (y + h > window.innerHeight - 8) { y = e.clientY - h - pad; }
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  }
+  function partner(el) {
+    var svg = el.ownerSVGElement;
+    if (!svg) { return null; }
+    var i = el.getAttribute('data-i');
+    if (i === null) { return null; }
+    return svg.querySelector('.bar-rect[data-i="' + i + '"], .spark-pt[data-i="' + i + '"]');
+  }
+  function bind(el) {
+    el.addEventListener('mouseenter', function (e) {
+      var t = ensureTip();
+      t.textContent = el.getAttribute('data-tip') || '';
+      t.classList.add('show');
+      var p = partner(el);
+      if (p) { p.classList.add('pop'); }
+      place(e);
+    });
+    el.addEventListener('mousemove', place);
+    el.addEventListener('mouseleave', function () {
+      if (tip) { tip.classList.remove('show'); }
+      var p = partner(el);
+      if (p) { p.classList.remove('pop'); }
+    });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    var els = document.querySelectorAll('[data-tip]');
+    for (var i = 0; i < els.length; i++) { bind(els[i]); }
   });
 })();
 """
@@ -1259,12 +1322,45 @@ body {{
 }}
 .bar-rect {{
   cursor: pointer;
-  transition: opacity 0.15s ease;
+  transform-box: fill-box;
+  transform-origin: left center;
+  transition: transform 0.16s ease, filter 0.16s ease;
 }}
-.bar-rect:hover {{ opacity: 0.82; }}
+/* Bar "pops out" when its row is hovered (driven by JS on the hit target). */
+.bar-rect.pop {{
+  transform: scaleY(1.18);
+  filter: brightness(1.12) drop-shadow(0 3px 6px rgba(0,0,0,0.28));
+}}
 .bar-hit {{ cursor: pointer; }}
 .spark-dot {{ cursor: pointer; }}
-.spark-dot:hover {{ fill-opacity: 0.28 !important; }}
+/* Trend point grows/highlights when hovered (driven by JS on the hit dot). */
+.spark-pt {{
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.16s ease;
+}}
+.spark-pt.pop {{ transform: scale(2.6); }}
+
+/* Instant styled hover tooltip shared by the trend + language charts. */
+.sloc-tip {{
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  background: #2d1a0e;
+  color: #f9f5f0;
+  padding: 7px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.32);
+  white-space: nowrap;
+  max-width: 340px;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}}
+.sloc-tip.show {{ opacity: 1; transform: translateY(0); }}
 
 /* ── Report & Exports ────────────────────────────────────────────────────── */
 .export-hint {{
