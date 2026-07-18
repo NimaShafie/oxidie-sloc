@@ -768,40 +768,39 @@ pub fn looks_like_cpp(text: &str) -> bool {
     MARKERS.iter().any(|m| text.contains(m))
 }
 
+/// tree-sitter fast-path for languages that have an adapter. Returns `Some` only
+/// when an adapter exists AND no IEEE 1045-1992 counting policy is engaged — the
+/// adapters don't implement those policies, so honoring them here would make counts
+/// depend on whether the `tree-sitter` feature is compiled in. Takes
+/// `&AnalysisOptions` to avoid assuming `AnalysisOptions: Copy`.
+#[cfg(feature = "tree-sitter")]
+fn tree_sitter_fast_path(
+    language: Language,
+    text: &str,
+    options: &AnalysisOptions,
+) -> Option<RawFileAnalysis> {
+    if options.blank_in_block_comment_as_comment || options.collapse_continuation_lines {
+        return None;
+    }
+    match language {
+        Language::C | Language::Cpp => {
+            let mut result = ts::analyze_c(text)?;
+            if options.enable_style && should_style_analyse(language, options.style_lang_scope) {
+                result.style_analysis = style::analyze_style(language, text);
+            }
+            Some(result)
+        }
+        Language::Python => ts::analyze_python(text),
+        _ => None,
+    }
+}
+
 #[must_use]
 pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) -> RawFileAnalysis {
-    // tree-sitter fast-paths (compiled out when feature is disabled)
+    // tree-sitter fast-path (compiled out when the feature is disabled).
     #[cfg(feature = "tree-sitter")]
-    {
-        // The tree-sitter adapters do not implement the IEEE 1045-1992 counting
-        // policies — they always behave as if both are off (blank lines inside a
-        // block comment count as blank; continuation lines count per physical
-        // line). Taking the fast-path when the caller has engaged either policy
-        // would make counts depend on whether the `tree-sitter` feature is
-        // compiled in. Skip it in that case so results are identical across
-        // feature sets and match the documented lexical semantics.
-        let ieee_policy_engaged =
-            options.blank_in_block_comment_as_comment || options.collapse_continuation_lines;
-        if !ieee_policy_engaged {
-            match language {
-                Language::C | Language::Cpp => {
-                    if let Some(mut result) = ts::analyze_c(text) {
-                        if options.enable_style
-                            && should_style_analyse(language, options.style_lang_scope)
-                        {
-                            result.style_analysis = style::analyze_style(language, text);
-                        }
-                        return result;
-                    }
-                }
-                Language::Python => {
-                    if let Some(result) = ts::analyze_python(text) {
-                        return result;
-                    }
-                }
-                _ => {}
-            }
-        }
+    if let Some(result) = tree_sitter_fast_path(language, text, &options) {
+        return result;
     }
 
     let (mut config, has_preprocessor) = language_scan_config(language);
