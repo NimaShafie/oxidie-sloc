@@ -11,7 +11,7 @@ pub async fn compare_runs(
 ) -> Result<Value> {
     cfg.check_path_allowed(&baseline_path)?;
     cfg.check_path_allowed(&current_path)?;
-    let tmp = tempfile_path();
+    let (_scratch, tmp) = scratch_result_file("sloc-mcp-diff-")?;
     let output = Command::new(&cfg.bin_path)
         .arg("diff")
         .arg(&baseline_path)
@@ -28,17 +28,18 @@ pub async fn compare_runs(
     }
 
     let content = tokio::fs::read_to_string(&tmp).await?;
-    let _ = tokio::fs::remove_file(&tmp).await;
+    // `_scratch` (a TempDir) is dropped here, removing the directory and its contents.
     Ok(serde_json::from_str(&content)?)
 }
 
-fn tempfile_path() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "sloc-mcp-diff-{}.json",
-        uuid::Uuid::new_v4().simple()
-    ));
-    p
+/// Create a private, auto-cleaned scratch directory and return it together with
+/// the path of the `result.json` file the CLI subprocess writes inside it. The
+/// returned [`tempfile::TempDir`] must be kept alive by the caller; dropping it
+/// removes the directory and its contents.
+fn scratch_result_file(prefix: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new().prefix(prefix).tempdir()?;
+    let path = dir.path().join("result.json");
+    Ok((dir, path))
 }
 
 #[cfg(test)]
@@ -64,23 +65,35 @@ mod tests {
         }
     }
 
-    // ── tempfile_path ─────────────────────────────────────────────────────────
+    // ── scratch_result_file ───────────────────────────────────────────────────
 
     #[test]
-    fn tempfile_path_in_temp_dir() {
-        let p = tempfile_path();
+    fn scratch_result_file_in_temp_dir() {
+        let (dir, p) = scratch_result_file("sloc-mcp-diff-").unwrap();
         assert!(p.starts_with(std::env::temp_dir()));
+        assert!(dir.path().exists(), "scratch dir must exist while held");
     }
 
     #[test]
-    fn tempfile_path_has_json_extension() {
-        let p = tempfile_path();
+    fn scratch_result_file_has_json_extension() {
+        let (_dir, p) = scratch_result_file("sloc-mcp-diff-").unwrap();
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
     }
 
     #[test]
-    fn tempfile_path_unique_across_calls() {
-        assert_ne!(tempfile_path(), tempfile_path());
+    fn scratch_result_file_unique_across_calls() {
+        let (_d1, p1) = scratch_result_file("sloc-mcp-diff-").unwrap();
+        let (_d2, p2) = scratch_result_file("sloc-mcp-diff-").unwrap();
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn scratch_result_file_cleans_up_on_drop() {
+        let dir_path = {
+            let (dir, _p) = scratch_result_file("sloc-mcp-diff-").unwrap();
+            dir.path().to_path_buf()
+        };
+        assert!(!dir_path.exists(), "scratch dir must be removed on drop");
     }
 
     // ── compare_runs path validation ──────────────────────────────────────────
