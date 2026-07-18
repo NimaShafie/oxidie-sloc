@@ -619,13 +619,15 @@ After a successful build, confirm each feature is wired correctly:
 - Transient failures are retried once before marking as failed (`.config/nextest.toml`).
 
 ### Coverage Report (Coverage plugin + HTML Publisher)
-- To enable: check `COVERAGE_STANDALONE`.
-- Requires cargo-llvm-cov or cargo-tarpaulin on the agent (see [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage)).
+- To enable: check `COVERAGE_STANDALONE` (opt-in — it recompiles instrumented, adding ~4–5 min/build, so it is off by default).
+- Requires cargo-llvm-cov + `llvm-tools-preview` on the agent (see [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage)).
 - After a successful coverage build:
   - The build page shows **line %, branch %, function %** from the Coverage plugin.
-  - The left sidebar shows a **"Coverage Source"** link with the annotated HTML source view.
-  - The job page shows the **"Line Coverage % Over Time"** trend chart.
+  - **The Coverage view is served at `/job/<job>/<n>/coverage/`** (the `recordCoverage` id is `coverage`) — not `/coverage-report/` or similar.
+  - The left sidebar shows a **"Coverage Source"** link with the annotated HTML source view (source painting targets `crates/`).
+  - The job page shows the **"Line Coverage % Over Time"** trend chart, plus a coverage delta vs. the previous build when the `git-forensics` plugin is installed (`discoverReferenceBuild()`; harmless when absent).
 - Set `COVERAGE_THRESHOLD` (e.g., `60`) to fail the build when line coverage drops below that %.
+- **SonarQube note:** SonarQube imports coverage from **LCOV** (`sonar.rust.lcov.reportPaths=coverage/lcov.info`), not the Cobertura XML — so cargo-llvm-cov's Cobertura duplicate-element quirk (which the Jenkins Coverage plugin rejects) does not affect the SonarQube import.
 
 ### PDF report artifact (pure-Rust)
 - To enable: check `GENERATE_PDF`.

@@ -201,13 +201,24 @@ def runCoverage() {
             gates << [threshold: threshold * 0.7, metric: 'BRANCH',
                       baseline: 'PROJECT', criticality: 'UNSTABLE']
         }
+        // Discover a reference build so the Coverage view shows a delta/trend vs.
+        // the previous build. Guarded: it needs the git-forensics plugin and is
+        // harmless (just no delta) when absent.
+        try {
+            discoverReferenceBuild()
+        } catch (Throwable t) {
+            echo "discoverReferenceBuild skipped (git-forensics plugin not installed): ${t.message}"
+        }
         // Guarded: without the Coverage plugin the lcov/cobertura files are still
-        // archived; only the "Coverage" trend view is skipped.
+        // archived; only the "Coverage" trend view is skipped. id 'coverage' →
+        // conventional /job/<job>/<n>/coverage/ URL. sourceDirectories points the
+        // source-painting at the Rust tree (crates/) instead of the Java default.
         try {
             recordCoverage(
                 tools:               tools,
-                id:                  'oxide-sloc-coverage',
+                id:                  'coverage',
                 name:                'Coverage',
+                sourceDirectories:   [[path: 'crates']],
                 sourceCodeRetention: 'EVERY_BUILD',
                 qualityGates:        gates
             )
