@@ -19,4 +19,4 @@ deploy/
 # Local editor / IDE state.
 .claude/
 images/
-examples/
+testing/examples/

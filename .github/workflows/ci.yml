@@ -135,15 +135,15 @@ jobs:
         run: bash ci/release.sh
 
       - name: Plain summary
-        run: ./target/release/oxide-sloc analyze tests/fixtures/basic --plain
+        run: ./target/release/oxide-sloc analyze testing/fixtures/basic --plain
 
       - name: Per-file breakdown
-        run: ./target/release/oxide-sloc analyze tests/fixtures/basic --per-file --plain
+        run: ./target/release/oxide-sloc analyze testing/fixtures/basic --per-file --plain
 
       - name: JSON + HTML reports
         run: |
           mkdir -p $OUT_DIR
-          ./target/release/oxide-sloc analyze tests/fixtures/basic \
+          ./target/release/oxide-sloc analyze testing/fixtures/basic \
             --report-title "CI run ${{ github.run_number }}" \
             --json-out $OUT_DIR/result.json \
             --html-out $OUT_DIR/report.html
@@ -160,7 +160,7 @@ jobs:
         run: |
           for policy in code-only code-and-comment comment-only separate-mixed-category; do
             echo "--- policy: $policy ---"
-            ./target/release/oxide-sloc analyze tests/fixtures/basic \
+            ./target/release/oxide-sloc analyze testing/fixtures/basic \
               --plain --mixed-line-policy "$policy"
           done
 

@@ -94,13 +94,13 @@ smoke:plain:
   stage: smoke
   needs: [build]
   script:
-    - ./target/release/oxide-sloc analyze tests/fixtures/basic --plain
+    - ./target/release/oxide-sloc analyze testing/fixtures/basic --plain
 
 smoke:per-file:
   stage: smoke
   needs: [build]
   script:
-    - ./target/release/oxide-sloc analyze tests/fixtures/basic --per-file --plain
+    - ./target/release/oxide-sloc analyze testing/fixtures/basic --per-file --plain
 
 smoke:reports:
   stage: smoke
@@ -108,7 +108,7 @@ smoke:reports:
   script:
     - mkdir -p "${OUT_DIR}"
     - |
-      ./target/release/oxide-sloc analyze tests/fixtures/basic \
+      ./target/release/oxide-sloc analyze testing/fixtures/basic \
         --report-title "GitLab CI run ${CI_PIPELINE_IID}" \
         --json-out "${OUT_DIR}/result.json" \
         --html-out "${OUT_DIR}/report.html"
@@ -145,7 +145,7 @@ smoke:policies:
     - |
       for policy in code-only code-and-comment comment-only separate-mixed-category; do
         echo "--- policy: $policy ---"
-        ./target/release/oxide-sloc analyze tests/fixtures/basic \
+        ./target/release/oxide-sloc analyze testing/fixtures/basic \
           --plain --mixed-line-policy "$policy"
       done
 

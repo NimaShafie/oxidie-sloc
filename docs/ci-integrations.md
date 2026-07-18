@@ -334,7 +334,7 @@ curl -sS -X POST -u "${JENKINS_USER}:${JENKINS_TOKEN}" \
   --data-urlencode 'REPORT_TITLE=widget SLOC'
 ```
 
-**B. Drop-in per project (self-contained `Jenkinsfile`).** Copy `examples/jenkins/Jenkinsfile` into your project's repository and let Jenkins auto-discover it (**Pipeline script from SCM**, script path `Jenkinsfile`). It scans the checked-out workspace with no edits, installing the scanner from crates.io when it is not already on `PATH`. For a Jenkins **shared library**, use `ci/sloc-jenkins.groovy` (`slocAnalyze(path: '.')`) instead — see the header of that file.
+**B. Drop-in per project (self-contained `Jenkinsfile`).** Copy `testing/examples/jenkins/Jenkinsfile` into your project's repository and let Jenkins auto-discover it (**Pipeline script from SCM**, script path `Jenkinsfile`). It scans the checked-out workspace with no edits, installing the scanner from crates.io when it is not already on `PATH`. For a Jenkins **shared library**, use `ci/sloc-jenkins.groovy` (`slocAnalyze(path: '.')`) instead — see the header of that file.
 
 Use **A** for a governance/portfolio scan run centrally; use **B** when each team owns its own pipeline.
 
@@ -393,7 +393,7 @@ The first build runs with no parameters — Jenkins uses it to discover the `par
 | `REPO_URL` | `https://github.com/oxide-sloc/oxide-sloc.git` | **Tooling repo** — the checkout the scanner binary is built from. Leave at the default (or your fork). To scan a different project, use `TARGET_REPO_URL` instead; do not point `REPO_URL` at the project you want to scan. Use `file:///path/to/repo` for air-gapped repos. |
 | `TARGET_REPO_URL` | _(empty → scan self)_ | Git URL of the **project you want to analyze**. When set, it is checked out into `./_target` and scanned there — this is how one Jenkins job scans any project. Empty = scan the tooling repo itself. Use `file:///path/to/repo` for air-gapped repos. |
 | `TARGET_REF` | _(default branch)_ | Branch, tag, or commit SHA to check out for `TARGET_REPO_URL`. Ignored when `TARGET_REPO_URL` is empty. Example: `develop`, `v2.1.0`, `a3f9d2c`. |
-| `SCAN_PATH` | `tests/fixtures/basic` | Directory or space-separated paths to scan, relative to the scanned repo root (or absolute). When `TARGET_REPO_URL` is set this is relative to `./_target` — set it to a path inside your project (`.` for the whole repo, `src` for a subtree). The default only exists in the oxide-sloc repo. |
+| `SCAN_PATH` | `testing/fixtures/basic` | Directory or space-separated paths to scan, relative to the scanned repo root (or absolute). When `TARGET_REPO_URL` is set this is relative to `./_target` — set it to a path inside your project (`.` for the whole repo, `src` for a subtree). The default only exists in the oxide-sloc repo. |
 | `REPORT_TITLE` | `oxide-sloc CI Report` | Title embedded in generated HTML and PDF reports. |
 | `OUTPUT_SUBDIR` | `ci-out` | Sub-directory for all generated artifacts (relative to workspace). Created automatically. Contains `report.html`, `result.json`, `report.pdf`, and trend CSVs. |
 | `CI_PRESET` | `default` | CI configuration preset loaded from `ci/`: `default` (balanced, mirrors web UI) / `none` (no preset) / `strict` (fail on binary files) / `full-scope` (count everything including vendor). |
@@ -1169,7 +1169,7 @@ The job stages these artifacts for upload: the compiled `oxide-sloc` binary, `re
 
 ### Publishing from Bitbucket Pipelines
 
-The `examples/bitbucket/bitbucket-pipelines.yml` file includes a **Publish to Nexus** step in both the `default` and `branches.main` pipelines. The step is a no-op when `NEXUS_REPO_URL` is not set, so adding this step does not break existing builds.
+The `testing/examples/bitbucket/bitbucket-pipelines.yml` file includes a **Publish to Nexus** step in both the `default` and `branches.main` pipelines. The step is a no-op when `NEXUS_REPO_URL` is not set, so adding this step does not break existing builds.
 
 **Repository variables to set** (Repository settings → Repository variables):
 

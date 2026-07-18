@@ -87,8 +87,8 @@ perf.data.old
 /toolchain/tmp/
 /.tools/
 
-# Generated report artefacts under tests/fixtures/
-tests/fixtures/**/sloc/
+# Generated report artefacts under testing/fixtures/
+testing/fixtures/**/sloc/
 
 # Transferable bundle archives created by `make bundle`
 /oxide-sloc-bundle*.7z

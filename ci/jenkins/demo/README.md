@@ -43,7 +43,7 @@ This creates `oxide-sloc-chain-upstream` and `oxide-sloc-chain-downstream`.
 ## 2. Run the test
 
 Build **`oxide-sloc-chain-upstream`** (Build with Parameters — the defaults are
-fine; `SCAN_PATH` defaults to `tests/fixtures/basic`).
+fine; `SCAN_PATH` defaults to `testing/fixtures/basic`).
 
 It runs `SKIP_QUALITY_GATES=true` and `SKIP_WEB_CHECK=true` so the demo is fast:
 oxide-sloc still builds, scans, and reports, but skips fmt/lint/test and the web
