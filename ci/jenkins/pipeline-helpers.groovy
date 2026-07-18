@@ -253,11 +253,11 @@ def runAnalyze() {
     def effScan = params.SCAN_PATH?.trim() ?: '.'
     if (scanningExternal) {
         effScan = effScan.startsWith('/') ? effScan : "${scanRoot}/${effScan}"
-        // Fail fast with a helpful message when SCAN_PATH does not exist in the target —
-        // the default (tests/fixtures/basic) only exists in the oxide-sloc repo.
+        // Fail fast with a helpful message when a SCAN_PATH subtree does not exist
+        // in the target repo (a blank SCAN_PATH scans the whole repo and never trips this).
         if (!fileExists(effScan)) {
-            error("SCAN_PATH '${params.SCAN_PATH}' was not found in the target project (${scanRoot}). " +
-                  "Set SCAN_PATH to a path inside TARGET_REPO_URL, e.g. '.' for the whole repo or 'src'.")
+            error("SCAN_PATH '${params.SCAN_PATH}' was not found in the target repo (${scanRoot}). " +
+                  "Leave SCAN_PATH BLANK to scan the whole repo, or set an existing subtree like 'src'.")
         }
     }
 
@@ -712,6 +712,17 @@ def runPostSuccess() {
         def result = readJSON file: "${outDir}/result_${proj}.json"
         def t      = result.summary_totals
 
+        // A human label for the build row: the SCAN_PATH subtree if set, else the
+        // target repo name (external scan), else "whole repo" (self-scan). SCAN_PATH
+        // is commonly blank now (blank = whole repo), so never show an empty label.
+        def scanLabel = params.SCAN_PATH?.trim()
+        if (!scanLabel) {
+            def tRepo = params.TARGET_REPO_URL?.trim()
+            scanLabel = tRepo
+                ? tRepo.replaceAll(/\.git$/, '').replaceAll(/.*[\/:]/, '')
+                : 'whole repo'
+        }
+
         def fmtN = { n ->
             long v = n as long
             long a = Math.abs(v)
@@ -726,7 +737,7 @@ def runPostSuccess() {
         def desc = "${fmtN(t.code_lines)} code · " +
                    "${fmtN(t.comment_lines)} cmts · " +
                    "${fmtN(t.blank_lines)} blank · " +
-                   "${fmtN(t.files_analyzed)} files | ${params.SCAN_PATH}"
+                   "${fmtN(t.files_analyzed)} files | ${scanLabel}"
 
         // Capture the sub-metrics so the rich summary generator can lay them out.
         def styleStr = ''
@@ -787,7 +798,7 @@ def runPostSuccess() {
         // glyphs, no HTML needed) and the .html feeds the badge summary box.
         def richDesc = desc
         try {
-            withEnv(["SLOC_SCAN_PATH=${params.SCAN_PATH ?: ''}",
+            withEnv(["SLOC_SCAN_PATH=${scanLabel}",
                      "SLOC_TESTS=${testsStr}",
                      "SLOC_COV=${covStr}",
                      "SLOC_STYLE=${styleStr}"]) {
@@ -808,7 +819,7 @@ def runPostSuccess() {
         }
 
         currentBuild.description = richDesc
-        currentBuild.displayName = "#${env.BUILD_NUMBER} — ${params.SCAN_PATH}"
+        currentBuild.displayName = "#${env.BUILD_NUMBER} — ${scanLabel}"
 
         // A boxed HTML summary panel (metric table + coloured language bars) on
         // the build page, via the badge plugin's createSummary. Catch Throwable,

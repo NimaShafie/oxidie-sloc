@@ -58,42 +58,53 @@ pipeline {
     parameters {
 
         // ═══════════════════════════════════════════════════════════════════════
-        //  REQUIRED — WHAT TO SCAN   (a quick scan needs only SCAN_PATH)
+        //  WHAT TO SCAN — point this at any existing repo and hit Build.
+        //  GitHub / GitLab / Bitbucket / local all work (it's a plain git clone).
+        //  Private repo? also set TARGET_CREDENTIALS_ID. Leave TARGET_REPO_URL
+        //  blank to scan this tooling repo itself (self-CI / demo).
+        //  See docs: ci/jenkins/INTEGRATION.md
         // ═══════════════════════════════════════════════════════════════════════
-        string(
-            name:         'SCAN_PATH',
-            defaultValue: 'tests/fixtures/basic',
-            description:  'REQUIRED — directory to scan (repo-relative or absolute). ' +
-                          'Use "." for a whole project or "src" for a subtree. ' +
-                          'The default only exists in the oxide-sloc repo, so change it for your project.'
-        )
         string(
             name:         'TARGET_REPO_URL',
             defaultValue: '',
-            description:  'Scan a DIFFERENT project: its Git URL (empty = scan this tooling repo). ' +
-                          'Checked out into ./_target; SCAN_PATH is resolved inside it. ' +
-                          'Use file:///path/to/repo for air-gapped local repos.'
+            description:  'The repo to analyze — any Git URL (GitHub / GitLab / Bitbucket / ' +
+                          'file:///local, https:// or ssh://). Blank = scan this tooling repo itself. ' +
+                          'Cloned into ./_target; SCAN_PATH is resolved inside it.'
         )
         string(
             name:         'TARGET_REF',
             defaultValue: '',
-            description:  'Branch/tag/SHA for TARGET_REPO_URL (empty = default branch). e.g. develop, v2.1.0, a3f9d2c'
+            description:  'Branch, tag, or commit SHA to scan (blank = the repo default branch). ' +
+                          'e.g. main, develop, v2.1.0, a3f9d2c'
+        )
+        string(
+            name:         'TARGET_CREDENTIALS_ID',
+            defaultValue: '',
+            description:  'Jenkins credentials ID for cloning a PRIVATE target repo (a username + ' +
+                          'personal-access-token, or an SSH key if TARGET_REPO_URL is an ssh:// URL). ' +
+                          'Blank = public repo, or the agent already has git access. ' +
+                          'Add one under Manage Jenkins > Credentials, then paste its ID here.'
+        )
+        string(
+            name:         'SCAN_PATH',
+            defaultValue: '',
+            description:  'Subdirectory of the target repo to scan. BLANK = the whole repo (recommended). ' +
+                          'Set e.g. "src" or "packages/api" for a subtree; absolute paths also work.'
         )
 
         // ═══════════════════════════════════════════════════════════════════════
-        //  OPTIONAL — everything below this line is pre-set to oxide-sloc's
-        //  application defaults. For a QUICK SCAN, ignore all of it: set SCAN_PATH
-        //  above and hit Build. The checkbox marks the boundary; leave it unchecked
-        //  and the defaults below already produce a standard default scan.
+        //  OPTIONAL — everything below is pre-set to oxide-sloc's application
+        //  defaults. For a standard scan, ignore it all: set TARGET_REPO_URL above
+        //  and hit Build. The checkbox just marks the boundary.
         //  (Jenkins' built-in form cannot truly collapse these fields without the
         //  Active Choices plugin — see ci/jenkins/MAINTENANCE.md for that option.)
         // ═══════════════════════════════════════════════════════════════════════
         booleanParam(
             name:         'CHANGE_DEFAULT_SCAN_SETTINGS',
             defaultValue: false,
-            description:  'Leave UNCHECKED for a quick scan with oxide-sloc defaults — you only need ' +
-                          'SCAN_PATH above. Check it as a reminder when you intend to change any of the ' +
-                          'optional parameters that follow (they are all pre-set to sensible defaults).'
+            description:  'Leave UNCHECKED for a standard scan with oxide-sloc defaults — you only need ' +
+                          'TARGET_REPO_URL above. Check it as a reminder when you intend to change any of ' +
+                          'the optional parameters that follow (they are all pre-set to sensible defaults).'
         )
 
         // ── Optional — output naming ───────────────────────────────────────────
@@ -462,17 +473,28 @@ pipeline {
                             !(params.TARGET_REF.trim() ==~ /^[A-Za-z0-9_\-\.\/]+$/)) {
                         error("TARGET_REF contains invalid characters: ${params.TARGET_REF}")
                     }
+                    if (params.TARGET_CREDENTIALS_ID?.trim() &&
+                            !(params.TARGET_CREDENTIALS_ID.trim() ==~ /^[A-Za-z0-9_\-\.]+$/)) {
+                        error("TARGET_CREDENTIALS_ID contains invalid characters: ${params.TARGET_CREDENTIALS_ID}")
+                    }
                     if (params.TARGET_REPO_URL?.trim()) {
                         def ref = params.TARGET_REF?.trim() ?: 'main'
                         // Accept a bare branch/tag (map to origin) or an explicit ref/SHA.
                         def branchSpec = (ref ==~ /^[0-9a-fA-F]{7,40}$/ || ref.contains('/')) ? ref : "*/${ref}"
+                        // Attach the credential only when provided, so public repos
+                        // (and agents with ambient git auth) keep working unchanged.
+                        def remoteCfg = [url: params.TARGET_REPO_URL.trim()]
+                        if (params.TARGET_CREDENTIALS_ID?.trim()) {
+                            remoteCfg['credentialsId'] = params.TARGET_CREDENTIALS_ID.trim()
+                        }
                         dir('_target') {
                             checkout([$class: 'GitSCM',
                                       branches: [[name: branchSpec]],
-                                      userRemoteConfigs: [[url: params.TARGET_REPO_URL.trim()]]])
+                                      userRemoteConfigs: [remoteCfg]])
                         }
                         env.SCAN_ROOT = "${env.WORKSPACE}/_target"
-                        echo "Scanning external project checked out at ${env.SCAN_ROOT} (ref: ${ref})"
+                        def credNote = params.TARGET_CREDENTIALS_ID?.trim() ? " (creds: ${params.TARGET_CREDENTIALS_ID.trim()})" : ''
+                        echo "Scanning external project at ${env.SCAN_ROOT} (ref: ${ref})${credNote}"
                     } else {
                         env.SCAN_ROOT = env.WORKSPACE
                     }
