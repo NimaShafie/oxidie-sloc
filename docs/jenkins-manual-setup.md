@@ -322,13 +322,19 @@ job pulls its `Jenkinsfile` from SCM, Jenkins enforces the Groovy sandbox by def
 With the sandbox active, the in-pipeline `System.setProperty` call is always blocked
 ("Direct CSP set blocked (sandbox active)"), so the REST API fallback becomes the only
 in-pipeline path available.  This makes the `jenkins-api-token` credential **effectively
-required** on a fresh install — unless you also disable the sandbox.
+required** on a fresh install (on older Jenkins you could instead disable the sandbox — see
+the note below on why that no longer works).
 
-Disabling the sandbox is exactly what `<sandbox>false</sandbox>` in
-`ci/jenkins/job-config.xml` and `ci/jenkins/job-config.xml.tmpl` does.  If you
-imported the job using `job-config.xml` the sandbox is already off.  If you created
-the job through the web UI, go to **Configure → Pipeline → Advanced** and uncheck
-**"Use Groovy Sandbox"** — or simply add this credential and leave the sandbox on.
+On `workflow-cps` versions that still honor it, `<sandbox>false</sandbox>` in
+`ci/jenkins/job-config.xml` and `ci/jenkins/job-config.xml.tmpl` disables the sandbox.
+**On current Jenkins LTS (`workflow-cps` 3900+, including 2.555.x) this element is
+ignored** — `CpsScmFlowDefinition` no longer exposes a sandbox field, so SCM-defined
+pipelines are always sandboxed and the `<sandbox>` line is a harmless no-op (Jenkins
+silently strips it on import). There is no web-UI toggle to disable it either.
+Instead, rely on the `jenkins-api-token` credential (the REST fallback below) for
+in-pipeline CSP relaxation, or use the `init.groovy.d/relax-csp.groovy` approach in
+[Step 6](#6-configure-the-csp-header-html-report-viewer) — recommended, since it needs
+no credential.
 
 | Field | Value |
 |-------|-------|
@@ -504,7 +510,7 @@ once.  The first build must run **without parameters** to register them.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 
-From this point on, all 49 configuration parameters are visible in the build form.
+From this point on, all 50 configuration parameters are visible in the build form.
 
 ---
 
@@ -512,7 +518,7 @@ From this point on, all 49 configuration parameters are visible in the build for
 
 1. Click **"Build with Parameters"** in the left sidebar.
 
-2. The build form opens with all 49 parameters grouped by function.
+2. The build form opens with all 50 parameters grouped by function.
    Adjust at minimum:
 
    | Parameter | Default | What to set |
