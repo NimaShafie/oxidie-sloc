@@ -29,7 +29,17 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '5'))
+        // Bound server storage on BOTH count and age. Build records (logs +
+        // published HTML reports) are capped at 20 builds / 30 days; the heavier
+        // archived artifacts (JSON/HTML/PDF/XLSX/sub-reports) are pruned harder —
+        // last 5 builds / 14 days — since only the latest matter for review and
+        // trend history is preserved separately in the persistent CSV.
+        buildDiscarder(logRotator(
+            numToKeepStr:         '20',
+            daysToKeepStr:        '30',
+            artifactNumToKeepStr: '5',
+            artifactDaysToKeepStr: '14'
+        ))
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
         ansiColor('xterm')
@@ -48,10 +58,7 @@ pipeline {
     parameters {
 
         // ═══════════════════════════════════════════════════════════════════════
-        //  REQUIRED — WHAT TO SCAN
-        //  Set SCAN_PATH (and TARGET_REPO_URL to point at another project). Every
-        //  parameter after the ADVANCED_OPTIONS divider is optional and already
-        //  matches oxide-sloc's application defaults — leave them for a normal run.
+        //  REQUIRED — WHAT TO SCAN   (a quick scan needs only SCAN_PATH)
         // ═══════════════════════════════════════════════════════════════════════
         string(
             name:         'SCAN_PATH',
@@ -72,35 +79,39 @@ pipeline {
             defaultValue: '',
             description:  'Branch/tag/SHA for TARGET_REPO_URL (empty = default branch). e.g. develop, v2.1.0, a3f9d2c'
         )
+
+        // ═══════════════════════════════════════════════════════════════════════
+        //  OPTIONAL — everything below this line is pre-set to oxide-sloc's
+        //  application defaults. For a QUICK SCAN, ignore all of it: set SCAN_PATH
+        //  above and hit Build. The checkbox marks the boundary; leave it unchecked
+        //  and the defaults below already produce a standard default scan.
+        //  (Jenkins' built-in form cannot truly collapse these fields without the
+        //  Active Choices plugin — see ci/jenkins/MAINTENANCE.md for that option.)
+        // ═══════════════════════════════════════════════════════════════════════
+        booleanParam(
+            name:         'CHANGE_DEFAULT_SCAN_SETTINGS',
+            defaultValue: false,
+            description:  'Leave UNCHECKED for a quick scan with oxide-sloc defaults — you only need ' +
+                          'SCAN_PATH above. Check it as a reminder when you intend to change any of the ' +
+                          'optional parameters that follow (they are all pre-set to sensible defaults).'
+        )
+
+        // ── Optional — output naming ───────────────────────────────────────────
         string(
             name:         'REPO_URL',
             defaultValue: 'https://github.com/oxide-sloc/oxide-sloc.git',
-            description:  'Tooling repo the scanner is built from — leave at the default (or your fork). ' +
-                          'This is NOT the project to scan; use TARGET_REPO_URL for that.'
+            description:  '(optional) Tooling repo the scanner is built from — leave at the default ' +
+                          '(or your fork). This is NOT the project to scan; use TARGET_REPO_URL for that.'
         )
         string(
             name:         'REPORT_TITLE',
             defaultValue: 'oxide-sloc CI Report',
-            description:  'Title shown in the generated HTML and PDF reports.'
+            description:  '(optional) Title shown in the generated HTML and PDF reports.'
         )
         string(
             name:         'OUTPUT_SUBDIR',
             defaultValue: 'ci-out',
-            description:  'Workspace sub-directory for generated artifacts (letters, digits, - _ / only).'
-        )
-
-        // ═══════════════════════════════════════════════════════════════════════
-        //  ADVANCED — OPTIONAL (pre-set to oxide-sloc's application defaults)
-        //  Leave everything below unchanged for a standard scan. Scroll past it
-        //  unless you specifically need to customize. To make this a real
-        //  collapsible section, install the "Parameter Separator" plugin.
-        // ═══════════════════════════════════════════════════════════════════════
-        booleanParam(
-            name:         'ADVANCED_OPTIONS',
-            defaultValue: false,
-            description:  'Section divider (no effect on the build). The parameters below are ' +
-                          'optional and already match oxide-sloc\'s defaults — leave them as-is ' +
-                          'for a standard run; adjust only what you need.'
+            description:  '(optional) Workspace sub-directory for generated artifacts (letters, digits, - _ / only).'
         )
 
         // ── Pipeline switches (optional) ───────────────────────────────────────
