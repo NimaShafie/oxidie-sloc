@@ -618,7 +618,13 @@ pipeline {
                 }
             }
             steps {
-                script { h.runCoverage() }
+                // Never let a coverage/test hiccup cascade and wipe the rest of the
+                // published dashboard: mark the build UNSTABLE and the stage FAILURE,
+                // but keep going so Analyze / Archive & Publish (reports, plots,
+                // warnings, HTML) still run.
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    script { h.runCoverage() }
+                }
             }
         }
 
