@@ -200,7 +200,9 @@ Run this before `createItem`. It verifies reachability, authentication, plugin p
 set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh
 ```
 
-All lines must print `[ok]`. Fix any `[fail]` before continuing.
+Fix any `[fail]` before continuing. `[ok]` is green, `[warn]` is advisory, and a `[skip]`
+line is benign (a probe that can't self-run, e.g. the agent library check when the script
+console is sandbox-gated — verify those manually per the inline hint).
 
 ### Installing plugins
 
@@ -302,7 +304,7 @@ sudo -u jenkins tar -xzf rust-cache.tar.gz -C /var/lib/jenkins
 bash ci/jenkins/preflight.sh
 ```
 
-All lines must print `[ok]`. Run this after Step 1 and again after Step 2 to confirm both layers are in place before triggering a build.
+Run this after Step 1 and again after Step 2 to confirm both layers are in place before triggering a build. Every line should be `[ok]` (a `[skip]` is benign; fix any `[fail]`).
 
 ### Basic pipeline
 

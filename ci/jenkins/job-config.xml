@@ -32,6 +32,9 @@
     </scm>
     <scriptPath>Jenkinsfile</scriptPath>
     <lightweight>true</lightweight>
+    <!-- No-op on modern workflow-cps (3900+, incl. Jenkins 2.555.x): CpsScmFlowDefinition
+         no longer exposes a sandbox field, so SCM pipelines are always sandboxed and
+         Jenkins silently strips this element on import. Kept for older-Jenkins back-compat. -->
     <sandbox>false</sandbox>
   </definition>
   <disabled>false</disabled>

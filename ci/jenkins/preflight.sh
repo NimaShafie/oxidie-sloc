@@ -44,6 +44,7 @@ ok()   { printf '[ok]   %s\n' "$*"; }
 fail() { printf '[fail] %s\n' "$*" >&2; ANY_FAIL=1; }
 info() { printf '[info] %s\n' "$*"; }
 warn() { printf '[warn] %s\n' "$*"; }
+skip() { printf '[skip] %s\n' "$*"; }
 
 # ── Validate required variables ──────────────────────────────────────────────
 
@@ -263,9 +264,14 @@ if [ -n "$crumb" ]; then
     elif [[ "$SYSLIB_OUT" == MISSING:* ]]; then
         fail "Agent is missing build deps (${SYSLIB_OUT#MISSING:}). Rebuild the Jenkins agent image or run ci/jenkins/install-system-deps.sh in the container: see docs/ci-integrations.md \"Rebuilding the agent image\"."
     else
-        # Script console may be locked down or unreachable. Demote to info.
-        info "Could not query agent system libraries via /scriptText. If clippy fails with \"Package wayland-client was not found\", rebuild the agent image."
+        # Script console is sandbox/permission-gated or unreachable, so this probe
+        # cannot run. This is not a failure — mark it explicitly skipped and tell the
+        # operator how to confirm manually (a passing Setup/Lint stage proves the libs
+        # are present), rather than leaving an ambiguous [info].
+        skip "Agent system-library probe (script console gated) — verify manually: if the Setup/Lint stage builds, the libs are present. If clippy fails with \"Package wayland-client was not found\", rebuild the agent image (ci/jenkins/install-system-deps.sh)."
     fi
+else
+    skip "Agent system-library probe (could not obtain a crumb for the script console) — verify manually via a passing Setup/Lint stage."
 fi
 rm -f "$cookies"
 

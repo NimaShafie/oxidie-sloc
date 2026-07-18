@@ -237,7 +237,10 @@ Run this before the `createItem` call. It verifies reachability, authentication,
 set -a; source ci/jenkins/.env; set +a && bash ci/jenkins/preflight.sh
 ```
 
-All lines must print `[ok]`. Fix any `[fail]` before continuing.
+Fix any `[fail]` before continuing. `[ok]` lines are green; a `[skip]` line is benign
+(a probe that can't self-run — e.g. the agent system-library check when the script
+console is sandbox-gated — with manual-verification guidance inline), and `[warn]`
+lines are advisory (see below).
 
 If a `[warn]` line reports that `hudson.model.DirectoryBrowserSupport.CSP` is at the default value, re-run with `--install-csp` to copy `relax-csp.groovy` into the running Jenkins container and restart it (requires Docker on the same host as Jenkins):
 
