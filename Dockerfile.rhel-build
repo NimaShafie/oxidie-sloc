@@ -19,10 +19,10 @@
 # (verified by sha256) via ci/docker-cargo-config.toml, so no crates.io access
 # is required. Only the one-time rustup bootstrap needs the network.
 #
-# DoD / hardened builds may substitute an approved UBI mirror WITHOUT editing
+# Hardened builds may substitute an approved UBI mirror WITHOUT editing
 # this file, e.g.:
 #   docker build -f Dockerfile.rhel-build \
-#     --build-arg BUILDER_IMAGE=registry1.dso.mil/ironbank/redhat/ubi/ubi8:8.10 .
+#     --build-arg BUILDER_IMAGE=registry.example.com/ubi/ubi8:8.10 .
 # NOTE: an ARG used in FROM must be declared before the first FROM (global scope).
 # Digest pinned to prevent silent base-image substitution (Scorecard Pinned-Dependencies).
 # To update: docker buildx imagetools inspect registry.access.redhat.com/ubi8/ubi:8.10

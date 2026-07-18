@@ -22,6 +22,7 @@ static IMG_ICON_DOCKERFILE: &[u8] = include_bytes!("../assets/icons/docker.png")
 static IMG_ICON_MAKEFILE: &[u8] = include_bytes!("../assets/icons/makefile.svg");
 static IMG_ICON_PERL: &[u8] = include_bytes!("../assets/icons/perl.svg");
 
+pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod confluence;
 pub(crate) mod error;
@@ -585,6 +586,10 @@ pub(crate) struct AppState {
     pub(crate) registry_path: PathBuf,
     pub(crate) analyze_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) server_mode: bool,
+    /// Operator explicitly accepted running server mode with no API key
+    /// (`SLOC_ALLOW_UNAUTHENTICATED=1`). When false, an unauthenticated server-mode
+    /// request fails closed with 503 instead of being served open.
+    pub(crate) allow_unauthenticated: bool,
     pub(crate) tls_enabled: bool,
     pub(crate) api_keys: Arc<Vec<secrecy::SecretBox<String>>>,
     pub(crate) rate_limiter: Arc<IpRateLimiter>,
@@ -828,6 +833,7 @@ fn test_app_state(tmp_subdir: &str) -> AppState {
         registry_path: tmp.join("registry.json"),
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode: false,
+        allow_unauthenticated: false,
         tls_enabled: false,
         api_keys: Arc::new(vec![]),
         rate_limiter: Arc::new(IpRateLimiter::new(
@@ -938,6 +944,22 @@ struct RuntimeSecurityConfig {
     rate_limiter: Arc<IpRateLimiter>,
 }
 
+/// Whether the operator has explicitly opted into running server mode with no API key.
+/// This is the single escape hatch for the fail-closed server-mode auth requirement.
+fn allow_unauthenticated_server_mode() -> bool {
+    matches!(
+        std::env::var("SLOC_ALLOW_UNAUTHENTICATED").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+/// Fail-closed startup gate: refuse to launch a network-facing server that has no
+/// authentication configured, unless the operator explicitly accepted the risk.
+/// Desktop/local mode (`server_mode == false`) is always allowed.
+fn refuse_unauthenticated_server(server_mode: bool, has_api_keys: bool) -> bool {
+    server_mode && !has_api_keys && !allow_unauthenticated_server_mode()
+}
+
 fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
     let api_keys: Vec<secrecy::SecretBox<String>> = std::env::var("SLOC_API_KEYS")
         .or_else(|_| std::env::var("SLOC_API_KEY"))
@@ -948,10 +970,16 @@ fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
         .map(|s| secrecy::SecretBox::new(Box::new(s.to_owned())))
         .collect();
     if server_mode && api_keys.is_empty() {
-        println!(
-            "WARNING: SLOC_API_KEY / SLOC_API_KEYS is not set. All web endpoints are \
-             unauthenticated. Set SLOC_API_KEYS (comma-separated) to enable authentication."
-        );
+        // Absence of a key is a hard startup failure in server mode (enforced by the
+        // caller, `serve`). The only exception is an explicit operator opt-in via
+        // SLOC_ALLOW_UNAUTHENTICATED=1 for trusted-LAN testing — warn loudly then.
+        if allow_unauthenticated_server_mode() {
+            println!(
+                "WARNING: SLOC_ALLOW_UNAUTHENTICATED=1 — server mode is running with NO \
+                 authentication. Every web endpoint is publicly reachable. Do NOT use this \
+                 outside a trusted, isolated network."
+            );
+        }
     }
     let tls_cert = std::env::var("SLOC_TLS_CERT").ok();
     let tls_key = std::env::var("SLOC_TLS_KEY").ok();
@@ -1061,6 +1089,28 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let _ = registry.save(&registry_path);
 
     let sec = load_runtime_security_config(server_mode);
+    // Security posture: refuse to start an unauthenticated network-facing server. A server-mode
+    // launch with no API key would expose every endpoint publicly; fail closed unless the
+    // operator has explicitly accepted the risk via SLOC_ALLOW_UNAUTHENTICATED=1.
+    if refuse_unauthenticated_server(server_mode, !sec.api_keys.is_empty()) {
+        audit::record(
+            "server_start_refused",
+            "denied",
+            &[(
+                "reason",
+                "server mode requires SLOC_API_KEY / SLOC_API_KEYS",
+            )],
+        );
+        anyhow::bail!(
+            "refusing to start: server mode requires authentication. Set SLOC_API_KEY \
+             (or SLOC_API_KEYS=<k1,k2>) to a secret before launching. To run an \
+             unauthenticated server on a trusted, isolated network, explicitly set \
+             SLOC_ALLOW_UNAUTHENTICATED=1 (not recommended)."
+        );
+    }
+    if server_mode && sec.api_keys.is_empty() {
+        audit::record("server_start_unauthenticated", "warning", &[]);
+    }
     spawn_upload_staging_cleanup();
 
     let git_clones_dir = resolve_git_clones_dir(&output_root);
@@ -1090,6 +1140,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         registry_path,
         analyze_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ANALYSES)),
         server_mode,
+        allow_unauthenticated: allow_unauthenticated_server_mode(),
         tls_enabled: sec.tls_enabled,
         api_keys: Arc::new(sec.api_keys),
         rate_limiter: sec.rate_limiter,
@@ -34074,6 +34125,101 @@ mod coverage_boost_unit_tests {
 mod tests_private {
     use super::*;
     use std::io::Read;
+
+    // ── Server-mode fail-closed auth gate ──────────────────────────────────────
+
+    #[test]
+    fn local_mode_never_refuses_start() {
+        // Desktop / local mode is open by design regardless of key presence.
+        assert!(!refuse_unauthenticated_server(false, false));
+        assert!(!refuse_unauthenticated_server(false, true));
+    }
+
+    #[test]
+    fn server_mode_with_key_is_allowed() {
+        assert!(!refuse_unauthenticated_server(true, true));
+    }
+
+    // Env-mutating assertions live in one test so they run sequentially: the
+    // process-global env var would otherwise race across parallel test threads.
+    #[test]
+    fn server_mode_auth_gate_respects_optin() {
+        std::env::remove_var("SLOC_ALLOW_UNAUTHENTICATED");
+        assert!(
+            refuse_unauthenticated_server(true, false),
+            "server mode + no key must fail closed by default"
+        );
+        std::env::set_var("SLOC_ALLOW_UNAUTHENTICATED", "1");
+        assert!(
+            !refuse_unauthenticated_server(true, false),
+            "explicit opt-in must allow the unauthenticated server"
+        );
+        std::env::remove_var("SLOC_ALLOW_UNAUTHENTICATED");
+    }
+
+    // ── Zip-slip / path-traversal on tarball extraction ────────────────────────
+
+    /// Hand-build a raw USTAR block for `name`/`data`, bypassing `tar::Builder`
+    /// (which refuses to *write* a `..` path). This lets us feed the *reader* a
+    /// genuinely malicious archive, which is where the zip-slip guard must hold.
+    fn raw_tar_block(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut h = [0u8; 512];
+        let nb = name.as_bytes();
+        h[..nb.len()].copy_from_slice(nb);
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[108..116].copy_from_slice(b"0000000\0");
+        h[116..124].copy_from_slice(b"0000000\0");
+        h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[156] = b'0'; // typeflag: regular file
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        for b in &mut h[148..156] {
+            *b = b' ';
+        }
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+
+        let mut out = h.to_vec();
+        out.extend_from_slice(data);
+        out.resize(out.len() + (512 - data.len() % 512) % 512, 0); // pad file to 512
+        out.resize(out.len() + 1024, 0); // two trailing zero blocks
+        out
+    }
+
+    /// A malicious tar whose entry path escapes the destination via `..` must not
+    /// write outside the staging directory. Locks in the `tar::Archive::unpack`
+    /// zip-slip guard as a regression test.
+    #[tokio::test]
+    async fn tarball_extraction_blocks_zip_slip() {
+        use std::io::Write as _;
+
+        let base = std::env::temp_dir().join(format!("sloc_zipslip_{}", uuid::Uuid::new_v4()));
+        let staging = base.join("staging");
+        let tar_gz = base.join("evil.tar.gz");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Write a gzip-compressed tar whose single entry is "../escaped.txt".
+        {
+            let f = std::fs::File::create(&tar_gz).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            enc.write_all(&raw_tar_block("../escaped.txt", b"pwned"))
+                .unwrap();
+            enc.finish().unwrap().flush().unwrap();
+        }
+
+        // Extraction must not write the escaped file beside the staging directory.
+        let _ = extract_tarball_to_staging(&tar_gz, &staging, 10 * 1024 * 1024).await;
+
+        let escaped = base.join("escaped.txt");
+        assert!(
+            !escaped.exists(),
+            "zip-slip entry escaped staging to {}",
+            escaped.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn size_limit_reader_zero_remaining_returns_error() {

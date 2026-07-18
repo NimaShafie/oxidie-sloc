@@ -227,7 +227,7 @@ slides_data = [
          "Docker image available for persistent server installations",
          "IP rate limiting and security headers enabled by default",
      ],
-     "note": "Designed for classified networks, air-gapped labs, and corporate environments with strict egress controls."},
+     "note": "Designed for air-gapped labs and corporate environments with strict egress controls."},
     # 10 – Getting Started
     {"type": "getting_started"},
     # 11 – Thank you / Q&A

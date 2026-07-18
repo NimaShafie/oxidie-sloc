@@ -6,11 +6,12 @@
 # Digest pinned to prevent silent base-image substitution.
 # To update: docker pull rust:1.95-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' rust:1.95-slim-bookworm
 #
-# Base images are build ARGs so a DoD/hardened build can substitute an approved
-# registry image (Iron Bank, Chainguard) WITHOUT editing this file, e.g.:
+# Base images are build ARGs so a hardened build can substitute an approved
+# registry image (e.g. Chainguard, distroless, or a private mirror) WITHOUT
+# editing this file, e.g.:
 #   docker build \
-#     --build-arg BUILDER_IMAGE=registry1.dso.mil/ironbank/rust/rust:1.95 \
-#     --build-arg RUNTIME_IMAGE=registry1.dso.mil/ironbank/redhat/ubi/ubi9-minimal:9.4 \
+#     --build-arg BUILDER_IMAGE=registry.example.com/rust/rust:1.95 \
+#     --build-arg RUNTIME_IMAGE=registry.example.com/ubi/ubi9-minimal:9.4 \
 #     --build-arg INSTALL_CHROMIUM=0 .
 # Defaults remain the digest-pinned Docker Hub images for the public build.
 # NOTE: ARGs used in FROM must be declared before the first FROM (global scope).
@@ -58,9 +59,9 @@ RUN cargo build --release -p oxide-sloc --no-default-features
 # Pin to a specific digest to prevent silent base-image substitution.
 # To update: docker pull debian:bookworm-slim && docker inspect --format '{{index .RepoDigests 0}}' debian:bookworm-slim
 #
-# DoD / hardened deployments: override RUNTIME_IMAGE (declared at the top) with an
-# approved registry image (Iron Bank `registry1.dso.mil/ironbank/...`, Chainguard,
-# or distroless) and build with `--build-arg INSTALL_CHROMIUM=0` to drop the browser.
+# Hardened deployments: override RUNTIME_IMAGE (declared at the top) with an
+# approved registry image (Chainguard, distroless, or a private mirror) and build
+# with `--build-arg INSTALL_CHROMIUM=0` to drop the browser.
 FROM ${RUNTIME_IMAGE}
 
 # Chromium is a large, frequently-CVE'd attack surface. It is only needed for the
