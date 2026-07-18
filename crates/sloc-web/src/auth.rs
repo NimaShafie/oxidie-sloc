@@ -117,6 +117,38 @@ to enable access.</p>
         .into_response()
 }
 
+/// True for state-changing HTTP methods (the ones worth auditing on success).
+fn is_mutating(method: &axum::http::Method) -> bool {
+    use axum::http::Method;
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
+}
+
+/// Pull the three accepted credential carriers out of the request headers:
+/// `(Bearer token, X-API-Key, session cookie)`.
+fn extract_credentials(req: &Request<Body>) -> (Option<String>, Option<String>, Option<String>) {
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let x_api_key = req
+        .headers()
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let session_cookie = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_session_cookie)
+        .map(str::to_owned);
+    (auth_header, x_api_key, session_cookie)
+}
+
 pub(crate) async fn require_api_key(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -140,23 +172,7 @@ pub(crate) async fn require_api_key(
         .map_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |c| c.0.ip());
     let peer_ip = client_ip_from(req.headers(), conn_ip);
 
-    let auth_header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_owned);
-    let x_api_key = req
-        .headers()
-        .get("X-API-Key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    let session_cookie = req
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_session_cookie)
-        .map(str::to_owned);
+    let (auth_header, x_api_key, session_cookie) = extract_credentials(&req);
 
     let session_valid = check_session_valid(session_cookie.as_deref(), &state);
     let any_credential_provided =
@@ -176,13 +192,7 @@ pub(crate) async fn require_api_key(
         // Audit successful authenticated access to state-changing endpoints only.
         // Auditing every GET (assets, polling) would flood the sink with no security
         // value; the who-did-what trail that matters is mutating requests.
-        if matches!(
-            *req.method(),
-            axum::http::Method::POST
-                | axum::http::Method::PUT
-                | axum::http::Method::PATCH
-                | axum::http::Method::DELETE
-        ) {
+        if is_mutating(req.method()) {
             let via = if session_valid { "session" } else { "api_key" };
             audit::record(
                 "auth_success",

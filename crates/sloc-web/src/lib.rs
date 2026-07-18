@@ -960,30 +960,25 @@ fn refuse_unauthenticated_server(server_mode: bool, has_api_keys: bool) -> bool 
     server_mode && !has_api_keys && !allow_unauthenticated_server_mode()
 }
 
-fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
-    let api_keys: Vec<secrecy::SecretBox<String>> = std::env::var("SLOC_API_KEYS")
-        .or_else(|_| std::env::var("SLOC_API_KEY"))
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| secrecy::SecretBox::new(Box::new(s.to_owned())))
-        .collect();
-    if server_mode && api_keys.is_empty() {
+/// Emit operator-facing warnings for insecure server-mode configurations.
+/// Pure side-effect (stdout); no bearing on the returned config values.
+fn emit_server_mode_warnings(
+    server_mode: bool,
+    api_keys_empty: bool,
+    tls_enabled: bool,
+    trust_proxy: bool,
+    trusted_proxy_ips: &[IpAddr],
+) {
+    if server_mode && api_keys_empty && allow_unauthenticated_server_mode() {
         // Absence of a key is a hard startup failure in server mode (enforced by the
         // caller, `serve`). The only exception is an explicit operator opt-in via
         // SLOC_ALLOW_UNAUTHENTICATED=1 for trusted-LAN testing — warn loudly then.
-        if allow_unauthenticated_server_mode() {
-            println!(
-                "WARNING: SLOC_ALLOW_UNAUTHENTICATED=1 — server mode is running with NO \
-                 authentication. Every web endpoint is publicly reachable. Do NOT use this \
-                 outside a trusted, isolated network."
-            );
-        }
+        println!(
+            "WARNING: SLOC_ALLOW_UNAUTHENTICATED=1 — server mode is running with NO \
+             authentication. Every web endpoint is publicly reachable. Do NOT use this \
+             outside a trusted, isolated network."
+        );
     }
-    let tls_cert = std::env::var("SLOC_TLS_CERT").ok();
-    let tls_key = std::env::var("SLOC_TLS_KEY").ok();
-    let tls_enabled = tls_cert.is_some() && tls_key.is_some();
     if server_mode && !tls_enabled {
         println!(
             "WARNING: TLS is not configured. Traffic is cleartext. \
@@ -997,12 +992,17 @@ fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
              to restrict cross-origin access (comma-separated)."
         );
     }
-    let trust_proxy = std::env::var("SLOC_TRUST_PROXY").as_deref() == Ok("1");
-    let trusted_proxy_ips: Vec<IpAddr> = std::env::var("SLOC_TRUSTED_PROXY_IPS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
-        .collect();
+    emit_trust_proxy_note(server_mode, trust_proxy, trusted_proxy_ips);
+    if std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some() {
+        println!(
+            "WARNING: SLOC_GIT_SSL_NO_VERIFY is set — TLS certificate verification is \
+             DISABLED for all git operations. Remove this variable before production use."
+        );
+    }
+}
+
+/// Emit the reverse-proxy / X-Forwarded-For trust advisory for server mode.
+fn emit_trust_proxy_note(server_mode: bool, trust_proxy: bool, trusted_proxy_ips: &[IpAddr]) {
     if trust_proxy {
         if trusted_proxy_ips.is_empty() {
             println!(
@@ -1028,12 +1028,33 @@ fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
              enable per-client rate limiting via X-Forwarded-For."
         );
     }
-    if std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some() {
-        println!(
-            "WARNING: SLOC_GIT_SSL_NO_VERIFY is set — TLS certificate verification is \
-             DISABLED for all git operations. Remove this variable before production use."
-        );
-    }
+}
+
+fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
+    let api_keys: Vec<secrecy::SecretBox<String>> = std::env::var("SLOC_API_KEYS")
+        .or_else(|_| std::env::var("SLOC_API_KEY"))
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| secrecy::SecretBox::new(Box::new(s.to_owned())))
+        .collect();
+    let tls_cert = std::env::var("SLOC_TLS_CERT").ok();
+    let tls_key = std::env::var("SLOC_TLS_KEY").ok();
+    let tls_enabled = tls_cert.is_some() && tls_key.is_some();
+    let trust_proxy = std::env::var("SLOC_TRUST_PROXY").as_deref() == Ok("1");
+    let trusted_proxy_ips: Vec<IpAddr> = std::env::var("SLOC_TRUSTED_PROXY_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+        .collect();
+    emit_server_mode_warnings(
+        server_mode,
+        api_keys.is_empty(),
+        tls_enabled,
+        trust_proxy,
+        &trusted_proxy_ips,
+    );
     let auth_lockout_threshold = std::env::var("SLOC_AUTH_LOCKOUT_FAILS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
