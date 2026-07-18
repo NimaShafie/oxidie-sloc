@@ -4,18 +4,18 @@
 # Compressed with gzip -9, split into ≤45 MB parts
 # Verify with: sha256sum -c toolchain/checksums.sha256
 
-6b76cb34f5fb80f42a35a0245380cd845cf8255081a5352e26ea204d3b08351b  toolchain/rust-toolchain-linux-arm64.tar.gz.aa
-4fd7b11009f7dc800d8d4f54d28b3d44e63eb94e674fa7b08145eab52611b3bf  toolchain/rust-toolchain-linux-arm64.tar.gz.ab
-d7cc13bdbdefd2bf43cc3f4695c798e0dcd8e34f11ea4353e18b13236c4a6da7  toolchain/rust-toolchain-linux-arm64.tar.gz.ac
-8860f4c9fc5784216472111563bab1a24738b1028717aeeff2e45ececd5e2c80  toolchain/rust-toolchain-linux-arm64.tar.gz.ad
-be95b13eef9dd4530e5bc8347aaa64d23bb5385a9411ae40c7615bd3614dabae  toolchain/rust-toolchain-linux-x86_64.tar.gz.aa
-beabd120dec386b8d1e7bdcd02b3072ec87a15903573c49debb35362adfd6fd7  toolchain/rust-toolchain-linux-x86_64.tar.gz.ab
-ba01c31889804ae937f31c32cf4e4c087480c30dcb66e914b60811e9cf4e5470  toolchain/rust-toolchain-linux-x86_64.tar.gz.ac
-180972691af133473f21b472f7b071131ae23979b639514cc729cd91a9920dce  toolchain/rust-toolchain-linux-x86_64.tar.gz.ad
-c4b2f022490ad65c83e034f1022b1d915694c052a62076310f2dff0770d871f7  toolchain/rust-toolchain-linux-x86_64.tar.gz.ae
-d9faf0a596ca15e20ca39bed7c1ca0624e7d1c2511b5dc06e0a3dd6e2af26940  toolchain/rust-toolchain-windows-x64.tar.gz.aa
-ac0d5197b68f2cce675be9142a15320c8360d4d6d12aac96419c0d4cfce769c4  toolchain/rust-toolchain-windows-x64.tar.gz.ab
-a1f7f92ff909386f2fce15176f9b850c48456754532229f2375fd8e90abdfac0  toolchain/rust-toolchain-windows-x64.tar.gz.ac
-d3783aacd1a801830d38d98ad9a74b5761ed9e11d7f2b6dee9dbbe20293c35dc  toolchain/rust-toolchain-windows-x64.tar.gz.ad
-5db01dc8913ad560d4196be71ec1822265ab316fd4c07ea3b16ad02559bf8bd7  toolchain/rust-toolchain-windows-x64.tar.gz.ae
-a5037f1a7201fd9b5d303ef91ccb4e843b99d3d49b86ef21b6e2e41ac28c8404  toolchain/rust-toolchain-windows-x64.tar.gz.af
+a38c08df671782ab703dbcab0d56f93bfaedb5b6c63cdb898f0ee86b6b7e057f  toolchain/rust-toolchain-linux-arm64.tar.gz.aa
+21438de8b78ea08810fba7cf1b282a1743a38c4c2097136d8222512fca60e82f  toolchain/rust-toolchain-linux-arm64.tar.gz.ab
+04292aa49337db1f04c1c11c4be09dce423222ae22b66aace94b258075bb73ce  toolchain/rust-toolchain-linux-arm64.tar.gz.ac
+1a901fce0f724e6df25253c34e94e1c77811206159cb72ac0ac5a35d334512e4  toolchain/rust-toolchain-linux-arm64.tar.gz.ad
+c7dd1e01d8ec0e3e57e814e0e0f9312c956c89f9ac6fbed40ce259632c01f5cb  toolchain/rust-toolchain-linux-x86_64.tar.gz.aa
+a673401878dbda6be1c0b6f55b5f95fb693a0fd5f0ff8ef0abbe95536106131d  toolchain/rust-toolchain-linux-x86_64.tar.gz.ab
+6135c96081e8516e1422acf3e68c47fe4110aef076d8bc973734c316bc8f2c42  toolchain/rust-toolchain-linux-x86_64.tar.gz.ac
+2487b0d06b508554334cbe5de950aad84477ee2d86cc5b9a8a482e9cda716a2e  toolchain/rust-toolchain-linux-x86_64.tar.gz.ad
+b85c65b384d0f3618985134e2821ccde214822760ca083f37430a6a7695707f4  toolchain/rust-toolchain-linux-x86_64.tar.gz.ae
+a32d3dab316bde3a793aa7e08c5ac77f51cf7ca49b4ed6ab5c22098fae505958  toolchain/rust-toolchain-windows-x64.tar.gz.aa
+8c187586ab15f805372f11e86f1b4d34116d1eb578d2861c8dcc6bcf7c39cea1  toolchain/rust-toolchain-windows-x64.tar.gz.ab
+b169cbc07206374c02d4ad45799420baa766655b33927791603a5c357d11665f  toolchain/rust-toolchain-windows-x64.tar.gz.ac
+f09b72222f08e08e049dda14b93ee8dd522399425ab1e4de21644a5586d0dd4a  toolchain/rust-toolchain-windows-x64.tar.gz.ad
+ba05d29725aaeadfb5161136e42b7b510c17b0354048dfea59ad7f89e3c2bca1  toolchain/rust-toolchain-windows-x64.tar.gz.ae
+4795e29b0ae25ef29e09c8b8026731eb688e712e6bfa14a7153ad265c0a14343  toolchain/rust-toolchain-windows-x64.tar.gz.af
