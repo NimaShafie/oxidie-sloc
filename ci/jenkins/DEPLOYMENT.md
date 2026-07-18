@@ -76,22 +76,33 @@ repo), rebuild, and restart the agent.
 # now cargo-nextest; it falls back to cargo test if this is missing).
 RUN cargo install cargo-nextest --locked
 
-# cargo-llvm-cov + llvm-tools → LCOV/Cobertura → Jenkins "Coverage" view
+# cargo-llvm-cov + llvm-tools → LCOV → Jenkins "Coverage" view (+ LCOV to SonarQube)
 RUN rustup component add llvm-tools-preview \
  && cargo install cargo-llvm-cov --locked
 ```
 
-Offline/air-gapped agents: both tools are vendored in `ci/tools/Cargo.toml`, so
-`cargo install --offline cargo-nextest` / `cargo-llvm-cov` work without internet
-(the pipeline already attempts the offline install as a fallback).
+The repo ships `ci/jenkins/install-rust-cache.sh`, which installs **both** tools
+(from prebuilt binaries, with a `cargo install` fallback) into the agent's
+persistent `~/.rust-cache/cargo/bin`. **The agent's provisioning MUST run that
+script on (re)creation** — either bake it into the image build, or run it as a
+one-shot on first boot. If it doesn't, a container rebuild silently loses the
+tools: the pipeline then falls back to `cargo test` (no Test Result view) and
+skips Coverage until the next provision. The pipeline's offline auto-install is a
+safety net, **not** a guarantee.
+
+Offline/air-gapped agents: both tools are also vendored in `ci/tools/Cargo.toml`,
+so `cargo install --offline cargo-nextest` / `cargo-llvm-cov` work without
+internet (the pipeline attempts this as its fallback).
 
 After the rebuild:
 
 - **Test Result** appears automatically — `TEST_RUNNER` defaults to
   `cargo-nextest` and `PUBLISH_TEST_RESULTS` defaults to true.
 - **Coverage** appears when a build runs with `COVERAGE_STANDALONE=true` (left
-  opt-in because it runs oxide-sloc's *own* llvm-cov and is only meaningful for
-  self-CI, not external-repo scans).
+  opt-in: it recompiles instrumented, ~4–5 min/build, and runs oxide-sloc's *own*
+  llvm-cov — meaningful for self-CI, not external-repo scans). The view is served
+  at **`/job/<job>/<n>/coverage/`**. SonarQube imports coverage from **LCOV**, not
+  the Cobertura XML, so the Cobertura duplicate-element quirk doesn't affect it.
 
 ## Credentials the infra side owns
 
