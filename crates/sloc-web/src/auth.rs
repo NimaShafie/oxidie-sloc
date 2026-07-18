@@ -695,4 +695,85 @@ mod tests {
             Some("token_val")
         );
     }
+
+    // ── is_browser_request / is_mutating / session_cookie_name ────────────────
+
+    fn req_with_accept(accept: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri("/api/runs");
+        if let Some(a) = accept {
+            b = b.header(header::ACCEPT, a);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn is_browser_request_true_for_html_accept() {
+        assert!(is_browser_request(&req_with_accept(Some("text/html,*/*"))));
+    }
+
+    #[test]
+    fn is_browser_request_false_for_json_or_missing_accept() {
+        assert!(!is_browser_request(&req_with_accept(Some(
+            "application/json"
+        ))));
+        assert!(!is_browser_request(&req_with_accept(None)));
+    }
+
+    #[test]
+    fn is_mutating_classifies_methods() {
+        use axum::http::Method;
+        for m in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(is_mutating(&m), "{m} should be mutating");
+        }
+        for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(!is_mutating(&m), "{m} should not be mutating");
+        }
+    }
+
+    #[test]
+    fn session_cookie_name_uses_host_prefix_when_secure() {
+        assert_eq!(session_cookie_name(true), "__Host-sloc_session");
+        assert_eq!(session_cookie_name(false), "sloc_session");
+    }
+
+    // ── unconfigured_server_mode_response (fail-closed 503) ───────────────────
+
+    #[test]
+    fn unconfigured_response_html_for_browser() {
+        let req = req_with_accept(Some("text/html"));
+        let resp = unconfigured_server_mode_response(&req);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/html"), "browser must get HTML, got {ct}");
+    }
+
+    #[test]
+    fn unconfigured_response_plain_for_api_client() {
+        let req = req_with_accept(Some("application/json"));
+        let resp = unconfigured_server_mode_response(&req);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            resp.headers().contains_key(header::WWW_AUTHENTICATE),
+            "API clients must receive a WWW-Authenticate challenge"
+        );
+    }
+
+    // ── any_key_matches (constant-time credential comparison) ─────────────────
+
+    #[test]
+    fn any_key_matches_detects_present_and_absent_credentials() {
+        use secrecy::SecretBox;
+        let keys = vec![SecretBox::new(Box::new("s3cret".to_string()))];
+        let good = Some("s3cret".to_string());
+        let bad = Some("nope".to_string());
+        let none: Option<String> = None;
+        assert!(any_key_matches(&[&good, &none], &keys));
+        assert!(!any_key_matches(&[&bad, &none], &keys));
+        // No candidates at all → no match.
+        assert!(!any_key_matches(&[&none], &keys));
+    }
 }
