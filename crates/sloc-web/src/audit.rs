@@ -39,6 +39,32 @@ fn audit_log_path() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// Size cap (bytes) that triggers rotation of the audit log. `SLOC_AUDIT_LOG_MAX_BYTES`
+/// takes precedence (byte-precise, for fine tuning); otherwise `SLOC_AUDIT_LOG_MAX_MB`
+/// (default 10 MB) is used. `0` from either disables rotation (grow forever).
+fn audit_log_max_bytes() -> u64 {
+    if let Some(bytes) = std::env::var("SLOC_AUDIT_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return bytes;
+    }
+    std::env::var("SLOC_AUDIT_LOG_MAX_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10)
+        * 1024
+        * 1024
+}
+
+/// Number of rotated generations to keep, from `SLOC_AUDIT_LOG_KEEP` (default 5).
+fn audit_log_keep() -> u32 {
+    std::env::var("SLOC_AUDIT_LOG_KEEP")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(5)
+}
+
 /// Record one security audit event.
 ///
 /// * `event`   — stable machine-readable event name (e.g. `auth_failure`).
@@ -92,6 +118,19 @@ fn append_json_line(path: &str, event: &str, outcome: &str, fields: &[(&str, &st
     let _guard = write_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Self-maintaining: rotate the sink by size before appending so it can never
+    // grow without bound. Rotation failure is non-fatal — we still try to append.
+    let max_bytes = audit_log_max_bytes();
+    if max_bytes > 0 {
+        if let Err(e) =
+            sloc_core::rotate_log(std::path::Path::new(path), max_bytes, audit_log_keep())
+        {
+            tracing::error!(target: "audit", error = %e, path = %path,
+                "failed to rotate audit log");
+        }
+    }
+
     match OpenOptions::new().create(true).append(true).open(path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(line.as_bytes()) {

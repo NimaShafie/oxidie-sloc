@@ -6,6 +6,7 @@ pub mod baseline;
 pub mod coverage;
 pub mod delta;
 pub mod history;
+pub mod maintenance;
 pub use baseline::{check_against_baseline, resolve_baselines_path, BaselineEntry, BaselineStore};
 pub use coverage::{aggregate_line_coverage, lookup_coverage, parse_lcov, FileCoverage};
 pub use delta::{
@@ -15,6 +16,10 @@ pub use delta::{
 pub use history::{
     CleanupPolicy, CleanupPolicyStore, RegistryEntry, ScanRegistry, ScanSummarySnapshot,
     WatchedDirsStore,
+};
+pub use maintenance::{
+    dir_size_bytes, execute_run_prune, plan_run_prune, resolve_output_root, resolve_registry_path,
+    rotate_log, rotated_log_paths, run_output_dir, PrunePlan, PruneReport, PrunedRun,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

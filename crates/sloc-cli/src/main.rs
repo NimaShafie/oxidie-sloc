@@ -17,8 +17,9 @@ use tracing_subscriber::EnvFilter;
 
 use sloc_config::{AppConfig, BlankInBlockCommentPolicy, ContinuationLinePolicy, MixedLinePolicy};
 use sloc_core::{
-    analyze, check_against_baseline, compute_delta, read_json, resolve_baselines_path, write_json,
-    AnalysisRun, BaselineEntry, BaselineStore, ScanComparison,
+    analyze, check_against_baseline, compute_delta, execute_run_prune, plan_run_prune, read_json,
+    resolve_baselines_path, resolve_output_root, resolve_registry_path, rotated_log_paths,
+    write_json, AnalysisRun, BaselineEntry, BaselineStore, ScanComparison, ScanRegistry,
 };
 use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, get_sha};
 use sloc_report::{
@@ -80,6 +81,10 @@ enum Commands {
     GitCompare(GitCompareArgs),
     /// Poll a repository branch for changes and scan on every new commit
     Watch(WatchArgs),
+    /// Reclaim disk: delete old scan artifacts and rotate/remove log files.
+    /// Runs as the local user against the output tree — no server or login needed.
+    /// Dry-run by default; pass --yes to actually delete.
+    Prune(PruneArgs),
     /// Post an SLOC diff comment to a pull request on GitHub or GitLab.
     /// Designed to be called from Jenkins post-build steps and CI pipelines.
     #[command(name = "pr-comment")]
@@ -605,6 +610,37 @@ struct WatchArgs {
     quiet: bool,
 }
 
+// ── prune ───────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Args)]
+struct PruneArgs {
+    /// Delete scan runs older than this many days
+    #[arg(long, value_name = "DAYS")]
+    older_than: Option<u32>,
+
+    /// Keep only the N most recent scan runs; delete the rest
+    #[arg(long, value_name = "N")]
+    keep_last: Option<u32>,
+
+    /// Output tree to prune (defaults to the same location the web server uses:
+    /// $OXIDE_SLOC_ROOT/out/web, or ./out/web)
+    #[arg(long, value_name = "DIR")]
+    output_dir: Option<PathBuf>,
+
+    /// Also rotate/remove the audit log ($SLOC_AUDIT_LOG) and its rotated history
+    #[arg(long)]
+    logs: bool,
+
+    /// Actually delete. Without this flag prune only reports what it *would* remove.
+    #[arg(long, short = 'y')]
+    yes: bool,
+
+    /// Emit a machine-readable JSON summary instead of human text
+    #[arg(long)]
+    json: bool,
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -635,6 +671,7 @@ async fn main() -> Result<()> {
         Commands::GitScan(args) => run_git_scan(args).await,
         Commands::GitCompare(args) => run_git_compare(args),
         Commands::Watch(args) => run_watch(args).await,
+        Commands::Prune(args) => run_prune(&args),
         Commands::PrComment(args) => run_pr_comment(args).await,
         Commands::Completions { shell } => {
             clap_complete::generate(
@@ -2772,6 +2809,237 @@ fn write_watch_output(run: &AnalysisRun, output_dir: Option<&Path>, sha: &str, q
     } else {
         log_written(&path, quiet);
     }
+}
+
+// ── prune ───────────────────────────────────────────────────────────────────────
+
+/// Human-readable byte size (e.g. `1.4 GB`). Binary units to match disk tooling.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    #[allow(clippy::cast_precision_loss)]
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
+}
+
+/// Collect the audit-log file and its rotated generations for the `--logs` sweep.
+fn audit_log_targets() -> Vec<PathBuf> {
+    let Some(raw) = std::env::var("SLOC_AUDIT_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let base = PathBuf::from(raw);
+    let mut targets = rotated_log_paths(&base);
+    if base.exists() {
+        targets.insert(0, base);
+    }
+    targets
+}
+
+/// `oxide-sloc prune` — operator-driven disk reclamation. No server, no login:
+/// the local shell is the authority. Dry-run unless `--yes` is given.
+fn run_prune(args: &PruneArgs) -> Result<()> {
+    let c = color_enabled();
+    let output_root = resolve_output_root(args.output_dir.as_ref().and_then(|p| p.to_str()));
+    let registry_path = resolve_registry_path(&output_root);
+    let mut registry = ScanRegistry::load(&registry_path);
+
+    let plan = plan_run_prune(&registry, args.older_than, args.keep_last);
+    let no_rules = args.older_than.is_none() && args.keep_last.is_none() && !args.logs;
+
+    // Gather log targets (bytes) up front so the summary is accurate in dry-run too.
+    let log_targets = if args.logs {
+        audit_log_targets()
+    } else {
+        Vec::new()
+    };
+    let log_bytes: u64 = log_targets
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    if args.json {
+        return emit_prune_json(
+            args,
+            &output_root,
+            &plan,
+            &log_targets,
+            log_bytes,
+            &mut registry,
+        );
+    }
+
+    if no_rules {
+        eprintln!(
+            "Nothing to do. Specify at least one rule: {}, {}, or {}.",
+            paint!(c, "1;36", "--older-than <DAYS>"),
+            paint!(c, "1;36", "--keep-last <N>"),
+            paint!(c, "1;36", "--logs")
+        );
+        eprintln!(
+            "Add {} to perform the deletion.",
+            paint!(c, "1;33", "--yes")
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} {}",
+        paint!(c, "1", "Prune target:"),
+        output_root.display()
+    );
+
+    // ── Report the run-artifact plan ────────────────────────────────────────────
+    if plan.is_empty() {
+        println!("  No scan runs match the retention rules.");
+    } else {
+        println!(
+            "  {} scan run(s), {} to reclaim:",
+            paint!(c, "1", &plan.runs.len().to_string()),
+            paint!(c, "1;32", &human_bytes(plan.total_bytes))
+        );
+        for r in &plan.runs {
+            println!(
+                "    {}  {}  {}  {}",
+                paint!(c, "2", &r.timestamp_utc.format("%Y-%m-%d").to_string()),
+                r.run_id,
+                paint!(c, "2", &r.project_label),
+                human_bytes(r.bytes)
+            );
+        }
+    }
+
+    // ── Report the log sweep ────────────────────────────────────────────────────
+    if args.logs {
+        if log_targets.is_empty() {
+            println!("  No audit log to remove ($SLOC_AUDIT_LOG unset or empty).");
+        } else {
+            println!(
+                "  {} log file(s), {} to reclaim:",
+                paint!(c, "1", &log_targets.len().to_string()),
+                paint!(c, "1;32", &human_bytes(log_bytes))
+            );
+            for p in &log_targets {
+                println!("    {}", p.display());
+            }
+        }
+    }
+
+    let total = plan.total_bytes + log_bytes;
+
+    // ── Dry-run vs execute ──────────────────────────────────────────────────────
+    if !args.yes {
+        println!(
+            "\n{} — nothing was deleted. Re-run with {} to reclaim {}.",
+            paint!(c, "1;33", "DRY RUN"),
+            paint!(c, "1;33", "--yes"),
+            paint!(c, "1;32", &human_bytes(total))
+        );
+        return Ok(());
+    }
+
+    let report = execute_run_prune(&mut registry, &plan);
+    if !plan.is_empty() {
+        registry
+            .save(&registry_path)
+            .context("failed to update registry after prune")?;
+    }
+
+    let mut freed = report.bytes_freed;
+    if args.logs {
+        freed += remove_log_targets(&log_targets);
+    }
+
+    for (path, err) in &report.failures {
+        eprintln!("{} could not remove {path}: {err}", paint!(c, "1;31", "!"));
+    }
+
+    println!(
+        "\n{} Removed {} run(s){}; reclaimed {}.",
+        paint!(c, "1;32", "✓"),
+        report.deleted_runs,
+        if args.logs {
+            format!(" and {} log file(s)", log_targets.len())
+        } else {
+            String::new()
+        },
+        paint!(c, "1;32", &human_bytes(freed))
+    );
+    Ok(())
+}
+
+/// Delete the given log files, returning the total bytes removed.
+fn remove_log_targets(targets: &[PathBuf]) -> u64 {
+    let mut freed = 0;
+    for p in targets {
+        let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        if std::fs::remove_file(p).is_ok() {
+            freed += sz;
+        }
+    }
+    freed
+}
+
+/// JSON output path for `prune --json`. Executes when `--yes`, otherwise reports
+/// the plan only.
+fn emit_prune_json(
+    args: &PruneArgs,
+    output_root: &Path,
+    plan: &sloc_core::PrunePlan,
+    log_targets: &[PathBuf],
+    log_bytes: u64,
+    registry: &mut ScanRegistry,
+) -> Result<()> {
+    let runs: Vec<_> = plan
+        .runs
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "run_id": r.run_id,
+                "project": r.project_label,
+                "timestamp_utc": r.timestamp_utc,
+                "bytes": r.bytes,
+            })
+        })
+        .collect();
+
+    let mut freed = 0u64;
+    let mut deleted = 0usize;
+    if args.yes {
+        let registry_path = resolve_registry_path(output_root);
+        let report = execute_run_prune(registry, plan);
+        if !plan.is_empty() {
+            registry.save(&registry_path)?;
+        }
+        deleted = report.deleted_runs;
+        freed = report.bytes_freed;
+        if args.logs {
+            freed += remove_log_targets(log_targets);
+        }
+    }
+
+    let out = serde_json::json!({
+        "output_root": output_root.display().to_string(),
+        "dry_run": !args.yes,
+        "runs_planned": runs,
+        "run_bytes": plan.total_bytes,
+        "log_files": log_targets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "log_bytes": log_bytes,
+        "deleted_runs": deleted,
+        "bytes_freed": if args.yes { freed } else { plan.total_bytes + log_bytes },
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
 }
 
 // ── git helpers ───────────────────────────────────────────────────────────────
