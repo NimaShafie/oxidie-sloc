@@ -21,7 +21,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 
-use crate::{AppState, CspNonce, LoginTemplate};
+use crate::{audit, AppState, CspNonce, LoginTemplate};
 use askama::Template as _;
 
 // ── Trusted-proxy / client-IP resolution ───────────────────────────────────────
@@ -85,10 +85,10 @@ const fn session_cookie_name(secure: bool) -> &'static str {
 /// 503 response returned when server mode is active but no API key is configured.
 /// Fails closed: browsers get an explanatory HTML page, API clients get a plain 503.
 fn unconfigured_server_mode_response(req: &Request<Body>) -> Response {
-    tracing::warn!(
-        event = "auth_unconfigured_server_mode",
-        path = %req.uri().path(),
-        "Rejected request: server mode requires SLOC_API_KEY or SLOC_API_KEYS"
+    audit::record(
+        "auth_denied_unconfigured",
+        "denied",
+        &[("path", req.uri().path())],
     );
     if is_browser_request(req) {
         return (
@@ -124,9 +124,10 @@ pub(crate) async fn require_api_key(
 ) -> Response {
     if state.api_keys.is_empty() {
         // In server mode with no API key configured every protected route would
-        // be publicly accessible. Fail closed so operators must opt in.
+        // be publicly accessible. Fail closed so operators must opt in — unless they
+        // explicitly accepted an open server via SLOC_ALLOW_UNAUTHENTICATED=1.
         // Desktop mode (server_mode = false) keeps the open-by-default behaviour.
-        if state.server_mode {
+        if state.server_mode && !state.allow_unauthenticated {
             return unconfigured_server_mode_response(&req);
         }
         return next.run(req).await;
@@ -172,6 +173,28 @@ pub(crate) async fn require_api_key(
             });
 
     if valid {
+        // Audit successful authenticated access to state-changing endpoints only.
+        // Auditing every GET (assets, polling) would flood the sink with no security
+        // value; the who-did-what trail that matters is mutating requests.
+        if matches!(
+            *req.method(),
+            axum::http::Method::POST
+                | axum::http::Method::PUT
+                | axum::http::Method::PATCH
+                | axum::http::Method::DELETE
+        ) {
+            let via = if session_valid { "session" } else { "api_key" };
+            audit::record(
+                "auth_success",
+                "success",
+                &[
+                    ("peer_ip", &peer_ip.to_string()),
+                    ("method", req.method().as_str()),
+                    ("path", req.uri().path()),
+                    ("via", via),
+                ],
+            );
+        }
         return next.run(req).await;
     }
 
@@ -181,9 +204,15 @@ pub(crate) async fn require_api_key(
 
     if any_credential_provided {
         state.rate_limiter.record_auth_failure(peer_ip);
-        let path = req.uri().path().to_owned();
-        tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = %path,
-            "API key authentication failed");
+        audit::record(
+            "auth_failure",
+            "failure",
+            &[
+                ("peer_ip", &peer_ip.to_string()),
+                ("method", req.method().as_str()),
+                ("path", req.uri().path()),
+            ],
+        );
         return (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer realm=\"oxide-sloc\"")],
@@ -234,8 +263,11 @@ fn auth_lockout_response(
     rate_limiter: &crate::IpRateLimiter,
     peer_ip: IpAddr,
 ) -> Response {
-    tracing::warn!(event = "auth_lockout", peer_addr = %peer_ip,
-        "Authentication locked out after repeated failures");
+    audit::record(
+        "auth_lockout",
+        "denied",
+        &[("peer_ip", &peer_ip.to_string())],
+    );
     let remaining = rate_limiter.auth_lockout_remaining_secs(peer_ip);
     let retry_after =
         HeaderValue::from_str(&remaining.to_string()).unwrap_or(HeaderValue::from_static("3600"));
@@ -423,11 +455,19 @@ pub(crate) async fn auth_login_post(
         let mut resp = StatusCode::FOUND.into_response();
         resp.headers_mut().insert(header::LOCATION, location);
         resp.headers_mut().insert(header::SET_COOKIE, cookie_hv);
+        audit::record(
+            "login_success",
+            "success",
+            &[("peer_ip", &peer_ip.to_string())],
+        );
         resp
     } else {
         state.rate_limiter.record_auth_failure(peer_ip);
-        tracing::warn!(event = "auth_failure", peer_addr = %peer_ip, path = "/auth/login",
-            "Login form authentication failed");
+        audit::record(
+            "login_failure",
+            "failure",
+            &[("peer_ip", &peer_ip.to_string()), ("path", "/auth/login")],
+        );
         let error_url = format!("/auth/login?next={}&error=1", urlencode_path(safe_next));
         let location = HeaderValue::from_str(&error_url)
             .unwrap_or_else(|_| HeaderValue::from_static("/auth/login?error=1"));
@@ -478,7 +518,7 @@ pub(crate) async fn auth_logout(State(state): State<AppState>, req: Request<Body
     if let Ok(hv) = HeaderValue::from_str(expire_host) {
         resp.headers_mut().append(header::SET_COOKIE, hv);
     }
-    tracing::info!(event = "auth_logout", "Session invalidated via logout");
+    audit::record("logout", "success", &[]);
     resp
 }
 
