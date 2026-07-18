@@ -108,10 +108,17 @@ ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
 #     -f ci/jenkins/Dockerfile.controller -t jenkins-oxide-sloc-controller .
 # For CI, pass the password from a secret store (e.g. --build-arg
 # JENKINS_ADMIN_PASSWORD="$(cat /run/secrets/jenkins_admin_password)").
-# The defaults below exist only so a local evaluation build boots out of the box;
-# production and air-gapped builds MUST override JENKINS_ADMIN_PASSWORD.
+# The admin username defaults to "admin"; the password has NO default and MUST be
+# supplied at build time — the build fails below if it is empty, so no shared
+# credential is ever baked into the committed source or a published image.
 ARG JENKINS_ADMIN_USER=admin
-ARG JENKINS_ADMIN_PASSWORD=admin
+ARG JENKINS_ADMIN_PASSWORD
+RUN test -n "${JENKINS_ADMIN_PASSWORD}" || { \
+      echo "ERROR: build-arg JENKINS_ADMIN_PASSWORD is required and has no default." >&2; \
+      echo "  docker build --build-arg JENKINS_ADMIN_PASSWORD='<strong-password>' \\" >&2; \
+      echo "    -f ci/jenkins/Dockerfile.controller -t jenkins-oxide-sloc-controller ." >&2; \
+      exit 1; \
+    }
 ENV JENKINS_OPTS="--argumentsRealm.roles.user=${JENKINS_ADMIN_USER} --argumentsRealm.passwd.${JENKINS_ADMIN_USER}=${JENKINS_ADMIN_PASSWORD}"
 
 # Liveness probe: confirm the Jenkins HTTP port is accepting connections.

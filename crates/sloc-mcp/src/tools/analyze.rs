@@ -10,7 +10,7 @@ pub async fn analyze_path(
     cfg: &McpConfig,
 ) -> Result<Value> {
     cfg.check_path_allowed(&path)?;
-    let tmp = tempfile_path();
+    let (_scratch, tmp) = scratch_result_file("sloc-mcp-")?;
     let mut cmd = Command::new(&cfg.bin_path);
     cmd.arg("analyze")
         .arg(&path)
@@ -28,8 +28,7 @@ pub async fn analyze_path(
     }
 
     let content = tokio::fs::read_to_string(&tmp).await?;
-    let _ = tokio::fs::remove_file(&tmp).await;
-
+    // `_scratch` (a TempDir) is dropped here, removing the directory and its contents.
     let run: Value = serde_json::from_str(&content)?;
     Ok(summarize_run(&run))
 }
@@ -73,10 +72,14 @@ pub fn summarize_run(run: &Value) -> Value {
     })
 }
 
-fn tempfile_path() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!("sloc-mcp-{}.json", uuid::Uuid::new_v4().simple()));
-    p
+/// Create a private, auto-cleaned scratch directory and return it together with
+/// the path of the `result.json` file the CLI subprocess writes inside it. The
+/// returned [`tempfile::TempDir`] must be kept alive by the caller; dropping it
+/// removes the directory and its contents.
+fn scratch_result_file(prefix: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new().prefix(prefix).tempdir()?;
+    let path = dir.path().join("result.json");
+    Ok((dir, path))
 }
 
 #[cfg(test)]
@@ -181,26 +184,38 @@ mod tests {
         assert_eq!(s["files_analyzed"], 5);
     }
 
-    // ── tempfile_path ─────────────────────────────────────────────────────────
+    // ── scratch_result_file ───────────────────────────────────────────────────
 
     #[test]
-    fn tempfile_path_is_in_temp_dir() {
-        let p = tempfile_path();
-        let tmp = std::env::temp_dir();
-        assert!(p.starts_with(&tmp), "temp path must be inside temp_dir");
+    fn scratch_result_file_is_in_temp_dir() {
+        let (dir, p) = scratch_result_file("sloc-mcp-").unwrap();
+        assert!(
+            p.starts_with(std::env::temp_dir()),
+            "scratch path must be inside temp_dir"
+        );
+        assert!(dir.path().exists(), "scratch dir must exist while held");
     }
 
     #[test]
-    fn tempfile_path_has_json_extension() {
-        let p = tempfile_path();
+    fn scratch_result_file_has_json_extension() {
+        let (_dir, p) = scratch_result_file("sloc-mcp-").unwrap();
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
     }
 
     #[test]
-    fn tempfile_path_is_unique() {
-        let p1 = tempfile_path();
-        let p2 = tempfile_path();
+    fn scratch_result_file_is_unique() {
+        let (_d1, p1) = scratch_result_file("sloc-mcp-").unwrap();
+        let (_d2, p2) = scratch_result_file("sloc-mcp-").unwrap();
         assert_ne!(p1, p2, "two calls must return different paths");
+    }
+
+    #[test]
+    fn scratch_result_file_cleans_up_on_drop() {
+        let dir_path = {
+            let (dir, _p) = scratch_result_file("sloc-mcp-").unwrap();
+            dir.path().to_path_buf()
+        };
+        assert!(!dir_path.exists(), "scratch dir must be removed on drop");
     }
 
     // ── analyze_path success path (uses compiled oxide-sloc binary) ───────────
