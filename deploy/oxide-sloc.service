@@ -2,6 +2,12 @@
 Description=oxide-sloc source line analysis server
 After=network.target
 
+# Email when this service ends up in the failed state (crashed and systemd gave
+# up restarting it). Requires oxide-sloc-alert@.service + /etc/oxide-sloc/alert.env.
+# Soft failures (process alive but not serving) are caught separately by
+# oxide-sloc-health.timer. Remove this line if you don't want crash emails.
+OnFailure=oxide-sloc-alert@%n.service
+
 [Service]
 Type=simple
 User=oxide-sloc

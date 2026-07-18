@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Hard-failure alert handler for oxide-sloc.
+#
+# Referenced from the main unit via `OnFailure=oxide-sloc-alert@%n.service`, so it
+# fires when oxide-sloc.service enters the "failed" state — i.e. it crashed and
+# systemd exhausted its restart attempts. The instance name (%i) is the failed
+# unit, passed through to the alert for context.
+#
+# Install: copy to /etc/systemd/system/ ; configure /etc/oxide-sloc/alert.env.
+[Unit]
+Description=Email alert: %i entered failed state
+# Do not let a flapping service spawn unbounded alert jobs.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/oxide-sloc/alert.env
+ExecStart=/opt/oxide-sloc/deploy/send-alert.sh \
+    "[oxide-sloc] service FAILED on %H" \
+    "The unit %i entered the failed state on %H at boot id %b.\nsystemd restart attempts were exhausted.\nInspect:  systemctl status %i  and  journalctl -u %i -n 100"
+User=oxide-sloc
+Group=oxide-sloc

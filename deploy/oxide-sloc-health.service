@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# One-shot health probe, driven by oxide-sloc-health.timer.
+# Emails on every up<->down transition (see deploy/healthcheck.sh).
+#
+# Install: copy this + oxide-sloc-health.timer to /etc/systemd/system/,
+# then:  systemctl enable --now oxide-sloc-health.timer
+[Unit]
+Description=oxide-sloc /healthz probe (emails on state change)
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/oxide-sloc/alert.env
+ExecStart=/opt/oxide-sloc/deploy/healthcheck.sh
+User=oxide-sloc
+Group=oxide-sloc
+# Allow writing the up/down state file.
+StateDirectory=oxide-sloc
+Environment=HEALTH_STATE_FILE=/var/lib/oxide-sloc/health.state

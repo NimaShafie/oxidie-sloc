@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Runs the oxide-sloc /healthz probe every minute.
+# Enable with:  systemctl enable --now oxide-sloc-health.timer
+[Unit]
+Description=Periodic oxide-sloc health probe
+
+[Timer]
+# First run shortly after boot, then every minute.
+OnBootSec=2min
+OnUnitActiveSec=1min
+# Don't stack runs if one is slow, and survive missed ticks (laptop sleep, etc.).
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
