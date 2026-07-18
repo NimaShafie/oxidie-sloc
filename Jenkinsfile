@@ -42,7 +42,11 @@ pipeline {
         ))
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
-        ansiColor('xterm')
+        // NOTE: ansiColor('xterm') was intentionally removed. It is a parse-time
+        // hard dependency on the non-default AnsiColor plugin (a missing options
+        // directive can't be try/catch'd), and it only colorized console output.
+        // Dropping it lets the pipeline run on a controller where AnsiColor isn't
+        // installed. To restore coloured logs, install AnsiColor and re-add it.
     }
 
     // ── Build parameters ──────────────────────────────────────────────────────
