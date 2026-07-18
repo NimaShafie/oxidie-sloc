@@ -1093,6 +1093,17 @@ mod tests {
         // +05:00 offset means UTC is 12:00 - 5:00 = 07:00
         assert_eq!(dt.time().hour(), 7);
     }
+
+    #[test]
+    fn port_of_git_url_unknown_scheme_returns_none() {
+        // A recognised scheme with no explicit port falls back to its default…
+        assert_eq!(port_of_git_url("https://host/repo"), Some(443));
+        assert_eq!(port_of_git_url("ssh://host/repo"), Some(22));
+        assert_eq!(port_of_git_url("git://host/repo"), Some(9418));
+        // …but an unknown scheme with no explicit port yields None.
+        assert_eq!(port_of_git_url("file://host/repo"), None);
+        assert_eq!(port_of_git_url("ftp://host/repo"), None);
+    }
 }
 
 // ── git subprocess integration tests ─────────────────────────────────────────

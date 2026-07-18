@@ -310,6 +310,18 @@ pub fn rotated_log_paths(path: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::history::{RegistryEntry, ScanRegistry, ScanSummarySnapshot};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Tests that mutate process-global environment variables must hold this lock
+    /// for their whole duration so the parallel test runner cannot observe each
+    /// other's `set_var`/`remove_var` changes.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn entry(run_id: &str, age_days: i64, root: &Path) -> RegistryEntry {
         let dir = root.join(run_id);
@@ -436,6 +448,113 @@ mod tests {
         assert!(rotate_log(&log, 10, 0).unwrap());
         assert!(log.exists());
         assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn workspace_root_prefers_env_dir_then_falls_back() {
+        let _guard = env_lock();
+        let dir = tmp();
+        std::env::set_var("OXIDE_SLOC_ROOT", &dir);
+        assert_eq!(workspace_root(), dir);
+        // A non-existent path is ignored → falls back to CWD (a real dir).
+        std::env::set_var("OXIDE_SLOC_ROOT", dir.join("does-not-exist"));
+        assert!(workspace_root().is_dir());
+        std::env::remove_var("OXIDE_SLOC_ROOT");
+        assert!(workspace_root().is_dir());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_output_root_handles_absolute_relative_and_default() {
+        let _guard = env_lock();
+        let dir = tmp();
+        // Absolute path is returned verbatim.
+        let abs = dir.join("art");
+        assert_eq!(resolve_output_root(Some(abs.to_str().unwrap())), abs);
+        // Empty/whitespace falls back to the default relative tree under the root.
+        std::env::set_var("OXIDE_SLOC_ROOT", &dir);
+        assert_eq!(resolve_output_root(Some("   ")), dir.join("out/web"));
+        assert_eq!(resolve_output_root(None), dir.join("out/web"));
+        // A relative override is anchored at the workspace root.
+        assert_eq!(
+            resolve_output_root(Some("custom/out")),
+            dir.join("custom/out")
+        );
+        std::env::remove_var("OXIDE_SLOC_ROOT");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_registry_path_honours_env_override() {
+        let _guard = env_lock();
+        let dir = tmp();
+        std::env::remove_var("SLOC_REGISTRY_PATH");
+        assert_eq!(resolve_registry_path(&dir), dir.join("registry.json"));
+        std::env::set_var("SLOC_REGISTRY_PATH", dir.join("shared.json"));
+        assert_eq!(resolve_registry_path(&dir), dir.join("shared.json"));
+        std::env::remove_var("SLOC_REGISTRY_PATH");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dir_size_bytes_counts_files_and_handles_single_file() {
+        let root = tmp();
+        std::fs::write(root.join("a.txt"), vec![b'x'; 10]).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("b.txt"), vec![b'y'; 5]).unwrap();
+        assert_eq!(dir_size_bytes(&root), 15);
+        // A path to a single file returns just that file's length.
+        assert_eq!(dir_size_bytes(&root.join("a.txt")), 10);
+        // A non-existent path is a best-effort zero.
+        assert_eq!(dir_size_bytes(&root.join("nope")), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn run_output_dir_handles_flat_layout_and_missing_paths() {
+        let root = tmp();
+        // Flat layout: json sits directly under the run dir (no html/json subfolder).
+        let mut e = entry("flat", 0, &root);
+        e.json_path = Some(root.join("flat").join("result.json"));
+        assert_eq!(run_output_dir(&e), Some(root.join("flat")));
+        // No stored paths at all → None.
+        e.json_path = None;
+        assert_eq!(run_output_dir(&e), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn execute_run_prune_records_failure_for_locked_dir() {
+        let root = tmp();
+        let mut reg = ScanRegistry::default();
+        reg.entries.push(entry("target", 40, &root));
+        let mut plan = plan_run_prune(&reg, Some(30), None);
+        // Point the plan at a *file* masquerading as the output dir so
+        // remove_dir_all fails with a non-NotFound error, exercising the
+        // failure-collection branch without racing on OS file locks.
+        let bogus = root.join("target").join("json").join("result.json");
+        plan.runs[0].output_dir = Some(bogus.clone());
+        let report = execute_run_prune(&mut reg, &plan);
+        assert_eq!(report.deleted_runs, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert!(reg.entries.iter().any(|e| e.run_id == "target"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rotate_log_drops_oldest_generation_at_keep_cap() {
+        let root = tmp();
+        let log = root.join("audit.log");
+        // Pre-seed the max number of generations we keep.
+        std::fs::write(&log, vec![b'x'; 100]).unwrap();
+        std::fs::write(log.with_extension("log.1"), b"g1").unwrap();
+        std::fs::write(log.with_extension("log.2"), b"g2").unwrap();
+        // keep=2: the oldest (.2) is dropped, .1 shifts to .2, live becomes .1.
+        assert!(rotate_log(&log, 50, 2).unwrap());
+        assert!(log.with_extension("log.1").exists());
+        assert!(log.with_extension("log.2").exists());
+        assert!(!log.with_extension("log.3").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 }
