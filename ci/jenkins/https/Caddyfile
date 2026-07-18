@@ -1,0 +1,29 @@
+# Put Jenkins behind HTTPS with Caddy — the durable fix for the browser's
+# "insecure download blocked" warning (Chrome/Brave refuse .zip/.xlsx downloads
+# served over plain HTTP). Once Jenkins is a secure (https) origin, EVERY
+# download works, including the htmlpublisher "Zip" button.
+#
+# Caddy fetches + renews TLS certificates automatically. Pick ONE site block
+# below, edit the address, then:
+#     caddy run --config ci/jenkins/https/Caddyfile
+# (or `caddy start` to run detached; `caddy reload` after edits).
+#
+# After it's up, set Jenkins' root URL to the https address:
+#   Manage Jenkins → System → Jenkins URL → https://<your-address>/
+
+# ── Option A: LAN / homelab, no public DNS (self-signed, internal CA) ─────────
+# Serve on the machine's IP or a .local/.lan name with a locally-trusted cert.
+# Browsers will prompt to trust Caddy's local CA the first time (accept once).
+https://10.0.0.8 {
+	reverse_proxy 127.0.0.1:8080
+	tls internal
+	encode gzip zstd
+}
+
+# ── Option B: real domain with automatic public certificates ──────────────────
+# Uncomment and set your domain + email; Caddy provisions a Let's Encrypt cert.
+# ci.example.com {
+# 	reverse_proxy 127.0.0.1:8080
+# 	encode gzip zstd
+# 	tls you@example.com
+# }

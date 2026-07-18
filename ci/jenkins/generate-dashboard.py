@@ -208,6 +208,7 @@ def svg_hbar(data: list) -> str:
     svg_h = row_h * len(data) + gap
 
     rows = []
+    hits = []
     for i, (label, value) in enumerate(data):
         colour = _OXIDE_PALETTE[i % len(_OXIDE_PALETTE)]
         y = i * row_h + gap
@@ -228,14 +229,24 @@ def svg_hbar(data: list) -> str:
             f' text-anchor="end" fill="#2d1a0e" font-size="13" font-family="system-ui,sans-serif"'
             f' font-weight="600">{html.escape(disp_label)}</text>'
             f'\n  <rect class="bar-rect" x="{label_w}" y="{y}" width="{bar_w}" height="{bar_h}"'
-            f' rx="4" fill="{colour}">'
-            f'<title>{html.escape(tip)}</title></rect>'
+            f' rx="4" fill="{colour}"/>'
             f'\n  <text x="{label_w + bar_w + 8}" y="{y + bar_h - 8}"'
             f' fill="#5a3820" font-size="12" font-family="system-ui,sans-serif"'
             f' font-weight="700">{html.escape(fmt(value))}</text>'
         )
 
-    body = "\n".join(rows)
+        # Full-row transparent hit target so hovering ANYWHERE on the row (label,
+        # bar, or count) shows the tooltip — essential for tiny bars whose painted
+        # width rounds to ~0 (e.g. "c: 1"). pointer-events="all" is required because
+        # a fully transparent fill is otherwise treated as not painted → no hover.
+        hits.append(
+            f'\n  <rect class="bar-hit" x="0" y="{i * row_h}" width="{total_w}"'
+            f' height="{row_h}" fill="#000000" fill-opacity="0" pointer-events="all">'
+            f'<title>{html.escape(tip)}</title></rect>'
+        )
+
+    # Hit targets are appended last so they sit on top of every painted element.
+    body = "\n".join(rows) + "\n" + "\n".join(hits)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="{svg_h}"'
         f' role="img" aria-label="Language breakdown bar chart">'
@@ -327,9 +338,14 @@ def svg_sparkline(points: list, width: int = 380, height: int = 80) -> str:
             d = v - values[i - 1]
             note = f" ({'+' if d > 0 else ''}{fmt_full(d)} vs #{builds[i - 1]})"
         tip = f"Build #{b}: {fmt_full(v)} code lines{note}"
+        # pointer-events="all" is essential: a fully transparent fill (fill-opacity=0)
+        # is treated as "not painted" under the default visiblePainted policy, so the
+        # element would receive NO hover events and the <title> tooltip would never
+        # show. "all" makes the whole circle area hoverable regardless of paint.
         hover_dots += (
-            f'\n  <circle class="spark-dot" cx="{x}" cy="{y}" r="7" fill="#b04a00"'
-            f' fill-opacity="0"><title>{html.escape(tip)}</title></circle>'
+            f'\n  <circle class="spark-dot" cx="{x}" cy="{y}" r="8" fill="#b04a00"'
+            f' fill-opacity="0" pointer-events="all">'
+            f'<title>{html.escape(tip)}</title></circle>'
         )
 
     return (
@@ -488,6 +504,41 @@ def parse_lcov(path: str) -> tuple:
         return (hit, found)
     except Exception:
         return (0, 0)
+
+
+# In-page download helper. Fetches an artifact same-origin and saves it via a
+# blob: URL. A blob: URL is a first-party, potentially-trustworthy origin, so a
+# download triggered from it is NOT subject to Chrome/Brave "insecure download
+# blocked" — the rule that fires when a .zip/.xlsx is fetched over plain HTTP
+# (exactly what the htmlpublisher "Zip" button does). If this script can't run
+# (strict CSP), the anchors' href attributes remain a working fallback.
+# ASCII-only, no async/await — safe under the trend-reports JS rules.
+_DOWNLOAD_JS = """(function () {
+  function saveBlob(url, name) {
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { if (!r.ok) { throw new Error(String(r.status)); } return r.blob(); })
+      .then(function (blob) {
+        var u = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = u;
+        a.download = name || url.split('/').pop() || 'download';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(u); a.parentNode && a.parentNode.removeChild(a); }, 1500);
+      })
+      .catch(function () { window.location.href = url; });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    var links = document.querySelectorAll('a[data-dl]');
+    for (var i = 0; i < links.length; i++) {
+      links[i].addEventListener('click', function (e) {
+        e.preventDefault();
+        saveBlob(this.getAttribute('href'), this.getAttribute('download') || '');
+      });
+    }
+  });
+})();
+"""
 
 
 def _reset_dir(path: str) -> None:
@@ -902,11 +953,20 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
     for fname, label, desc, action in export_defs:
         if not os.path.isfile(os.path.join(out_dir, fname)):
             continue
-        dl_attr = "" if action == "open" else " download"
-        target = ' target="_blank" rel="noopener"' if action == "open" else ""
-        verb = "Open" if action == "open" else "Download"
+        # Download links carry data-dl + a download attr so the in-page blob
+        # helper (dashboard_<slug>.js) saves them via a blob: URL — that counts
+        # as a first-party/secure origin, so Chrome/Brave do NOT apply the
+        # "insecure download blocked" rule that fires on plain-HTTP .zip/.xlsx
+        # downloads (the htmlpublisher "Zip" button hits exactly that block).
+        # If the script is unavailable (strict CSP), the href is the fallback.
+        if action == "open":
+            attrs = ' target="_blank" rel="noopener"'
+            verb = "Open"
+        else:
+            attrs = f' download="{html.escape(fname)}" data-dl="1"'
+            verb = "Download"
         export_links.append(
-            f'<a class="export-link" href="{html.escape(fname)}"{dl_attr}{target}'
+            f'<a class="export-link" href="{html.escape(fname)}"{attrs}'
             f' title="{verb} {html.escape(desc.lower())}">'
             f'<span class="export-link-label">{html.escape(label)}</span>'
             f'<span class="export-link-desc">{html.escape(desc)}</span>'
@@ -917,6 +977,9 @@ def generate(out_dir: str, slug: Optional[str] = None) -> None:
         downloads_section = f"""
 <div class="card">
   <div class="card-title">Report &amp; Exports</div>
+  <p class="export-hint">Use these links instead of the top-right <strong>Zip</strong>
+     button &mdash; they save directly and avoid the browser's
+     &ldquo;insecure download blocked&rdquo; warning on plain-HTTP servers.</p>
   <div class="export-grid">
     {''.join(export_links)}
   </div>
@@ -1199,10 +1262,18 @@ body {{
   transition: opacity 0.15s ease;
 }}
 .bar-rect:hover {{ opacity: 0.82; }}
+.bar-hit {{ cursor: pointer; }}
 .spark-dot {{ cursor: pointer; }}
 .spark-dot:hover {{ fill-opacity: 0.28 !important; }}
 
 /* ── Report & Exports ────────────────────────────────────────────────────── */
+.export-hint {{
+  font-size: 12px;
+  color: #8a6a5a;
+  margin: -6px 0 14px;
+  line-height: 1.5;
+}}
+.export-hint strong {{ color: #b04a00; }}
 .export-grid {{
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
@@ -1476,6 +1547,16 @@ body {{
             1,
         )
 
+    # ── Write the in-page download helper as an external script (CSP-safe) ──
+    # An external script from 'self' is permitted by Jenkins' relaxed CSP,
+    # whereas inline scripts are not. Referenced right before </body>.
+    js_filename = f"dashboard_{slug}.js"
+    with open(os.path.join(out_dir, js_filename), "w", encoding="utf-8") as fh:
+        fh.write(_DOWNLOAD_JS)
+    html_out = html_out.replace(
+        "</body>", f'<script src="{js_filename}"></script>\n</body>', 1
+    )
+
     # ── Write output file ───────────────────────────────────────────────────
     out_path = os.path.join(out_dir, f"dashboard_{slug}.html")
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -1510,6 +1591,7 @@ body {{
         out_dir,
         [
             f"dashboard_{slug}.css",
+            f"dashboard_{slug}.js",
             f"report_{slug}.html",
             f"report_{slug}.css",
             f"report_{slug}.js",
