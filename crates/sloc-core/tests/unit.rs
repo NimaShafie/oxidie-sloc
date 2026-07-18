@@ -2439,3 +2439,102 @@ fn resolve_coverage_file_prefers_env_var() {
         resolved.display()
     );
 }
+
+// ── analyze() branch coverage: single-file root, header reclassification, ────
+//    disabled-language skip, and style-summary aggregation. ────────────────────
+
+#[test]
+fn analyze_single_file_root_path() {
+    // A root that is a *file* (not a directory) takes the `root.is_file()` branch
+    // in analyze(), scanning just that file.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("solo.rs");
+    std::fs::write(&file, "fn main() {}\nlet x = 1;\n").unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.discovery.root_paths = vec![file];
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+}
+
+#[test]
+fn analyze_header_reclassified_as_cpp() {
+    // A .h file that uses C++-only constructs (namespace/class/templates) is
+    // reclassified from C to C++ so class/namespace lines are counted correctly.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.h"),
+        "namespace ui {\nclass Widget {\npublic:\n    template<typename T> T get();\n};\n}\n",
+    )
+    .unwrap();
+    let cfg = analysis_config_for(dir.path());
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 1);
+    // The file must be attributed to the C++ family, not C.
+    assert!(
+        run.totals_by_language
+            .iter()
+            .any(|l| l.language == Language::Cpp),
+        "header with C++ constructs must be counted as C++: {:?}",
+        run.totals_by_language
+            .iter()
+            .map(|l| l.language)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn analyze_disabled_language_is_skipped_by_policy() {
+    // Restricting enabled_languages to Python means a .rs file is skipped by policy.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.analysis.enabled_languages = vec!["Python".to_string()];
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert_eq!(run.summary_totals.files_analyzed, 0);
+    assert_eq!(run.summary_totals.files_skipped, 1);
+}
+
+/// Two Rust files with divergent indentation drive the style-summary
+/// `dominant_indent_label` vote arms (tabs vs mixed), and a raised column
+/// threshold drives the `line_col_pct` threshold branches.
+fn write_style_corpus(dir: &std::path::Path) {
+    std::fs::write(dir.path_tabs(), "fn a() {\n\tlet x = 1;\n\tlet y = 2;\n}\n").unwrap();
+    std::fs::write(
+        dir.path_mixed(),
+        "fn b() {\n\tlet x = 1;\n  let y = 2;\n    let z = 3;\n}\n",
+    )
+    .unwrap();
+}
+
+trait StyleCorpusPaths {
+    fn path_tabs(&self) -> PathBuf;
+    fn path_mixed(&self) -> PathBuf;
+}
+impl StyleCorpusPaths for std::path::Path {
+    fn path_tabs(&self) -> PathBuf {
+        self.join("tabbed.rs")
+    }
+    fn path_mixed(&self) -> PathBuf {
+        self.join("mixed.rs")
+    }
+}
+
+#[test]
+fn analyze_style_summary_threshold_100() {
+    let dir = tempfile::tempdir().unwrap();
+    write_style_corpus(dir.path());
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.analysis.style_col_threshold = 100;
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert!(run.style_summary.is_some());
+}
+
+#[test]
+fn analyze_style_summary_threshold_120() {
+    let dir = tempfile::tempdir().unwrap();
+    write_style_corpus(dir.path());
+    let mut cfg = analysis_config_for(dir.path());
+    cfg.analysis.style_col_threshold = 120;
+    let run = analyze(&cfg, "test", None, None).unwrap();
+    assert!(run.style_summary.is_some());
+}
