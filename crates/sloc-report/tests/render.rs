@@ -1015,6 +1015,48 @@ fn write_diff_csv_contains_status_labels() {
     assert!(content.contains("Modified"), "must label modified files");
 }
 
+/// A `FileDelta` builder with sane zero defaults, so tests can specify only the
+/// status and path they care about.
+fn file_delta(path: &str, status: FileChangeStatus) -> FileDelta {
+    FileDelta {
+        relative_path: path.into(),
+        language: Some("Rust".into()),
+        status,
+        baseline_code: 10,
+        current_code: 10,
+        code_delta: 0,
+        baseline_comment: 0,
+        current_comment: 0,
+        comment_delta: 0,
+        baseline_blank: 0,
+        current_blank: 0,
+        blank_delta: 0,
+        total_delta: 0,
+    }
+}
+
+#[test]
+fn write_diff_csv_covers_removed_unchanged_and_quoted_paths() {
+    // Exercise the Removed and Unchanged status arms (the Added/Modified arms are
+    // covered above) plus csv_escape's quoting branch via a comma-bearing path.
+    let mut cmp = make_scan_comparison();
+    cmp.file_deltas = vec![
+        file_delta("src/gone.rs", FileChangeStatus::Removed),
+        file_delta("src/same.rs", FileChangeStatus::Unchanged),
+        // A path with a comma must be wrapped in quotes by csv_escape.
+        file_delta("src/weird,name.rs", FileChangeStatus::Modified),
+    ];
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    write_diff_csv(&cmp, tmp.path()).unwrap();
+    let content = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(content.contains("Removed"), "must label removed files");
+    assert!(content.contains("Unchanged"), "must label unchanged files");
+    assert!(
+        content.contains("\"src/weird,name.rs\""),
+        "comma-bearing path must be CSV-quoted:\n{content}"
+    );
+}
+
 #[test]
 fn write_diff_csv_empty_comparison() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
