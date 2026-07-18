@@ -206,10 +206,25 @@ impl ScanRegistry {
     pub fn remove_entries_under(&mut self, dir: &Path) -> usize {
         let before = self.entries.len();
         self.entries.retain(|e| {
-            let under = |p: &Option<std::path::PathBuf>| {
-                p.as_ref().is_some_and(|path| path.starts_with(dir))
-            };
+            let under = |p: &Option<PathBuf>| p.as_ref().is_some_and(|path| path.starts_with(dir));
             !(under(&e.json_path) || under(&e.html_path))
+        });
+        before - self.entries.len()
+    }
+
+    /// Keep only entries whose artifacts live under one of `roots` — the currently-watched
+    /// folders plus the app's own output directory. Everything else (leftovers from folders
+    /// that are no longer watched, or other external strays) is dropped. This enforces the
+    /// invariant that the report list reflects exactly the watched folders and native scans.
+    /// Returns the number of entries removed.
+    pub fn retain_under_roots(&mut self, roots: &[PathBuf]) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| {
+            let under = |p: &Option<PathBuf>| {
+                p.as_ref()
+                    .is_some_and(|path| roots.iter().any(|r| path.starts_with(r)))
+            };
+            under(&e.json_path) || under(&e.html_path)
         });
         before - self.entries.len()
     }
@@ -315,5 +330,34 @@ mod tests {
         reg.entries.push(entry("a", "/other/result.json"));
         assert_eq!(reg.remove_entries_under(Path::new("/watched")), 0);
         assert_eq!(reg.entries.len(), 1);
+    }
+
+    #[test]
+    fn retain_under_roots_keeps_only_watched_and_native() {
+        let mut reg = ScanRegistry::default();
+        reg.entries
+            .push(entry("native", "/app/out/web/run1/json/result.json"));
+        reg.entries
+            .push(entry("watched", "/watched/scans/run2/json/result.json"));
+        reg.entries
+            .push(entry("orphan", "/removed/folder/run3/json/result.json"));
+
+        let roots = vec![
+            PathBuf::from("/app/out/web"),
+            PathBuf::from("/watched/scans"),
+        ];
+        let removed = reg.retain_under_roots(&roots);
+        assert_eq!(removed, 1);
+        assert_eq!(reg.entries.len(), 2);
+        assert!(reg.entries.iter().all(|e| e.run_id != "orphan"));
+    }
+
+    #[test]
+    fn retain_under_roots_empty_roots_clears_all() {
+        let mut reg = ScanRegistry::default();
+        reg.entries.push(entry("a", "/somewhere/result.json"));
+        reg.entries.push(entry("b", "/elsewhere/result.json"));
+        assert_eq!(reg.retain_under_roots(&[]), 2);
+        assert!(reg.entries.is_empty());
     }
 }
