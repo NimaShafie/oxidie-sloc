@@ -149,7 +149,6 @@ mod win_dialog_focus {
 
     #[link(name = "kernel32")]
     extern "system" {
-        #[cfg(feature = "native-dialog")]
         fn GetCurrentThreadId() -> DWORD;
     }
 
@@ -243,13 +242,41 @@ mod win_dialog_focus {
     }
 
     unsafe fn bring_to_front(hwnd: HWND) {
-        // SW_RESTORE = 9 — same sequence as flash_dialog_when_ready.
-        // SwitchToThisWindow bypasses foreground-lock so the window surfaces
-        // regardless of which process currently has focus.
+        // Surfacing a window owned by another process (Explorer) from a
+        // background thread is blocked by Windows' foreground lock:
+        // SetForegroundWindow silently fails and only the taskbar button
+        // flashes.  The reliable workaround is to temporarily attach our input
+        // queue to the thread that currently owns the foreground window — while
+        // attached, SetForegroundWindow/BringWindowToTop actually activate the
+        // window instead of merely flashing it.
+        let my_tid = GetCurrentThreadId();
+        let fg_hwnd = GetForegroundWindow();
+        let fg_tid = if fg_hwnd.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(fg_hwnd, core::ptr::null_mut())
+        };
+        let attached = fg_tid != 0 && fg_tid != my_tid && AttachThreadInput(my_tid, fg_tid, 1) != 0;
+
+        // SW_RESTORE = 9 — un-minimise the Explorer window (it may have opened
+        // as a taskbar button) without forcing a full-screen maximise.
         ShowWindow(hwnd, 9);
-        SwitchToThisWindow(hwnd, 1);
-        SetForegroundWindow(hwnd);
         BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        // Extra belt-and-braces activation that also bypasses the foreground
+        // lock on older Windows builds.
+        SwitchToThisWindow(hwnd, 1);
+
+        // Force the Z-order to the very top regardless of the foreground-lock
+        // outcome by flipping TOPMOST on then off, so the window jumps above all
+        // others without staying pinned. HWND_TOPMOST = -1, HWND_NOTOPMOST = -2;
+        // SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE = 0x0013.
+        SetWindowPos(hwnd, (-1isize) as HWND, 0, 0, 0, 0, 0x0013);
+        SetWindowPos(hwnd, (-2isize) as HWND, 0, 0, 0, 0, 0x0013);
+
+        if attached {
+            AttachThreadInput(my_tid, fg_tid, 0);
+        }
     }
 
     /// Opens `path` in Windows Explorer and forces it to the foreground.
