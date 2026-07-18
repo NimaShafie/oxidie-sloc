@@ -625,7 +625,7 @@ After a successful build, confirm each feature is wired correctly:
 - To enable: check `GENERATE_PDF`.
 - **No browser, Chromium, or external tool required on the agent** — PDF generation is
   implemented entirely in Rust.  This parameter can be enabled without any additional agent setup.
-- The PDF is archived as `ci-out/report_<slug>.pdf` and can be included in artifact repository
+- The PDF is archived as `ci-out/report_<proj-slug>.pdf` and can be included in artifact repository
   pushes via `ARTIFACT_PUSH_PDF`.
 
 ### Build description
@@ -640,12 +640,21 @@ After a successful build, confirm each feature is wired correctly:
   This confirms all metadata was correctly read from the build output.
 
 ### Archived artifacts
-- Click the build number → **"Build Artifacts"** to see all archived files. With default parameters:
-  - `ci-out/result_<slug>.json` (scan output, slug = `SCAN_PATH` basename)
-  - `ci-out/report_<slug>.html`, `report_<slug>.css`, `report_<slug>.js`,
-    `report_<slug>.xlsx`, `report_<slug>.csv` (HTML report with assets and exports)
-  - `ci-out/report_<slug>.pdf` (produced by default; suppressed when `GENERATE_PDF = false`)
-  - `ci-out/summary.csv`, `ci-out/per_language.csv` (trend CSVs consumed by Plot plugin)
+- Click the build number → **"Build Artifacts"**. Key files produced with default parameters —
+  `<proj-slug>` is the project slug `<repo-name>_<short-sha>` (e.g. `oxide-sloc_2eb74e9`), the
+  same slug used for the report sidebar links above, derived in
+  [`ci/jenkins/pipeline-helpers.groovy`](../ci/jenkins/pipeline-helpers.groovy):
+  - `ci-out/result_<proj-slug>.json` (scan output)
+  - `ci-out/report_<proj-slug>.html`, `report_<proj-slug>.css`, `report_<proj-slug>.js`,
+    `report_<proj-slug>.xlsx`, `report_<proj-slug>.csv` (HTML report with assets and exports)
+  - `ci-out/report_<proj-slug>.pdf` (produced by default; suppressed when `GENERATE_PDF = false`)
+  - `ci-out/scan-config_<proj-slug>.json` (the effective scan configuration used for the run)
+  - `ci-out/dashboard_<proj-slug>.{html,css,js}` (native CI dashboard — the source of the
+    `OxideSLOC_HTML_Report_<proj-slug>` sidebar link)
+  - `ci-out/capabilities.json` (detected plugin/permission state that drives dashboard degradation)
+  - `ci-out/summary.csv`, `ci-out/per_language.csv`, `ci-out/style_analysis.csv` (trend CSVs consumed by Plot plugin)
+  - `ci-out/sub_<name>.html` (per-submodule breakdown, one per detected submodule; on by default via
+    `SUBMODULE_BREAKDOWN = true`)
   - `ci-out/test-results/junit.xml` (when `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`)
   - `ci-out/coverage/{lcov.info,sonar-coverage.xml,html/}` (when `COVERAGE_STANDALONE = true`)
 
