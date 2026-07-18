@@ -1601,10 +1601,11 @@ fn pdf_info_parts_tests(tot: &SummaryTotals) -> Vec<String> {
     tc
 }
 
-/// Emit one or more info lines, packing `parts` joined by "  |  " and wrapping onto a fresh
-/// line whenever appending the next part would overflow the usable page width. Measured with
-/// the exact Helvetica advance table so the whole line is always shown — never truncated.
-/// Returns the y position below the last emitted line.
+/// Emit one or more info lines, packing `parts` and wrapping onto a fresh line whenever the
+/// next part would overflow the usable page width. Each part is drawn as a **bold** key
+/// ("Code:") followed by its regular-weight value, with a muted separator between parts, so the
+/// dense metric strip reads cleanly. Measured with the exact Helvetica advance table so the
+/// whole line is always shown — never truncated. Returns the y position below the last line.
 fn pdf_info_emit_line(
     ctx: &PdfCtx<'_>,
     mut y: f32,
@@ -1614,33 +1615,53 @@ fn pdf_info_emit_line(
     parts: &[String],
 ) -> f32 {
     use crate::pdf_compat::{Color, Mm, Rgb};
-    const SEP: &str = "  |  ";
+    const SIZE: f32 = 7.0;
+    const LINE_GAP: f32 = 6.2;
+    const SEP: &str = "   |   ";
     if parts.is_empty() {
         return y;
     }
     let usable = ctx.margin.mul_add(-2.0, ctx.w);
-    ctx.layer
-        .set_fill_color(Color::Rgb(Rgb::new(r, g, b, None)));
-    let mut line = String::new();
+    let sep_w = helvetica_width_mm(SEP, SIZE, false);
+    let group = Color::Rgb(Rgb::new(r, g, b, None));
+    let sep_color = Color::Rgb(Rgb::new(0.66, 0.63, 0.60, None));
+    let mut x = ctx.margin;
+    let mut first_on_line = true;
     for part in parts {
-        let candidate = if line.is_empty() {
-            part.clone()
-        } else {
-            format!("{line}{SEP}{part}")
+        // Split "Label: value" into a bold key (kept with its colon) and a regular value.
+        let (key, val) = match part.split_once(": ") {
+            Some((k, v)) => (format!("{k}: "), v.to_string()),
+            None => (part.clone(), String::new()),
         };
-        // Keep packing until the next part would overflow; then flush and start a new line.
-        if !line.is_empty() && helvetica_width_mm(&candidate, 7.0, false) > usable {
-            ctx.layer
-                .use_text(line.as_str(), 7.0, Mm(ctx.margin), Mm(y), ctx.font_reg);
-            y -= 5.0;
-            line.clone_from(part);
+        let key_w = helvetica_width_mm(&key, SIZE, true);
+        let val_w = helvetica_width_mm(&val, SIZE, false);
+        let advance = if first_on_line {
+            key_w + val_w
         } else {
-            line = candidate;
+            sep_w + key_w + val_w
+        };
+        if !first_on_line && x + advance > ctx.margin + usable {
+            y -= LINE_GAP;
+            x = ctx.margin;
+            first_on_line = true;
         }
+        if !first_on_line {
+            ctx.layer.set_fill_color(sep_color.clone());
+            ctx.layer.use_text(SEP, SIZE, Mm(x), Mm(y), ctx.font_reg);
+            x += sep_w;
+        }
+        ctx.layer.set_fill_color(group.clone());
+        ctx.layer
+            .use_text(key.as_str(), SIZE, Mm(x), Mm(y), ctx.font_bold);
+        x += key_w;
+        if !val.is_empty() {
+            ctx.layer
+                .use_text(val.as_str(), SIZE, Mm(x), Mm(y), ctx.font_reg);
+            x += val_w;
+        }
+        first_on_line = false;
     }
-    ctx.layer
-        .use_text(line.as_str(), 7.0, Mm(ctx.margin), Mm(y), ctx.font_reg);
-    y - 5.0
+    y - LINE_GAP
 }
 
 fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> f32 {
@@ -1648,12 +1669,15 @@ fn pdf_render_info_lines(ctx: &PdfCtx<'_>, run: &AnalysisRun, row2_bot: f32) -> 
     let mut y = row2_bot - 6.5;
     let stats = pdf_info_parts_stats(tot);
     y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.15, &stats);
+    // A little extra breathing room between the stats / git / tests groups.
     let git = pdf_info_parts_git(run);
     if !git.is_empty() {
+        y -= 1.6;
         y = pdf_info_emit_line(ctx, y, 0.10, 0.35, 0.15, &git);
     }
     let tests = pdf_info_parts_tests(tot);
     if !tests.is_empty() {
+        y -= 1.6;
         y = pdf_info_emit_line(ctx, y, 0.15, 0.15, 0.50, &tests);
     }
     y
@@ -2002,8 +2026,11 @@ fn pdf_tc_gauges(ctx: &PdfCtx<'_>, run: &AnalysisRun, mut y: f32) -> f32 {
         return y;
     }
     let count = visible.len() as f32;
-    let gauge_h: f32 = 14.0;
+    let gauge_h: f32 = 16.0;
+    let pad: f32 = 4.0;
+    let bar_h: f32 = 3.0;
     let gauge_w = (ctx.w - 2.0 * margin - (count - 1.0) * gap) / count;
+    let bar_w = gauge_w - 2.0 * pad;
     for (gi, (label, hit, found)) in visible.iter().enumerate() {
         let gx = margin + gi as f32 * (gauge_w + gap);
         let pct = *hit as f64 / *found as f64 * 100.0;
@@ -2014,39 +2041,59 @@ fn pdf_tc_gauges(ctx: &PdfCtx<'_>, run: &AnalysisRun, mut y: f32) -> f32 {
             clippy::cast_possible_truncation,
             reason = "0..=100 percentage to f32 bar width"
         )]
-        let bar_fill = (gauge_w - 6.0) * (pct as f32 / 100.0);
+        let bar_fill = bar_w * (pct as f32 / 100.0);
         let gy = y - gauge_h;
+        // Simulated 0.5 mm border (outer rect) behind a lighter card fill, matching the meta box.
+        pdf_fill_rect(
+            ctx.layer,
+            gx - 0.5,
+            gy - 0.5,
+            gauge_w + 1.0,
+            gauge_h + 1.0,
+            Rgb::new(0.80, 0.75, 0.68, None),
+        );
         pdf_fill_rect(
             ctx.layer,
             gx,
             gy,
             gauge_w,
             gauge_h,
-            Rgb::new(0.975, 0.965, 0.95, None),
+            Rgb::new(0.98, 0.97, 0.95, None),
         );
+        // Label (top), percentage (middle), progress bar (bottom) — evenly padded.
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.15, 0.15, 0.15, None)));
-        ctx.layer
-            .use_text(*label, 6.0, Mm(gx + 2.0), Mm(gy + 9.5), ctx.font_bold);
+        ctx.layer.use_text(
+            *label,
+            6.0,
+            Mm(gx + pad),
+            Mm(gy + gauge_h - 4.5),
+            ctx.font_bold,
+        );
         ctx.layer
             .set_fill_color(Color::Rgb(Rgb::new(0.20, 0.55, 0.35, None)));
-        ctx.layer
-            .use_text(&pct_str, 8.0, Mm(gx + 2.0), Mm(gy + 4.5), ctx.font_bold);
+        ctx.layer.use_text(
+            &pct_str,
+            8.5,
+            Mm(gx + pad),
+            Mm(gy + bar_h + 3.0),
+            ctx.font_bold,
+        );
         pdf_fill_rect(
             ctx.layer,
-            gx + 3.0,
-            gy + 1.5,
-            gauge_w - 6.0,
-            2.5,
+            gx + pad,
+            gy + pad * 0.5,
+            bar_w,
+            bar_h,
             Rgb::new(0.86, 0.84, 0.80, None),
         );
         if bar_fill > 0.0 {
             pdf_fill_rect(
                 ctx.layer,
-                gx + 3.0,
-                gy + 1.5,
+                gx + pad,
+                gy + pad * 0.5,
                 bar_fill,
-                2.5,
+                bar_h,
                 Rgb::new(0.20, 0.55, 0.35, None),
             );
         }
@@ -4796,6 +4843,10 @@ struct WarningOpportunityRow {
     .support-example-file { display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; padding: 1px 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; margin-bottom: 2px; word-break: break-all; }
     .support-recommendation { color: var(--muted); font-size: 11px; margin: 6px 0 0; line-height: 1.5; }
     .num-col { text-align: right !important; }
+    /* Per-file coverage table: fixed layout keeps numeric columns compact and off the shell border */
+    .cov-file-table { table-layout: fixed; }
+    .cov-file-table th:not(:first-child), .cov-file-table td:not(:first-child) { width: 150px; }
+    .cov-file-table th.num-col, .cov-file-table td.num-col { padding-right: 16px; }
     tbody tr:hover { background: rgba(255, 247, 238, 0.6); }
     body.dark-theme tbody tr:hover { background: rgba(255,255,255,0.03); }
     tr:last-child td { border-bottom: none; }
@@ -4822,10 +4873,14 @@ struct WarningOpportunityRow {
     .info-callout code { background:rgba(68,103,216,0.12); border-radius:4px; padding:1px 5px; font-size:12px; }
     body.dark-theme .info-callout { background:rgba(100,130,255,0.09); border-color:rgba(100,130,255,0.22); }
     .empty-state-row td { text-align:center; padding:20px; color:var(--muted-2); font-size:13px; font-style:italic; }
-    .cov-gauge-row { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:18px; }
+    /* auto-fit so a lone gauge card (line-only coverage) spans the full width instead of 1/3 */
+    .cov-gauge-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin-bottom:18px; }
     @media(max-width:700px) { .cov-gauge-row { grid-template-columns:1fr; } }
-    .cov-gauge-card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px 20px; display:flex; flex-direction:column; gap:8px; transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1); min-width:0; }
-    .cov-gauge-card:hover { transform:translateY(-3px); box-shadow:0 10px 28px rgba(77,44,20,0.15); }
+    .cov-gauge-card { position:relative; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px 20px; display:flex; flex-direction:column; gap:8px; cursor:default; transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1); min-width:0; }
+    .cov-gauge-card:hover { transform:translateY(-3px); box-shadow:0 10px 28px rgba(77,44,20,0.15); z-index:10; }
+    .cov-gauge-tip { position:absolute; top:calc(100% + 10px); left:50%; transform:translateX(-50%) translateY(-7px); background:var(--text); color:var(--bg); padding:10px 14px; border-radius:8px; font-size:12px; font-weight:500; line-height:1.55; white-space:normal; max-width:420px; min-width:200px; text-align:left; pointer-events:none; opacity:0; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1); z-index:200; box-shadow:0 4px 18px rgba(0,0,0,0.25); }
+    .cov-gauge-tip::after { content:''; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-bottom-color:var(--text); }
+    .cov-gauge-card:hover .cov-gauge-tip { opacity:1; transform:translateX(-50%) translateY(0); }
     .cov-gauge-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
     .cov-gauge-val { font-size:32px; font-weight:900; line-height:1; }
     .cov-gauge-track { height:8px; border-radius:4px; background:var(--line); overflow:hidden; }
@@ -5815,6 +5870,7 @@ struct WarningOpportunityRow {
               <div class="cov-gauge-val" style="color:var(--{{ cov_line_class }}-text);">{{ cov_line_pct }}%</div>
               <div class="cov-gauge-track"><div class="cov-gauge-fill" style="width:{{ cov_line_pct }}%;background:var(--{{ cov_line_class }}-text);"></div></div>
               <div class="cov-gauge-sub">Lines hit / instrumented</div>
+              <div class="cov-gauge-tip">Share of instrumented source lines executed at least once during the test run (from LCOV <code>DA</code> records).</div>
             </div>
             {% if has_fn_coverage %}
             <div class="cov-gauge-card">
@@ -5869,14 +5925,14 @@ struct WarningOpportunityRow {
               <h3 style="margin:0;font-size:14px;font-weight:800;color:var(--text);">Per-File Coverage</h3>
               <span class="pill good" style="font-size:10px;">{{ file_rows.len() }} files with data</span>
             </div>
-            <table data-sort-table style="min-width:560px;">
+            <table data-sort-table class="cov-file-table" style="min-width:560px;">
               <thead>
                 <tr>
                   <th data-sort-type="text">File</th>
-                  <th data-sort-type="number">Line Cov %</th>
-                  <th data-sort-type="text">Lines Hit / Found</th>
-                  {% if has_fn_coverage %}<th data-sort-type="number">Fn Cov %</th>{% endif %}
-                  {% if has_branch_coverage %}<th data-sort-type="number">Branch Cov %</th>{% endif %}
+                  <th class="num-col" data-sort-type="number">Line Cov %</th>
+                  <th class="num-col" data-sort-type="text">Lines Hit / Found</th>
+                  {% if has_fn_coverage %}<th class="num-col" data-sort-type="number">Fn Cov %</th>{% endif %}
+                  {% if has_branch_coverage %}<th class="num-col" data-sort-type="number">Branch Cov %</th>{% endif %}
                 </tr>
               </thead>
               <tbody>
@@ -7329,6 +7385,16 @@ struct WarningOpportunityRow {
           ? { text: '#d4c5b8', grid: 'rgba(255,255,255,0.10)' }
           : { text: '#43342d', grid: '#e6d0bf' };
       }
+      // Legend-highlight alpha for a dataset's drawn label / marker. `chart.$hiDs` is
+      // set by legend hover (see attachScatterLegend); when it is null every dataset
+      // draws at full strength. Once a language is hovered, the others fade so the
+      // hovered one's marker, name and number stay readable through overlapping
+      // neighbours. Applied globally to every value-labelled Chart.js plot.
+      function hiAlpha(chart, di) {
+        var h = chart.$hiDs;
+        if (h == null) return 1;
+        return di === h ? 1 : 0.1;
+      }
       // Inline Chart.js plugin: draws a permanent value label on each bar / bubble.
       // fmtFn(rawValue, datasetIndex, pointIndex) → string | null
       // anchor: 'top' = above vertical bar, 'end' = right of horizontal bar, 'bubble' = above bubble
@@ -7343,6 +7409,7 @@ struct WarningOpportunityRow {
                 var label = fmtFn(ds.data[idx], di, idx);
                 if (label == null || label === '') return;
                 ctx.save();
+                ctx.globalAlpha = hiAlpha(chart, di);
                 ctx.font = '600 11px Inter,ui-sans-serif,sans-serif';
                 ctx.fillStyle = tc;
                 if (anchor === 'top') {
@@ -7364,6 +7431,34 @@ struct WarningOpportunityRow {
             });
           }
         };
+      }
+      // Bubble-chart value labels (language name + code lines above each bubble).
+      // Shared by the dashboard card and the Full View modal. Honours the legend
+      // highlight: non-hovered languages' labels fade and the hovered one is drawn
+      // last so its name + number sit on top of any overlapping neighbours — the
+      // clustered bubbles at the origin are otherwise an unreadable pile of text.
+      function scatterLabelPlugin() {
+        return { afterDatasetsDraw: function(chart) {
+          var ctx = chart.ctx, tc = clr().text, hi = chart.$hiDs;
+          function drawOne(di) {
+            var d = SCAT_D[di]; if (!d) return;
+            var meta = chart.getDatasetMeta(di), a = hiAlpha(chart, di);
+            meta.data.forEach(function(el) {
+              var r = (el.options && el.options.radius) ? el.options.radius : 10;
+              var ty2 = Math.max(14, el.y - r - 3), ty1 = Math.max(1, ty2 - 14);
+              ctx.save();
+              ctx.globalAlpha = a; ctx.fillStyle = tc;
+              ctx.textBaseline = 'bottom'; ctx.textAlign = 'center';
+              ctx.font = '800 11px Inter,ui-sans-serif,sans-serif';
+              ctx.fillText(d.lang, el.x, ty1);
+              ctx.font = '700 10px Inter,ui-sans-serif,sans-serif';
+              ctx.fillText(fmt(d.code), el.x, ty2);
+              ctx.restore();
+            });
+          }
+          chart.data.datasets.forEach(function(_, di) { if (hi == null || di !== hi) drawOne(di); });
+          if (hi != null && hi >= 0) drawOne(hi);
+        } };
       }
       function makeStackedEndPlugin(fmtFn) {
         return {
@@ -7392,9 +7487,33 @@ struct WarningOpportunityRow {
 
       function wireDonutLegend(svg) {
         if(!svg) return;
-        var paths=svg.querySelectorAll('path[data-lang]');
-        function hl(lang){for(var i=0;i<paths.length;i++){if(paths[i].getAttribute('data-lang')===lang){paths[i].style.filter='brightness(1.18) drop-shadow(0 2px 8px rgba(0,0,0,.25))';paths[i].style.transform='scale(1.05)';paths[i].style.opacity='1';}else{paths[i].style.opacity='0.32';paths[i].style.filter='none';paths[i].style.transform='none';}}}
-        function rst(){for(var i=0;i<paths.length;i++){paths[i].style.opacity='';paths[i].style.filter='';paths[i].style.transform='';}}
+        // Every donut element carries data-lang: slices (path/circle), leader lines,
+        // outside labels + % labels (text) and legend rows (g). Hovering any one of
+        // them emphasises that language across all of them and fades the rest, so the
+        // slice, its leader line, its label and its legend row move as one picture.
+        var items=svg.querySelectorAll('[data-lang]');
+        function emph(el,st){ // st: 1 = highlight, -1 = fade, 0 = reset
+          var tag=el.tagName.toLowerCase();
+          if(tag==='path'||tag==='circle'){
+            if(st===1){el.style.opacity='1';el.style.filter='brightness(1.15) drop-shadow(0 3px 9px rgba(0,0,0,.28))';el.style.transform='scale(1.06)';}
+            else if(st===-1){el.style.opacity='0.24';el.style.filter='none';el.style.transform='none';}
+            else{el.style.opacity='';el.style.filter='';el.style.transform='';}
+          }else if(tag==='line'){
+            if(st===1){el.style.opacity='1';el.style.strokeWidth='1.8';}
+            else if(st===-1){el.style.opacity='0.1';el.style.strokeWidth='';}
+            else{el.style.opacity='';el.style.strokeWidth='';}
+          }else if(tag==='text'){
+            if(st===1){el.style.opacity='1';el.style.fontWeight='800';}
+            else if(st===-1){el.style.opacity='0.18';el.style.fontWeight='';}
+            else{el.style.opacity='';el.style.fontWeight='';}
+          }else{ // legend group
+            if(st===1){el.style.opacity='1';}
+            else if(st===-1){el.style.opacity='0.4';}
+            else{el.style.opacity='';}
+          }
+        }
+        function hl(lang){for(var i=0;i<items.length;i++){emph(items[i],items[i].getAttribute('data-lang')===lang?1:-1);}}
+        function rst(){for(var i=0;i<items.length;i++){emph(items[i],0);}}
         svg.addEventListener('mouseover',function(e){var t=e.target;while(t&&t!==svg){var l=t.getAttribute&&t.getAttribute('data-lang');if(l){hl(l);return;}t=t.parentNode;}rst();});
         svg.addEventListener('mousemove',function(e){var t=e.target;while(t&&t!==svg){if(t.getAttribute&&t.getAttribute('data-lang'))return;t=t.parentNode;}rst();});
         svg.addEventListener('mouseout',function(e){if(e.relatedTarget&&svg.contains(e.relatedTarget))return;rst();});
@@ -7428,10 +7547,14 @@ struct WarningOpportunityRow {
         var legCount=D.length;
         var legSpacing=Math.max(12,Math.min(22,Math.floor((DH-30)/Math.max(legCount,1))));
         var legYStart=Math.round((DH-legCount*legSpacing)/2);
-        var ds='<svg viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+        var ds='<svg id="dnt-svg" viewBox="0 0 '+DW+' '+DH+'" width="'+DW+'" height="'+DH+'" style="display:block;max-width:100%;" xmlns="http://www.w3.org/2000/svg">';
+        // One shared transition on every donut element so slices, leader lines,
+        // outside labels, % labels and the legend all animate together as a single
+        // picture when a language is hovered. Slices scale from the donut centre.
+        ds+='<style>#dnt-svg path,#dnt-svg circle,#dnt-svg line,#dnt-svg text,#dnt-svg g{transition:opacity .22s ease,filter .22s ease,transform .22s ease,stroke-width .22s ease;}#dnt-svg path,#dnt-svg circle{transform-origin:'+cx+'px '+cy+'px;}</style>';
         if(D.length===1){
           var rm=Math.round((Ro+Ri)/2),rsw=Ro-Ri;
-          ds+='<circle'+tt(D[0].lang,fmt(D[0].code)+' code lines')+' cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+PALETTE[0]+'" stroke-width="'+rsw+'"/>';
+          ds+='<circle'+tt(D[0].lang,fmt(D[0].code)+' code lines')+' data-lang="'+esc(D[0].lang)+'" cx="'+cx+'" cy="'+cy+'" r="'+rm+'" fill="none" stroke="'+PALETTE[0]+'" stroke-width="'+rsw+'"/>';
         } else {
           var smalls=[];
           var ang=-Math.PI/2;
@@ -7443,7 +7566,7 @@ struct WarningOpportunityRow {
             var xi2=cx+Ri*Math.cos(ang),yi2=cy+Ri*Math.sin(ang);
             var pct=Math.round(d.code/tot*100);
             ds+='<path'+tt(d.lang,fmt(d.code)+' code lines ('+pct+'%)')+' data-lang="'+esc(d.lang)+'" d="M'+px(x1)+','+px(y1)+' A'+Ro+','+Ro+' 0 '+(sw>Math.PI?1:0)+',1 '+px(x2)+','+px(y2)+' L'+px(xi1)+','+px(yi1)+' A'+Ri+','+Ri+' 0 '+(sw>Math.PI?1:0)+',0 '+px(xi2)+','+px(yi2)+' Z" fill="'+(PALETTE[i%PALETTE.length])+'" stroke="white" stroke-width="2"/>';
-            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){smalls.push({mAng:ang+sw/2,pct:pct,lang:d.lang,col:PALETTE[i%PALETTE.length]});}
+            if(pct>=5){var mAng=ang+sw/2,mR=(Ro+Ri)/2;ds+='<text data-lang="'+esc(d.lang)+'" x="'+px(cx+mR*Math.cos(mAng))+'" y="'+px(cy+mR*Math.sin(mAng))+'" text-anchor="middle" dominant-baseline="middle" font-family="'+FONT+'" font-size="10" font-weight="700" fill="white" style="pointer-events:none;">'+pct+'%</text>';}else if(pct>0){smalls.push({mAng:ang+sw/2,pct:pct,lang:d.lang,col:PALETTE[i%PALETTE.length]});}
             ang+=sw;
           });
           // Small slices (<5%) get outside labels positioned near each slice's own
@@ -7460,8 +7583,8 @@ struct WarningOpportunityRow {
             if(sOver>0)smalls.forEach(function(sm){sm.x-=sOver;});
             smalls.forEach(function(sm){
               var axx=cx+Ro*Math.cos(sm.mAng),ayy=cy+Ro*Math.sin(sm.mAng);
-              ds+='<line x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(sm.x)+'" y2="'+px(sRowY+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
-              ds+='<text x="'+px(sm.x)+'" y="'+px(sRowY)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="pointer-events:none;">'+esc(sm.txt)+'</text>';
+              ds+='<line data-lang="'+esc(sm.lang)+'" x1="'+px(axx)+'" y1="'+px(ayy)+'" x2="'+px(sm.x)+'" y2="'+px(sRowY+4)+'" stroke="'+sm.col+'" stroke-width="1" opacity="0.5" style="pointer-events:none;"/>';
+              ds+='<text data-lang="'+esc(sm.lang)+'" x="'+px(sm.x)+'" y="'+px(sRowY)+'" text-anchor="middle" font-family="'+FONT+'" font-size="9" font-weight="700" fill="'+sm.col+'" style="cursor:pointer;">'+esc(sm.txt)+'</text>';
             });
           }
         }
@@ -7883,6 +8006,7 @@ struct WarningOpportunityRow {
           + 'align-content:center;font-size:12px;line-height:1;';
         function setHi(idx) {
           var chart = holder.chart; if (!chart) return;
+          chart.$hiDs = idx;   // read by scatterLabelPlugin so labels fade in step
           chart.data.datasets.forEach(function(ds, i) {
             var b = PALETTE[i % PALETTE.length];
             ds.backgroundColor = i === idx ? b + 'b8' : b + '20';
@@ -7893,6 +8017,7 @@ struct WarningOpportunityRow {
         }
         function clearHi() {
           var chart = holder.chart; if (!chart) return;
+          chart.$hiDs = null;
           chart.data.datasets.forEach(function(ds, i) {
             var b = PALETTE[i % PALETTE.length];
             ds.backgroundColor = b + 'b8';
@@ -7983,26 +8108,7 @@ struct WarningOpportunityRow {
               }
             }
           },
-          plugins: [(function(){return{afterDatasetsDraw:function(chart){
-            var ctx=chart.ctx,tc=clr().text,ca=chart.chartArea;
-            chart.data.datasets.forEach(function(ds,di){
-              var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
-              meta.data.forEach(function(el){
-                var r=(el.options&&el.options.radius)?el.options.radius:10;
-                var codeStr=fmt(d.code);
-                // render in layout.padding.top space — clamp only to canvas top, not chartArea.top
-                var ty2=Math.max(14,el.y-r-3);
-                var ty1=Math.max(1,ty2-14);
-                // label always centred directly on bubble — padding.right gives room at the edge
-                ctx.save();ctx.fillStyle=tc;ctx.textBaseline='bottom';ctx.textAlign='center';
-                ctx.font='800 11px Inter,ui-sans-serif,sans-serif';
-                ctx.fillText(d.lang,el.x,ty1);
-                ctx.font='700 10px Inter,ui-sans-serif,sans-serif';
-                ctx.fillText(codeStr,el.x,ty2);
-                ctx.restore();
-              });
-            });
-          }};})()]
+          plugins: [scatterLabelPlugin()]
         });
         ALL_CHARTS.push(chart);
         legHolder.chart = chart;
@@ -8566,24 +8672,7 @@ struct WarningOpportunityRow {
                   }}
                 }
               },
-              plugins: [(function(){return{afterDatasetsDraw:function(chart){
-                var ctx=chart.ctx,tc=clr().text,ca=chart.chartArea;
-                chart.data.datasets.forEach(function(ds,di){
-                  var meta=chart.getDatasetMeta(di),d=SCAT_D[di];if(!d)return;
-                  meta.data.forEach(function(el){
-                    var r=(el.options&&el.options.radius)?el.options.radius:10;
-                    var codeStr=fmt(d.code);
-                    var ty2=Math.max(14,el.y-r-3);
-                    var ty1=Math.max(1,ty2-14);
-                    ctx.save();ctx.fillStyle=tc;ctx.textBaseline='bottom';ctx.textAlign='center';
-                    ctx.font='800 11px Inter,ui-sans-serif,sans-serif';
-                    ctx.fillText(d.lang,el.x,ty1);
-                    ctx.font='700 10px Inter,ui-sans-serif,sans-serif';
-                    ctx.fillText(codeStr,el.x,ty2);
-                    ctx.restore();
-                  });
-                });
-              }};})()]
+              plugins: [scatterLabelPlugin()]
             });
             scLegHolder.chart = scExpand;
           });
