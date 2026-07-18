@@ -5920,11 +5920,11 @@ struct WarningOpportunityRow {
             </table>
           </div>
           {% if has_coverage_data %}
-          <div class="table-shell" style="margin-top:16px;">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-              <h3 style="margin:0;font-size:14px;font-weight:800;color:var(--text);">Per-File Coverage</h3>
-              <span class="pill good" style="font-size:10px;">{{ file_rows.len() }} files with data</span>
-            </div>
+          <div style="display:flex;align-items:center;gap:10px;margin:16px 0 8px;">
+            <h3 style="margin:0;font-size:14px;font-weight:800;color:var(--text);">Per-File Coverage</h3>
+            <span class="pill good" style="font-size:10px;">{{ file_rows.len() }} files with data</span>
+          </div>
+          <div class="table-shell">
             <table data-sort-table class="cov-file-table" style="min-width:560px;">
               <thead>
                 <tr>
