@@ -136,6 +136,26 @@ fn any_key_matches(candidates: &[&Option<String>], keys: &[secrecy::SecretBox<St
     })
 }
 
+/// Audit a successful authenticated request, but only for state-changing methods.
+/// Auditing every GET (assets, polling) would flood the sink with no security value;
+/// the who-did-what trail that matters is mutating requests.
+fn audit_authenticated_success(req: &Request<Body>, peer_ip: IpAddr, session_valid: bool) {
+    if !is_mutating(req.method()) {
+        return;
+    }
+    let via = if session_valid { "session" } else { "api_key" };
+    audit::record(
+        "auth_success",
+        "success",
+        &[
+            ("peer_ip", &peer_ip.to_string()),
+            ("method", req.method().as_str()),
+            ("path", req.uri().path()),
+            ("via", via),
+        ],
+    );
+}
+
 /// Pull the three accepted credential carriers out of the request headers:
 /// `(Bearer token, X-API-Key, session cookie)`.
 fn extract_credentials(req: &Request<Body>) -> (Option<String>, Option<String>, Option<String>) {
@@ -190,22 +210,7 @@ pub(crate) async fn require_api_key(
     let valid = session_valid || any_key_matches(&[&auth_header, &x_api_key], keys);
 
     if valid {
-        // Audit successful authenticated access to state-changing endpoints only.
-        // Auditing every GET (assets, polling) would flood the sink with no security
-        // value; the who-did-what trail that matters is mutating requests.
-        if is_mutating(req.method()) {
-            let via = if session_valid { "session" } else { "api_key" };
-            audit::record(
-                "auth_success",
-                "success",
-                &[
-                    ("peer_ip", &peer_ip.to_string()),
-                    ("method", req.method().as_str()),
-                    ("path", req.uri().path()),
-                    ("via", via),
-                ],
-            );
-        }
+        audit_authenticated_success(&req, peer_ip, session_valid);
         return next.run(req).await;
     }
 
