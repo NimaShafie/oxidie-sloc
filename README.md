@@ -191,10 +191,10 @@ Full OpenAPI 3.1 spec: `GET /api/openapi.yaml` or [`docs/openapi.yaml`](./docs/o
 |---|---|
 | GitHub Actions | `ci/sloc-github-action.yml` — copy to `.github/workflows/` |
 | GitHub Marketplace | `uses: NimaShafie/oxide-sloc@main` (see [`action.yml`](./action.yml)) |
-| Jenkins | `examples/jenkins/Jenkinsfile` |
+| Jenkins | `testing/examples/jenkins/Jenkinsfile` |
 | GitLab CI | `ci/sloc-gitlab.yml` — include via `include:` |
-| Bitbucket Pipelines | `examples/bitbucket/bitbucket-pipelines.yml` |
-| Azure Pipelines | `examples/azure/azure-pipelines.yml` |
+| Bitbucket Pipelines | `testing/examples/bitbucket/bitbucket-pipelines.yml` |
+| Azure Pipelines | `testing/examples/azure/azure-pipelines.yml` |
 
 **Marketplace action:**
 
@@ -249,8 +249,8 @@ crates/
 ci/                 # CI scripts + config presets
 docs/               # airgap.md, ci-integrations.md, server-deployment.md, openapi.yaml
 dist/               # Windows pre-built binary (committed by CI after each release)
-examples/           # Runnable examples + sloc.example.toml
 scripts/            # run.sh, serve-server.sh (user-facing entry points)
+testing/            # fixtures/ (scan sample repo) + examples/ (CI configs, sloc.example.toml)
 ```
 
 ---

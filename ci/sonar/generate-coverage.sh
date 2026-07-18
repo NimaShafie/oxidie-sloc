@@ -114,7 +114,7 @@ if has_cargo_subcommand tarpaulin; then
         --all-features \
         --out Lcov Xml \
         --output-dir "${OUTPUT_DIR}" \
-        --exclude-files "tests/*" \
+        --exclude-files "testing/*" \
         --timeout 120
 
     # tarpaulin names the XML file "cobertura.xml"; rename to the expected name.

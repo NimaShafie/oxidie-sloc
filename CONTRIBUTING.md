@@ -44,7 +44,7 @@ Language support touches two crates and must be kept in sync:
 
 2. **`crates/sloc-config/src/lib.rs`** — verify that the new language name is accepted via `enabled_languages` filtering (it uses `Language::from_name` so no change is usually needed).
 
-3. Add a small test file for the new language under `tests/fixtures/basic/` so the smoke test covers it.
+3. Add a small test file for the new language under `testing/fixtures/basic/` so the smoke test covers it.
 
 ## Adding a new CLI flag
 
@@ -120,7 +120,7 @@ Common types: `feat`, `fix`, `refactor`, `docs`, `chore`, `ci`, `test`.
 ## Pull request checklist
 
 - [ ] All four CI gates pass locally
-- [ ] New language support updates both `sloc-languages` and has a fixture file in `tests/fixtures/basic/`
+- [ ] New language support updates both `sloc-languages` and has a fixture file in `testing/fixtures/basic/`
 - [ ] New dependencies: run `bash scripts/internal/update-vendor.sh` so the next release bundles them
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`
 - [ ] No `#[allow(...)]` without a comment explaining why

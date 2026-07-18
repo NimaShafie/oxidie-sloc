@@ -102,7 +102,7 @@ pipelineJob(upstreamName) {
     parameters {
         stringParam('TARGET_JOB',     targetJob,          'The oxide-sloc pipeline job to trigger')
         stringParam('DOWNSTREAM_JOB', downstreamName,     'Job that oxide-sloc triggers on success')
-        stringParam('SCAN_PATH',      'tests/fixtures/basic', 'Path oxide-sloc scans for this demo')
+        stringParam('SCAN_PATH',      'testing/fixtures/basic', 'Path oxide-sloc scans for this demo')
     }
     definition {
         cps {

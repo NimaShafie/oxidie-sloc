@@ -4276,7 +4276,7 @@ async fn preview_handler(
 ) -> impl IntoResponse {
     let raw_path = query
         .path
-        .unwrap_or_else(|| "tests/fixtures/basic".to_string());
+        .unwrap_or_else(|| "testing/fixtures/basic".to_string());
     let resolved = resolve_input_path(&raw_path);
 
     // If the sample path was requested but doesn't exist on this server (e.g. a deployed
@@ -18342,7 +18342,7 @@ struct SubmoduleRow {
                       <input type="hidden" name="git_repo" value="{{ git_repo }}" />
                       <input type="hidden" name="git_ref" value="{{ git_ref }}" />
                       {% else %}
-                      <input id="path" name="path" type="text" value="tests/fixtures/basic" placeholder="/path/to/repository" required />
+                      <input id="path" name="path" type="text" value="testing/fixtures/basic" placeholder="/path/to/repository" required />
                       <button type="button" class="mini-button oxide" id="browse-path">{% if server_mode %}Upload{% else %}Browse{% endif %}</button>
                       <button type="button" class="mini-button" id="use-sample-path">Use sample</button>
                       {% endif %}
@@ -18512,7 +18512,7 @@ coverage run -m pytest && coverage json   # writes coverage.json
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
                   Proceed with the default sample test?
                 </h3>
-                <p>The <strong>Project path</strong> is still set to the bundled sample <code>tests/fixtures/basic</code></p>
+                <p>The <strong>Project path</strong> is still set to the bundled sample <code>testing/fixtures/basic</code></p>
                 <p>You haven&#39;t selected your own project yet.</p>
                 <p>Make sure to fill out the <strong>Project path</strong> with your repository and confirm it uploads successfully before scanning.</p>
                 <div class="default-path-actions">
@@ -20563,7 +20563,7 @@ int main() { … }   ← code
 
       // True when the project path is untouched from the bundled sample default.
       function isDefaultSamplePath() {
-        return !GIT_MODE && pathInput && pathInput.value.trim() === "tests/fixtures/basic";
+        return !GIT_MODE && pathInput && pathInput.value.trim() === "testing/fixtures/basic";
       }
 
       var defaultPathOverlay = document.getElementById("default-path-overlay");
@@ -20640,11 +20640,11 @@ int main() { … }   ← code
 
       if (useSamplePath) {
         useSamplePath.addEventListener("click", function () {
-          pathInput.value = "tests/fixtures/basic";
+          pathInput.value = "testing/fixtures/basic";
           updateReportTitleFromPath();
-          autoSetOutputDir("tests/fixtures/basic");
+          autoSetOutputDir("testing/fixtures/basic");
           loadPreview();
-          suggestCoverageFile("tests/fixtures/basic");
+          suggestCoverageFile("testing/fixtures/basic");
         });
       }
 

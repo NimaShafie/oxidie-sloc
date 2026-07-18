@@ -20,7 +20,7 @@ comment:
 # in headless CI (binary entry points, and git handlers that require a live
 # remote to clone/fetch/scan against).
 ignore:
-  - "tests/**"
+  - "testing/**"
   - "vendor/**"
   - "crates/sloc-cli/src/main.rs"
   - "crates/sloc-mcp/src/main.rs"

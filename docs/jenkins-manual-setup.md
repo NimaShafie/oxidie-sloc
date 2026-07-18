@@ -498,7 +498,7 @@ once.  The first build must run **without parameters** to register them.
    **Checkout → Load helpers → Setup → Quality Gates (Format, Lint, Unit tests) → Build →
    Coverage → Analyze → Web UI health check → Deliver results (Send webhook, Send email) →
    Archive & Publish → Push to Artifact Repository → Git-Ref Scan → Git-Ref Compare**,
-   then succeeds.  Analyze targets `tests/fixtures/basic` which exists in the repository.
+   then succeeds.  Analyze targets `testing/fixtures/basic` which exists in the repository.
    Optional stages (Coverage, Web UI health check, webhook, email, artifact push, ref scan)
    are skipped unless the corresponding parameters are configured.
 
@@ -524,7 +524,7 @@ From this point on, all 50 configuration parameters are visible in the build for
    | Parameter | Default | What to set |
    |-----------|---------|------------|
    | `REPO_URL` | GitHub upstream | URL of the repository you want to scan |
-   | `SCAN_PATH` | `tests/fixtures/basic` | Path within the repository to analyze (e.g., `src` or `.`) |
+   | `SCAN_PATH` | `testing/fixtures/basic` | Path within the repository to analyze (e.g., `src` or `.`) |
    | `REPORT_TITLE` | `oxide-sloc CI Report` | A descriptive title for the HTML report |
    | `GENERATE_HTML` | ✓ checked | Check to produce an HTML report (recommended) |
    | `GENERATE_PDF` | ✓ checked | PDF is produced by default; uncheck to skip. **Pure-Rust — no browser required on the agent** |
