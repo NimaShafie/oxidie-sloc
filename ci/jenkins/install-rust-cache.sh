@@ -60,13 +60,38 @@ fi
 # without --component llvm-tools, or when the cached toolchain predates this requirement).
 rustup component add llvm-tools 2>/dev/null || true
 
-# Pre-install CI tooling so the pipeline's auto-install step is a no-op on this agent.
-# Both tools are also vendored in ci/tools/Cargo.toml for offline installs, but having
-# them pre-installed avoids the vendor-extract overhead on every nextest/coverage run.
-echo "Installing cargo-nextest..."
-cargo install cargo-nextest || echo "WARNING: cargo-nextest install failed (network required for fresh install)."
-echo "Installing cargo-llvm-cov..."
-cargo install cargo-llvm-cov || echo "WARNING: cargo-llvm-cov install failed (network required for fresh install)."
+# Pre-install CI tooling so the "Test Result" (cargo-nextest) and "Coverage"
+# (cargo-llvm-cov) views work, and so the pipeline's auto-install step is a no-op.
+# Installing into $CARGO_HOME/bin means the tools survive an agent-image rebuild
+# when this script runs at image-build time (not just in a live container).
+# Prefer the official prebuilt binaries (fast, no compile); fall back to
+# `cargo install` (which can use the vendored sources on offline agents).
+install_ci_tool() {  # $1 = binary name, $2 = prebuilt tarball URL, $3 = crate name
+    local bin="$1" url="$2" crate="$3"
+    if command -v "${bin}" >/dev/null 2>&1 || [ -x "${CARGO_HOME}/bin/${bin}" ]; then
+        echo "${bin} already present — skipping."
+        return 0
+    fi
+    echo "Installing ${bin} (prebuilt binary)..."
+    local tmp
+    tmp="$(mktemp)"
+    if curl --proto '=https' --tlsv1.2 -LsSf "${url}" -o "${tmp}" \
+        && tar -xzf "${tmp}" -C "${CARGO_HOME}/bin" 2>/dev/null; then
+        echo "  ${bin} -> ${CARGO_HOME}/bin"
+    else
+        echo "  prebuilt download failed — falling back to cargo install ${crate}."
+        cargo install "${crate}" \
+            || echo "  WARNING: ${crate} install failed (network required for a fresh install)."
+    fi
+    rm -f "${tmp}"
+}
+
+install_ci_tool cargo-nextest \
+    "https://get.nexte.st/latest/linux" \
+    cargo-nextest
+install_ci_tool cargo-llvm-cov \
+    "https://github.com/taiki-e/cargo-llvm-cov/releases/latest/download/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+    cargo-llvm-cov
 
 JENKINS_HOME_GUESS="$(getent passwd jenkins 2>/dev/null | cut -d: -f6 || echo '/var/lib/jenkins')"
 

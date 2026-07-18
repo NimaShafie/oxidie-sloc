@@ -773,23 +773,34 @@ pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) ->
     // tree-sitter fast-paths (compiled out when feature is disabled)
     #[cfg(feature = "tree-sitter")]
     {
-        match language {
-            Language::C | Language::Cpp => {
-                if let Some(mut result) = ts::analyze_c(text) {
-                    if options.enable_style
-                        && should_style_analyse(language, options.style_lang_scope)
-                    {
-                        result.style_analysis = style::analyze_style(language, text);
+        // The tree-sitter adapters do not implement the IEEE 1045-1992 counting
+        // policies — they always behave as if both are off (blank lines inside a
+        // block comment count as blank; continuation lines count per physical
+        // line). Taking the fast-path when the caller has engaged either policy
+        // would make counts depend on whether the `tree-sitter` feature is
+        // compiled in. Skip it in that case so results are identical across
+        // feature sets and match the documented lexical semantics.
+        let ieee_policy_engaged =
+            options.blank_in_block_comment_as_comment || options.collapse_continuation_lines;
+        if !ieee_policy_engaged {
+            match language {
+                Language::C | Language::Cpp => {
+                    if let Some(mut result) = ts::analyze_c(text) {
+                        if options.enable_style
+                            && should_style_analyse(language, options.style_lang_scope)
+                        {
+                            result.style_analysis = style::analyze_style(language, text);
+                        }
+                        return result;
                     }
-                    return result;
                 }
-            }
-            Language::Python => {
-                if let Some(result) = ts::analyze_python(text) {
-                    return result;
+                Language::Python => {
+                    if let Some(result) = ts::analyze_python(text) {
+                        return result;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 

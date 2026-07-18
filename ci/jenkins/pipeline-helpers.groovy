@@ -109,7 +109,17 @@ def runUnitTests() {
             cargo nextest run --workspace ${failFastFlag} --profile ci \
                 2>&1 | tee '${resultsDir}/nextest-output.txt'
         """
-        sh "mv -f junit.xml '${resultsDir}/junit.xml' 2>/dev/null || true"
+        // nextest writes JUnit XML into the profile store dir
+        // (target/nextest/ci/junit.xml), NOT the workspace root. Move from there;
+        // fall back to a search in case a custom CARGO_TARGET_DIR relocates it.
+        sh """
+            if [ -f target/nextest/ci/junit.xml ]; then
+                mv -f target/nextest/ci/junit.xml '${resultsDir}/junit.xml'
+            else
+                found=\$(find . -path '*/nextest/ci/junit.xml' -print -quit 2>/dev/null)
+                [ -n "\$found" ] && mv -f "\$found" '${resultsDir}/junit.xml' || true
+            fi
+        """
         if (params.PUBLISH_TEST_RESULTS) {
             // Guarded so a controller WITHOUT the JUnit plugin still passes — the
             // junit.xml is archived regardless, so nothing is lost but the sidebar
