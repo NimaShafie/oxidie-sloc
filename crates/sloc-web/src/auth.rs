@@ -126,6 +126,16 @@ fn is_mutating(method: &axum::http::Method) -> bool {
     )
 }
 
+/// True if any provided credential constant-time-matches a configured API key.
+/// Kept as a free function so its nested closures don't score against the caller.
+fn any_key_matches(candidates: &[&Option<String>], keys: &[secrecy::SecretBox<String>]) -> bool {
+    use secrecy::ExposeSecret;
+    candidates.iter().filter_map(|o| o.as_deref()).any(|k| {
+        keys.iter()
+            .any(|expected| ct_eq(k, expected.expose_secret()))
+    })
+}
+
 /// Pull the three accepted credential carriers out of the request headers:
 /// `(Bearer token, X-API-Key, session cookie)`.
 fn extract_credentials(req: &Request<Body>) -> (Option<String>, Option<String>, Option<String>) {
@@ -177,16 +187,7 @@ pub(crate) async fn require_api_key(
     let session_valid = check_session_valid(session_cookie.as_deref(), &state);
     let any_credential_provided =
         auth_header.is_some() || x_api_key.is_some() || session_cookie.is_some();
-    let valid = session_valid
-        || [&auth_header, &x_api_key]
-            .iter()
-            .filter_map(|o| o.as_deref())
-            .any(|k| {
-                keys.iter().any(|expected| {
-                    use secrecy::ExposeSecret;
-                    ct_eq(k, expected.expose_secret())
-                })
-            });
+    let valid = session_valid || any_key_matches(&[&auth_header, &x_api_key], keys);
 
     if valid {
         // Audit successful authenticated access to state-changing endpoints only.
