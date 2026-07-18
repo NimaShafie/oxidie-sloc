@@ -199,6 +199,20 @@ impl ScanRegistry {
         self.entries
             .retain(|e| e.json_path.as_ref().is_none_or(|p| p.exists()));
     }
+
+    /// Remove every entry whose artifacts live under `dir` (the directory itself or any
+    /// descendant). Used when a watched folder is un-watched so its linked reports leave the
+    /// list too. Returns the number of entries removed.
+    pub fn remove_entries_under(&mut self, dir: &Path) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| {
+            let under = |p: &Option<std::path::PathBuf>| {
+                p.as_ref().is_some_and(|path| path.starts_with(dir))
+            };
+            !(under(&e.json_path) || under(&e.html_path))
+        });
+        before - self.entries.len()
+    }
 }
 
 const fn default_interval_hours() -> u32 {
@@ -251,5 +265,55 @@ impl CleanupPolicyStore {
         }
         std::fs::write(path, serde_json::to_string_pretty(self)?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(run_id: &str, json: &str) -> RegistryEntry {
+        RegistryEntry {
+            run_id: run_id.to_string(),
+            timestamp_utc: Utc::now(),
+            project_label: "proj".to_string(),
+            input_roots: vec![],
+            json_path: Some(PathBuf::from(json)),
+            html_path: None,
+            pdf_path: None,
+            csv_path: None,
+            xlsx_path: None,
+            summary: ScanSummarySnapshot::default(),
+            git_branch: None,
+            git_commit: None,
+            git_commit_long: None,
+            git_author: None,
+            git_tags: None,
+            git_nearest_tag: None,
+            git_commit_date: None,
+        }
+    }
+
+    #[test]
+    fn remove_entries_under_drops_only_matching_folder() {
+        let mut reg = ScanRegistry::default();
+        reg.entries
+            .push(entry("a", "/watched/scans/run1/result.json"));
+        reg.entries
+            .push(entry("b", "/watched/scans/sub/json/result.json"));
+        reg.entries.push(entry("c", "/other/place/result.json"));
+
+        let removed = reg.remove_entries_under(Path::new("/watched/scans"));
+        assert_eq!(removed, 2);
+        assert_eq!(reg.entries.len(), 1);
+        assert_eq!(reg.entries[0].run_id, "c");
+    }
+
+    #[test]
+    fn remove_entries_under_no_match_is_noop() {
+        let mut reg = ScanRegistry::default();
+        reg.entries.push(entry("a", "/other/result.json"));
+        assert_eq!(reg.remove_entries_under(Path::new("/watched")), 0);
+        assert_eq!(reg.entries.len(), 1);
     }
 }

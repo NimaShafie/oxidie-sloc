@@ -4070,6 +4070,13 @@ async fn remove_watched_dir_handler(
         wd.remove(&folder);
         let _ = wd.save(&state.watched_dirs_path);
     }
+    // Drop any reports that were linked in from this folder so the list reflects the removal.
+    {
+        let mut reg = state.registry.lock().await;
+        if reg.remove_entries_under(&folder) > 0 {
+            let _ = reg.save(&state.registry_path);
+        }
+    }
     axum::response::Redirect::to(safe_redirect(&form.redirect_to)).into_response()
 }
 
@@ -11653,6 +11660,22 @@ async fn trend_report_handler(
 
   <div class="page">
     {watched_dirs_html}
+    <div class="scan-overlay" id="scan-overlay" aria-hidden="true">
+      <div class="scan-overlay-card">
+        <div class="scan-spinner"></div>
+        <div class="scan-overlay-text">Scanning folder…</div>
+        <div class="scan-overlay-sub">Reading reports and building metrics — this can take a moment for large folders.</div>
+      </div>
+    </div>
+    <style>
+    .scan-overlay{{position:fixed;inset:0;z-index:12000;display:none;align-items:center;justify-content:center;background:rgba(20,12,8,0.5);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);}}
+    .scan-overlay.active{{display:flex;}}
+    .scan-overlay-card{{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;padding:26px 38px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 24px 60px rgba(0,0,0,0.35);max-width:340px;text-align:center;}}
+    .scan-spinner{{width:42px;height:42px;border-radius:50%;border:4px solid var(--line);border-top-color:var(--oxide);animation:scanSpin 0.8s linear infinite;}}
+    @keyframes scanSpin{{to{{transform:rotate(360deg);}}}}
+    .scan-overlay-text{{font-size:15px;font-weight:800;color:var(--text);}}
+    .scan-overlay-sub{{font-size:12px;color:var(--muted);line-height:1.5;}}
+    </style>
     <div class="summary-strip" id="trend-stats"></div>
     <div class="panel">
       <div class="trend-header">
@@ -11773,6 +11796,10 @@ async fn trend_report_handler(
       }})();
 
       // Watched folder picker
+      (function(){{
+        window.__scanOverlay=function(msg){{var o=document.getElementById('scan-overlay');if(!o)return;var t=o.querySelector('.scan-overlay-text');if(t&&msg)t.textContent=msg;o.classList.add('active');}};
+        document.addEventListener('submit',function(e){{var f=e.target;if(!f||!f.getAttribute)return;var a=f.getAttribute('action')||'';if(a.indexOf('/watched-dirs/remove')!==-1){{window.__scanOverlay('Updating watched folders');}}else if(a.indexOf('/watched-dirs/')!==-1){{window.__scanOverlay();}}}},true);
+      }})();
       (function() {{
         var btn = document.getElementById('add-watched-btn');
         if (!btn) return;
@@ -11790,6 +11817,7 @@ async fn trend_report_handler(
                 fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
                 form.appendChild(ri); form.appendChild(fi);
                 document.body.appendChild(form);
+                if (window.__scanOverlay) window.__scanOverlay();
                 form.submit();
               }}
             }})
@@ -13750,6 +13778,22 @@ async fn test_metrics_handler(
 
   <div class="page">
     {watched_dirs_html}
+    <div class="scan-overlay" id="scan-overlay" aria-hidden="true">
+      <div class="scan-overlay-card">
+        <div class="scan-spinner"></div>
+        <div class="scan-overlay-text">Scanning folder…</div>
+        <div class="scan-overlay-sub">Reading reports and building metrics — this can take a moment for large folders.</div>
+      </div>
+    </div>
+    <style>
+    .scan-overlay{{position:fixed;inset:0;z-index:12000;display:none;align-items:center;justify-content:center;background:rgba(20,12,8,0.5);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);}}
+    .scan-overlay.active{{display:flex;}}
+    .scan-overlay-card{{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;padding:26px 38px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 24px 60px rgba(0,0,0,0.35);max-width:340px;text-align:center;}}
+    .scan-spinner{{width:42px;height:42px;border-radius:50%;border:4px solid var(--line);border-top-color:var(--oxide);animation:scanSpin 0.8s linear infinite;}}
+    @keyframes scanSpin{{to{{transform:rotate(360deg);}}}}
+    .scan-overlay-text{{font-size:15px;font-weight:800;color:var(--text);}}
+    .scan-overlay-sub{{font-size:12px;color:var(--muted);line-height:1.5;}}
+    </style>
     <div class="scope-bar">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--muted);"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
       <span class="scope-label">Scope</span>
@@ -14031,6 +14075,10 @@ async fn test_metrics_handler(
     }})();
 
     // Watched folder picker
+    (function(){{
+      window.__scanOverlay=function(msg){{var o=document.getElementById('scan-overlay');if(!o)return;var t=o.querySelector('.scan-overlay-text');if(t&&msg)t.textContent=msg;o.classList.add('active');}};
+      document.addEventListener('submit',function(e){{var f=e.target;if(!f||!f.getAttribute)return;var a=f.getAttribute('action')||'';if(a.indexOf('/watched-dirs/remove')!==-1){{window.__scanOverlay('Updating watched folders');}}else if(a.indexOf('/watched-dirs/')!==-1){{window.__scanOverlay();}}}},true);
+    }})();
     (function() {{
       var btn = document.getElementById('add-watched-btn');
       if (!btn) return;
@@ -14048,6 +14096,7 @@ async fn test_metrics_handler(
               fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
               form.appendChild(ri); form.appendChild(fi);
               document.body.appendChild(form);
+              if (window.__scanOverlay) window.__scanOverlay();
               form.submit();
             }}
           }})
@@ -26745,6 +26794,22 @@ struct RelocateScanTemplate {
       </div>
       {% endif %}
     </div>
+    <div class="scan-overlay" id="scan-overlay" aria-hidden="true">
+      <div class="scan-overlay-card">
+        <div class="scan-spinner"></div>
+        <div class="scan-overlay-text">Scanning folder…</div>
+        <div class="scan-overlay-sub">Reading reports and building metrics — this can take a moment for large folders.</div>
+      </div>
+    </div>
+    <style>
+    .scan-overlay{position:fixed;inset:0;z-index:12000;display:none;align-items:center;justify-content:center;background:rgba(20,12,8,0.5);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);}
+    .scan-overlay.active{display:flex;}
+    .scan-overlay-card{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;padding:26px 38px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 24px 60px rgba(0,0,0,0.35);max-width:340px;text-align:center;}
+    .scan-spinner{width:42px;height:42px;border-radius:50%;border:4px solid var(--line);border-top-color:var(--oxide);animation:scanSpin 0.8s linear infinite;}
+    @keyframes scanSpin{to{transform:rotate(360deg);}}
+    .scan-overlay-text{font-size:15px;font-weight:800;color:var(--text);}
+    .scan-overlay-sub{font-size:12px;color:var(--muted);line-height:1.5;}
+    </style>
     {% if total_scans > 0 %}
     <div class="summary-strip">
       <div class="stat-chip"><div class="stat-chip-tip">Total scan runs recorded in this workspace</div><div class="stat-chip-val">{{ total_scans }}</div><div class="stat-chip-label">Total scans</div></div>
@@ -27420,6 +27485,10 @@ struct RelocateScanTemplate {
         if (el) el.addEventListener('change', window.applyFilters);
         el = document.getElementById('per-page-sel');
         if (el) el.addEventListener('change', function() { window.setPerPage(this.value); });
+        (function(){
+          window.__scanOverlay=function(msg){var o=document.getElementById('scan-overlay');if(!o)return;var t=o.querySelector('.scan-overlay-text');if(t&&msg)t.textContent=msg;o.classList.add('active');};
+          document.addEventListener('submit',function(e){var f=e.target;if(!f||!f.getAttribute)return;var a=f.getAttribute('action')||'';if(a.indexOf('/watched-dirs/remove')!==-1){window.__scanOverlay('Updating watched folders');}else if(a.indexOf('/watched-dirs/')!==-1){window.__scanOverlay();}},true);
+        })();
         el = document.getElementById('add-watched-btn');
         if (el) el.addEventListener('click', function() {
           fetch('/pick-directory?kind=reports')
@@ -27435,6 +27504,7 @@ struct RelocateScanTemplate {
                 fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
                 form.appendChild(ri); form.appendChild(fi);
                 document.body.appendChild(form);
+                if (window.__scanOverlay) window.__scanOverlay();
                 form.submit();
               }
             })
@@ -27785,6 +27855,22 @@ struct HistoryTemplate {
       </div>
       {% endif %}
     </div>
+    <div class="scan-overlay" id="scan-overlay" aria-hidden="true">
+      <div class="scan-overlay-card">
+        <div class="scan-spinner"></div>
+        <div class="scan-overlay-text">Scanning folder…</div>
+        <div class="scan-overlay-sub">Reading reports and building metrics — this can take a moment for large folders.</div>
+      </div>
+    </div>
+    <style>
+    .scan-overlay{position:fixed;inset:0;z-index:12000;display:none;align-items:center;justify-content:center;background:rgba(20,12,8,0.5);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);}
+    .scan-overlay.active{display:flex;}
+    .scan-overlay-card{background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;padding:26px 38px;display:flex;flex-direction:column;align-items:center;gap:12px;box-shadow:0 24px 60px rgba(0,0,0,0.35);max-width:340px;text-align:center;}
+    .scan-spinner{width:42px;height:42px;border-radius:50%;border:4px solid var(--line);border-top-color:var(--oxide);animation:scanSpin 0.8s linear infinite;}
+    @keyframes scanSpin{to{transform:rotate(360deg);}}
+    .scan-overlay-text{font-size:15px;font-weight:800;color:var(--text);}
+    .scan-overlay-sub{font-size:12px;color:var(--muted);line-height:1.5;}
+    </style>
     {% if total_scans > 0 %}
     <div class="summary-strip">
       <div class="stat-chip"><div class="stat-chip-tip">Total scan runs available for comparison</div><div class="stat-chip-val">{{ total_scans }}</div><div class="stat-chip-label">Total scans</div></div>
@@ -28343,6 +28429,10 @@ struct HistoryTemplate {
       })();
 
       // ── Watched folder picker ─────────────────────────────────────────────
+      (function(){
+        window.__scanOverlay=function(msg){var o=document.getElementById('scan-overlay');if(!o)return;var t=o.querySelector('.scan-overlay-text');if(t&&msg)t.textContent=msg;o.classList.add('active');};
+        document.addEventListener('submit',function(e){var f=e.target;if(!f||!f.getAttribute)return;var a=f.getAttribute('action')||'';if(a.indexOf('/watched-dirs/remove')!==-1){window.__scanOverlay('Updating watched folders');}else if(a.indexOf('/watched-dirs/')!==-1){window.__scanOverlay();}},true);
+      })();
       (function() {
         var btn = document.getElementById('add-watched-btn');
         if (!btn) return;
@@ -28360,6 +28450,7 @@ struct HistoryTemplate {
                 fi.type = 'hidden'; fi.name = 'folder_path'; fi.value = data.selected_path;
                 form.appendChild(ri); form.appendChild(fi);
                 document.body.appendChild(form);
+                if (window.__scanOverlay) window.__scanOverlay();
                 form.submit();
               }
             })
