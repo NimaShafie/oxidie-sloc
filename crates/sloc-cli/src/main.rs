@@ -2899,40 +2899,9 @@ fn run_prune(args: &PruneArgs) -> Result<()> {
         output_root.display()
     );
 
-    // ── Report the run-artifact plan ────────────────────────────────────────────
-    if plan.is_empty() {
-        println!("  No scan runs match the retention rules.");
-    } else {
-        println!(
-            "  {} scan run(s), {} to reclaim:",
-            paint!(c, "1", &plan.runs.len().to_string()),
-            paint!(c, "1;32", &human_bytes(plan.total_bytes))
-        );
-        for r in &plan.runs {
-            println!(
-                "    {}  {}  {}  {}",
-                paint!(c, "2", &r.timestamp_utc.format("%Y-%m-%d").to_string()),
-                r.run_id,
-                paint!(c, "2", &r.project_label),
-                human_bytes(r.bytes)
-            );
-        }
-    }
-
-    // ── Report the log sweep ────────────────────────────────────────────────────
+    print_prune_plan(c, &plan);
     if args.logs {
-        if log_targets.is_empty() {
-            println!("  No audit log to remove ($SLOC_AUDIT_LOG unset or empty).");
-        } else {
-            println!(
-                "  {} log file(s), {} to reclaim:",
-                paint!(c, "1", &log_targets.len().to_string()),
-                paint!(c, "1;32", &human_bytes(log_bytes))
-            );
-            for p in &log_targets {
-                println!("    {}", p.display());
-            }
-        }
+        print_log_sweep(c, &log_targets, log_bytes);
     }
 
     let total = plan.total_bytes + log_bytes;
@@ -2976,6 +2945,44 @@ fn run_prune(args: &PruneArgs) -> Result<()> {
         paint!(c, "1;32", &human_bytes(freed))
     );
     Ok(())
+}
+
+/// Print the run-artifact prune plan (or a "nothing matched" line).
+fn print_prune_plan(c: bool, plan: &sloc_core::PrunePlan) {
+    if plan.is_empty() {
+        println!("  No scan runs match the retention rules.");
+        return;
+    }
+    println!(
+        "  {} scan run(s), {} to reclaim:",
+        paint!(c, "1", &plan.runs.len().to_string()),
+        paint!(c, "1;32", &human_bytes(plan.total_bytes))
+    );
+    for r in &plan.runs {
+        println!(
+            "    {}  {}  {}  {}",
+            paint!(c, "2", &r.timestamp_utc.format("%Y-%m-%d").to_string()),
+            r.run_id,
+            paint!(c, "2", &r.project_label),
+            human_bytes(r.bytes)
+        );
+    }
+}
+
+/// Print the audit-log sweep section (or a "nothing to remove" line).
+fn print_log_sweep(c: bool, log_targets: &[PathBuf], log_bytes: u64) {
+    if log_targets.is_empty() {
+        println!("  No audit log to remove ($SLOC_AUDIT_LOG unset or empty).");
+        return;
+    }
+    println!(
+        "  {} log file(s), {} to reclaim:",
+        paint!(c, "1", &log_targets.len().to_string()),
+        paint!(c, "1;32", &human_bytes(log_bytes))
+    );
+    for p in log_targets {
+        println!("    {}", p.display());
+    }
 }
 
 /// Delete the given log files, returning the total bytes removed.
