@@ -180,14 +180,15 @@ def runCoverage() {
                             : 0.0)
 
     def lcovFile      = "${params.OUTPUT_SUBDIR}/coverage/lcov.info"
-    def coberturaFile = "${params.OUTPUT_SUBDIR}/coverage/sonar-coverage.xml"
 
+    // Feed the Jenkins Coverage view from LCOV only. cargo-llvm-cov's Cobertura
+    // XML (sonar-coverage.xml) contains a duplicate element that the Coverage
+    // plugin's CoberturaParser rejects, which threw and dropped the whole view;
+    // lcov.info already provides line/branch/function coverage. sonar-coverage.xml
+    // is still generated + archived for SonarQube — it's just not fed to Jenkins.
     def tools = []
     if (fileExists("${env.WORKSPACE}/${lcovFile}")) {
         tools << [parser: 'LCOV', pattern: lcovFile]
-    }
-    if (fileExists("${env.WORKSPACE}/${coberturaFile}")) {
-        tools << [parser: 'COBERTURA', pattern: coberturaFile]
     }
 
     if (tools.isEmpty()) {
@@ -211,7 +212,9 @@ def runCoverage() {
                 qualityGates:        gates
             )
         } catch (Throwable t) {
-            echo "recordCoverage skipped (Coverage plugin not installed): ${t.message}"
+            // Could be a missing Coverage plugin OR a parser error — log the real
+            // reason rather than assuming the plugin is absent.
+            echo "recordCoverage skipped (Coverage plugin missing, or report parse error): ${t.message}"
         }
     }
 
