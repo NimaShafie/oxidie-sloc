@@ -111,9 +111,17 @@ def runUnitTests() {
         """
         sh "mv -f junit.xml '${resultsDir}/junit.xml' 2>/dev/null || true"
         if (params.PUBLISH_TEST_RESULTS) {
-            junit testResults:          "${params.OUTPUT_SUBDIR}/test-results/junit.xml",
-                  allowEmptyResults:    true,
-                  skipPublishingChecks: false
+            // Guarded so a controller WITHOUT the JUnit plugin still passes — the
+            // junit.xml is archived regardless, so nothing is lost but the sidebar
+            // "Test Result" view. Throwable (not Exception): a missing step throws
+            // NoSuchMethodError, which is an Error.
+            try {
+                junit testResults:          "${params.OUTPUT_SUBDIR}/test-results/junit.xml",
+                      allowEmptyResults:    true,
+                      skipPublishingChecks: false
+            } catch (Throwable t) {
+                echo "junit publish skipped (JUnit plugin not installed): ${t.message}"
+            }
         }
     } else {
         def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
@@ -182,17 +190,23 @@ def runCoverage() {
             gates << [threshold: threshold * 0.7, metric: 'BRANCH',
                       baseline: 'PROJECT', criticality: 'UNSTABLE']
         }
-        recordCoverage(
-            tools:               tools,
-            id:                  'oxide-sloc-coverage',
-            name:                'Coverage',
-            sourceCodeRetention: 'EVERY_BUILD',
-            qualityGates:        gates
-        )
+        // Guarded: without the Coverage plugin the lcov/cobertura files are still
+        // archived; only the "Coverage" trend view is skipped.
+        try {
+            recordCoverage(
+                tools:               tools,
+                id:                  'oxide-sloc-coverage',
+                name:                'Coverage',
+                sourceCodeRetention: 'EVERY_BUILD',
+                qualityGates:        gates
+            )
+        } catch (Throwable t) {
+            echo "recordCoverage skipped (Coverage plugin not installed): ${t.message}"
+        }
     }
 
     if (fileExists("${coverageDir}/html/index.html")) {
-        publishHTML(target: [
+        publishHtmlSafe([
             allowMissing         : false,
             alwaysLinkToLastBuild: true,
             keepAll              : false,
@@ -202,6 +216,19 @@ def runCoverage() {
         ])
     } else {
         echo 'Annotated HTML source report not available for this run.'
+    }
+}
+
+// Publish an HTML report, degrading cleanly when the HTML Publisher plugin is
+// absent: the report dir is already archived by archiveArtifacts, so without the
+// plugin you simply lose the left-sidebar link, not the report. Throwable, not
+// Exception — a missing publishHTML step throws NoSuchMethodError (an Error).
+def publishHtmlSafe(Map target) {
+    try {
+        publishHTML(target: target)
+    } catch (Throwable t) {
+        echo "publishHTML '${target.reportName}' skipped (HTML Publisher plugin not installed); " +
+             "the report is still available under Build Artifacts. (${t.message})"
     }
 }
 
@@ -453,7 +480,7 @@ def runArchivePublish() {
     // project-scoped, space/em-dash-free names → e.g. OxideSLOC_CI_Report_<proj>.zip.
     // reportFiles is always index.html, so the zip has one obvious entry point.
     if (dashboardBuilt) {
-        publishHTML(target: [
+        publishHtmlSafe([
             allowMissing         : true,
             alwaysLinkToLastBuild: true,
             keepAll              : false,
@@ -464,7 +491,7 @@ def runArchivePublish() {
     }
 
     if (params.GENERATE_HTML && fileExists("${outDir}/html-report/index.html")) {
-        publishHTML(target: [
+        publishHtmlSafe([
             allowMissing         : false,
             alwaysLinkToLastBuild: true,
             keepAll              : false,
@@ -536,7 +563,9 @@ def runArchivePublish() {
                 useDescr:    true
             )
         }
-    } catch (Exception ex) {
+    } catch (Throwable ex) {
+        // Throwable, not Exception: a missing plot step throws NoSuchMethodError
+        // (an Error). Without the plugin the trend CSVs are still archived.
         echo "Plot trend charts skipped (install the 'plot' plugin to enable): ${ex.message}"
     }
 }

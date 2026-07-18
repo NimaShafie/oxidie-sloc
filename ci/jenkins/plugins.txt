@@ -54,8 +54,10 @@ coverage                    # recordCoverage() — native LCOV/Cobertura integra
 
 # ── UX quality-of-life ─────────────────────────────────────────────────────────
 pipeline-stage-view         # Stage visualization in the job UI (Blue Ocean lite)
-timestamper                 # Timestamps on every console output line
-ansicolor                   # ANSI colour in Rust compiler / clippy output
+timestamper                 # Timestamps on every console output line (used by options{ timestamps() })
+ansicolor                   # ANSI colour in Rust output (optional — the ansiColor() pipeline
+                            #   directive was removed so this is NOT required; install only if you
+                            #   re-add ansiColor('xterm') to the Jenkinsfile options block)
 
 # ── Run-page enrichment (optional — pipeline degrades to native dashboard) ─────
 # These add richer visuals to the Jenkins run/job page itself. They are handled
