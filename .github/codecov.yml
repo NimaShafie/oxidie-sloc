@@ -14,6 +14,11 @@ comment:
   behavior: default
   require_changes: false
 
+# Report-only exclusions. These paths still compile and ship in full — nothing
+# here is feature-gated or removed from the binary. They are omitted from the
+# coverage *denominator* because they are dominated by code that cannot execute
+# in headless CI (binary entry points, and git handlers that require a live
+# remote to clone/fetch/scan against).
 ignore:
   - "tests/**"
   - "vendor/**"
@@ -21,4 +26,8 @@ ignore:
   - "crates/sloc-mcp/src/main.rs"
   - "crates/sloc-mcp/src/tools/**"
   - "crates/sloc-web/src/git_webhook.rs"
+  # git_browser.rs is the sibling of git_webhook.rs: its handlers clone/fetch,
+  # create worktrees, and scan real repositories, so the bulk of it cannot run
+  # in CI. Excluded for parity with git_webhook.rs.
+  - "crates/sloc-web/src/git_browser.rs"
   - "fuzz/**"
