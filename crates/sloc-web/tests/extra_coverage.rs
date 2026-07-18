@@ -1755,6 +1755,135 @@ async fn api_confluence_test_no_config_returns_error() {
     );
 }
 
+// ── Confluence: save config, then hit the *configured* post-guard clauses ─────
+//
+// The smoke tests above only reach the "not configured" early return. This drives
+// the far larger post-configuration path: after a valid config is saved, GET
+// reports `configured: true`, and POST /api/confluence/post with a well-formed but
+// unknown run_id proceeds past the config check into the artifact/registry lookup,
+// which misses and returns 404 — all without any outbound network call.
+
+#[tokio::test]
+async fn api_confluence_save_then_post_unknown_run_is_404() {
+    let app = make_test_router();
+
+    // 1. Save a valid Confluence config (public HTTPS URL passes SSRF validation).
+    let cfg = r#"{
+        "tier": "cloud",
+        "base_url": "https://example.atlassian.net",
+        "username": "bot@example.com",
+        "credential": "s3cret-token",
+        "space_key": "DEV",
+        "parent_page_id": ""
+    }"#;
+    let (save_status, _) = post_json(app.clone(), "/api/confluence/config", cfg).await;
+    assert_eq!(save_status, StatusCode::OK, "valid config must save");
+
+    // 2. GET config must now report configured=true (the populated JSON branch).
+    let get_resp = app
+        .clone()
+        .oneshot(
+            Request::get("/api/confluence/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["configured"], true);
+    assert_eq!(json["base_url"], "https://example.atlassian.net");
+    assert_eq!(json["api_token_set"], true);
+
+    // 3. POST to publish a run that does not exist. With config present, this now
+    //    passes the config gate and reaches the artifact+registry lookup, which
+    //    misses → 404 (no outbound call is made).
+    let (post_status, post_body) = post_json(
+        app.clone(),
+        "/api/confluence/post",
+        r#"{"run_id":"nonexistent-valid-run-id","page_title":"My Report"}"#,
+    )
+    .await;
+    assert_eq!(
+        post_status,
+        StatusCode::NOT_FOUND,
+        "publishing an unknown run must 404, got {post_status}: {post_body}"
+    );
+}
+
+#[tokio::test]
+async fn api_wiki_markup_unknown_run_is_404_and_bad_run_id_is_400() {
+    // Unknown (but well-formed) run_id misses both artifacts and registry → 404.
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/confluence/wiki-markup?run_id=nonexistent-run",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A run_id containing a path separator is rejected up front → 400.
+    let (bad, _, _) = get(
+        make_test_router(),
+        "/api/confluence/wiki-markup?run_id=a%2Fb",
+    )
+    .await;
+    assert_eq!(bad, StatusCode::BAD_REQUEST);
+}
+
+// ── Git browser API guard clauses (no network / no real clone) ───────────────
+
+#[tokio::test]
+async fn api_git_refs_missing_repo_is_400() {
+    let (status, _, _) = get(make_test_router(), "/api/git/refs").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_git_refs_invalid_repo_url_is_bad_gateway() {
+    // A non-URL repo is rejected by clone_or_fetch's scheme allowlist before any
+    // network call, so load_refs returns Err → 502 (the Ok(Err) task arm).
+    let (status, _, _) = get(make_test_router(), "/api/git/refs?repo=not-a-valid-url").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn api_git_scan_ref_invalid_ref_is_400() {
+    // A ref_name containing ".." fails is_valid_git_ref → 400 before spawn_blocking.
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/scan-ref?repo=https://example.com/r.git&ref_name=../evil",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_git_compare_refs_invalid_ref_is_400() {
+    let (status, _, _) = get(
+        make_test_router(),
+        "/api/git/compare-refs?repo=https://example.com/r.git&baseline_ref=../bad&current_ref=main",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_confluence_save_rejects_ssrf_url() {
+    // A loopback base_url must be rejected at save time (SSRF validation), so the
+    // config is never stored.
+    let (status, _) = post_json(
+        make_test_router(),
+        "/api/confluence/config",
+        r#"{"base_url":"http://127.0.0.1/wiki","username":"u","credential":"c","space_key":"S"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "loopback Confluence URL must be rejected, got {status}"
+    );
+}
+
 // ── Helper function: URL-encode a string for form bodies ─────────────────────
 
 fn urlencoding_encode(s: &str) -> String {
