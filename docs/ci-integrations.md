@@ -871,17 +871,21 @@ oxide-sloc can push build artifacts to an external artifact repository at the en
 
 | Artifact | Filename pattern | Always generated |
 |---|---|---|
-| SLOC report (JSON) | `result_<slug>.json` | Yes |
-| SLOC report (CSV) | `report_<slug>.csv` | Yes |
-| SLOC report (XLSX) | `report_<slug>.xlsx` | Yes |
-| SLOC report (HTML) | `report_<slug>.html` | When `GENERATE_HTML=true` |
-| SLOC report (PDF) | `report_<slug>.pdf` | When `GENERATE_PDF=true` |
+| SLOC report (JSON) | `result_<proj-slug>.json` | Yes |
+| SLOC report (CSV) | `report_<proj-slug>.csv` | Yes |
+| SLOC report (XLSX) | `report_<proj-slug>.xlsx` | Yes |
+| SLOC report (HTML) | `report_<proj-slug>.html` | When `GENERATE_HTML=true` |
+| SLOC report (PDF) | `report_<proj-slug>.pdf` | When `GENERATE_PDF=true` |
 | Compiled binary | `oxide-sloc` / `oxide-sloc.exe` | Yes (from build stage) |
 | Test results | `junit.xml` | When cargo-nextest is used |
 | Coverage (LCOV) | `lcov.info` | When coverage stage runs |
 | Coverage (Cobertura) | `sonar-coverage.xml` | When coverage stage runs |
 | Diff comparison | `diff.json`, `diff.csv` | When GIT_REF comparison runs |
 | SHA-256 manifest | `checksums.sha256` | When `ARTIFACT_GENERATE_MANIFEST=true` |
+
+`<proj-slug>` is the project slug `<repo-name>_<short-sha>` (e.g. `oxide-sloc_2eb74e9`) — the same
+value published as the `OxideSLOC_CI_Report_<proj-slug>` sidebar link, derived in
+`ci/jenkins/pipeline-helpers.groovy`.
 
 All configuration is passed via `ARTIFACT_REPO_*` environment variables. The script can be called from Jenkins, GitLab CI, Bitbucket Pipelines, or manually.
 
