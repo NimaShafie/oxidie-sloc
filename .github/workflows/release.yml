@@ -310,13 +310,23 @@ jobs:
         run: cargo install cargo-cyclonedx --locked
 
       - name: Generate CycloneDX SBOM
-        run: cargo cyclonedx --format json --override-filename sbom
+        run: |
+          # In a virtual workspace cargo-cyclonedx writes one SBOM next to each
+          # member's Cargo.toml — never at the repo root — so scope it to the binary
+          # crate (its dependency tree spans the whole workspace) and hoist the
+          # generated file to the root for a stable upload path.
+          cargo cyclonedx --format json --override-filename sbom -p oxide-sloc
+          src="$(find . -name 'sbom.cdx.json' | head -n1)"
+          echo "Generated SBOM: ${src:-<none>}"
+          test -n "$src"
+          cp "$src" sbom.cdx.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sbom
           path: sbom.cdx.json
+          if-no-files-found: error
 
   sign:
     name: Sign release artifacts
