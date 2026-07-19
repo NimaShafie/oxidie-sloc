@@ -117,6 +117,10 @@ type: short imperative summary (≤72 chars)
 
 Common types: `feat`, `fix`, `refactor`, `docs`, `chore`, `ci`, `test`.
 
+The first line is the summary shown in `git log` and in the GitHub file listing —
+keep the `type:` at the very start with no stray leading characters, and put any
+longer explanation in the body after a blank line.
+
 ## Pull request checklist
 
 - [ ] All four CI gates pass locally

@@ -67,7 +67,7 @@ clippy.stderr
 # Coverage / profiling (cargo-llvm-cov, grcov, cargo-flamegraph)
 *.profraw
 *.profdata
-lcov.info
+lcov*.info
 flamegraph.svg
 perf.data
 perf.data.old
@@ -97,5 +97,3 @@ testing/fixtures/**/sloc/
 # Claude Code (project-local AI context — not for commit)
 CLAUDE.md
 .claude
-
-lcov*.info

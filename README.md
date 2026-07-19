@@ -276,7 +276,7 @@ Pre-built tool definitions for Claude API (`tool_use`) and OpenAI (`function_cal
 
 ## License
 
-**oxide-sloc** is licensed under [AGPL-3.0-or-later](./LICENSE).  
+**oxide-sloc** is licensed under [AGPL-3.0-or-later](./LICENSE).
 Copyright (C) 2026 Nima Shafie.
 
 ---

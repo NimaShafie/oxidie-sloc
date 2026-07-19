@@ -1,3 +1,7 @@
+# Example oxide-sloc configuration. Copy to sloc.toml in your project root and
+# edit as needed; CLI flags override any value set here. Every field below is
+# optional — omitted keys fall back to the built-in defaults.
+
 [discovery]
 root_paths = ["."]
 include_globs = []
