@@ -4,9 +4,13 @@ out.7z
 tmp-sloc/
 *.log
 *.tmp
+*.bak
 .git/
 .vscode/
 .idea/
+# OS junk — never needed in the build context.
+.DS_Store
+Thumbs.db
 # Uncompressed vendor tree — the Dockerfile verifies vendor.tar.xz with sha256sum
 # and extracts it at build time, so the pre-expanded directory is never needed.
 vendor/

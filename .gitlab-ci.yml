@@ -9,7 +9,7 @@
 #   1. Push this file to the root of your repo.
 #   2. GitLab will auto-detect it and run the pipeline on every push.
 
-# Use the official Rust image (pinned by digest) instead of curl|sh rustup install (FIND-014).
+# Use the official Rust image (pinned by digest) instead of curl|sh rustup install.
 # To update the digest: docker pull rust:slim && docker inspect --format '{{index .RepoDigests 0}}' rust:slim
 image: rust:slim@sha256:81099830a1e1d244607b9a7a30f3ff6ecadc52134a933b4635faba24f52840c9
 
