@@ -11792,7 +11792,7 @@ async fn trend_report_handler(
         <button class="tr-expand-btn" id="tr-chart-fv-btn">&#x2922; Full View</button>
       </div>
 
-      <div id="chart-wrap" class="chart-wrap"><div class="loading-state"><div class="loading-spinner"></div>Loading scan history\u2026</div></div>
+      <div id="chart-wrap" class="chart-wrap"><div class="loading-state"><div class="loading-spinner"></div>Loading scan history…</div></div>
       <div id="data-table-wrap" style="overflow-x:auto;"></div>
     </div>
   </div>
@@ -13700,8 +13700,11 @@ async fn test_metrics_handler(
     .density-bar-wrap{{display:flex;align-items:center;gap:8px;}}
     .density-bar{{height:6px;border-radius:3px;background:var(--oxide);opacity:0.75;min-width:2px;flex-shrink:0;}}
     .cov-gauge-row{{display:grid!important;grid-template-columns:repeat(3,1fr)!important;gap:16px;margin-bottom:18px;}}
-    .cov-gauge-card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);min-width:0;}}
+    .cov-gauge-card{{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:8px;transition:transform .27s cubic-bezier(.16,1,.3,1),box-shadow .27s cubic-bezier(.16,1,.3,1);min-width:0;}}
     .cov-gauge-card:hover{{transform:translateY(-3px);box-shadow:0 10px 28px rgba(77,44,20,0.15);}}
+    .cov-gauge-tip{{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-7px);background:var(--text);color:var(--bg);padding:10px 14px;border-radius:8px;font-size:11px;font-weight:500;line-height:1.55;white-space:normal;max-width:300px;min-width:180px;text-align:left;pointer-events:none;opacity:0;transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1);z-index:200;box-shadow:0 4px 14px rgba(0,0,0,0.2);}}
+    .cov-gauge-tip::after{{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--text);}}
+    .cov-gauge-card:hover .cov-gauge-tip{{opacity:1;transform:translateX(-50%) translateY(0);}}
     .cov-gauge-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);}}
     .cov-gauge-val{{font-size:32px;font-weight:900;line-height:1;}}
     .cov-gauge-track{{height:8px;border-radius:4px;background:var(--line);overflow:hidden;}}
@@ -13964,7 +13967,14 @@ async fn test_metrics_handler(
     </div>
 
     <div class="panel">
-      <h1>Test Metrics</h1>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <h1 style="margin:0;">Test Metrics</h1>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="export-btn" id="tm2-export-xlsx-btn" title="Download test metrics and LCOV coverage summary as an Excel workbook (.xlsx)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel</button>
+          <button type="button" class="export-btn" id="tm2-export-png-btn" title="Save the test metrics and coverage charts as a PNG image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Export PNG</button>
+          <button type="button" class="export-btn" id="tm2-export-pdf-btn" title="Export a printable PDF of test metrics with the LCOV coverage summary"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg> Export PDF</button>
+        </div>
+      </div>
       <p class="muted">Lexical test definition counts across your codebase — how many test functions, test cases, and test decorators were detected per language, and how dense the test coverage is relative to production code.</p>
 
       <div class="section-header">Language Breakdown</div>
@@ -13994,18 +14004,21 @@ async fn test_metrics_handler(
           <div class="cov-gauge-val" id="cov-line-val" style="color:#2a6846;">{cov_line_pct_str}%</div>
           <div class="cov-gauge-track"><div id="cov-line-bar" class="cov-gauge-fill" style="width:{cov_line_pct_str}%;background:#2a6846;"></div></div>
           <div class="cov-gauge-sub">Lines hit / instrumented</div>
+          <div class="cov-gauge-tip">Percentage of executable lines exercised by the test suite (lines hit &divide; lines instrumented), aggregated across every file in the LCOV report.</div>
         </div>
         <div class="cov-gauge-card">
           <div class="cov-gauge-label">Function Coverage</div>
           <div class="cov-gauge-val" id="cov-fn-val" style="color:#1a6b96;">{cov_fn_pct_str}%</div>
           <div class="cov-gauge-track"><div id="cov-fn-bar" class="cov-gauge-fill" style="width:{cov_fn_pct_str}%;background:#1a6b96;"></div></div>
           <div class="cov-gauge-sub">Functions hit / found</div>
+          <div class="cov-gauge-tip">Percentage of functions called at least once during testing (functions hit &divide; functions found). Shows 0% when the coverage report carries no function-level (FN/FNH) records.</div>
         </div>
         <div class="cov-gauge-card">
           <div class="cov-gauge-label">Branch Coverage</div>
           <div class="cov-gauge-val" id="cov-branch-val" style="color:#7a4fa0;">{cov_branch_pct_str}%</div>
           <div class="cov-gauge-track"><div id="cov-branch-bar" class="cov-gauge-fill" style="width:{cov_branch_pct_str}%;background:#7a4fa0;"></div></div>
           <div class="cov-gauge-sub">Branches hit / found</div>
+          <div class="cov-gauge-tip">Percentage of conditional branches taken during testing (branches hit &divide; branches found). Shows 0% when the coverage report carries no branch-level (BRDA/BRF) records.</div>
         </div>
       </div>
       <div class="chart-row">
@@ -14029,7 +14042,7 @@ async fn test_metrics_handler(
           <button class="cov-tab" data-tier="mid">Moderate (50–79%)</button>
           <button class="cov-tab" data-tier="high">High (≥80%)</button>
         </div>
-        <input type="search" id="cov-file-search" class="cov-file-search" placeholder="Filter by filename\u2026">
+        <input type="search" id="cov-file-search" class="cov-file-search" placeholder="Filter by filename…">
       </div>
       <div style="overflow-x:auto;">
         <table class="data-table" id="cov-file-table">
@@ -15148,7 +15161,11 @@ async fn test_metrics_handler(
       var totFiles=D.reduce(function(a,d){{return a+d.files;}},0);
       var avgDensity=totCode>0?(totTests/totCode*1000).toFixed(2):'0.00';
 
-      // Sheet 1: Summary
+      // ── Build the worksheet list (test metrics + optional LCOV coverage) ──
+      // Each entry: {{name, tbl (Excel table name), hdr, rows, tot, cols}}.
+      var sheets=[];
+
+      // Sheet: Summary
       var sumHdr=['Metric','Value'];
       var sumRows=[
         ['Project / Scope', t.proj],
@@ -15160,40 +15177,78 @@ async fn test_metrics_handler(
         ['Total Code Lines', Number(totCode).toLocaleString()],
         ['Average Density (per 1K)', String(avgDensity)],
       ];
-      var sumRef='A1:B'+(sumRows.length+1);
-      var sumTblXml=makeTableXml(1,'Summary',sumRef,sumHdr);
-      var sumSheetXml=buildSheet(sumHdr,sumRows,null,[28,22],'rId1');
+      sheets.push({{name:'Summary',tbl:'Summary',hdr:sumHdr,rows:sumRows,tot:null,cols:[28,22]}});
 
-      // Sheet 2: Language Breakdown
+      // Sheet: Language Breakdown (TOTAL row sits just below the table range)
       var langHdr=['Language','Test Functions','Assertions','Test Suites','Code Lines','Files','Density (per 1K)'];
       var langRows=D.map(function(d){{return[d.lang,Number(d.tests).toLocaleString(),Number(d.assertions||0).toLocaleString(),Number(d.suites||0).toLocaleString(),Number(d.code).toLocaleString(),Number(d.files).toLocaleString(),Number(d.density).toFixed(2)];}});
       var totRow=['TOTAL',Number(totTests).toLocaleString(),Number(totAssert).toLocaleString(),Number(totSuites).toLocaleString(),Number(totCode).toLocaleString(),Number(totFiles).toLocaleString(),String(avgDensity)];
-      // Table covers header + data only (TOTAL row excluded from table, sits just below)
-      var langDataRows=langRows.length;
-      var langTblRef='A1:G'+(langDataRows+1);
-      var langTblXml=makeTableXml(2,'LangBreakdown',langTblRef,langHdr);
-      var langSheetXml=buildSheet(langHdr,langRows,totRow,[22,15,15,15,15,12,15],'rId1');
+      sheets.push({{name:'Language Breakdown',tbl:'LangBreakdown',hdr:langHdr,rows:langRows,tot:totRow,cols:[22,15,15,15,15,12,15]}});
+
+      // Sheets: LCOV Coverage Summary (appended only when the current scope has coverage)
+      var covDs=(typeof getDataset==='function')?getDataset():null;
+      if(covDs&&covDs.has_coverage){{
+        var covT=covDs.totals||{{}};
+        var covSumHdr=['Metric','Value'];
+        var covSumRows=[
+          ['Line Coverage', (covT.cov_line||'0')+'%'],
+          ['Function Coverage', (covT.cov_fn||'0')+'%'],
+          ['Branch Coverage', (covT.cov_branch||'0')+'%'],
+        ];
+        if(covDs.cov_tiers){{
+          covSumRows.push(['Files High (≥80%)', String(covDs.cov_tiers.high||0)]);
+          covSumRows.push(['Files Moderate (50–79%)', String(covDs.cov_tiers.mid||0)]);
+          covSumRows.push(['Files Low (<50%)', String(covDs.cov_tiers.low||0)]);
+        }}
+        sheets.push({{name:'Coverage Summary',tbl:'CoverageSummary',hdr:covSumHdr,rows:covSumRows,tot:null,cols:[26,14]}});
+
+        if(covDs.cov&&covDs.cov.length){{
+          var covLangHdr=['Language','Line Coverage %'];
+          var covLangRows=covDs.cov.map(function(c){{return[c.lang,Number(c.pct).toFixed(1)];}});
+          sheets.push({{name:'Coverage by Language',tbl:'CoverageByLang',hdr:covLangHdr,rows:covLangRows,tot:null,cols:[24,18]}});
+        }}
+        if(covFileData&&covFileData.length){{
+          var covFileHdr=['File','Language','Line %','Lines Hit','Lines Found','Function %','Fns Hit','Fns Found'];
+          var covFileRows=covFileData.map(function(f){{
+            var noFn=f.fn_pct<0;
+            return[f.rel,f.lang,Number(f.line_pct).toFixed(1),String(f.lhit),String(f.lfound),noFn?'—':Number(f.fn_pct).toFixed(1),noFn?'—':String(f.fhit),noFn?'—':String(f.ffound)];
+          }});
+          sheets.push({{name:'Coverage by File',tbl:'CoverageByFile',hdr:covFileHdr,rows:covFileRows,tot:null,cols:[40,14,10,10,12,12,10,10]}});
+        }}
+      }}
 
       var styl='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
-      var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/><Override PartName="/xl/tables/table2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
       var dotrels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
-      var wbr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
-      var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="Language Breakdown" sheetId="2" r:id="rId2"/></sheets></workbook>';
-      var sh1rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>';
-      var sh2rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table2.xml"/></Relationships>';
-      var files=[
+
+      // Assemble per-sheet parts, content-type overrides, and workbook relationships.
+      var files=[];
+      var ctOverrides='', wbSheetTags='', wbRelTags='';
+      sheets.forEach(function(sh,i){{
+        var n=i+1;
+        var lastCol=col2l(sh.hdr.length);
+        var ref='A1:'+lastCol+(sh.rows.length+1);
+        var sheetXml=buildSheet(sh.hdr,sh.rows,sh.tot,sh.cols,'rId1');
+        var tblXml=makeTableXml(n,sh.tbl,ref,sh.hdr);
+        var shRels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table'+n+'.xml"/></Relationships>';
+        files.push({{name:'xl/worksheets/sheet'+n+'.xml',data:s2b(sheetXml)}});
+        files.push({{name:'xl/worksheets/_rels/sheet'+n+'.xml.rels',data:s2b(shRels)}});
+        files.push({{name:'xl/tables/table'+n+'.xml',data:s2b(tblXml)}});
+        ctOverrides+='<Override PartName="/xl/worksheets/sheet'+n+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+        ctOverrides+='<Override PartName="/xl/tables/table'+n+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>';
+        wbSheetTags+='<sheet name="'+xe(sh.name)+'" sheetId="'+n+'" r:id="rId'+n+'"/>';
+        wbRelTags+='<Relationship Id="rId'+n+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+n+'.xml"/>';
+      }});
+      var styleRid='rId'+(sheets.length+1);
+      var ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+ctOverrides+'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
+      var wbr='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="'+styleRid+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'+wbRelTags+'</Relationships>';
+      var wbx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+wbSheetTags+'</sheets></workbook>';
+      files.unshift(
         {{name:'[Content_Types].xml',data:s2b(ct)}},
         {{name:'_rels/.rels',data:s2b(dotrels)}},
         {{name:'xl/workbook.xml',data:s2b(wbx)}},
         {{name:'xl/_rels/workbook.xml.rels',data:s2b(wbr)}},
-        {{name:'xl/styles.xml',data:s2b(styl)}},
-        {{name:'xl/worksheets/sheet1.xml',data:s2b(sumSheetXml)}},
-        {{name:'xl/worksheets/sheet2.xml',data:s2b(langSheetXml)}},
-        {{name:'xl/worksheets/_rels/sheet1.xml.rels',data:s2b(sh1rels)}},
-        {{name:'xl/worksheets/_rels/sheet2.xml.rels',data:s2b(sh2rels)}},
-        {{name:'xl/tables/table1.xml',data:s2b(sumTblXml)}},
-        {{name:'xl/tables/table2.xml',data:s2b(langTblXml)}},
-      ];
+        {{name:'xl/styles.xml',data:s2b(styl)}}
+      );
       var parts=[],offsets=[],total=0;
       files.forEach(function(f){{offsets.push(total);var nb=s2b(f.name),crc=crc32(f.data);var h=new DataView(new ArrayBuffer(30+nb.length));h.setUint32(0,0x04034B50,true);h.setUint16(4,20,true);h.setUint16(6,0,true);h.setUint16(8,0,true);h.setUint16(10,0,true);h.setUint16(12,0,true);h.setUint32(14,crc,true);h.setUint32(18,f.data.length,true);h.setUint32(22,f.data.length,true);h.setUint16(26,nb.length,true);h.setUint16(28,0,true);for(var i=0;i<nb.length;i++)h.setUint8(30+i,nb[i]);parts.push(new Uint8Array(h.buffer));parts.push(f.data);total+=30+nb.length+f.data.length;}});
       var cdStart=total;files.forEach(function(f,fi){{var nb=s2b(f.name),crc=crc32(f.data);var cd=new DataView(new ArrayBuffer(46+nb.length));cd.setUint32(0,0x02014B50,true);cd.setUint16(4,20,true);cd.setUint16(6,20,true);cd.setUint16(8,0,true);cd.setUint16(10,0,true);cd.setUint16(12,0,true);cd.setUint16(14,0,true);cd.setUint32(16,crc,true);cd.setUint32(20,f.data.length,true);cd.setUint32(24,f.data.length,true);cd.setUint16(28,nb.length,true);cd.setUint16(30,0,true);cd.setUint16(32,0,true);cd.setUint16(34,0,true);cd.setUint16(36,0,true);cd.setUint32(38,0,true);cd.setUint32(42,offsets[fi],true);for(var i=0;i<nb.length;i++)cd.setUint8(46+i,nb[i]);parts.push(new Uint8Array(cd.buffer));total+=46+nb.length;}});
@@ -15214,9 +15269,15 @@ async fn test_metrics_handler(
         'canvas-assertions':  'ASSERTIONS BY LANGUAGE',
         'canvas-suites':      'TEST SUITES BY LANGUAGE',
         'canvas-files':       'TEST FILES BREAKDOWN',
-        'canvas-composition': 'TEST COMPOSITION'
+        'canvas-composition': 'TEST COMPOSITION',
+        'canvas-cov':         'LINE COVERAGE % BY LANGUAGE',
+        'canvas-cov-tiers':   'COVERAGE TIER DISTRIBUTION'
       }};
+      // Coverage canvases are only appended when the LCOV panel is visible (has data).
+      var covPanelEl=document.getElementById('cov-panel');
+      var covShown=covPanelEl&&covPanelEl.style.display!=='none';
       var ids=['canvas-trend','canvas-tests','canvas-density','canvas-assertions','canvas-suites','canvas-files','canvas-composition'];
+      if(covShown){{ids.push('canvas-cov','canvas-cov-tiers');}}
       var canvases=ids.map(function(id){{return document.getElementById(id);}}).filter(function(c){{return c&&c.width>0&&c.style.display!=='none';}});
       if(!canvases.length){{alert('No charts rendered yet. Run a scan first.');return;}}
       var t=tmExportMeta();
@@ -15328,7 +15389,7 @@ async fn test_metrics_handler(
       var a=document.createElement('a');a.download='oxide-sloc-test-metrics-'+proj3+'-'+t.slug+'.png';a.href=out.toDataURL('image/png');a.click();
     }}
 
-    function exportTmPDF() {{
+    function exportTmPDF(ev) {{
       var D=currentLangTests;
       var t=tmExportMeta();
       var strips=document.querySelectorAll('.summary-strip');
@@ -15377,18 +15438,48 @@ async fn test_metrics_handler(
         +'th{{background:#f5efe8;font-weight:800;font-size:10px;}}'
         +'.n{{text-align:right;}}'
         +'.tot-row td{{background:#f0e6dc;border-top:2px solid #C45C10;}}'
+        +'.cov-strip{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:4px 0 8px;}}'
+        +'.cov-card{{border:1px solid #e6d0bf;border-radius:10px;padding:10px 12px;}}'
+        +'.cov-k{{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7b675b;}}'
+        +'.cov-v{{font-size:18px;font-weight:900;color:#2a6846;margin-top:3px;}}'
         +'.rep-footer{{background:#43342d;color:rgba(255,255,255,0.75);padding:10px 32px;font-size:10px;text-align:center;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}'
         +'</style>';
+      // LCOV Coverage Summary section — only rendered when the current scope has coverage.
+      var covDs=(typeof getDataset==='function')?getDataset():null;
+      var covHtml='';
+      if(covDs&&covDs.has_coverage){{
+        var covT=covDs.totals||{{}};
+        covHtml+='<div class="section-hdr">LCOV Coverage Summary</div>'
+          +'<div class="cov-strip">'
+          +'<div class="cov-card"><div class="cov-k">Line Coverage</div><div class="cov-v">'+(covT.cov_line||'0')+'%</div></div>'
+          +'<div class="cov-card"><div class="cov-k">Function Coverage</div><div class="cov-v">'+(covT.cov_fn||'0')+'%</div></div>'
+          +'<div class="cov-card"><div class="cov-k">Branch Coverage</div><div class="cov-v">'+(covT.cov_branch||'0')+'%</div></div>'
+          +'</div>';
+        if(covFileData&&covFileData.length){{
+          var cfrows='';
+          covFileData.forEach(function(f){{
+            var noFn=f.fn_pct<0;
+            cfrows+='<tr><td>'+f.rel+'</td><td>'+f.lang+'</td>'
+              +'<td class="n">'+Number(f.line_pct).toFixed(1)+'%</td>'
+              +'<td class="n">'+f.lhit+' / '+f.lfound+'</td>'
+              +'<td class="n">'+(noFn?'—':Number(f.fn_pct).toFixed(1)+'%')+'</td>'
+              +'<td class="n">'+(noFn?'—':f.fhit+' / '+f.ffound)+'</td></tr>';
+          }});
+          covHtml+='<div class="section-hdr">Coverage File Detail</div>'
+            +'<table><thead><tr><th>File</th><th>Lang</th><th class="n">Line %</th><th class="n">Lines Hit / Found</th><th class="n">Fn %</th><th class="n">Fns Hit / Found</th></tr></thead><tbody>'+cfrows+'</tbody></table>';
+        }}
+      }}
       var doc='<!doctype html><html><head><meta charset="utf-8"><title>OxideSLOC Test Metrics</title>'+css+'</head><body>'
         +'<div class="rep-header"><div><h1>Test Metrics Report</h1><p class="sub">Scope: '+t.proj+'  ·  Generated: '+t.full+'</p></div>'
         +'<div class="rep-brand">OxideSLOC<small>oxide-sloc v{version}</small></div></div>'
         +'<div class="rep-body">'+statsHtml
         +'<div class="section-hdr">Language Breakdown</div>'
-        +tableHtml+'</div>'
+        +tableHtml+covHtml+'</div>'
         +'<div class="rep-footer">© 2026 OxideSLOC · oxide-sloc v{version} · local code metrics workbench · AGPL-3.0-or-later · Generated '+t.full+'</div>'
         +'</body></html>';
       var proj4=t.proj.replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').substring(0,30)||'all';
-      window.slocExportPdf({{html:doc,filename:'oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf',button:document.getElementById('tm-export-pdf-btn')}});
+      var pdfBtn=(ev&&ev.currentTarget)||document.getElementById('tm-export-pdf-btn');
+      window.slocExportPdf({{html:doc,filename:'oxide-sloc-test-metrics-'+proj4+'-'+t.slug+'.pdf',button:pdfBtn}});
     }}
 
     (function() {{
@@ -15398,6 +15489,14 @@ async fn test_metrics_handler(
       if(xBtn)xBtn.addEventListener('click',exportTmXLSX);
       if(pngBtn)pngBtn.addEventListener('click',exportTmPNG);
       if(pdfBtn)pdfBtn.addEventListener('click',exportTmPDF);
+      // Test Metrics panel export controls — share the same handlers, which now
+      // fold in the LCOV Coverage Summary when the current scope has coverage.
+      var xBtn2=document.getElementById('tm2-export-xlsx-btn');
+      var pngBtn2=document.getElementById('tm2-export-png-btn');
+      var pdfBtn2=document.getElementById('tm2-export-pdf-btn');
+      if(xBtn2)xBtn2.addEventListener('click',exportTmXLSX);
+      if(pngBtn2)pngBtn2.addEventListener('click',exportTmPNG);
+      if(pdfBtn2)pdfBtn2.addEventListener('click',exportTmPDF);
     }})();
 
     applyScope();
@@ -16937,7 +17036,7 @@ fn build_preview_html(
         let status_label = row.kind.label();
         let lang_attr = row.language.unwrap_or("");
         let toggle_html = if row.is_dir {
-            r#"<button type="button" class="tree-toggle" aria-label="Toggle folder">\u25be</button>"#
+            r#"<button type="button" class="tree-toggle" aria-label="Toggle folder">▾</button>"#
                 .to_string()
         } else {
             r#"<span class="tree-bullet">•</span>"#.to_string()

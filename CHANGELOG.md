@@ -10,6 +10,50 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.77] — 2026-07-18
+
+### Added
+
+- **Test Metrics export buttons** (`crates/sloc-web`): the `/test-metrics` page now
+  offers Export Excel (`.xlsx`), Export PNG, and Export PDF actions that bundle the
+  test-definition counts alongside the LCOV coverage summary.
+- **Coverage gauge tooltips** (`crates/sloc-web`): the line/function/branch coverage
+  gauges on `/test-metrics` gained hover tooltips explaining how each percentage is
+  derived from the LCOV report.
+- **`prune` CLI command + audit-log rotation** (`crates/sloc-cli`, `crates/sloc-core`):
+  operator-driven disk reclamation (`--older-than`, `--keep-last`, `--logs`, dry-run by
+  default) plus size-based self-rotation of the `SLOC_AUDIT_LOG` JSONL sink.
+- **Fail-closed server auth + SIEM audit log** (`crates/sloc-web`): `serve --server`
+  refuses to start without an API key unless `SLOC_ALLOW_UNAUTHENTICATED=1`; security
+  events stream to `SLOC_AUDIT_LOG` as JSON lines.
+- **Accurate C/C++ semantic metrics** (`crates/sloc-languages`): header detection and
+  member/local/global variable + macro-constant categorization surfaced in the CLI and
+  coverage display.
+- **Watched-folder scan overlay + orphan cleanup** (`crates/sloc-web`): watched-folder
+  actions show a scan overlay, and un-watching a folder now drops its linked reports.
+
+### Fixed
+
+- **Opaque Appearance settings modal** (`crates/sloc-web`): the colour-scheme picker
+  modal is no longer see-through.
+- **Output folder window surfacing** (`crates/sloc-web`): reliably raise the output
+  folder window to the foreground on Windows.
+- **Coverage view fed from LCOV only** (`ci/jenkins`): the Cobertura parser rejected the
+  report; the Coverage view now reads LCOV directly.
+- **Cyclomatic complexity counts real code only** (`crates/sloc-languages`): complexity
+  is measured against executable lines with a density-based gate.
+
+### Changed
+
+- **Coverage UI + PDF polish** (`crates/sloc-report`): coverage UI refinements and a
+  reworked PDF metric strip.
+- **Cognitive-complexity refactors** across `sloc-web`, `sloc-core`, `sloc-git`,
+  `sloc-report`, and `sloc-languages` (no behaviour change).
+- **Toolchain + dependency refresh**: bundled Rust toolchain bumped to 1.97 and
+  `printpdf` to 0.11; several GitHub Actions pinned to newer releases.
+
+---
+
 ## [1.5.76] — 2026-07-12
 
 ### Added
