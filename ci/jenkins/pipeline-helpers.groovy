@@ -976,6 +976,7 @@ def runBitbucketNotify() {
                      "CONFLUENCE_USER=${env.CONFLUENCE_USER ?: ''}",
                      "CONFLUENCE_SPACE_KEY=${env.CONFLUENCE_SPACE_KEY ?: ''}",
                      "CONFLUENCE_PARENT_ID=${env.CONFLUENCE_PARENT_ID ?: ''}",
+                     "CONFLUENCE_PAGE_TITLE=${env.CONFLUENCE_PAGE_TITLE ?: ''}",
                      "REPORT_URL=${reportUrl}"]) {
                 sh "CONFLUENCE_TOKEN=\"\$SLOC_CF_TOKEN\" python3 ci/jenkins/notify-confluence.py '${outDir}' '${proj}' || true"
             }

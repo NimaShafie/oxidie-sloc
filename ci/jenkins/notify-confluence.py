@@ -68,6 +68,68 @@ def _fmt(n) -> str:
         return str(n)
 
 
+_BOUNDARY = "oxidesloc7f3c1a9b2e5d4680boundary"
+
+
+def _multipart_body(filename: str, content_type: str, data: bytes) -> bytes:
+    """Hand-assembled multipart/form-data body for a Confluence attachment."""
+    pre = (
+        f"--{_BOUNDARY}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    post = (
+        f"\r\n--{_BOUNDARY}\r\n"
+        'Content-Disposition: form-data; name="minorEdit"\r\n\r\n'
+        "true\r\n"
+        f"--{_BOUNDARY}--\r\n"
+    ).encode("utf-8")
+    return pre + data + post
+
+
+def _attach(api: str, pid: str, auth: str, out_dir: str) -> None:
+    """Best-effort: upload the HTML/PDF report as page attachments.
+
+    Re-posting the same filename updates the existing attachment to a new
+    version, so repeated builds stay idempotent. Never fails the build.
+    """
+    import glob as _glob
+
+    targets = []
+    for pattern, ctype, name in (
+        ("*.html", "text/html", "oxide-sloc-report.html"),
+        ("*.pdf", "application/pdf", "oxide-sloc-report.pdf"),
+    ):
+        matches = sorted(_glob.glob(os.path.join(out_dir, pattern)))
+        if matches:
+            targets.append((matches[0], ctype, name))
+
+    for path, ctype, name in targets:
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        req = urllib.request.Request(
+            f"{api}/{pid}/child/attachment",
+            data=_multipart_body(name, ctype, data),
+            method="POST",
+        )
+        req.add_header("Authorization", auth)
+        req.add_header("X-Atlassian-Token", "nocheck")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={_BOUNDARY}")
+        req.add_header("Accept", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                ok = 200 <= resp.status < 300
+            print(f"notify-confluence: attachment '{name}' "
+                  f"{'uploaded' if ok else 'upload returned ' + str(resp.status)}.")
+        except urllib.error.HTTPError as e:
+            print(f"notify-confluence: attachment '{name}' upload failed ({e.code}) — non-fatal.")
+        except (urllib.error.URLError, OSError, ValueError):
+            print(f"notify-confluence: attachment '{name}' skipped (unreachable) — non-fatal.")
+
+
 def _storage_body(data: dict, report_url: str) -> str:
     """Confluence 'storage' (XHTML) body summarising the scan."""
     t = data.get("summary_totals", {})
@@ -160,10 +222,15 @@ def main() -> None:
         print(f"notify-confluence: {'updated' if ok else 'update failed ('+str(st)+') for'} "
               f"page '{title}' (v{ver}).")
     else:
-        st, _ = _req("POST", api, auth, common)
+        st, created = _req("POST", api, auth, common)
         ok = st is not None and 200 <= st < 300
+        pid = (created or {}).get("id") if isinstance(created, dict) else None
         print(f"notify-confluence: {'created' if ok else 'create failed ('+str(st)+') for'} "
               f"page '{title}'.")
+
+    # Best-effort: embed the full HTML/PDF report as attachments on the page.
+    if ok and pid:
+        _attach(api, pid, auth, out_dir)
 
 
 if __name__ == "__main__":
