@@ -927,13 +927,19 @@ def runBitbucketNotify() {
     //    installed (i.e. a system-admin build was able to enable it).
     if (env.BITBUCKET_SOURCE_BRANCH || env.GIT_COMMIT) {
         try {
+            // Note: no buildUrl: parameter — the installed plugin version does not
+            // accept it (it derives the link from the build) and passing it logs a
+            // "WARNING: Unknown parameter(s) found ... buildUrl" line on every build.
             bitbucketStatusNotify(
                 buildState: state,
                 buildKey:   env.JOB_NAME,
-                buildName:  "oxide-sloc CI #${env.BUILD_NUMBER}",
-                buildUrl:   env.BUILD_URL
+                buildName:  "oxide-sloc CI #${env.BUILD_NUMBER}"
             )
-        } catch (e) {
+        } catch (Throwable e) {
+            // An absent plugin makes Pipeline throw java.lang.NoSuchMethodError (a
+            // java.lang.Error, NOT an Exception), so catch Throwable — an untyped
+            // `catch (e)` compiles to catch(Exception) and would let the Error escape,
+            // aborting post{always} and skipping the REST fallback entirely.
             echo "Bitbucket status notify via plugin skipped (plugin not installed): ${e.message}"
         }
     }

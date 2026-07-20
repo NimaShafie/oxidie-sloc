@@ -172,12 +172,19 @@ def main() -> None:
               "(need CONFLUENCE_BASE_URL, CONFLUENCE_SPACE_KEY, CONFLUENCE_TOKEN) - skipping.")
         return
 
-    # Load the scan result for the summary table.
+    # Load the scan result for the summary table. Prefer the slug-named file, but
+    # ALWAYS fall back to any result_*.json — if the scan wrote its output under a
+    # name that drifts from the SLOC_PROJECT slug, looking only for result_<slug>.json
+    # would leave data={} and silently publish an all-zeros table.
     data = {}
-    candidates = [os.path.join(out_dir, f"result_{slug}.json")] if slug else []
-    if not candidates:
-        import glob as _glob
-        candidates = sorted(_glob.glob(os.path.join(out_dir, "result_*.json")))
+    import glob as _glob
+
+    candidates = []
+    if slug:
+        candidates.append(os.path.join(out_dir, f"result_{slug}.json"))
+    candidates += sorted(_glob.glob(os.path.join(out_dir, "result_*.json")))
+    seen = set()
+    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
     for c in candidates:
         try:
             with open(c, encoding="utf-8") as fh:
@@ -185,6 +192,9 @@ def main() -> None:
             break
         except (OSError, ValueError):
             continue
+    if not data:
+        print(f"notify-confluence: warning — no scan result JSON found in '{out_dir}'; "
+              "summary table will be empty.")
 
     title = os.environ.get("CONFLUENCE_PAGE_TITLE", "").strip() or (
         f"oxide-sloc — {os.environ.get('JOB_NAME', slug) or 'report'}"
