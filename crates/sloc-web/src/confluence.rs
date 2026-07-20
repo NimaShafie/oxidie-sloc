@@ -440,6 +440,100 @@ impl ConfluenceClient {
         }
         Ok(())
     }
+
+    /// Upload a file as an attachment on an existing page. Uses the v1 REST
+    /// attachment endpoint (identical shape on Cloud — under `/wiki` — and
+    /// Server/DC). Re-posting the same filename updates the attachment to a new
+    /// version rather than erroring, so repeated publishes stay idempotent.
+    ///
+    /// The multipart/form-data body is hand-assembled so we do not need reqwest's
+    /// `multipart` feature (the workspace builds reqwest with default features off
+    /// for the air-gapped vendor set).
+    async fn upload_attachment(
+        &self,
+        page_id: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        let url = match self.tier {
+            ConfluenceTier::Cloud => {
+                format!(
+                    "{}/wiki/rest/api/content/{page_id}/child/attachment",
+                    self.base_url
+                )
+            }
+            ConfluenceTier::Server => {
+                format!(
+                    "{}/rest/api/content/{page_id}/child/attachment",
+                    self.base_url
+                )
+            }
+        };
+
+        let boundary = "oxidesloc7f3c1a9b2e5d4680boundary";
+        let mut body: Vec<u8> = Vec::with_capacity(bytes.len() + 512);
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+        // minorEdit=true avoids notifying page watchers on every re-upload.
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"minorEdit\"\r\n\r\n");
+        body.extend_from_slice(b"true\r\n");
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", &self.auth_header)
+            // Required by Confluence to accept a cross-origin-style multipart upload.
+            .header("X-Atlassian-Token", "nocheck")
+            .header("Accept", "application/json")
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Confluence attachment upload failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+}
+
+/// Best-effort: attach the finished HTML/PDF report files to a Confluence page.
+/// Failures are logged and swallowed — the summary page (table + report link) is
+/// the primary artifact; the embedded attachments are a convenience so the full
+/// report is viewable inside Confluence without linking back to the server.
+pub async fn attach_reports(
+    client: &ConfluenceClient,
+    page_id: &str,
+    html_path: Option<&Path>,
+    pdf_path: Option<&Path>,
+) {
+    for (path, name, ctype) in [
+        (html_path, "oxide-sloc-report.html", "text/html"),
+        (pdf_path, "oxide-sloc-report.pdf", "application/pdf"),
+    ] {
+        let Some(p) = path else { continue };
+        match std::fs::read(p) {
+            Ok(bytes) => {
+                if let Err(e) = client.upload_attachment(page_id, name, ctype, &bytes).await {
+                    tracing::warn!("Confluence attachment '{name}' skipped: {e:#}");
+                }
+            }
+            Err(e) => tracing::warn!("Confluence attachment '{name}' unreadable ({p:?}): {e}"),
+        }
+    }
 }
 
 /// Create or update a Confluence page with the SLOC scan result. Returns the
@@ -733,7 +827,16 @@ pub async fn api_post_to_confluence(
     let report_url = body.report_url.as_deref();
 
     match post_to_confluence(&client, &run, &body.page_title, report_url).await {
-        Ok(page_id) => Json(serde_json::json!({ "ok": true, "page_id": page_id })).into_response(),
+        Ok(page_id) => {
+            attach_reports(
+                &client,
+                &page_id,
+                artifacts.html_path.as_deref(),
+                artifacts.pdf_path.as_deref(),
+            )
+            .await;
+            Json(serde_json::json!({ "ok": true, "page_id": page_id })).into_response()
+        }
         Err(e) => {
             tracing::warn!("Confluence publish failed for run '{}': {e:#}", body.run_id);
             (
@@ -827,8 +930,32 @@ pub async fn maybe_auto_post_confluence(
     let proto = if state.tls_enabled { "https" } else { "http" };
     let report_url = format!("{proto}://{bind}/runs/result/{run_id}");
 
-    if let Err(e) = post_to_confluence(&client, run, &title, Some(&report_url)).await {
-        tracing::warn!("Confluence auto-post failed for schedule {sched_id}: {e:#}");
+    match post_to_confluence(&client, run, &title, Some(&report_url)).await {
+        Ok(page_id) => {
+            // Look up the run's saved artifacts to attach the full report files.
+            let artifacts = {
+                let map = state.artifacts.lock().await;
+                map.get(run_id).cloned()
+            };
+            let artifacts = match artifacts {
+                Some(a) => Some(a),
+                None => {
+                    let reg = state.registry.lock().await;
+                    reg.find_by_run_id(run_id)
+                        .map(recover_artifacts_from_registry)
+                }
+            };
+            if let Some(a) = artifacts {
+                attach_reports(
+                    &client,
+                    &page_id,
+                    a.html_path.as_deref(),
+                    a.pdf_path.as_deref(),
+                )
+                .await;
+            }
+        }
+        Err(e) => tracing::warn!("Confluence auto-post failed for schedule {sched_id}: {e:#}"),
     }
 }
 
@@ -1750,5 +1877,60 @@ mod http_tests {
         // schedule_auto_post empty → not enabled → early return.
         state.confluence.lock().await.config = Some(loopback_cfg(HashMap::new()));
         maybe_auto_post_confluence(&state, sched, &tiny_run(), "conf-001").await;
+    }
+
+    // ── attachment upload ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn upload_attachment_server_success() {
+        let app = Router::new().route(
+            #[allow(clippy::literal_string_with_formatting_args)]
+            "/rest/api/content/{id}/child/attachment",
+            routing::post(|| async { Json(serde_json::json!({"results": [{"id": "att1"}]})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        assert!(
+            client
+                .upload_attachment("p1", "report.html", "text/html", b"<p>x</p>")
+                .await
+                .is_ok(),
+            "server attachment upload should succeed on 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_attachment_cloud_forbidden_errors() {
+        use axum::http::StatusCode;
+        let app = Router::new().route(
+            #[allow(clippy::literal_string_with_formatting_args)]
+            "/wiki/rest/api/content/{id}/child/attachment",
+            routing::post(|| async { StatusCode::FORBIDDEN }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&cloud_cfg(&format!("http://{addr}")));
+        assert!(
+            client
+                .upload_attachment("p1", "report.pdf", "application/pdf", b"%PDF-1.4")
+                .await
+                .is_err(),
+            "cloud attachment upload should error on 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_reports_uploads_present_files_and_skips_missing() {
+        let app = Router::new().route(
+            #[allow(clippy::literal_string_with_formatting_args)]
+            "/rest/api/content/{id}/child/attachment",
+            routing::post(|| async { Json(serde_json::json!({"results": [{"id": "att"}]})) }),
+        );
+        let addr = start_mock(app).await;
+        let client = ConfluenceClient::new(&server_cfg(&format!("http://{addr}")));
+        let dir = tempfile::tempdir().unwrap();
+        let html = dir.path().join("report.html");
+        std::fs::write(&html, "<p>hi</p>").unwrap();
+        // HTML present → uploaded; PDF None → silently skipped. Must not panic.
+        attach_reports(&client, "p1", Some(&html), None).await;
     }
 }

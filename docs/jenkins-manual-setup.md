@@ -510,7 +510,7 @@ once.  The first build must run **without parameters** to register them.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 
-From this point on, all 50 configuration parameters are visible in the build form.
+From this point on, all 58 configuration parameters are visible in the build form.
 
 ---
 
@@ -518,7 +518,7 @@ From this point on, all 50 configuration parameters are visible in the build for
 
 1. Click **"Build with Parameters"** in the left sidebar.
 
-2. The build form opens with all 50 parameters grouped by function.
+2. The build form opens with all 58 parameters grouped by function.
    Adjust at minimum:
 
    | Parameter | Default | What to set |

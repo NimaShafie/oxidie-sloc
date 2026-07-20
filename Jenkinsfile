@@ -435,6 +435,64 @@ pipeline {
                           'listing the hash of every pushed artifact alongside the files themselves.'
         )
 
+        // ── Atlassian Suite: Confluence + Bitbucket (optional) ─────────────────
+        // Publish the finished report to Confluence and post a commit build-status
+        // to Bitbucket after every build (see post{always} → runBitbucketNotify).
+        // Both are fully opt-in and plugin-independent: they no-op (exit 0) when
+        // their base URL or credential is absent, so leaving these blank changes
+        // nothing.  The API tokens are NOT parameters — add them as Jenkins Secret
+        // Text credentials so they are masked in the log:
+        //   confluence-api-token   Confluence PAT (Server/DC) or Cloud API token
+        //   bitbucket-build-token  Bitbucket HTTP access token / app password
+        // The full HTML + PDF report is uploaded as a page attachment when present.
+        // See docs/ci-integrations.md § Atlassian and
+        // testing/atlassian-integration-test-plan.md.
+        string(
+            name:         'CONFLUENCE_BASE_URL',
+            defaultValue: '',
+            description:  '(optional) Confluence base URL. Server/DC: https://confluence.example.com ; ' +
+                          'Cloud: https://your-domain.atlassian.net/wiki . Blank = skip Confluence publish.'
+        )
+        string(
+            name:         'CONFLUENCE_USER',
+            defaultValue: '',
+            description:  '(optional) Confluence Cloud account email for basic auth (email:api-token). ' +
+                          'Leave BLANK for Server/DC when confluence-api-token is a Personal Access Token (Bearer).'
+        )
+        string(
+            name:         'CONFLUENCE_SPACE_KEY',
+            defaultValue: '',
+            description:  '(optional) Confluence space key to publish the summary page into (e.g. DEV). ' +
+                          'Required for the Confluence publish to run.'
+        )
+        string(
+            name:         'CONFLUENCE_PARENT_ID',
+            defaultValue: '',
+            description:  '(optional) Parent page ID to nest the report page under (blank = space root).'
+        )
+        string(
+            name:         'CONFLUENCE_PAGE_TITLE',
+            defaultValue: '',
+            description:  '(optional) Page title to create/update. Blank = "oxide-sloc — <JOB_NAME>". ' +
+                          'Re-using the same title updates the existing page (new version) instead of duplicating.'
+        )
+        string(
+            name:         'BITBUCKET_BASE_URL',
+            defaultValue: '',
+            description:  '(optional) Bitbucket base URL for commit build-status. Server/DC: ' +
+                          'https://bitbucket.example.com ; Cloud: https://api.bitbucket.org . Blank = skip.'
+        )
+        string(
+            name:         'BITBUCKET_WORKSPACE',
+            defaultValue: '',
+            description:  '(optional) Bitbucket CLOUD workspace ID (Cloud only; ignored on Server/DC).'
+        )
+        string(
+            name:         'BITBUCKET_REPO',
+            defaultValue: '',
+            description:  '(optional) Bitbucket CLOUD repository slug (Cloud only; ignored on Server/DC).'
+        )
+
         // ── Pipeline-of-Pipelines chaining ─────────────────────────────────────
         string(name: 'UPSTREAM_JOB',   defaultValue: '', description: 'Name of the upstream pipeline that triggered this build (for chaining)')
         string(name: 'UPSTREAM_BUILD', defaultValue: '', description: 'Build number of the upstream job')
