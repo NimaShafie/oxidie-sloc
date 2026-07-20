@@ -63,23 +63,34 @@ No Confluence or Bitbucket Marketplace app is required. All calls use the
 first-party REST APIs (Confluence Cloud v2 / Server v1; Bitbucket Cloud 2.0 /
 Server `build-status/1.0`). **Do not** install any add-on for the core test.
 
-### Jenkins side — two optional plugins (already bundled)
-Both are already listed in `ci/jenkins/plugins.txt` and therefore already inside
-the committed offline bundle `jenkins-plugins.tar.xz`:
+### Jenkins side — two optional plugins (NOT pre-bundled in the repo)
+Both are listed in `ci/jenkins/plugins.txt`:
 
 | Plugin | Purpose | Required? |
 |---|---|---|
 | `bitbucket` | Bitbucket Branch Source (SCM) | Optional |
 | `bitbucket-build-status-notifier` | `bitbucketStatusNotify()` build-status step | Optional |
 
-- **Installing them offline (Tier 1/2 with a Jenkins admin):**
-  `bash ci/jenkins/install-jenkins-plugins.sh` (verifies the `.sha256`, unpacks the
-  bundle into `$JENKINS_HOME/plugins`, restarts). No internet needed.
-- **Regeneration is NOT needed** for this work — no new plugins were added. Only
-  re-run `bash ci/jenkins/bundle-jenkins-plugins.sh` (Docker + internet) if
-  `plugins.txt` changes in the future, then commit `jenkins-plugins.tar.xz{,.sha256}`.
+> **Important:** the offline bundle `jenkins-plugins.tar.xz` (+ `.sha256`) is **not
+> committed to the repo** — it is a multi-tens-of-MB binary that must be generated
+> on demand. `ci/jenkins/Dockerfile.controller` COPYs it, so the controller image
+> also expects it to be produced first. Do not assume a fresh checkout already
+> contains it; the `install-jenkins-plugins.sh` header reflects this.
+
+- **Producing the bundle (once, on a networked machine):**
+  `bash ci/jenkins/bundle-jenkins-plugins.sh` (needs Docker + internet) writes
+  `jenkins-plugins.tar.xz{,.sha256}` to the repo root. Commit them only if you want
+  a truly offline clone; otherwise they stay local.
+- **Installing them offline (Tier 1/2 with a Jenkins admin), after producing the
+  bundle:** `bash ci/jenkins/install-jenkins-plugins.sh` (verifies the `.sha256`,
+  unpacks the bundle into `$JENKINS_HOME/plugins`, restarts).
+- **No-Docker fallback:** `bash ci/jenkins/plugins/download.sh` populates
+  `ci/jenkins/plugins/*.hpi` (direct plugins only), then
+  `bash ci/jenkins/install-jenkins-plugins.sh --from-dir ci/jenkins/plugins`. The
+  install script auto-detects this directory when the tar.xz bundle is absent.
 - **When absent** (Tier 3, or an admin who declined to install): the plugin call in
-  `runBitbucketNotify()` is wrapped in try/catch and the **plugin-independent**
+  `runBitbucketNotify()` is wrapped in try/catch (`catch (Throwable)`, so an absent
+  step throwing `NoSuchMethodError` is caught) and the **plugin-independent**
   `notify-bitbucket.sh` REST path takes over. Build-status still posts.
 
 ### Agent prerequisites (all tiers)
@@ -193,7 +204,7 @@ Legend: **App** = via web UI/REST on `sloc-web`; **CI** = via a Jenkins build.
 
 | ID | Steps | Expected |
 |---|---|---|
-| C1 | Build a commit with `BITBUCKET_*` params + `bitbucket-build-token` | `notify-bitbucket: posted SUCCESSFUL for <sha> → Bitbucket (200/201)`. Status visible on the commit. |
+| C1 | Build a commit with `BITBUCKET_*` params + `bitbucket-build-token` | `notify-bitbucket: posted SUCCESSFUL for <sha> → Bitbucket (2xx)`. Status visible on the commit. (Server/DC returns **204 No Content**; Cloud returns **201** — assert any `2xx`, not a literal `200/201`. `notify-bitbucket.sh` prints the actual code.) |
 | C2 | Force a failing build | Status **FAILED** posted for the same commit. |
 | C3 | Cloud target with `BITBUCKET_WORKSPACE`/`BITBUCKET_REPO` blank | `Cloud needs BITBUCKET_WORKSPACE + BITBUCKET_REPO — skipping.` Build green. |
 | C4 | No `bitbucket-build-token` credential | `Bitbucket direct notify skipped … ` Build green. |
