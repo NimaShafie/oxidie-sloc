@@ -69,7 +69,7 @@ jobs:
             --ignore RUSTSEC-2026-0195
 
       - name: Dependency licenses & bans
-        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2.0.19 (cargo-deny 0.19.7)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.0.19 (cargo-deny 0.19.7)
 
       - name: Build
         run: bash ci/build.sh
