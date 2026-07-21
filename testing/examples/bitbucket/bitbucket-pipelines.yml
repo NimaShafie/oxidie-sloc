@@ -1,5 +1,15 @@
 # oxide-sloc Bitbucket Pipelines integration
 #
+# STANDALONE EXAMPLE — runs oxide-sloc inside Bitbucket's own Pipelines runner and
+# posts native Code Insights. If instead you run oxide-sloc from JENKINS and just
+# want to post a commit build-status back to Bitbucket, the pipeline already does
+# that via ci/jenkins/notify-bitbucket.sh (wired into post{always}). See:
+#   - docs/ci-integrations.md § Atlassian Suite (Confluence + Bitbucket)
+#   - testing/atlassian-integration-test-plan.md
+#   - ci/jenkins/INTEGRATION.md § Atlassian plugin-optional design
+# Note: Cloud app passwords use Basic auth (user:app_password); set BITBUCKET_USER
+# for the Jenkins helper. Server/DC HTTP tokens use Bearer.
+#
 # What this does:
 #   1. Installs oxide-sloc from source (or a pre-built artifact).
 #   2. Runs analysis and produces JSON + HTML reports.

@@ -12,6 +12,15 @@ This document is written to be handed to the infrastructure agent that spins up
 the Atlassian + Jenkins instances. Every step lists the exact permission, token
 scope, and expected result so a pass/fail can be recorded without guesswork.
 
+**See also:**
+[`docs/ci-integrations.md` § Atlassian Suite](../docs/ci-integrations.md#atlassian-suite-confluence--bitbucket--built-in-ci-integration)
+(params, credential IDs, auth-scheme matrix, Cloud-vs-Server, troubleshooting) ·
+[`ci/jenkins/INTEGRATION.md`](../ci/jenkins/INTEGRATION.md#atlassian-plugin-optional-design)
+(plugin-optional design, job topology, offline plugin bundle) ·
+standalone REST examples
+[`testing/examples/confluence/update-sloc-page.sh`](examples/confluence/update-sloc-page.sh),
+[`testing/examples/bitbucket/bitbucket-pipelines.yml`](examples/bitbucket/bitbucket-pipelines.yml).
+
 ---
 
 ## 0. Architecture — why this is testable without admin
@@ -237,6 +246,63 @@ The integration is production-ready when **all** hold for every tier under test:
 
 ---
 
+## 5a. Real end-to-end pipeline verification (operator runbook)
+
+Groups A–D above drive `runBitbucketNotify()` and the two REST scripts directly.
+This section closes the one gap that isolated testing cannot: a **full green
+`oxide-sloc` pipeline build on a real agent**, where the scan → report →
+`post { always }` → notify chain fires end-to-end with real params + credentials.
+It must be run by an operator on a live controller (it cannot be run headless).
+
+**Preconditions**
+
+1. A controller + agent from `ci/jenkins/Dockerfile.controller` /
+   `ci/jenkins/Dockerfile.agent` (Rust baked in), or a native install.
+2. The `oxide-sloc` job seeded (`ci/jenkins/seed-job.groovy`) and run **once** with
+   no parameters so the `parameters{}` form is discovered (see
+   [`ci/jenkins/INTEGRATION.md` § Job topology](../ci/jenkins/INTEGRATION.md#job-topology-seed--main--manual)).
+3. `confluence-api-token` + `bitbucket-build-token` added as **Secret Text**
+   credentials; the `CONFLUENCE_*` / `BITBUCKET_*` params filled in for a real
+   space/repo. For Bitbucket **Cloud app passwords**, also set `BITBUCKET_USER`
+   (Basic auth); leave it blank for a token/PAT (Bearer).
+
+**Run**
+
+Build with Parameters, pointing at any real target repo (or blank to self-scan),
+with the Atlassian params set. Leave `SKIP_QUALITY_GATES` unchecked so it is a
+genuine green build, not a scan-only shortcut.
+
+**Verify `GIT_COMMIT` resolves to a real commit** (so the Bitbucket status attaches
+to an existing commit): the `Checkout` stage sets `env.GIT_COMMIT` from the
+checkout return value — for a self-scan it is the tooling HEAD, and when
+`TARGET_REPO_URL` is set it is the **scanned** repo's commit. Confirm the
+`notify-bitbucket` log line shows the expected 8-char SHA prefix.
+
+**Expected console excerpt** (Tier 3 — no plugin installed — is the strictest):
+
+```
+Bitbucket status notify via plugin skipped (plugin not installed): No such DSL method 'bitbucketStatusNotify' ...
+notify-bitbucket: posted SUCCESSFUL for <sha8> → Bitbucket (2xx).
+notify-confluence: created page 'oxide-sloc — <job>'.        (or: updated page '…' (vN).)
+notify-confluence: attachment 'oxide-sloc-report.html' uploaded.
+notify-confluence: attachment 'oxide-sloc-report.pdf' uploaded.
+Finished: SUCCESS
+```
+
+On Tier 1/2 with the plugin installed, the first line is replaced by a normal
+`bitbucketStatusNotify` invocation and the REST lines still print (no double
+failure). **Capture this excerpt and attach it to the build record / release
+notes** — it is the acceptance artifact for the end-to-end wiring.
+
+> Automated coverage of the underlying logic (state mapping, Cloud/Server URL
+> selection, auth scheme, glob fallback, idempotent create→update, attachment
+> upload, non-fatal skips) runs in CI without a controller via
+> `ci/jenkins/tests/test-notify-confluence.py`,
+> `ci/jenkins/tests/test-notify-bitbucket.sh`, and
+> `ci/jenkins/tests/test-pipeline-helpers-guards.py` (the `pipeline-sim` job).
+
+---
+
 ## 6. Quick reference — env/credential cheat-sheet
 
 **App (`sloc-web`)** — configure at `/integrations` or via env:
@@ -252,7 +318,8 @@ CONFLUENCE_PARENT_ID, CONFLUENCE_PAGE_TITLE      # job parameters
 confluence-api-token                              # Secret Text credential
 
 # Bitbucket
-BITBUCKET_BASE_URL, BITBUCKET_WORKSPACE, BITBUCKET_REPO   # job parameters
+BITBUCKET_BASE_URL, BITBUCKET_WORKSPACE, BITBUCKET_REPO,  # job parameters
+BITBUCKET_USER   # set ⇒ Basic auth (Cloud app password); blank ⇒ Bearer (token/PAT)
 bitbucket-build-token                                     # Secret Text credential
 ```
 

@@ -16,10 +16,18 @@ This document covers how to wire oxide-sloc into your CI/CD pipelines and how to
    - [Publishing to Confluence](#publishing-to-confluence)
    - [Trend charts](#trend-charts-plot-plugin)
    - [Setting the artifact-viewer CSP](#setting-the-artifact-viewer-csp)
-3. [GitHub Actions](#github-actions)
+3. [Atlassian Suite (Confluence + Bitbucket) — built-in CI integration](#atlassian-suite-confluence--bitbucket--built-in-ci-integration)
+   - [The two surfaces](#the-two-surfaces)
+   - [Three-tier permission model](#three-tier-permission-model)
+   - [Job parameters + credential IDs](#job-parameters--credential-ids)
+   - [Cloud vs Server/DC differences](#cloud-vs-serverdc-differences)
+   - [Auth schemes](#atlassian-auth-schemes)
+   - [Plugin-optional design (Tier-3 fallback)](#plugin-optional-design-tier-3-fallback)
+   - [Troubleshooting (keyed to log lines)](#atlassian-troubleshooting-keyed-to-log-lines)
+4. [GitHub Actions](#github-actions)
    - [VirusTotal binary scanning](#virustotal-binary-scanning)
-4. [GitLab CI](#gitlab-ci)
-5. [Artifact Repository Integration](#artifact-repository-integration)
+5. [GitLab CI](#gitlab-ci)
+6. [Artifact Repository Integration](#artifact-repository-integration)
    - [JFrog Artifactory](#jfrog-artifactory)
    - [Sonatype Nexus Repository Manager 3](#sonatype-nexus-repository-manager-3)
    - [Sonatype Nexus Repository Manager 2](#sonatype-nexus-repository-manager-2)
@@ -28,8 +36,8 @@ This document covers how to wire oxide-sloc into your CI/CD pipelines and how to
    - [Azure Blob Storage](#azure-blob-storage)
    - [Generic HTTP PUT](#generic-http-put)
    - [Registering artifact repo credentials](#registering-artifact-repo-credentials)
-6. [Environment variables reference](#environment-variables-reference)
-7. [CLI flag quick reference](#cli-flag-quick-reference)
+7. [Environment variables reference](#environment-variables-reference)
+8. [CLI flag quick reference](#cli-flag-quick-reference)
 
 ---
 
@@ -730,6 +738,161 @@ table = f"""
 """
 print(table)
 ```
+
+---
+
+## Atlassian Suite (Confluence + Bitbucket) — built-in CI integration
+
+The roll-your-own recipes above still work, but the Jenkins pipeline **ships with
+a first-party Atlassian integration** that needs no Marketplace app and no
+mandatory Jenkins plugin. After every build, `post { always }` calls
+`runBitbucketNotify()` (in `ci/jenkins/pipeline-helpers.groovy`), which:
+
+1. optionally fires the `bitbucketStatusNotify(...)` plugin step **if the plugin
+   is installed** (wrapped in `catch (Throwable)` so an absent plugin can never
+   fail the build — see [Plugin-optional design](#plugin-optional-design-tier-3-fallback)),
+2. posts a commit build-status via `ci/jenkins/notify-bitbucket.sh` (plugin-independent REST), and
+3. upserts a Confluence summary page and attaches the full HTML + PDF report via
+   `ci/jenkins/notify-confluence.py`.
+
+Every step is **opt-in and non-fatal**: with no base URL or credential it prints
+a one-line "skipping" note and exits 0. A missing, unreachable, or unauthorized
+Atlassian target **never** turns the build red.
+
+> Full production test plan (3 privilege tiers, Cloud + Server/DC):
+> [`testing/atlassian-integration-test-plan.md`](../testing/atlassian-integration-test-plan.md).
+> Standalone REST examples:
+> [`testing/examples/confluence/update-sloc-page.sh`](../testing/examples/confluence/update-sloc-page.sh),
+> [`testing/examples/bitbucket/bitbucket-pipelines.yml`](../testing/examples/bitbucket/bitbucket-pipelines.yml).
+
+### The two surfaces
+
+oxide-sloc talks to Atlassian over **two independent surfaces**, both plain REST
+with a bearer/basic token — neither needs a Connect/Forge app:
+
+| Surface | Confluence | Bitbucket | Code |
+|---|---|---|---|
+| **Application** (`sloc-web`) | Native REST client: create/update page, versioning, HTML+PDF attachments, **SSRF guard** | report hosted by the app | `crates/sloc-web/src/confluence.rs`, `integrations.rs` |
+| **Jenkins CI** | `notify-confluence.py` — upsert page + attach HTML/PDF | `notify-bitbucket.sh` — POST commit build-status | `ci/jenkins/`, wired at `Jenkinsfile` `post{always}` → `runBitbucketNotify()` |
+
+**SSRF note:** the web app enforces an SSRF allow/deny policy on user-supplied
+URLs (blocks loopback/link-local/cloud-metadata; **allows** RFC-1918 so
+self-hosted Server on a LAN works). The **CI scripts do not** — they run in a
+trusted CI context where the base URL is an operator-set job parameter, not
+attacker input. This is by design and documented in each script's header.
+
+### Three-tier permission model
+
+The *functionality* (page create/update, attachment upload, build-status POST)
+needs only **content-level** permissions + a token. Admin rights matter only to
+install the optional plugins and to provision spaces/repos/tokens.
+
+| Tier | Who | What still works |
+|---|---|---|
+| **1 — system/site admin** | can install anything | everything, incl. the optional plugin path |
+| **2 — project/space admin** | manages one space/repo, cannot install apps | everything via REST; plugin path not required |
+| **3 — no admin** | plain user, content/repo perms only, **no Jenkins plugin** | everything via REST fallback — this is the path the P0 `catch (Throwable)` fix keeps green |
+
+**Minimum permission per REST call:**
+
+| Call | Endpoint | Minimum permission |
+|---|---|---|
+| Confluence create/update page | `POST`/`PUT /rest/api/content` | space **Add Page** |
+| Confluence attachment upload | `POST …/child/attachment[/{id}/data]` | same page/space **Add** (attachments inherit page perms) |
+| Bitbucket Server/DC build-status | `POST /rest/build-status/1.0/commits/{sha}` | token owner **REPO_READ** on a repo containing the commit |
+| Bitbucket Cloud build-status | `POST /2.0/repositories/{ws}/{repo}/commit/{sha}/statuses/build` | app password / token with **`repository:write`** |
+
+### Job parameters + credential IDs
+
+The `CONFLUENCE_*` / `BITBUCKET_*` fields are first-class Jenkins **job
+parameters** (declared in `Jenkinsfile parameters{}`, auto-exposed as env vars):
+
+| Parameter | Applies to | Example |
+|---|---|---|
+| `CONFLUENCE_BASE_URL` | both | `https://confluence.corp.com` or `https://acme.atlassian.net/wiki` |
+| `CONFLUENCE_USER` | Cloud basic auth (blank ⇒ Server PAT/Bearer) | `ci-bot@acme.com` |
+| `CONFLUENCE_SPACE_KEY` | required to publish | `DEV` |
+| `CONFLUENCE_PARENT_ID` | optional nesting | `65601` |
+| `CONFLUENCE_PAGE_TITLE` | optional (blank ⇒ `oxide-sloc — <JOB_NAME>`) | `oxide-sloc — payments-api` |
+| `BITBUCKET_BASE_URL` | both | `https://bitbucket.corp.com` or `https://api.bitbucket.org` |
+| `BITBUCKET_WORKSPACE` | Cloud only | `acme` |
+| `BITBUCKET_REPO` | Cloud only | `payments-api` |
+| `BITBUCKET_USER` | Cloud **app-password** basic auth (blank ⇒ Bearer token) | `ci-bot@acme.com` |
+
+**Tokens are NOT parameters** — add them as Jenkins **Secret Text** credentials
+so they are masked in the log:
+
+| Credential ID | Value |
+|---|---|
+| `confluence-api-token` | Confluence PAT (Server/DC) **or** Cloud API token |
+| `bitbucket-build-token` | Bitbucket HTTP access token / app password |
+
+`GIT_COMMIT` (the commit the Bitbucket status attaches to) is resolved
+automatically by the `Checkout` stage: for a self-scan it is the tooling repo's
+HEAD; when `TARGET_REPO_URL` is set it is the **scanned** repo's commit, so the
+status lands on the commit that was actually analyzed.
+
+### Cloud vs Server/DC differences
+
+| | Confluence Cloud | Confluence Server/DC | Bitbucket Cloud | Bitbucket Server/DC |
+|---|---|---|---|---|
+| Base URL | `https://acme.atlassian.net/wiki` | `https://confluence.corp.com` | `https://api.bitbucket.org` | `https://bitbucket.corp.com` |
+| Auth | Basic (`email:api-token`) → set `CONFLUENCE_USER` | Bearer PAT → leave `CONFLUENCE_USER` blank | Basic (`user:app_password`) → set `BITBUCKET_USER`; **or** Bearer access token | Bearer PAT/HTTP token → leave `BITBUCKET_USER` blank |
+| Build-status success code | — | — | **201 Created** | **204 No Content** |
+| Content REST | v1 today (`/rest/api/content`); **v2 is the future** (`/wiki/api/v2`) — see the TODO in `notify-confluence.py` | v1 (`/rest/api/content`) | — | — |
+
+`notify-bitbucket.sh` treats **any 2xx** as success and prints the actual code,
+so both 201 and 204 log as `→ Bitbucket (2xx)`.
+
+### Atlassian auth schemes
+
+Set the username parameter only when the credential is an **app password / Cloud
+basic** credential; leave it blank for a **bearer token / PAT**:
+
+| Target | Credential | Scheme | Set the `*_USER` param? |
+|---|---|---|---|
+| Confluence Cloud | API token | Basic | `CONFLUENCE_USER` = account email |
+| Confluence Server/DC | Personal Access Token | Bearer | no |
+| Bitbucket Cloud | **app password** | Basic | `BITBUCKET_USER` = username/email |
+| Bitbucket Cloud | repo/workspace access token | Bearer | no |
+| Bitbucket Server/DC | HTTP access token / PAT | Bearer | no |
+
+> **Common Cloud gotcha:** a Bitbucket **app password** must use Basic auth. If
+> you mint an app password (as the test plan suggests) but leave `BITBUCKET_USER`
+> blank, the script falls back to Bearer and Cloud rejects it. Set
+> `BITBUCKET_USER` and it uses `user:app_password` Basic auth.
+
+### Plugin-optional design (Tier-3 fallback)
+
+The two Bitbucket Jenkins plugins (`bitbucket`,
+`bitbucket-build-status-notifier`) are **optional**. When
+`bitbucketStatusNotify` is undefined (plugin absent), Jenkins throws
+`java.lang.NoSuchMethodError` — a `java.lang.Error`, **not** an `Exception`. The
+call is therefore wrapped in `catch (Throwable e)` (not `catch (Exception)`), so
+the error is swallowed, `post { always }` continues, and the plugin-independent
+`notify-bitbucket.sh` REST path posts the status. This is what makes the
+**no-admin / no-plugin Tier 3** path work and stay green. A static guard test
+(`ci/jenkins/tests/test-pipeline-helpers-guards.py`) fails if this ever regresses
+to `catch (Exception)` or if the unsupported `buildUrl:` argument is re-added.
+
+The offline plugin bundle story is documented in
+[`ci/jenkins/INTEGRATION.md`](../ci/jenkins/INTEGRATION.md#offline-jenkins-plugins)
+and the test plan §1.
+
+### Atlassian troubleshooting (keyed to log lines)
+
+| Log line | Meaning | Fix |
+|---|---|---|
+| `notify-confluence: not configured …` | base URL / space / token missing | set `CONFLUENCE_BASE_URL`, `CONFLUENCE_SPACE_KEY`, and the `confluence-api-token` credential |
+| `notify-confluence: Confluence unreachable (air-gapped?) …` | network/DNS/connection failure | expected on air-gapped controllers; non-fatal. Check base URL + reachability |
+| `notify-confluence: create/update failed (401/403) …` | auth/permission problem | Cloud: set `CONFLUENCE_USER` (Basic). Server: use a PAT (Bearer). Ensure **Add Page** permission |
+| `notify-confluence: warning — no scan result JSON found …` | result file name drifted from the slug | non-fatal; the page publishes with an empty table. Check `OUTPUT_SUBDIR`/naming (P1 glob fallback covers most cases) |
+| `notify-confluence: attachment '…' upload returned 400 …` | strict Server/DC rejected a same-name re-POST | handled automatically — the script retries via the per-attachment `/data` endpoint |
+| `notify-bitbucket: not configured …` | base URL / token / commit missing | set `BITBUCKET_BASE_URL`, `bitbucket-build-token`, and ensure `GIT_COMMIT` resolves |
+| `notify-bitbucket: Cloud needs BITBUCKET_WORKSPACE + BITBUCKET_REPO …` | Cloud target without ws/repo | set both Cloud parameters |
+| `notify-bitbucket: Bitbucket returned HTTP 401 …` | auth problem | Cloud app password → set `BITBUCKET_USER` (Basic). Token/PAT → leave it blank (Bearer) |
+| `Bitbucket direct notify skipped (no 'bitbucket-build-token' credential) …` | credential not defined | add the `bitbucket-build-token` Secret Text credential |
+| `Bitbucket status notify via plugin skipped (plugin not installed) …` | expected on Tier 3 | none — the REST path posts the status |
 
 ---
 

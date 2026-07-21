@@ -308,6 +308,17 @@ jobs:
       - name: Simulate permission + air-gap scenarios
         run: python3 ci/jenkins/tests/simulate-scenarios.py
 
+      # Atlassian CI integration regression tests. Lock in the P0/P1 fixes and the
+      # notify-bitbucket.sh auth/URL/state logic. Pure stdlib — no Rust, no network.
+      - name: Atlassian notify — Confluence regression tests
+        run: python3 ci/jenkins/tests/test-notify-confluence.py
+
+      - name: Atlassian notify — pipeline-helpers static guards (P0/P3)
+        run: python3 ci/jenkins/tests/test-pipeline-helpers-guards.py
+
+      - name: Atlassian notify — Bitbucket state/URL/auth tests
+        run: bash ci/jenkins/tests/test-notify-bitbucket.sh
+
   self-analysis:
     name: Self-analysis (dogfood)
     needs: [smoke]

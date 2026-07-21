@@ -21,6 +21,28 @@ CONFLUENCE_PARENT_ID  optional parent page id
 CONFLUENCE_PAGE_TITLE optional page title (default: "oxide-sloc — <job/slug>")
 REPORT_URL            link to the published report (shown on the page)
 BUILD_URL / JOB_NAME / BUILD_NUMBER  Jenkins context (optional)
+
+Auth-scheme matrix
+------------------
+    Target                 Credential                Scheme   Set CONFLUENCE_USER?
+    Confluence CLOUD       API token                 Basic    YES (account email)
+    Confluence SERVER/DC   Personal Access Token     Bearer   no
+
+SSRF note
+---------
+Unlike the web app (which enforces an SSRF allow/deny policy on user-supplied
+Atlassian URLs), this CI script performs NO SSRF filtering. It runs in a trusted
+CI context where CONFLUENCE_BASE_URL is an operator-set job parameter, not
+attacker-controlled input, so blocking loopback/link-local/metadata hosts is
+neither needed nor desirable (self-hosted Server on a private LAN is valid).
+
+TODO (Cloud v1 deprecation)
+---------------------------
+This script uses the v1 `/rest/api/content` REST surface for BOTH Server/DC and
+Cloud. It still works against Cloud today, but Atlassian has deprecated the Cloud
+v1 content REST API in favour of v2 (`/wiki/api/v2/...`). The web app already
+speaks v2 for Cloud (see crates/sloc-web/src/confluence.rs); align this CI helper
+with v2 for Cloud when convenient. Server/DC continues to use v1.
 """
 
 import base64
@@ -87,11 +109,49 @@ def _multipart_body(filename: str, content_type: str, data: bytes) -> bytes:
     return pre + data + post
 
 
+def _multipart_post(url: str, auth: str, filename: str, ctype: str, data: bytes):
+    """POST a multipart/form-data attachment body. Returns (status, None) on an
+    HTTP response (any code), or (None, None) when the endpoint is unreachable."""
+    req = urllib.request.Request(
+        url,
+        data=_multipart_body(filename, ctype, data),
+        method="POST",
+    )
+    req.add_header("Authorization", auth)
+    req.add_header("X-Atlassian-Token", "nocheck")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={_BOUNDARY}")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            return resp.status, None
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (urllib.error.URLError, OSError, ValueError):
+        return None, None
+
+
+def _find_attachment_id(api: str, pid: str, auth: str, name: str) -> Optional[str]:
+    """Return the id of an existing attachment named `name` on page `pid`, or None."""
+    from urllib.parse import quote
+    url = f"{api}/{pid}/child/attachment?filename={quote(name)}&limit=50"
+    status, found = _req("GET", url, auth)
+    if status is None or not isinstance(found, dict):
+        return None
+    for att in found.get("results", []):
+        if att.get("title") == name and att.get("id"):
+            return att["id"]
+    return None
+
+
 def _attach(api: str, pid: str, auth: str, out_dir: str) -> None:
     """Best-effort: upload the HTML/PDF report as page attachments.
 
-    Re-posting the same filename updates the existing attachment to a new
-    version, so repeated builds stay idempotent. Never fails the build.
+    Idempotency: re-posting the same filename to `/child/attachment` updates the
+    attachment to a new version on many Confluence versions — but some Server/DC
+    versions REJECT the re-POST with 400 ("Cannot add a new attachment with same
+    file name as an existing attachment"). In that case we look up the existing
+    attachment id and POST the new bytes to `/child/attachment/{id}/data`, which
+    always creates a new version. Never fails the build.
     """
     import glob as _glob
 
@@ -110,24 +170,26 @@ def _attach(api: str, pid: str, auth: str, out_dir: str) -> None:
                 data = fh.read()
         except OSError:
             continue
-        req = urllib.request.Request(
-            f"{api}/{pid}/child/attachment",
-            data=_multipart_body(name, ctype, data),
-            method="POST",
-        )
-        req.add_header("Authorization", auth)
-        req.add_header("X-Atlassian-Token", "nocheck")
-        req.add_header("Content-Type", f"multipart/form-data; boundary={_BOUNDARY}")
-        req.add_header("Accept", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                ok = 200 <= resp.status < 300
-            print(f"notify-confluence: attachment '{name}' "
-                  f"{'uploaded' if ok else 'upload returned ' + str(resp.status)}.")
-        except urllib.error.HTTPError as e:
-            print(f"notify-confluence: attachment '{name}' upload failed ({e.code}) — non-fatal.")
-        except (urllib.error.URLError, OSError, ValueError):
+
+        status, _ = _multipart_post(f"{api}/{pid}/child/attachment", auth, name, ctype, data)
+
+        # 400 on the create endpoint usually means the filename already exists on
+        # a Confluence version that won't update-via-re-POST. Fall back to the
+        # per-attachment data endpoint to push a new version.
+        if status == 400:
+            att_id = _find_attachment_id(api, pid, auth, name)
+            if att_id:
+                status, _ = _multipart_post(
+                    f"{api}/{pid}/child/attachment/{att_id}/data",
+                    auth, name, ctype, data,
+                )
+
+        if status is None:
             print(f"notify-confluence: attachment '{name}' skipped (unreachable) — non-fatal.")
+        elif 200 <= status < 300:
+            print(f"notify-confluence: attachment '{name}' uploaded.")
+        else:
+            print(f"notify-confluence: attachment '{name}' upload returned {status} — non-fatal.")
 
 
 def _storage_body(data: dict, report_url: str) -> str:
