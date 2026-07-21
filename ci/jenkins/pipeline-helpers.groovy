@@ -963,6 +963,9 @@ def runBitbucketNotify() {
             withEnv(["BITBUCKET_BASE_URL=${env.BITBUCKET_BASE_URL ?: ''}",
                      "BITBUCKET_WORKSPACE=${env.BITBUCKET_WORKSPACE ?: ''}",
                      "BITBUCKET_REPO=${env.BITBUCKET_REPO ?: ''}",
+                     // BITBUCKET_USER set ⇒ notify-bitbucket.sh uses Basic auth
+                     // (Cloud app passwords). Blank ⇒ Bearer (access token / Server PAT).
+                     "BITBUCKET_USER=${env.BITBUCKET_USER ?: ''}",
                      "GIT_COMMIT=${env.GIT_COMMIT ?: ''}",
                      "BUILD_KEY=${env.JOB_NAME ?: 'oxide-sloc'}",
                      "BUILD_NAME=oxide-sloc CI #${env.BUILD_NUMBER}",

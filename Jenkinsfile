@@ -492,6 +492,14 @@ pipeline {
             defaultValue: '',
             description:  '(optional) Bitbucket CLOUD repository slug (Cloud only; ignored on Server/DC).'
         )
+        string(
+            name:         'BITBUCKET_USER',
+            defaultValue: '',
+            description:  '(optional) Bitbucket CLOUD username for app-password auth. When set, ' +
+                          'notify-bitbucket.sh uses Basic auth (user:app_password) — required for Cloud ' +
+                          'APP PASSWORDS. Leave BLANK for a Cloud/Server ACCESS TOKEN or Server PAT ' +
+                          '(Bearer auth). See docs/ci-integrations.md § Atlassian auth schemes.'
+        )
 
         // ── Pipeline-of-Pipelines chaining ─────────────────────────────────────
         string(name: 'UPSTREAM_JOB',   defaultValue: '', description: 'Name of the upstream pipeline that triggered this build (for chaining)')
@@ -528,9 +536,18 @@ pipeline {
         // git-ref, and compare stages; it defaults to the workspace root (self-scan).
         stage('Checkout') {
             steps {
-                checkout([$class: 'GitSCM',
-                          branches: [[name: '*/main']],
-                          userRemoteConfigs: [[url: params.REPO_URL]]])
+                script {
+                    // Capture the tooling checkout's commit explicitly. With
+                    // skipDefaultCheckout(true) + a scripted checkout, relying on the
+                    // git plugin's implicit env.GIT_COMMIT is fragile (it reflects
+                    // whichever checkout ran last). runBitbucketNotify() needs a real
+                    // SHA or it treats itself as "not configured" and skips — so we
+                    // set env.GIT_COMMIT here from the checkout return value.
+                    def scmVars = checkout([$class: 'GitSCM',
+                                            branches: [[name: '*/main']],
+                                            userRemoteConfigs: [[url: params.REPO_URL]]])
+                    env.GIT_COMMIT = scmVars.GIT_COMMIT ?: env.GIT_COMMIT
+                }
                 script {
                     if (params.TARGET_REF?.trim() &&
                             !(params.TARGET_REF.trim() ==~ /^[A-Za-z0-9_\-\.\/]+$/)) {
@@ -551,9 +568,16 @@ pipeline {
                             remoteCfg['credentialsId'] = params.TARGET_CREDENTIALS_ID.trim()
                         }
                         dir('_target') {
-                            checkout([$class: 'GitSCM',
-                                      branches: [[name: branchSpec]],
-                                      userRemoteConfigs: [remoteCfg]])
+                            def tgtVars = checkout([$class: 'GitSCM',
+                                                    branches: [[name: branchSpec]],
+                                                    userRemoteConfigs: [remoteCfg]])
+                            // When scanning an external project, the Bitbucket
+                            // build-status must attach to the SCANNED commit (the one
+                            // being analyzed), not the tooling repo's HEAD — mirror the
+                            // SLOC_PROJECT short-SHA logic, which also uses the target.
+                            if (tgtVars?.GIT_COMMIT?.trim()) {
+                                env.GIT_COMMIT = tgtVars.GIT_COMMIT
+                            }
                         }
                         env.SCAN_ROOT = "${env.WORKSPACE}/_target"
                         def credNote = params.TARGET_CREDENTIALS_ID?.trim() ? " (creds: ${params.TARGET_CREDENTIALS_ID.trim()})" : ''

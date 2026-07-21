@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # update-sloc-page.sh
 #
+# STANDALONE EXAMPLE (curl + jq) for pushing oxide-sloc metrics to a Confluence
+# page you already know the ID of. For the built-in, zero-dependency CI
+# integration (stdlib-only, upserts by title, attaches HTML+PDF, plugin-optional)
+# use ci/jenkins/notify-confluence.py instead — it is wired into the Jenkins
+# pipeline's post{always} block. See:
+#   - docs/ci-integrations.md § Atlassian Suite (Confluence + Bitbucket)
+#   - testing/atlassian-integration-test-plan.md
+#   - ci/jenkins/INTEGRATION.md § Atlassian plugin-optional design
+#
 # Pushes the latest oxide-sloc metrics to a Confluence page.
 # The page is updated with a formatted table and an embedded iframe widget.
 #
