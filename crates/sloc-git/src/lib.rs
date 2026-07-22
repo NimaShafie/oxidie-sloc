@@ -11,7 +11,8 @@ pub use ops::{
 };
 pub use schedule::{ScanSchedule, ScanScheduleKind, ScanScheduleProvider, ScheduleStore};
 pub use webhook::{
-    parse_bitbucket_push, parse_github_push, parse_gitlab_push, WebhookEvent, WebhookProvider,
+    hmac_sha256_hex, parse_bitbucket_push, parse_github_push, parse_gitlab_push, WebhookEvent,
+    WebhookProvider,
 };
 
 use chrono::{DateTime, Utc};

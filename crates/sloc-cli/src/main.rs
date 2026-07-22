@@ -89,6 +89,12 @@ enum Commands {
     /// Designed to be called from Jenkins post-build steps and CI pipelines.
     #[command(name = "pr-comment")]
     PrComment(PrCommentArgs),
+    /// Verify the integrity of a hash-chained audit log.
+    /// Recomputes each record's keyed MAC and checks the chain links; reports the
+    /// first altered/removed record. Requires the same key used when writing
+    /// (SLOC_AUDIT_HMAC_KEY, or pass --key).
+    #[command(name = "verify-audit")]
+    VerifyAudit(VerifyAuditArgs),
     /// Print shell completion script to stdout.
     /// Source the output to enable tab-completion for the current shell session.
     Completions {
@@ -96,6 +102,19 @@ enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+// ── verify-audit ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+struct VerifyAuditArgs {
+    /// Path to the audit log to verify. Defaults to $SLOC_AUDIT_LOG.
+    #[arg(value_name = "PATH")]
+    log: Option<PathBuf>,
+
+    /// Integrity key. Defaults to $SLOC_AUDIT_HMAC_KEY.
+    #[arg(long, value_name = "KEY")]
+    key: Option<String>,
 }
 
 // ── analyze ───────────────────────────────────────────────────────────────────
@@ -672,6 +691,7 @@ async fn main() -> Result<()> {
         Commands::GitCompare(args) => run_git_compare(args),
         Commands::Watch(args) => run_watch(args).await,
         Commands::Prune(args) => run_prune(&args),
+        Commands::VerifyAudit(args) => run_verify_audit(&args),
         Commands::PrComment(args) => run_pr_comment(args).await,
         Commands::Completions { shell } => {
             clap_complete::generate(
@@ -682,6 +702,49 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+    }
+}
+
+// ── verify-audit handler ──────────────────────────────────────────────────────
+
+fn run_verify_audit(args: &VerifyAuditArgs) -> Result<()> {
+    let log = args
+        .log
+        .clone()
+        .or_else(|| std::env::var_os("SLOC_AUDIT_LOG").map(PathBuf::from))
+        .context("no audit log path given; pass one as an argument or set SLOC_AUDIT_LOG")?;
+    let key = args
+        .key
+        .clone()
+        .or_else(|| std::env::var("SLOC_AUDIT_HMAC_KEY").ok())
+        .filter(|s| !s.is_empty())
+        .context(
+            "no integrity key given; pass --key or set SLOC_AUDIT_HMAC_KEY (the same \
+             value used when the log was written)",
+        )?;
+
+    let report = sloc_web::verify_audit_file(&log, &key);
+    if report.ok {
+        println!(
+            "OK: {} record(s) verified — chain intact ({})",
+            report.records,
+            log.display()
+        );
+        Ok(())
+    } else {
+        let detail = report.detail.as_deref().unwrap_or("verification failed");
+        match report.first_bad_line {
+            Some(line) => eprintln!(
+                "FAIL: {} ({}:{}) after {} record(s)",
+                detail,
+                log.display(),
+                line,
+                report.records.saturating_sub(1)
+            ),
+            None => eprintln!("FAIL: {} ({})", detail, log.display()),
+        }
+        // Non-zero exit so CI / SIEM tooling can gate on tamper detection.
+        std::process::exit(2);
     }
 }
 
