@@ -23,6 +23,7 @@ static IMG_ICON_MAKEFILE: &[u8] = include_bytes!("../assets/icons/makefile.svg")
 static IMG_ICON_PERL: &[u8] = include_bytes!("../assets/icons/perl.svg");
 
 pub(crate) mod audit;
+pub use audit::{verify_audit_file, AuditVerifyReport};
 pub(crate) mod auth;
 pub(crate) mod confluence;
 pub(crate) mod error;
@@ -987,6 +988,23 @@ fn refuse_unauthenticated_server(server_mode: bool, has_api_keys: bool) -> bool 
     server_mode && !has_api_keys && !allow_unauthenticated_server_mode()
 }
 
+/// Umbrella strict-posture switch (`SLOC_HARDENED=1`). When set, opt-in hardening
+/// defaults take effect: transport encryption is required on non-loopback binds and
+/// the auth-lockout threshold tightens. Off by default so existing deployments are
+/// unaffected; individual controls also keep their own env overrides.
+fn hardened_mode() -> bool {
+    std::env::var("SLOC_HARDENED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// Whether a certificate must be present before serving a network-facing
+/// (non-loopback) bind. Opt-in via `SLOC_REQUIRE_TLS=1` or `SLOC_HARDENED=1`. Off by
+/// default, so cleartext and reverse-proxy-terminated deployments keep working.
+fn require_tls() -> bool {
+    hardened_mode()
+        || std::env::var("SLOC_REQUIRE_TLS")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Emit operator-facing warnings for insecure server-mode configurations.
 /// Pure side-effect (stdout); no bearing on the returned config values.
 fn emit_server_mode_warnings(
@@ -1085,7 +1103,7 @@ fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
     let auth_lockout_threshold = std::env::var("SLOC_AUTH_LOCKOUT_FAILS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(10);
+        .unwrap_or_else(|| if hardened_mode() { 3 } else { 10 });
     let auth_lockout_secs = std::env::var("SLOC_AUTH_LOCKOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -1236,6 +1254,24 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     let preferred: SocketAddr = bind_address
         .parse()
         .with_context(|| format!("invalid bind address: {bind_address}"))?;
+
+    // Opt-in transport-encryption gate: refuse to expose a network-facing (non-
+    // loopback) listener in cleartext when TLS enforcement is requested. Off by
+    // default; enable with SLOC_REQUIRE_TLS=1 or SLOC_HARDENED=1. Loopback binds
+    // (including reverse-proxy-terminated setups) are always allowed.
+    if require_tls() && !preferred.ip().is_loopback() && !sec.tls_enabled {
+        audit::record(
+            "server_start_refused",
+            "denied",
+            &[("reason", "TLS required for non-loopback bind")],
+        );
+        anyhow::bail!(
+            "refusing to start: TLS is required for a network-facing bind ({preferred}) but \
+             SLOC_TLS_CERT / SLOC_TLS_KEY are not set. Provide a certificate and key, bind to \
+             a loopback address, or unset SLOC_REQUIRE_TLS / SLOC_HARDENED."
+        );
+    }
+
     let (listener, addr) = {
         let candidates = (0u16..=9).map(|offset| {
             let mut a = preferred;
@@ -13723,9 +13759,14 @@ async fn test_metrics_handler(
     body.dark-theme .chart-box{{border-color:var(--line-strong);}}
     .btn{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .13s;}}
     .btn:hover{{background:var(--surface-2);}}
-    .export-btn{{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .12s ease;text-decoration:none;}}
+    .export-btn{{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--text);text-decoration:none;white-space:nowrap;transition:background .12s ease;}}
     .export-btn:hover{{background:var(--line);}}
     .export-btn svg{{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.2;}}
+    /* Page-level export controls (Scope toolbar, right-aligned) — identical style to View Reports */
+    .export-group{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}}
+    .scope-export{{margin-left:auto;}}
+    body.pdf-mode .export-group{{display:none!important;}}
+    @media (max-width:720px){{.scope-export{{margin-left:0;width:100%;}}}}
     .scope-bar{{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:14px;position:relative;z-index:1;flex-wrap:wrap;}}
     .scope-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);white-space:nowrap;flex-shrink:0;}}
     .scope-sel-wrap{{display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap;}}
@@ -13850,6 +13891,21 @@ async fn test_metrics_handler(
           <select id="scope-sub-sel" class="scope-sel"><option value="">Entire project</option></select>
         </div>
       </div>
+      <!-- Page-level export: covers the whole page (Test Metrics + LCOV Coverage Summary) for the selected scope. -->
+      <div class="export-group scope-export" id="tm-export-group">
+        <button type="button" class="export-btn" id="tm-export-xlsx-btn" title="Download the whole page (Test Metrics + LCOV Coverage Summary) as an Excel workbook (.xlsx)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export Excel
+        </button>
+        <button type="button" class="export-btn" id="tm-export-png-btn" title="Save the whole page's charts as a PNG image">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          Export PNG
+        </button>
+        <button type="button" class="export-btn" id="tm-export-pdf-btn" title="Export the whole page as a printable PDF report">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>
+          Export PDF
+        </button>
+      </div>
     </div>
     <div class="summary-strip" style="grid-template-columns:repeat(4,1fr);">
       <div class="stat-chip"><div class="stat-chip-val" id="chip-total">{total_tests}</div><div class="stat-chip-label">Test Functions</div><div class="stat-chip-tip">Lexically detected test case / function definitions (GTest, PyTest, JUnit, Unity, etc.)</div><div class="stat-chip-exact" id="chip-total-exact"></div></div>
@@ -13865,14 +13921,7 @@ async fn test_metrics_handler(
     </div>
 
     <div class="panel" id="viz-panel">
-      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;display:flex;align-items:center;justify-content:space-between;">
-        <span>Visualizations</span>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="export-btn" id="tm-export-xlsx-btn" title="Download test metrics as Excel workbook (.xlsx)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel</button>
-          <button type="button" class="export-btn" id="tm-export-png-btn" title="Save charts as PNG image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Export PNG</button>
-          <button type="button" class="export-btn" id="tm-export-pdf-btn" title="Export printable PDF report"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg> Export PDF</button>
-        </div>
-      </div>
+      <div class="section-header" style="margin-top:0;padding-top:0;border-top:none;">Visualizations</div>
 
       <div class="chart-box" style="margin-bottom:18px;">
         <div class="chart-box-header">
@@ -13924,7 +13973,7 @@ async fn test_metrics_handler(
         </div>
         <div class="chart-box">
           <div class="chart-box-header">
-            <div class="chart-box-title" style="margin-bottom:0;">Test Density (per 1 000 code lines)</div>
+            <div class="chart-box-title" style="margin-bottom:0;">Test Density (per 1,000 code lines)</div>
             <button class="chart-expand-btn" id="density-expand-btn" title="View full chart" aria-label="Expand chart">&#x2922; Full View</button>
           </div>
           <div class="chart-canvas-wrap"><canvas id="canvas-density"></canvas></div>
@@ -13967,14 +14016,7 @@ async fn test_metrics_handler(
     </div>
 
     <div class="panel">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <h1 style="margin:0;">Test Metrics</h1>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="export-btn" id="tm2-export-xlsx-btn" title="Download test metrics and LCOV coverage summary as an Excel workbook (.xlsx)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel</button>
-          <button type="button" class="export-btn" id="tm2-export-png-btn" title="Save the test metrics and coverage charts as a PNG image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Export PNG</button>
-          <button type="button" class="export-btn" id="tm2-export-pdf-btn" title="Export a printable PDF of test metrics with the LCOV coverage summary"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg> Export PDF</button>
-        </div>
-      </div>
+      <h1>Test Metrics</h1>
       <p class="muted">Lexical test definition counts across your codebase — how many test functions, test cases, and test decorators were detected per language, and how dense the test coverage is relative to production code.</p>
 
       <div class="section-header">Language Breakdown</div>
@@ -14217,6 +14259,48 @@ async fn test_metrics_handler(
     }}
     Chart.defaults.onHover = chartCursor; // applies to every chart on this page
 
+    // ── Global bar hover emphasis ──────────────────────────────────────────────
+    // Doughnuts pop via hoverOffset; bars had no per-bar hover feedback (fading the
+    // *other* bars does nothing when there is only one). Give every bar chart a
+    // built-in "pop": the hovered bar brightens, lifts with a rounded outline, and
+    // animates via the fast active transition. Applied globally through a plugin so
+    // it covers all current and future bar charts on the page.
+    function tmLighten(c, amt) {{
+      if (typeof c === 'string' && c.charAt(0) === '#' && c.length === 7) {{
+        var n = parseInt(c.slice(1), 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+        r = Math.round(r + (255 - r) * amt);
+        g = Math.round(g + (255 - g) * amt);
+        b = Math.round(b + (255 - b) * amt);
+        return 'rgb(' + r + ',' + g + ',' + b + ')';
+      }}
+      return c;
+    }}
+    var tmBarHoverEmphasis = {{
+      id: 'tmBarHoverEmphasis',
+      beforeInit: function(chart) {{
+        if (!chart.config || chart.config.type !== 'bar') return;
+        (chart.data.datasets || []).forEach(function(ds) {{
+          var bg = ds.backgroundColor;
+          if (ds.hoverBackgroundColor == null) {{
+            ds.hoverBackgroundColor = Array.isArray(bg)
+              ? bg.map(function(c) {{ return tmLighten(c, 0.24); }})
+              : tmLighten(bg, 0.24);
+          }}
+          if (ds.hoverBorderColor == null) {{
+            ds.hoverBorderColor = isDark() ? 'rgba(245,236,230,0.9)' : 'rgba(67,52,45,0.82)';
+          }}
+          if (ds.hoverBorderWidth == null) ds.hoverBorderWidth = 3;
+        }});
+      }}
+    }};
+    Chart.register(tmBarHoverEmphasis);
+    // Quick, smooth tween when a bar enters/leaves the hovered (active) state.
+    try {{
+      Chart.defaults.transitions.active = Chart.defaults.transitions.active || {{}};
+      Chart.defaults.transitions.active.animation = Chart.defaults.transitions.active.animation || {{}};
+      Chart.defaults.transitions.active.animation.duration = 260;
+    }} catch (e) {{}}
+
     // Plugin: draws % labels inside each doughnut slice.
     var donutPctPlugin = {{
       afterDatasetsDraw: function(chart) {{
@@ -14278,6 +14362,57 @@ async fn test_metrics_handler(
       if (wrap && wrap.classList.contains('chart-canvas-wrap')) wrap.style.display = show ? 'none' : '';
     }}
 
+    // Shared hover treatment for every single-series bar/doughnut chart on this page:
+    // emphasise the hovered bar/arc and fade the rest, mirroring the highlight+fade
+    // treatment used by the language charts on the scan results page.
+    function tmFadeColor(c) {{
+      if (typeof c === 'string' && c.charAt(0) === '#' && c.length === 7) return c + '3D';
+      return c;
+    }}
+    function tmApplyFade(chart, activeIdx) {{
+      var ds = chart.data.datasets[0];
+      if (!ds._baseBg) ds._baseBg = ds.backgroundColor.slice();
+      if (activeIdx == null) {{
+        ds.backgroundColor = ds._baseBg.slice();
+      }} else {{
+        ds.backgroundColor = ds._baseBg.map(function(c, i) {{
+          return i === activeIdx ? ds._baseBg[i] : tmFadeColor(ds._baseBg[i]);
+        }});
+      }}
+    }}
+    function tmFadeHover(e, active, chart) {{
+      var t = e.native && e.native.target;
+      if (t) t.style.cursor = active.length ? 'pointer' : 'default';
+      var idx = active.length ? active[0].index : null;
+      if (chart._fadeIdx === idx) return;
+      chart._fadeIdx = idx;
+      tmApplyFade(chart, idx);
+      // 'active' mode tweens the fade + the hovered bar's pop via the fast active
+      // transition (doughnuts keep their own hoverOffset motion regardless).
+      chart.update('active');
+    }}
+    // Legend hover on a doughnut should highlight+fade exactly like hovering the arc.
+    function tmDoughnutLegendHover(e, item, leg) {{
+      var ch = leg.chart;
+      var t = e.native && e.native.target;
+      if (t) t.style.cursor = 'pointer';
+      ch._fadeIdx = item.index;
+      ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
+      ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
+      tmApplyFade(ch, item.index);
+      ch.update();
+    }}
+    function tmDoughnutLegendLeave(e, item, leg) {{
+      var ch = leg.chart;
+      var t = e.native && e.native.target;
+      if (t) t.style.cursor = 'default';
+      ch._fadeIdx = null;
+      ch.setActiveElements([]);
+      ch.tooltip.setActiveElements([], {{}});
+      tmApplyFade(ch, null);
+      ch.update('none');
+    }}
+
     function renderTestCharts(D) {{
       currentLangTests = D || [];
       testsChart = destroyChart(testsChart);
@@ -14299,7 +14434,7 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Test Definitions', data: top15.map(function(d){{ return d.tests; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[i % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
             layout: {{ padding: {{ right: 64 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
@@ -14321,7 +14456,7 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Tests / 1K Code Lines', data: topD.map(function(d){{ return d.density; }}), backgroundColor: topD.map(function(_,i){{ return PALETTE[(i+4) % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
             layout: {{ padding: {{ right: 64 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
             scales: {{
@@ -14349,7 +14484,7 @@ async fn test_metrics_handler(
           datasets: [{{ label: 'Assertions', data: top15.map(function(d){{ return d.assertions; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+2) % PALETTE.length]; }}), borderRadius: 4 }}]
         }},
         options: {{
-          responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
           layout: {{ padding: {{ right: 64 }} }},
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
           scales: {{
@@ -14376,7 +14511,7 @@ async fn test_metrics_handler(
           datasets: [{{ label: 'Test Suites', data: top15.map(function(d){{ return d.suites; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+6) % PALETTE.length]; }}), borderRadius: 4 }}]
         }},
         options: {{
-          responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
           layout: {{ padding: {{ right: 64 }} }},
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
           scales: {{
@@ -14403,11 +14538,11 @@ async fn test_metrics_handler(
         type: 'doughnut',
         data: {{
           labels: ['Test Files', 'Non-Test Files'],
-          datasets: [{{ data: [testF, nonTest], backgroundColor: ['#C45C10', dark ? '#524238' : '#e6d0bf'], borderWidth: 2, borderColor: dark ? '#1e1e1e' : '#f5efe8' }}]
+          datasets: [{{ data: [testF, nonTest], backgroundColor: ['#C45C10', dark ? '#524238' : '#e6d0bf'], borderWidth: 2, borderColor: dark ? '#1e1e1e' : '#f5efe8', hoverOffset: 14 }}]
         }},
         options: {{
           responsive: true, maintainAspectRatio: false, cutout: '62%',
-          onHover: chartCursor,
+          onHover: tmFadeHover,
           plugins: {{
             legend: {{ position: 'right', labels: {{ color: txtClr(), font: {{size:12}}, padding: 16,
               generateLabels: function(chart) {{
@@ -14428,22 +14563,8 @@ async fn test_metrics_handler(
                 }});
               }}
             }},
-              onHover: function(e, item, leg) {{
-                var ch = leg.chart;
-                var t = e.native && e.native.target;
-                if (t) t.style.cursor = 'pointer';
-                ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
-                ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
-                ch.update();
-              }},
-              onLeave: function(e, item, leg) {{
-                var ch = leg.chart;
-                var t = e.native && e.native.target;
-                if (t) t.style.cursor = 'default';
-                ch.setActiveElements([]);
-                ch.tooltip.setActiveElements([], {{}});
-                ch.update('none');
-              }}
+              onHover: tmDoughnutLegendHover,
+              onLeave: tmDoughnutLegendLeave
             }},
             tooltip: {{ callbacks: {{ label: function(ctx) {{
               var v = ctx.parsed, pct = totalF > 0 ? (v / totalF * 100).toFixed(1) : '0';
@@ -14471,6 +14592,7 @@ async fn test_metrics_handler(
         }},
         options: {{
           responsive: true, maintainAspectRatio: false,
+          onHover: tmFadeHover,
           layout: {{ padding: {{ top: 22 }} }},
           plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.y); }} }} }} }},
           scales: {{
@@ -14495,13 +14617,15 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Line Coverage %', data: covD.map(function(d){{ return d.pct; }}), backgroundColor: covD.map(function(d){{ return d.pct >= 80 ? '#2A6846' : d.pct >= 50 ? '#D4A017' : '#B23030'; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
+            layout: {{ padding: {{ right: 52 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + ctx.parsed.x.toFixed(1) + '%'; }} }} }} }},
             scales: {{
               x: {{ min: 0, max: 100, grid: {{ color: clr() }}, ticks: {{ color: txtClr(), font:{{size:11}}, callback: function(v){{ return v + '%'; }} }} }},
               y: {{ grid: {{ color: 'transparent' }}, ticks: {{ color: txtClr(), font:{{size:11}} }} }}
             }}
-          }}
+          }},
+          plugins: [makeDlPlugin(function(v){{ return Number(v).toFixed(1) + '%'; }}, 'end')]
         }});
         ALL_CHARTS.push(covChart);
       }}
@@ -14512,29 +14636,15 @@ async fn test_metrics_handler(
           type: 'doughnut',
           data: {{
             labels: ['High (\u226580%)', 'Moderate (50\u201379%)', 'Low (<50%)'],
-            datasets: [{{ data: [tiers.high || 0, tiers.mid || 0, tiers.low || 0], backgroundColor: ['#2A6846', '#D4A017', '#B23030'], borderWidth: 2, borderColor: isDark() ? '#1e1e1e' : '#f5efe8' }}]
+            datasets: [{{ data: [tiers.high || 0, tiers.mid || 0, tiers.low || 0], backgroundColor: ['#2A6846', '#D4A017', '#B23030'], borderWidth: 2, borderColor: isDark() ? '#1e1e1e' : '#f5efe8', hoverOffset: 14 }}]
           }},
           options: {{
             responsive: true, maintainAspectRatio: false, cutout: '62%',
-            onHover: chartCursor,
+            onHover: tmFadeHover,
             plugins: {{
               legend: {{ position: 'right', labels: {{ color: txtClr(), font: {{size:12}}, padding: 14 }},
-                onHover: function(e, item, leg) {{
-                  var ch = leg.chart;
-                  var t = e.native && e.native.target;
-                  if (t) t.style.cursor = 'pointer';
-                  ch.setActiveElements([{{ datasetIndex: 0, index: item.index }}]);
-                  ch.tooltip.setActiveElements([{{ datasetIndex: 0, index: item.index }}], {{ x: 0, y: 0 }});
-                  ch.update();
-                }},
-                onLeave: function(e, item, leg) {{
-                  var ch = leg.chart;
-                  var t = e.native && e.native.target;
-                  if (t) t.style.cursor = 'default';
-                  ch.setActiveElements([]);
-                  ch.tooltip.setActiveElements([], {{}});
-                  ch.update('none');
-                }}
+                onHover: tmDoughnutLegendHover,
+                onLeave: tmDoughnutLegendLeave
               }},
               tooltip: {{ callbacks: {{ label: function(ctx) {{
                 var v = ctx.parsed, pct = total > 0 ? (v / total * 100).toFixed(1) : '0';
@@ -14925,7 +15035,7 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Test Definitions', data: top15.map(function(d){{ return d.tests; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[i % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
@@ -14946,7 +15056,7 @@ async fn test_metrics_handler(
         if (!D || !D.length) return;
         var topD = D.slice().sort(function(a,b){{ return b.density - a.density; }}).slice(0, 15);
         var h = Math.max(320, topD.length * 36 + 80);
-        var canvas = makeTmOverlay('Test Density (per 1\u202f000 code lines) \u2014 Full View', topD.length + ' languages', h);
+        var canvas = makeTmOverlay('Test Density (per 1,000 code lines) \u2014 Full View', topD.length + ' languages', h);
         if (!canvas) return;
         new Chart(canvas, {{
           type: 'bar',
@@ -14955,7 +15065,7 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Tests / 1K Code Lines', data: topD.map(function(d){{ return d.density; }}), backgroundColor: topD.map(function(_,i){{ return PALETTE[(i+4) % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + Number(ctx.parsed.x).toFixed(2) + ' / 1K'; }} }} }} }},
             scales: {{
@@ -15003,7 +15113,7 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Assertions', data: top15.map(function(d){{ return d.assertions; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+2) % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
@@ -15034,7 +15144,7 @@ async fn test_metrics_handler(
             datasets: [{{ label: 'Test Suites', data: top15.map(function(d){{ return d.suites; }}), backgroundColor: top15.map(function(_,i){{ return PALETTE[(i+6) % PALETTE.length]; }}), borderRadius: 4 }}]
           }},
           options: {{
-            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y', onHover: tmFadeHover,
             layout: {{ padding: {{ right: 72 }} }},
             plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: function(ctx){{ return ' ' + fmtFull(ctx.parsed.x); }} }} }} }},
             scales: {{
@@ -15265,7 +15375,7 @@ async fn test_metrics_handler(
       var CHART_TITLES = {{
         'canvas-trend':       'TEST COUNT TREND',
         'canvas-tests':       'TEST DEFINITIONS BY LANGUAGE',
-        'canvas-density':     'TEST DENSITY (PER 1,000 CODE LINES)',
+        'canvas-density':     'TEST DENSITY (per 1,000 code lines)',
         'canvas-assertions':  'ASSERTIONS BY LANGUAGE',
         'canvas-suites':      'TEST SUITES BY LANGUAGE',
         'canvas-files':       'TEST FILES BREAKDOWN',
@@ -15278,12 +15388,16 @@ async fn test_metrics_handler(
       var covShown=covPanelEl&&covPanelEl.style.display!=='none';
       var ids=['canvas-trend','canvas-tests','canvas-density','canvas-assertions','canvas-suites','canvas-files','canvas-composition'];
       if(covShown){{ids.push('canvas-cov','canvas-cov-tiers');}}
-      var canvases=ids.map(function(id){{return document.getElementById(id);}}).filter(function(c){{return c&&c.width>0&&c.style.display!=='none';}});
+      // Include only charts that actually rendered data. A "no data" chart has its
+      // canvas wrap hidden (offsetParent===null) with a placeholder shown instead —
+      // skip those so the image has no empty gaps (e.g. Assertions/Suites at 0).
+      function chartHasData(c){{return c&&c.width>0&&c.offsetParent!==null;}}
+      var canvases=ids.map(function(id){{return document.getElementById(id);}}).filter(chartHasData);
       if(!canvases.length){{alert('No charts rendered yet. Run a scan first.');return;}}
       var t=tmExportMeta();
       var COLW=760, GAP=16, HEADER_H=102, FOOTER_H=40, ROW_PAD=18, TITLE_H=26;
       var trendCanvas=document.getElementById('canvas-trend');
-      var hasTrend=trendCanvas&&trendCanvas.width>0&&trendCanvas.style.display!=='none';
+      var hasTrend=chartHasData(trendCanvas);
       var gridCanvases=canvases.filter(function(c){{return c.id!=='canvas-trend';}});
       var TOTAL_W=COLW*2+GAP;
       var TREND_H=hasTrend?Math.round(TOTAL_W*(trendCanvas.height/Math.max(trendCanvas.width,1))):0;
@@ -15483,20 +15597,14 @@ async fn test_metrics_handler(
     }}
 
     (function() {{
+      // Page-level export controls (Scope toolbar). Every button exports the ENTIRE
+      // Test Metrics page — test metrics + the LCOV Coverage Summary — for the scope.
       var xBtn=document.getElementById('tm-export-xlsx-btn');
       var pngBtn=document.getElementById('tm-export-png-btn');
       var pdfBtn=document.getElementById('tm-export-pdf-btn');
       if(xBtn)xBtn.addEventListener('click',exportTmXLSX);
       if(pngBtn)pngBtn.addEventListener('click',exportTmPNG);
       if(pdfBtn)pdfBtn.addEventListener('click',exportTmPDF);
-      // Test Metrics panel export controls — share the same handlers, which now
-      // fold in the LCOV Coverage Summary when the current scope has coverage.
-      var xBtn2=document.getElementById('tm2-export-xlsx-btn');
-      var pngBtn2=document.getElementById('tm2-export-png-btn');
-      var pdfBtn2=document.getElementById('tm2-export-pdf-btn');
-      if(xBtn2)xBtn2.addEventListener('click',exportTmXLSX);
-      if(pngBtn2)pngBtn2.addEventListener('click',exportTmPNG);
-      if(pdfBtn2)pdfBtn2.addEventListener('click',exportTmPDF);
     }})();
 
     applyScope();

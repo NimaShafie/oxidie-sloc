@@ -46,6 +46,17 @@ pub fn verify_bitbucket_sig(body: &[u8], sig_header: &str, secret: &str) -> bool
     verify_github_sig(body, sig_header, secret)
 }
 
+/// Compute the HMAC-SHA256 of `msg` keyed by `secret`, returned as a lowercase
+/// hex string. Shared helper so other crates can build keyed integrity chains
+/// without taking their own crypto dependency.
+#[must_use]
+pub fn hmac_sha256_hex(secret: &[u8], msg: &[u8]) -> String {
+    use ring::hmac;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+    let tag = hmac::sign(&key, msg);
+    bytes_to_hex(tag.as_ref())
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
