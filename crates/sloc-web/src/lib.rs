@@ -852,7 +852,15 @@ pub const TEST_SERVER_MODE_API_KEY: &str = "oxide-sloc-test-server-mode-internal
 /// Always suppresses native OS dialogs (file pickers, open-path) via `SLOC_HEADLESS`.
 fn test_app_state(tmp_subdir: &str) -> AppState {
     std::env::set_var("SLOC_HEADLESS", "1");
-    let tmp = std::env::temp_dir().join(tmp_subdir);
+    // Root every router in its OWN temp subdirectory. Multiple routers share a
+    // namespace prefix (e.g. "sloc_test"), so a fixed name would make parallel
+    // tests read/write the same registry.json + artifact tree and race — a
+    // concurrently-mutated shared store is what made multi_compare_* flaky.
+    // A per-call counter (plus PID, to avoid leftover-dir collisions across
+    // runs) guarantees isolation, honouring this fn's "per-test subdir" contract.
+    static TEST_DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TEST_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("{tmp_subdir}-{}-{seq}", std::process::id()));
     AppState {
         base_config: AppConfig::default(),
         artifacts: Arc::new(Mutex::new(HashMap::new())),
