@@ -605,6 +605,14 @@ impl ScanProfileStore {
     }
 }
 
+/// Server-side session record. `absolute_expiry` is the hard 8-hour cap (unchanged);
+/// `last_seen` supports the optional sliding idle timeout (see `session_idle_timeout`).
+#[derive(Clone, Copy)]
+pub(crate) struct SessionState {
+    pub(crate) absolute_expiry: Instant,
+    pub(crate) last_seen: Instant,
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) base_config: AppConfig,
@@ -633,7 +641,7 @@ pub(crate) struct AppState {
     /// Named scan profiles saved by the user via the web UI.
     pub(crate) scan_profiles: Arc<Mutex<ScanProfileStore>>,
     pub(crate) scan_profiles_path: PathBuf,
-    pub(crate) sessions: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    pub(crate) sessions: Arc<std::sync::Mutex<HashMap<String, SessionState>>>,
     /// Persisted Confluence integration settings.
     pub(crate) confluence: Arc<Mutex<confluence::ConfluenceConfigStore>>,
     pub(crate) confluence_path: PathBuf,
@@ -816,6 +824,8 @@ fn build_router(state: AppState) -> Router {
         .route("/auth/login", get(auth::auth_login_get))
         .route("/auth/login", post(auth::auth_login_post))
         .route("/auth/logout", post(auth::auth_logout))
+        // Pre-access consent acknowledgement endpoint (public; exempt from the gate).
+        .route("/auth/consent", get(auth::auth_consent_accept))
         // Webhook receivers are public (no API-key auth) — they use per-schedule HMAC secrets.
         // Explicit 512 KB body cap: generous for any real webhook payload, blocks body-flood attacks.
         .route(
@@ -831,6 +841,7 @@ fn build_router(state: AppState) -> Router {
             post(git_webhook::handle_bitbucket_webhook).layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
+        .layer(middleware::from_fn(consent_gate))
         .layer(middleware::from_fn(csrf_protect))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1011,6 +1022,140 @@ fn require_tls() -> bool {
     hardened_mode()
         || std::env::var("SLOC_REQUIRE_TLS")
             .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// Optional sliding idle timeout for authenticated sessions. `None` (the default)
+/// means only the 8-hour absolute cap applies — identical to prior behaviour.
+/// `SLOC_SESSION_IDLE_SECS=<n>` sets an explicit idle limit (`0` disables); under
+/// `SLOC_HARDENED` it defaults to 15 minutes. Each authenticated request refreshes
+/// the session's last-seen time, so the window slides.
+pub(crate) fn session_idle_timeout() -> Option<Duration> {
+    match std::env::var("SLOC_SESSION_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None if hardened_mode() => Some(Duration::from_secs(15 * 60)),
+        None => None,
+    }
+}
+
+/// Generic authorized-use notice shown when a banner is required but the operator
+/// has not supplied custom text via `SLOC_CONSENT_BANNER`.
+const DEFAULT_CONSENT_NOTICE: &str = "This is a restricted system for authorized users only. \
+Activity on this system may be monitored and recorded. By continuing you acknowledge that you \
+are an authorized user and consent to such monitoring. Unauthorized use is prohibited.";
+
+/// The pre-access consent banner text, if enabled. `SLOC_CONSENT_BANNER=<text>`
+/// sets custom wording; `SLOC_HARDENED` alone falls back to a generic notice.
+/// `None` (the default) disables the banner entirely.
+fn consent_banner_text() -> Option<String> {
+    if let Ok(t) = std::env::var("SLOC_CONSENT_BANNER") {
+        let t = t.trim();
+        if !t.is_empty() {
+            return Some(t.to_owned());
+        }
+    }
+    hardened_mode().then(|| DEFAULT_CONSENT_NOTICE.to_owned())
+}
+
+/// True when this request is a top-level browser navigation that the consent gate
+/// should intercept. APIs, assets, webhooks, health checks, and the accept
+/// endpoint itself are never gated.
+fn consent_gate_applies(req: &Request<Body>) -> bool {
+    if !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
+        return false;
+    }
+    let is_html = req
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if !is_html {
+        return false;
+    }
+    let path = req.uri().path();
+    const EXEMPT: &[&str] = &[
+        "/auth/consent",
+        "/static/",
+        "/images/",
+        "/assets/",
+        "/badge/",
+        "/healthz",
+        "/api/",
+        "/webhooks/",
+        "/metrics",
+        "/favicon",
+        "/llms",
+    ];
+    !EXEMPT.iter().any(|p| path.starts_with(p))
+}
+
+/// Whether the request already carries the consent acknowledgement cookie.
+fn request_has_consent(req: &Request<Body>) -> bool {
+    req.headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| c.split(';').any(|p| p.trim() == "sloc_consent=1"))
+}
+
+/// Pre-access consent gate. When a banner is configured, browser page navigations
+/// must acknowledge it (recorded in a session cookie) before proceeding. A no-op
+/// when unconfigured, so default deployments are unaffected.
+async fn consent_gate(req: Request<Body>, next: Next) -> Response {
+    let Some(text) = consent_banner_text() else {
+        return next.run(req).await;
+    };
+    if !consent_gate_applies(&req) || request_has_consent(&req) {
+        return next.run(req).await;
+    }
+    let next_path = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
+    render_consent_page(&text, next_path)
+}
+
+/// Minimal escaping for embedding operator/config text into the banner HTML.
+fn html_escape_consent(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Render the consent interstitial with an "I Agree" action that records
+/// acknowledgement and returns the user to where they were headed.
+fn render_consent_page(text: &str, next_path: &str) -> Response {
+    // Only accept a safe same-origin relative path as the return target.
+    let safe_next = if next_path.starts_with('/')
+        && !next_path.starts_with("//")
+        && !next_path.contains("://")
+        && !next_path.starts_with("/auth/")
+    {
+        next_path
+    } else {
+        "/"
+    };
+    let accept_url = format!("/auth/consent?next={}", html_escape_consent(safe_next));
+    let body = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notice and Consent — OxideSLOC</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:560px;margin:64px auto;padding:0 24px;color:#2f241c}}
+h1{{color:#b85d33;font-size:20px}}.notice{{line-height:1.65;background:#f7efe7;border:1px solid #e2d2c2;border-radius:10px;padding:18px 20px;white-space:pre-wrap}}
+.agree{{display:inline-block;margin-top:20px;background:#b85d33;color:#fff;text-decoration:none;padding:10px 22px;border-radius:8px;font-weight:700}}
+.agree:hover{{background:#a04d27}}</style>
+</head><body>
+<h1>Notice and Consent</h1>
+<div class="notice">{}</div>
+<a class="agree" href="{}">I Agree</a>
+</body></html>"#,
+        html_escape_consent(text),
+        accept_url
+    );
+    (StatusCode::OK, Html(body)).into_response()
 }
 
 /// Emit operator-facing warnings for insecure server-mode configurations.

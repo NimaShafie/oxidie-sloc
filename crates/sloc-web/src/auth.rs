@@ -261,12 +261,18 @@ pub(crate) async fn require_api_key(
 fn check_session_valid(token: Option<&str>, state: &AppState) -> bool {
     let Some(tok) = token else { return false };
     let now = Instant::now();
+    let idle = crate::session_idle_timeout();
     let mut sessions = state
         .sessions
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(&expiry) = sessions.get(tok) {
-        if now < expiry {
+    if let Some(sess) = sessions.get_mut(tok) {
+        let absolute_ok = now < sess.absolute_expiry;
+        // Idle timeout is opt-in; when unset every session passes the idle check.
+        let idle_ok = idle.is_none_or(|d| now.duration_since(sess.last_seen) < d);
+        if absolute_ok && idle_ok {
+            // Sliding window: each authenticated request refreshes last-seen.
+            sess.last_seen = now;
             return true;
         }
         sessions.remove(tok);
@@ -350,7 +356,7 @@ fn sanitize_next(raw: &str) -> &str {
     if raw.starts_with('/')
         && !raw.starts_with("//")
         && !raw.contains("://")
-        && !raw.starts_with("/auth/login")
+        && !raw.starts_with("/auth/")
     {
         raw
     } else {
@@ -455,8 +461,14 @@ pub(crate) async fn auth_login_post(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Evict expired sessions to prevent unbounded memory growth under sustained logins.
-        sessions.retain(|_, &mut exp| exp > now);
-        sessions.insert(session_id.clone(), expiry);
+        sessions.retain(|_, s| s.absolute_expiry > now);
+        sessions.insert(
+            session_id.clone(),
+            crate::SessionState {
+                absolute_expiry: expiry,
+                last_seen: now,
+            },
+        );
         drop(sessions);
         let secure = secure_cookies(&state);
         let secure_flag = if secure { "; Secure" } else { "" };
@@ -535,6 +547,35 @@ pub(crate) async fn auth_logout(State(state): State<AppState>, req: Request<Body
         resp.headers_mut().append(header::SET_COOKIE, hv);
     }
     audit::record("logout", "success", &[]);
+    resp
+}
+
+// ── Consent acknowledgement ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ConsentQuery {
+    next: Option<String>,
+}
+
+/// GET /auth/consent — records acknowledgement of the notice-and-consent banner in
+/// a session-scoped cookie and returns the user to their original destination.
+/// Reachable without authentication and exempt from the consent gate itself.
+pub(crate) async fn auth_consent_accept(
+    State(state): State<AppState>,
+    Query(query): Query<ConsentQuery>,
+) -> Response {
+    let next = query.next.as_deref().map_or("/", sanitize_next).to_owned();
+    let secure = secure_cookies(&state);
+    let secure_flag = if secure { "; Secure" } else { "" };
+    // Session-scoped (no Max-Age): the banner is re-shown on each new browser session.
+    let cookie = format!("sloc_consent=1; Path=/; HttpOnly; SameSite=Strict{secure_flag}");
+    let location = HeaderValue::from_str(&next).unwrap_or_else(|_| HeaderValue::from_static("/"));
+    let cookie_hv = HeaderValue::from_str(&cookie)
+        .unwrap_or_else(|_| HeaderValue::from_static("sloc_consent=1; Path=/; HttpOnly"));
+    let mut resp = StatusCode::FOUND.into_response();
+    resp.headers_mut().insert(header::LOCATION, location);
+    resp.headers_mut().insert(header::SET_COOKIE, cookie_hv);
+    audit::record("consent_ack", "success", &[]);
     resp
 }
 
