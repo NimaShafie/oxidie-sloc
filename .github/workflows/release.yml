@@ -315,7 +315,9 @@ jobs:
           # member's Cargo.toml — never at the repo root — so scope it to the binary
           # crate (its dependency tree spans the whole workspace) and hoist the
           # generated file to the root for a stable upload path.
-          cargo cyclonedx --format json --override-filename sbom -p oxide-sloc
+          # cargo-cyclonedx has no `-p`/package selector; scope with --manifest-path.
+          cargo cyclonedx --format json --override-filename sbom \
+            --manifest-path crates/sloc-cli/Cargo.toml
           src="$(find . -name 'sbom.cdx.json' | head -n1)"
           echo "Generated SBOM: ${src:-<none>}"
           test -n "$src"
