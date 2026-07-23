@@ -26,8 +26,14 @@ path = "src/lib.rs"
 [package.metadata.docs.rs]
 no-default-features = true
 
+# `native-dialog` (the rfd native directory picker for the server-host `/pick-directory`
+# route) is intentionally NOT in `default`. On Linux rfd drags in wayland-client /
+# wayland-protocols / GTK system libraries, which are pointless for a browser-based web
+# UI and force GUI deps onto headless/air-gapped builds. It is enabled by default only on
+# Windows (below), where rfd is win32-only and needs no extra system libraries. Linux
+# users who want the native picker can opt in with `--features native-dialog`.
 [features]
-default = ["native-dialog"]
+default = []
 native-dialog = ["sloc-web/native-dialog"]
 
 [dependencies]
@@ -50,3 +56,9 @@ sloc-core = { path = "../sloc-core", version = "1.5.77" }
 sloc-git = { path = "../sloc-git", version = "1.5.77" }
 sloc-report = { path = "../sloc-report", version = "1.5.77" }
 sloc-web = { path = "../sloc-web", version = "1.5.77" }
+
+# On Windows the native directory picker (rfd) is win32-only and pulls in no extra system
+# libraries, so keep it on by default there. Feature unification means this turns on
+# `native-dialog` for Windows builds without it being a cross-platform default.
+[target.'cfg(windows)'.dependencies]
+sloc-web = { path = "../sloc-web", version = "1.5.77", features = ["native-dialog"] }
