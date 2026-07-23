@@ -10,6 +10,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.78] — 2026-07-22
+
+### Added
+
+- **Atlassian CI integration** (`crates/sloc-web`, `ci/jenkins`): end-to-end wiring for
+  posting metrics and attaching the full HTML/PDF report to Confluence, plus Bitbucket
+  build-status reporting. The integration is plugin-independent and works on the first run;
+  CI configuration is surfaced in the UI.
+- **Opt-in mutual TLS + read-only API keys** (`crates/sloc-web`): client-certificate
+  authentication (mTLS), a distinct read-only API-key tier, a configurable minimum TLS
+  version pin, and in-memory zeroization of key material. All opt-in; defaults unchanged.
+- **Opt-in session idle timeout + pre-access consent banner** (`crates/sloc-web`):
+  configurable idle-session expiry and an optional consent banner shown before access.
+- **Opt-in server hardening controls** (`crates/sloc-web`): additional server-mode
+  hardening toggles alongside refinements to the Test Metrics page.
+
+### Fixed
+
+- **Leaner default Linux builds** (`crates/sloc-cli`): the default Linux build no longer
+  pulls in `wayland`/`rfd`, avoiding unnecessary system dependencies (#87).
+- **Isolated test-router on-disk stores** (`crates/sloc-web`): each test router now uses
+  its own on-disk store so parallel tests no longer interfere.
+- **Real SBOM release artifact** (`ci`): the release pipeline now produces a genuine SBOM
+  artifact instead of a placeholder.
+
+### Changed
+
+- **Dependency refresh**: bumped `uuid` to 1.24.0 and refreshed the vendor archive; pinned
+  several GitHub Actions (`cargo-deny-action`, `setup-buildx-action`, `action-gh-release`,
+  `rust-toolchain`) to newer releases.
+
+---
+
 ## [1.5.77] — 2026-07-18
 
 ### Added
