@@ -628,6 +628,10 @@ pub(crate) struct AppState {
     pub(crate) allow_unauthenticated: bool,
     pub(crate) tls_enabled: bool,
     pub(crate) api_keys: Arc<Vec<secrecy::SecretBox<String>>>,
+    /// Read-only credentials (`SLOC_API_KEYS_READONLY`): authenticate for safe
+    /// (GET/HEAD/OPTIONS) requests but are rejected on state-changing methods.
+    /// Empty by default, so all keys are full-access — the prior behaviour.
+    pub(crate) readonly_api_keys: Arc<Vec<secrecy::SecretBox<String>>>,
     pub(crate) rate_limiter: Arc<IpRateLimiter>,
     pub(crate) trust_proxy: bool,
     /// Allowlist of proxy IPs that are permitted to set X-Forwarded-For. Only honoured when
@@ -883,6 +887,7 @@ fn test_app_state(tmp_subdir: &str) -> AppState {
         allow_unauthenticated: false,
         tls_enabled: false,
         api_keys: Arc::new(vec![]),
+        readonly_api_keys: Arc::new(vec![]),
         rate_limiter: Arc::new(IpRateLimiter::new(
             Duration::from_mins(1),
             600,
@@ -983,6 +988,7 @@ pub fn make_test_router_tight_auth_lockout(api_key: &str) -> Router {
 
 struct RuntimeSecurityConfig {
     api_keys: Vec<secrecy::SecretBox<String>>,
+    readonly_api_keys: Vec<secrecy::SecretBox<String>>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
     tls_enabled: bool,
@@ -1237,6 +1243,14 @@ fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
         .filter(|s| !s.is_empty())
         .map(|s| secrecy::SecretBox::new(Box::new(s.to_owned())))
         .collect();
+    let readonly_api_keys: Vec<secrecy::SecretBox<String>> =
+        std::env::var("SLOC_API_KEYS_READONLY")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| secrecy::SecretBox::new(Box::new(s.to_owned())))
+            .collect();
     let tls_cert = std::env::var("SLOC_TLS_CERT").ok();
     let tls_key = std::env::var("SLOC_TLS_KEY").ok();
     let tls_enabled = tls_cert.is_some() && tls_key.is_some();
@@ -1278,6 +1292,7 @@ fn load_runtime_security_config(server_mode: bool) -> RuntimeSecurityConfig {
     IpRateLimiter::spawn_pruning_task(Arc::clone(&rate_limiter));
     RuntimeSecurityConfig {
         api_keys,
+        readonly_api_keys,
         tls_cert,
         tls_key,
         tls_enabled,
@@ -1362,6 +1377,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         allow_unauthenticated: allow_unauthenticated_server_mode(),
         tls_enabled: sec.tls_enabled,
         api_keys: Arc::new(sec.api_keys),
+        readonly_api_keys: Arc::new(sec.readonly_api_keys),
         rate_limiter: sec.rate_limiter,
         trust_proxy: sec.trust_proxy,
         trusted_proxy_ips: sec.trusted_proxy_ips,
@@ -1570,10 +1586,55 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
     let key = PrivateKeyDer::from_pem_slice(key_bytes.as_slice())
         .context("failed to parse TLS private key")?;
 
-    rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)
-        .context("failed to build TLS server config")
+    // Explicitly pin the accepted protocol versions to TLS 1.2 and 1.3 (these are
+    // rustls's safe defaults; stated here so the accepted set is auditable). rustls
+    // ships only modern AEAD cipher suites — no CBC/RC4/3DES — so no suite pinning is
+    // needed to exclude weak ciphers.
+    let builder = rustls::ServerConfig::builder_with_protocol_versions(&[
+        &rustls::version::TLS13,
+        &rustls::version::TLS12,
+    ]);
+
+    // Opt-in mutual TLS: when SLOC_TLS_CLIENT_CA points to a PEM CA bundle, require
+    // every client to present a certificate that chains to it — a transport-layer
+    // factor on top of the application API key. Unset = no client auth (prior
+    // behaviour).
+    let config = match client_cert_verifier()? {
+        Some(verifier) => builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(cert_chain, key),
+        None => builder
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key),
+    };
+    config.context("failed to build TLS server config")
+}
+
+/// Build a client-certificate verifier when `SLOC_TLS_CLIENT_CA` is configured,
+/// enabling mutual TLS. Returns `None` (no client auth) when unset — the default.
+fn client_cert_verifier() -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>> {
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::CertificateDer;
+
+    let Some(ca_path) = std::env::var("SLOC_TLS_CLIENT_CA")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let ca_bytes = fs::read(&ca_path)
+        .with_context(|| format!("failed to read client CA bundle: {ca_path}"))?;
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(ca_bytes.as_slice()) {
+        let cert = cert.context("failed to parse client CA certificate")?;
+        roots
+            .add(cert)
+            .context("failed to add client CA certificate to root store")?;
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .context("failed to build client certificate verifier")?;
+    Ok(Some(verifier))
 }
 
 /// Accept loop with TLS termination using tokio-rustls + hyper-util.

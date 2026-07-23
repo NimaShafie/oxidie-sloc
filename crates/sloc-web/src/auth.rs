@@ -126,6 +126,12 @@ fn is_mutating(method: &axum::http::Method) -> bool {
     )
 }
 
+/// True for non-state-changing methods that a read-only credential may perform.
+fn is_safe_method(method: &axum::http::Method) -> bool {
+    use axum::http::Method;
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
 /// True if any provided credential constant-time-matches a configured API key.
 /// Kept as a free function so its nested closures don't score against the caller.
 fn any_key_matches(candidates: &[&Option<String>], keys: &[secrecy::SecretBox<String>]) -> bool {
@@ -212,6 +218,32 @@ pub(crate) async fn require_api_key(
     if valid {
         audit_authenticated_success(&req, peer_ip, session_valid);
         return next.run(req).await;
+    }
+
+    // Read-only credentials: authenticate for safe methods only. A read-only key
+    // that matches but targets a state-changing method is rejected with 403 rather
+    // than treated as an auth failure (it is a valid credential, wrong privilege).
+    if !state.readonly_api_keys.is_empty()
+        && any_key_matches(&[&auth_header, &x_api_key], &state.readonly_api_keys)
+    {
+        if is_safe_method(req.method()) {
+            return next.run(req).await;
+        }
+        audit::record(
+            "authz_denied",
+            "denied",
+            &[
+                ("peer_ip", &peer_ip.to_string()),
+                ("method", req.method().as_str()),
+                ("path", req.uri().path()),
+                ("role", "readonly"),
+            ],
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "403 Forbidden — read-only credential cannot perform this action\n",
+        )
+            .into_response();
     }
 
     if state.rate_limiter.is_auth_locked_out(peer_ip) {
@@ -436,7 +468,7 @@ pub(crate) async fn auth_login_post(
     State(state): State<AppState>,
     axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Form(form): Form<LoginFormData>,
+    Form(mut form): Form<LoginFormData>,
 ) -> Response {
     let peer_ip = client_ip_from(&headers, peer_addr.ip());
     let next_url = form
@@ -446,10 +478,18 @@ pub(crate) async fn auth_login_post(
         .unwrap_or("/");
     let safe_next = sanitize_next(next_url);
 
-    let valid = state.api_keys.iter().any(|expected| {
+    // Move the submitted key into a zeroizing container so the plaintext credential
+    // is wiped from memory as soon as the constant-time comparison completes, rather
+    // than lingering in the form String until it happens to be overwritten.
+    let submitted = secrecy::SecretBox::new(Box::new(std::mem::take(&mut form.key)));
+    let valid = {
         use secrecy::ExposeSecret;
-        ct_eq(&form.key, expected.expose_secret())
-    });
+        state
+            .api_keys
+            .iter()
+            .any(|expected| ct_eq(submitted.expose_secret(), expected.expose_secret()))
+    };
+    drop(submitted);
 
     if valid {
         const SESSION_SECS: u64 = 8 * 3600;
