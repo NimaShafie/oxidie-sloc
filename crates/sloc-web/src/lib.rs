@@ -1738,7 +1738,21 @@ async fn add_security_headers(
     let mut resp = next.run(req).await;
     inject_page_fade_into_html(&mut resp, &nonce).await;
     let h = resp.headers_mut();
-    h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    // frame-ancestors defaults to deny (the UI cannot be iframed anywhere). An
+    // operator can opt into embedding in named corporate dashboards by setting
+    // SLOC_FRAME_ANCESTORS to a space-separated origin allowlist. X-Frame-Options
+    // cannot express a multi-origin allowlist, so when one is configured we drop
+    // XFO and let the CSP frame-ancestors directive govern (per-origin, and what
+    // modern browsers honour); unset keeps the strict XFO: DENY + frame-ancestors
+    // 'none' posture. A malformed value falls back to the safe default below.
+    let frame_ancestors = std::env::var("SLOC_FRAME_ANCESTORS")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if frame_ancestors.is_none() {
+        h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    }
+    let frame_ancestors_directive = frame_ancestors.as_deref().unwrap_or("'none'");
     h.insert(
         "X-Content-Type-Options",
         HeaderValue::from_static("nosniff"),
@@ -1756,7 +1770,7 @@ async fn add_security_headers(
          script-src 'self' 'nonce-{nonce}'; \
          font-src 'self' data:; \
          object-src 'none'; \
-         frame-ancestors 'none'"
+         frame-ancestors {frame_ancestors_directive}"
     );
     h.insert(
         "Content-Security-Policy",
