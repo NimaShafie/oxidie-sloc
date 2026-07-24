@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
+use std::io::Read as _;
 use std::net::ToSocketAddrs;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -38,6 +41,74 @@ fn require_host_allowlist() -> bool {
     })
 }
 
+/// When `SLOC_GIT_SSL_NO_VERIFY` is set (any value), TLS certificate verification is
+/// disabled for git network operations via `-c http.sslVerify=false`. This is the escape
+/// hatch for corporate networks whose VPN/proxy performs TLS inspection with a self-signed
+/// CA that is not in the machine's trust store — the common reason a Bitbucket/GitHub fetch
+/// fails on an internal network. Off by default; a startup warning is printed when set.
+fn ssl_no_verify() -> bool {
+    static NO_VERIFY: OnceLock<bool> = OnceLock::new();
+    *NO_VERIFY.get_or_init(|| std::env::var_os("SLOC_GIT_SSL_NO_VERIFY").is_some())
+}
+
+/// Wall-clock ceiling for a single git subprocess, from `SLOC_GIT_TIMEOUT` (seconds).
+/// Defaults to 300s. Guarantees a stalled clone/fetch (dead VPN, black-holed proxy) fails
+/// with a clear error instead of hanging the web request forever.
+fn git_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let secs = std::env::var("SLOC_GIT_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .unwrap_or(300);
+        Duration::from_secs(secs)
+    })
+}
+
+/// `-c key=value` config flags applied to every network-touching git invocation
+/// (clone/fetch). Wires up the corporate-network escape hatches the UI advertises:
+/// - `http.followRedirects=false` — never follow an HTTP redirect into an SSRF target.
+/// - `http.lowSpeedLimit`/`http.lowSpeedTime` — abort a transfer that drops below ~1 KB/s
+///   for 30s, so a flaky VPN/proxy fails fast rather than hanging.
+/// - `http.sslVerify=false` — only when `SLOC_GIT_SSL_NO_VERIFY` is set (TLS-inspecting proxy).
+fn network_git_config() -> Vec<String> {
+    let mut cfg = vec![
+        "http.followRedirects=false".to_owned(),
+        "http.lowSpeedLimit=1000".to_owned(),
+        "http.lowSpeedTime=30".to_owned(),
+    ];
+    if ssl_no_verify() {
+        cfg.push("http.sslVerify=false".to_owned());
+    }
+    cfg
+}
+
+/// Prepend `-c <cfg>` pairs to a git argument list, borrowing from `cfg`.
+fn with_config<'a>(cfg: &'a [String], tail: &[&'a str]) -> Vec<&'a str> {
+    let mut v = Vec::with_capacity(cfg.len() * 2 + tail.len());
+    for c in cfg {
+        v.push("-c");
+        v.push(c.as_str());
+    }
+    v.extend_from_slice(tail);
+    v
+}
+
+/// Persist the network config into the freshly-cloned repo's local git config.
+/// Blobless clones fetch file contents lazily (the promisor kicks in when a ref is checked
+/// out into a worktree), and that implicit fetch reads the repo config — not our per-command
+/// `-c` flags. Writing them here makes the SSL bypass and low-speed abort apply to those
+/// lazy fetches too, so scanning a ref works on the same corporate network the clone did.
+/// Best-effort: a failure here doesn't invalidate an otherwise-successful clone.
+fn persist_repo_config(dest: &Path, cfg: &[String]) {
+    for kv in cfg {
+        if let Some((key, value)) = kv.split_once('=') {
+            let _ = run_git(dest, &["config", key, value]);
+        }
+    }
+}
+
 // ── low-level git runner ───────────────────────────────────────────────────────
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -53,17 +124,69 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         .env("GIT_ASKPASS", "")
-        .env("SSH_ASKPASS", "");
-    let out = cmd
+        .env("SSH_ASKPASS", "")
         .args(args)
         .current_dir(repo)
-        .output()
-        .context("failed to spawn git process")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {}: {}", args.first().unwrap_or(&""), stderr.trim());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("failed to spawn git process")?;
+
+    // Drain stdout/stderr on dedicated threads: a chatty git process (clone progress,
+    // large logs) can otherwise fill a fixed-size OS pipe buffer and block on write while
+    // we poll for the timeout below — a deadlock that would look exactly like a hang.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    // Poll for completion, killing the process if it exceeds the wall-clock ceiling.
+    let timeout = git_timeout();
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait().context("failed to poll git process")? {
+            Some(status) => break status,
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!(
+                        "git {} timed out after {}s — the remote did not respond in time. \
+                         On a corporate network this usually means a proxy or VPN is slow or \
+                         blocking the connection. Raise the ceiling with SLOC_GIT_TIMEOUT=<seconds>, \
+                         or check your proxy/VPN configuration.",
+                        args.first().copied().unwrap_or(""),
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+
+    let stdout = out_handle.join().unwrap_or_default();
+    let stderr = err_handle.join().unwrap_or_default();
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        bail!(
+            "git {}: {}",
+            args.first().copied().unwrap_or(""),
+            stderr.trim()
+        );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
 }
 
 // ── URL normalization ─────────────────────────────────────────────────────────
@@ -358,37 +481,63 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
     let normalized = normalize_git_url(url);
     let url = normalized.as_str();
     validate_clone_url(url)?;
-    // `http.followRedirects=false` stops git from following an HTTP redirect into an
-    // SSRF-sensitive target that bypassed the up-front host validation above.
+    // `network_git_config()` supplies `http.followRedirects=false` (SSRF hardening — a
+    // redirect can't escape the validated host), the low-speed abort (a stalled VPN/proxy
+    // fails fast), and optional `http.sslVerify=false` for TLS-inspecting corporate proxies.
+    let cfg = network_git_config();
     if dest.join(".git").exists() {
-        run_git(
-            dest,
+        let args = with_config(&cfg, &["fetch", "--all", "--tags", "--prune"]);
+        run_git(dest, &args)?;
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(dest).context("failed to create clone directory")?;
+    let dest_str = dest.to_str().unwrap_or(".");
+    let parent = dest.parent().unwrap_or(dest);
+
+    // Fast path: a blobless (`--filter=blob:none`), no-checkout clone. Only commit and tree
+    // metadata is downloaded — no file blobs, no working tree — which is all that ref
+    // listing needs, and is dramatically faster than a full clone on large repos and slow
+    // corporate links (the original `--depth=50 --no-single-branch` still pulled every
+    // blob for HEAD across every branch). File contents are fetched lazily by the promisor
+    // when a ref is later scanned into a worktree. `--no-tags` is NOT passed: the Tags tab
+    // needs them.
+    let fast = with_config(
+        &cfg,
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--no-single-branch",
+            url,
+            dest_str,
+        ],
+    );
+    if let Err(e) = run_git(parent, &fast) {
+        // A handful of older self-hosted servers (e.g. legacy Bitbucket Server) reject
+        // object filtering outright instead of degrading to a full clone. Only in that
+        // specific case do we clean up the partial directory and retry without the filter —
+        // a genuine network/auth failure is surfaced directly rather than paying a second
+        // timeout.
+        let msg = e.to_string().to_lowercase();
+        if !(msg.contains("filter") || msg.contains("partial")) {
+            return Err(e);
+        }
+        let _ = std::fs::remove_dir_all(dest);
+        std::fs::create_dir_all(dest).context("failed to re-create clone directory")?;
+        let full = with_config(
+            &cfg,
             &[
-                "-c",
-                "http.followRedirects=false",
-                "fetch",
-                "--all",
-                "--tags",
-                "--prune",
-            ],
-        )?;
-    } else {
-        std::fs::create_dir_all(dest).context("failed to create clone directory")?;
-        let dest_str = dest.to_str().unwrap_or(".");
-        let parent = dest.parent().unwrap_or(dest);
-        run_git(
-            parent,
-            &[
-                "-c",
-                "http.followRedirects=false",
                 "clone",
+                "--no-checkout",
                 "--no-single-branch",
-                "--depth=50",
                 url,
                 dest_str,
             ],
-        )?;
+        );
+        run_git(parent, &full)?;
     }
+    persist_repo_config(dest, &cfg);
     Ok(())
 }
 
@@ -584,6 +733,35 @@ mod tests {
         // RFC 1918 private ranges are intentionally NOT blocked.
         assert!(!is_ssrf_blocked_host("192.168.1.10"));
         assert!(!is_ssrf_blocked_host("10.0.0.1"));
+    }
+
+    // ── network config helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn network_git_config_always_hardens_redirects_and_lowspeed() {
+        let cfg = network_git_config();
+        assert!(cfg.iter().any(|c| c == "http.followRedirects=false"));
+        assert!(cfg.iter().any(|c| c == "http.lowSpeedLimit=1000"));
+        assert!(cfg.iter().any(|c| c == "http.lowSpeedTime=30"));
+    }
+
+    #[test]
+    fn with_config_interleaves_dash_c_pairs_before_tail() {
+        let cfg = vec!["a=1".to_owned(), "b=2".to_owned()];
+        let args = with_config(&cfg, &["clone", "url", "dest"]);
+        assert_eq!(args, vec!["-c", "a=1", "-c", "b=2", "clone", "url", "dest"]);
+    }
+
+    #[test]
+    fn with_config_empty_cfg_is_just_the_tail() {
+        let cfg: Vec<String> = Vec::new();
+        assert_eq!(with_config(&cfg, &["fetch"]), vec!["fetch"]);
+    }
+
+    #[test]
+    fn git_timeout_is_positive() {
+        // Default (or env-provided) timeout is always a positive duration.
+        assert!(git_timeout().as_secs() > 0);
     }
 
     // ── normalize_git_url ─────────────────────────────────────────────────────

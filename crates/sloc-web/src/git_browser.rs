@@ -368,7 +368,7 @@ pub struct CompareRefsQuery {
         <span class="fetch-footer-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
         <span class="fetch-footer-body">
           <span>First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Browse URLs (e.g. <code style="font-family:ui-monospace,monospace;font-size:11px">/projects/PROJ/repos/REPO/browse</code>) are automatically converted to git clone URLs.</span>
-          <span>Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching. For internal repos with self-signed certificates, set <code style="font-family:ui-monospace,monospace;font-size:11px">SLOC_GIT_SSL_NO_VERIFY=1</code> before starting oxide-sloc.</span>
+          <span>Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching. Behind a corporate proxy, set <code style="font-family:ui-monospace,monospace;font-size:11px">HTTPS_PROXY</code>/<code style="font-family:ui-monospace,monospace;font-size:11px">HTTP_PROXY</code>; for a TLS-inspecting proxy or self-signed certificate, set <code style="font-family:ui-monospace,monospace;font-size:11px">SLOC_GIT_SSL_NO_VERIFY=1</code> before starting oxide-sloc.</span>
         </span>
       </div>
     </div>
@@ -536,9 +536,14 @@ pub struct CompareRefsQuery {
           return '<b>Repository not found.</b> Verify the URL is correct and the repository is accessible from this machine. For private repos, ensure your credentials are configured in git.';
         }
 
+        // Timeout (stalled proxy / VPN)
+        if (errLower.includes('timed out') || errLower.includes('timeout')) {
+          return '<b>Fetch timed out.</b> The remote did not respond in time — usually a slow or blocking proxy/VPN on a corporate network. git honors the <code>HTTPS_PROXY</code>/<code>HTTP_PROXY</code> environment variables; set them if your network requires a proxy. Raise the ceiling with <code>SLOC_GIT_TIMEOUT=&lt;seconds&gt;</code> (default 300) before starting oxide-sloc.';
+        }
+
         // Connection errors
         if (errLower.includes('could not resolve host') || errLower.includes('failed to connect') || errLower.includes('connection refused') || errLower.includes('network')) {
-          return '<b>Network error.</b> Check that the host is reachable from this machine. For internal corporate repos, ensure you are connected to the correct network or VPN.';
+          return '<b>Network error.</b> Check that the host is reachable from this machine. For internal corporate repos, ensure you are connected to the correct network or VPN, and set <code>HTTPS_PROXY</code>/<code>HTTP_PROXY</code> if a proxy is required.';
         }
 
         return '';
