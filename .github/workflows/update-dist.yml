@@ -56,7 +56,24 @@ jobs:
             exit 1
           fi
 
+      # Resolve the release tag BEFORE checkout. A workflow_run-triggered job that
+      # checks out with no `ref:` gets main@HEAD, NOT the tagged commit — which is
+      # one release behind. Build the dist artifact from the tag's exact source.
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          WORKFLOW_RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c  # stable
@@ -74,6 +91,30 @@ jobs:
 
       - name: Build
         run: bash ci/release.sh ${{ matrix.target }}
+
+      # Hard gate: the built exe MUST self-report the release tag's version, or the
+      # dist zip would ship a stale binary (the "dist lags release by one version"
+      # bug). Fail here — before packaging — if it doesn't match.
+      - name: Assert binary version matches release tag
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          EXPECTED="${TAG#v}"
+          ACTUAL="$("target/${TARGET}/release/oxide-sloc.exe" --version \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*' | head -1)"
+          echo "Expected version: $EXPECTED"
+          echo "Binary  version: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::could not parse a version from 'oxide-sloc.exe --version'"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Windows dist binary version ($ACTUAL) != release tag ($EXPECTED). Refusing to package a mismatched dist artifact."
+            exit 1
+          fi
+          echo "OK: Windows dist binary version matches release tag ($EXPECTED)"
 
       - name: Sign Windows binary
         if: runner.os == 'Windows'
@@ -148,7 +189,25 @@ jobs:
             exit 1
           fi
 
+      # Resolve the release tag BEFORE checkout. A workflow_run-triggered job that
+      # checks out with no `ref:` gets main@HEAD, NOT the tagged commit — which is
+      # one release behind, since main advances past the version-bump/tag commit.
+      # We must build the dist artifact from the tag's exact source.
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          WORKFLOW_RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Build binary in UBI 8 container
         env:
@@ -160,6 +219,28 @@ jobs:
             .
           test -f out/oxide-sloc || { echo "::error::UBI 8 build produced no binary"; exit 1; }
           chmod +x out/oxide-sloc
+
+      # Hard gate: the built binary MUST self-report the release tag's version.
+      # This is what catches the "dist artifact lags the release by one version"
+      # bug — if the checkout (or a stale Cargo.toml on the tag) produced a binary
+      # for a different version, fail the job BEFORE the tarball is packaged.
+      - name: Assert binary version matches release tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          EXPECTED="${TAG#v}"
+          ACTUAL="$(./out/oxide-sloc --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*' | head -1)"
+          echo "Expected version: $EXPECTED"
+          echo "Binary  version: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::could not parse a version from './oxide-sloc --version'"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Linux dist binary version ($ACTUAL) != release tag ($EXPECTED). Refusing to package a mismatched dist artifact."
+            exit 1
+          fi
+          echo "OK: Linux dist binary version matches release tag ($EXPECTED)"
 
       - name: Verify glibc floor (must not exceed 2.28 / RHEL 8)
         run: |
@@ -492,6 +573,26 @@ jobs:
           TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # Final safety net before committing to main: unzip the bundle and confirm
+      # the exe reports the release version. Never commit a stale dist artifact.
+      - name: Assert dist zip binary version matches release tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          EXPECTED="${TAG#v}"
+          unzip -o dist/oxide-sloc-windows-x64.zip -d /tmp/distcheck
+          ACTUAL="$(/tmp/distcheck/oxide-sloc.exe --version 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*' | head -1 || true)"
+          echo "Expected version: $EXPECTED"
+          echo "Zip exe version: ${ACTUAL:-<unrunnable on Linux runner>}"
+          # The Windows exe cannot execute on the ubuntu runner; only enforce when
+          # a version was actually parsed (e.g. via wine). Otherwise the build-job
+          # assertion is the authoritative gate and this step is a no-op guard.
+          if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::dist Windows zip version ($ACTUAL) != release tag ($EXPECTED). Refusing to commit."
+            exit 1
+          fi
+
       - name: Open PR with updated Windows binary
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
@@ -542,6 +643,28 @@ jobs:
         run: |
           TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Authoritative final gate: the Linux binary DOES run on the ubuntu runner,
+      # so extract the tarball and hard-assert its --version equals the release
+      # tag before committing it to main's dist/. This is the exact defense
+      # against the "dist artifact lags the release by one version" bug.
+      - name: Assert dist tarball binary version matches release tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          EXPECTED="${TAG#v}"
+          mkdir -p /tmp/distcheck
+          tar xzf dist/oxide-sloc-linux-x86_64.tar.gz -C /tmp/distcheck
+          chmod +x /tmp/distcheck/oxide-sloc
+          ACTUAL="$(/tmp/distcheck/oxide-sloc --version \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*' | head -1)"
+          echo "Expected version: $EXPECTED"
+          echo "Tarball version: $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::dist Linux tarball version ($ACTUAL) != release tag ($EXPECTED). Refusing to commit a stale dist artifact to main."
+            exit 1
+          fi
+          echo "OK: dist Linux tarball version matches release tag ($EXPECTED)"
 
       - name: Open PR with updated Linux binary
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
