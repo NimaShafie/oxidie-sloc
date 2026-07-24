@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "notify-confluence.py")
 
 _SAMPLE = {
-    "tool": {"name": "sloc", "version": "1.5.78"},
+    "tool": {"name": "sloc", "version": "1.6.0"},
     "summary_totals": {
         "code_lines": 3475,
         "comment_lines": 812,
