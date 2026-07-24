@@ -980,7 +980,7 @@ pub async fn api_list_refs(
         Ok(Ok(refs)) => (StatusCode::OK, Json(serde_json::json!(refs))).into_response(),
         Ok(Err(e)) => {
             tracing::warn!(event = "git_api_error", "load_refs failed: {e:#}");
-            json_error(StatusCode::BAD_GATEWAY, "Failed to access repository")
+            json_error(StatusCode::BAD_GATEWAY, &git_error_message(&e))
         }
         Err(e) => {
             tracing::error!(event = "git_task_panic", "load_refs task panicked: {e}");
@@ -1032,7 +1032,7 @@ pub async fn api_scan_ref(
         }
         Ok(Err(e)) => {
             tracing::warn!(event = "git_api_error", "ref scan failed: {e:#}");
-            json_error(StatusCode::BAD_GATEWAY, "Failed to access repository")
+            json_error(StatusCode::BAD_GATEWAY, &git_error_message(&e))
         }
         Err(e) => {
             tracing::error!(event = "git_task_panic", "ref scan task panicked: {e}");
@@ -1089,7 +1089,7 @@ pub async fn api_compare_refs(
         }
         Ok(Err(e)) => {
             tracing::warn!(event = "git_api_error", "ref compare failed: {e:#}");
-            json_error(StatusCode::BAD_GATEWAY, "Failed to access repository")
+            json_error(StatusCode::BAD_GATEWAY, &git_error_message(&e))
         }
         Err(e) => {
             tracing::error!(event = "git_task_panic", "ref compare task panicked: {e}");
@@ -1230,6 +1230,24 @@ fn make_label(repo: &str, ref_name: &str) -> String {
 
 fn json_error(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// Render a git-operation error for the API response body. The Git Browser UI classifies
+/// this text (timeout, SSL/certificate, authentication, DNS, SSRF-block, …) to show
+/// targeted remediation hints, so the real message must reach the client instead of
+/// collapsing to a single opaque string that no hint can match. The full cause chain is
+/// still logged separately on the `git_api_error` event; length is capped here to keep the
+/// payload bounded.
+fn git_error_message(e: &anyhow::Error) -> String {
+    const MAX_CHARS: usize = 600;
+    let msg = format!("{e:#}");
+    if msg.chars().count() > MAX_CHARS {
+        let mut truncated: String = msg.chars().take(MAX_CHARS).collect();
+        truncated.push('\u{2026}');
+        truncated
+    } else {
+        msg
+    }
 }
 
 #[cfg(test)]
