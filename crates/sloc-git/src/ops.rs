@@ -562,13 +562,47 @@ pub fn get_sha(repo: &Path, ref_name: &str) -> Result<String> {
 
 // ── worktree helpers ──────────────────────────────────────────────────────────
 
-/// Create a detached worktree at `worktree_path` pointing at `ref_name`.
+/// Resolve a user-facing ref name to a concrete commit SHA the worktree/scan commands
+/// accept. A clone only materialises a *local* branch for the repository's default branch;
+/// every other branch exists solely as a remote-tracking ref (`refs/remotes/origin/<name>`).
+/// Ref listing strips the `origin/` prefix for display, so a bare branch name like "test"
+/// won't resolve directly — we fall back to the remote-tracking form. Tags and raw SHAs
+/// resolve on the first candidate. Peeling with `^{commit}` also dereferences annotated tags.
 ///
 /// # Errors
-/// Returns an error if `git worktree add` fails.
+/// Returns an error if none of the candidate spellings resolve to a commit.
+pub fn resolve_committish(repo: &Path, ref_name: &str) -> Result<String> {
+    let candidates = [
+        ref_name.to_owned(),
+        format!("origin/{ref_name}"),
+        format!("refs/remotes/origin/{ref_name}"),
+    ];
+    for cand in &candidates {
+        let spec = format!("{cand}^{{commit}}");
+        if let Ok(sha) = run_git(repo, &["rev-parse", "--verify", "-q", &spec]) {
+            if !sha.is_empty() {
+                return Ok(sha);
+            }
+        }
+    }
+    bail!(
+        "ref {ref_name:?} not found in repository (tried it directly, as origin/{ref_name}, \
+         and as refs/remotes/origin/{ref_name})"
+    );
+}
+
+/// Create a detached worktree at `worktree_path` pointing at `ref_name`.
+///
+/// `ref_name` is resolved via [`resolve_committish`] first, so a bare branch name that
+/// only exists as a remote-tracking ref (every branch except the default one, in a fresh
+/// clone) still checks out correctly instead of failing with "invalid reference".
+///
+/// # Errors
+/// Returns an error if `ref_name` cannot be resolved or `git worktree add` fails.
 pub fn create_worktree(repo: &Path, ref_name: &str, worktree_path: &Path) -> Result<()> {
     let wt = worktree_path.to_str().unwrap_or(".");
-    run_git(repo, &["worktree", "add", "--detach", wt, ref_name])?;
+    let committish = resolve_committish(repo, ref_name)?;
+    run_git(repo, &["worktree", "add", "--detach", wt, &committish])?;
     Ok(())
 }
 
@@ -1577,5 +1611,62 @@ mod git_integration {
         make_repo(repo.path());
         let nonexistent = repo.path().join("does_not_exist");
         assert!(destroy_worktree(repo.path(), &nonexistent).is_ok());
+    }
+
+    #[test]
+    fn create_worktree_resolves_non_default_remote_branch() {
+        // A fresh clone only materialises a local branch for the default branch; every other
+        // branch exists solely as origin/<name>. Ref listing shows the bare name, so scanning
+        // a non-default branch must still resolve — the regression the infra test caught.
+        let src = tempdir().unwrap();
+        let inner = src.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        make_repo(&inner);
+        git(&inner, &["checkout", "-b", "feature-x"]);
+        std::fs::write(inner.join("feat.txt"), "feature\n").unwrap();
+        git(&inner, &["add", "feat.txt"]);
+        git(&inner, &["commit", "--no-gpg-sign", "-m", "feature commit"]);
+        git(&inner, &["checkout", "main"]);
+
+        let dest_root = tempdir().unwrap();
+        let dest = dest_root.path().join("clone");
+        run_git(
+            src.path(),
+            &["clone", inner.to_str().unwrap(), dest.to_str().unwrap()],
+        )
+        .unwrap();
+
+        // Bare "feature-x" is only a remote-tracking ref in the clone; must still check out.
+        let wt_root = tempdir().unwrap();
+        let wt = wt_root.path().join("wt");
+        create_worktree(&dest, "feature-x", &wt).unwrap();
+        assert!(
+            wt.join("feat.txt").exists(),
+            "worktree must contain the feature branch's file"
+        );
+        destroy_worktree(&dest, &wt).unwrap();
+    }
+
+    #[test]
+    fn resolve_committish_falls_back_to_origin_and_rejects_unknown() {
+        let src = tempdir().unwrap();
+        let inner = src.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        make_repo(&inner);
+        git(&inner, &["branch", "release-1"]);
+
+        let dest_root = tempdir().unwrap();
+        let dest = dest_root.path().join("clone");
+        run_git(
+            src.path(),
+            &["clone", inner.to_str().unwrap(), dest.to_str().unwrap()],
+        )
+        .unwrap();
+
+        // Non-default branch resolves via the origin/ fallback to a 40-char SHA.
+        let sha = resolve_committish(&dest, "release-1").unwrap();
+        assert_eq!(sha.len(), 40, "must resolve to a full SHA: {sha}");
+        // A genuinely absent ref is an error, not a silent empty string.
+        assert!(resolve_committish(&dest, "no-such-branch").is_err());
     }
 }
