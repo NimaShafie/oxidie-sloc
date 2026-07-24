@@ -368,7 +368,7 @@ pub struct CompareRefsQuery {
         <span class="fetch-footer-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
         <span class="fetch-footer-body">
           <span>First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Browse URLs (e.g. <code style="font-family:ui-monospace,monospace;font-size:11px">/projects/PROJ/repos/REPO/browse</code>) are automatically converted to git clone URLs.</span>
-          <span>Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching. Behind a corporate proxy, set <code style="font-family:ui-monospace,monospace;font-size:11px">HTTPS_PROXY</code>/<code style="font-family:ui-monospace,monospace;font-size:11px">HTTP_PROXY</code>; for a TLS-inspecting proxy or self-signed certificate, set <code style="font-family:ui-monospace,monospace;font-size:11px">SLOC_GIT_SSL_NO_VERIFY=1</code> before starting oxide-sloc.</span>
+          <span>Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching. Corporate proxy/VPN certificates are trusted automatically from your OS certificate store — no extra setup. Behind an outbound proxy, set <code style="font-family:ui-monospace,monospace;font-size:11px">HTTPS_PROXY</code>/<code style="font-family:ui-monospace,monospace;font-size:11px">HTTP_PROXY</code>.</span>
         </span>
       </div>
     </div>
@@ -523,7 +523,7 @@ pub struct CompareRefsQuery {
 
         // SSL / certificate errors
         if (errLower.includes('ssl') || errLower.includes('certificate') || errLower.includes('tls')) {
-          return '<b>SSL certificate error.</b> For corporate/internal repos with self-signed certificates, start oxide-sloc with <code>SLOC_GIT_SSL_NO_VERIFY=1</code>, or add the CA certificate to your system trust store.';
+          return '<b>SSL certificate error.</b> Corporate proxy/VPN certificates are trusted automatically from your OS certificate store (Windows uses schannel). If this still fails, the signing CA is not installed in your system trust store — add it there (the durable fix), or as a last resort start oxide-sloc with <code>SLOC_GIT_SSL_NO_VERIFY=1</code>.';
         }
 
         // Authentication errors

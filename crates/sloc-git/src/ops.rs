@@ -67,17 +67,28 @@ fn git_timeout() -> Duration {
 }
 
 /// `-c key=value` config flags applied to every network-touching git invocation
-/// (clone/fetch). Wires up the corporate-network escape hatches the UI advertises:
+/// (clone/fetch). Makes internal/corporate repos work with zero configuration:
+/// - `http.sslBackend=schannel` (Windows only) — validate TLS against the Windows system
+///   certificate store instead of Git for Windows' own bundled CA file. The system store
+///   already holds the enterprise/proxy root CAs that IT deploys, so a TLS-inspecting
+///   corporate proxy or VPN is trusted automatically — the same reason the repo opens fine
+///   in a browser. This is why a fetch that used to need `SLOC_GIT_SSL_NO_VERIFY` now just
+///   works, and it keeps certificate verification ON (no security downgrade). On Linux/macOS
+///   git already uses the system trust store, so nothing extra is needed there.
 /// - `http.followRedirects=false` — never follow an HTTP redirect into an SSRF target.
 /// - `http.lowSpeedLimit`/`http.lowSpeedTime` — abort a transfer that drops below ~1 KB/s
 ///   for 30s, so a flaky VPN/proxy fails fast rather than hanging.
-/// - `http.sslVerify=false` — only when `SLOC_GIT_SSL_NO_VERIFY` is set (TLS-inspecting proxy).
+/// - `http.sslVerify=false` — last-resort override, only when `SLOC_GIT_SSL_NO_VERIFY` is set
+///   (a self-signed cert that isn't in any trust store). Rarely needed now.
 fn network_git_config() -> Vec<String> {
     let mut cfg = vec![
         "http.followRedirects=false".to_owned(),
         "http.lowSpeedLimit=1000".to_owned(),
         "http.lowSpeedTime=30".to_owned(),
     ];
+    if cfg!(windows) {
+        cfg.push("http.sslBackend=schannel".to_owned());
+    }
     if ssl_no_verify() {
         cfg.push("http.sslVerify=false".to_owned());
     }
@@ -743,6 +754,15 @@ mod tests {
         assert!(cfg.iter().any(|c| c == "http.followRedirects=false"));
         assert!(cfg.iter().any(|c| c == "http.lowSpeedLimit=1000"));
         assert!(cfg.iter().any(|c| c == "http.lowSpeedTime=30"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn network_git_config_uses_schannel_on_windows() {
+        // On Windows we validate against the system certificate store so corporate
+        // root CAs are trusted automatically — no SLOC_GIT_SSL_NO_VERIFY required.
+        let cfg = network_git_config();
+        assert!(cfg.iter().any(|c| c == "http.sslBackend=schannel"));
     }
 
     #[test]
