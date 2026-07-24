@@ -97,3 +97,6 @@ testing/fixtures/**/sloc/
 # Claude Code (project-local AI context — not for commit)
 CLAUDE.md
 .claude
+
+# Corporate secure profile — the filled-in env holds secrets; keep only the .example
+deploy/corp.env
