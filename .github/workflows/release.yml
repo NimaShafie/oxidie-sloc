@@ -307,7 +307,9 @@ jobs:
           toolchain: "1.97"
 
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --locked
+        # Pin to a known-good version so a future upstream release can't silently
+        # change the output filename/extension and break this job again.
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
 
       - name: Generate CycloneDX SBOM
         run: |
@@ -316,11 +318,17 @@ jobs:
           # crate (its dependency tree spans the whole workspace) and hoist the
           # generated file to the root for a stable upload path.
           # cargo-cyclonedx has no `-p`/package selector; scope with --manifest-path.
+          #
+          # --override-filename replaces the whole filename, so the tool does NOT
+          # append its usual `.cdx` infix: `--override-filename sbom --format json`
+          # writes `sbom.json`, not `sbom.cdx.json`. Match both spellings so the
+          # detection survives either behaviour, then normalise to `sbom.cdx.json`
+          # at the repo root for the existing upload path below.
           cargo cyclonedx --format json --override-filename sbom \
             --manifest-path crates/sloc-cli/Cargo.toml
-          src="$(find . -name 'sbom.cdx.json' | head -n1)"
+          src="$(find . \( -name 'sbom.cdx.json' -o -name 'sbom.json' \) | head -n1)"
           echo "Generated SBOM: ${src:-<none>}"
-          test -n "$src"
+          test -n "$src"   # fail loudly if cargo-cyclonedx produced nothing
           cp "$src" sbom.cdx.json
 
       - name: Upload SBOM artifact
