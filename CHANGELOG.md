@@ -10,6 +10,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.0] — 2026-07-24
+
+### Added
+
+- **Corporate-network serve ergonomics + secure server profile** (`crates/sloc-web`,
+  `scripts/serve-server.sh`): firewalld zone detection (targets the zone of the primary
+  route interface, not a blind default-zone guess), advertisement of only routable LAN IPs
+  with a recommended URL (virtual/docker bridges are listed as "ignore"), a
+  `SLOC_ADVERTISE_HOST` override to pin the advertised hostname, and a fail-closed gate that
+  refuses to start a plain unauthenticated server on a network bind unless explicitly
+  acknowledged.
+- **Embeddable UI via `SLOC_FRAME_ANCESTORS`** (`crates/sloc-web`): opt-in allowlist of
+  origins permitted to embed the UI in an iframe. Default remains deny (`X-Frame-Options:
+  DENY`, CSP `frame-ancestors 'none'`); when set, the page drops `X-Frame-Options` and emits
+  a scoped `frame-ancestors` directive.
+- **systemd install with a generated key** (`scripts/internal/install-systemd.sh`): a secure
+  happy-path installer that provisions the service, generates an API key into a `0640`
+  `EnvironmentFile`, and enables the unit so it survives reboot.
+
+### Fixed
+
+- **Git Browser fetch is fast, resilient, and corporate-network ready** (`crates/sloc-git`,
+  `crates/sloc-web`): clone now uses a blobless, no-checkout partial clone
+  (`--filter=blob:none`) so listing branches/tags/commits is near-instant even on large
+  repos and slow links (blobs are fetched lazily at scan time); a `SLOC_GIT_TIMEOUT`
+  wall-clock ceiling (default 300s) plus a low-speed abort ensures a stalled proxy/VPN fails
+  fast instead of hanging; on Windows the OS certificate store (schannel) is used so
+  TLS-inspecting corporate proxy/VPN certificates are trusted with zero configuration.
+- **Git Browser scan/compare on non-default branches** (`crates/sloc-git`): a bare branch
+  name that exists only as a remote-tracking ref now resolves correctly instead of failing
+  with "invalid reference", so scanning or comparing any branch works — not just the
+  default.
+- **Actionable Git Browser fetch errors** (`crates/sloc-web`): the fetch API now returns the
+  real, classifiable git error (timeout / certificate / authentication / DNS) instead of a
+  single opaque message, so the UI's remediation hints fire and operators can distinguish
+  failure modes.
+- **`serve-server.sh` honors `SLOC_API_KEYS`** (`scripts`): the launcher now treats
+  `SLOC_API_KEYS` as configured authentication, so the secure one-shot profile starts
+  without extra flags.
+- **Release pipeline SBOM + dist artifacts** (`ci`): the CycloneDX SBOM step is pinned to
+  `cargo-cyclonedx 0.5.9` and tolerates the tool's output filename, and dist artifacts are
+  built from the release tag with a version assertion — repairing the release workflow.
+
+---
+
 ## [1.5.78] — 2026-07-22
 
 ### Added

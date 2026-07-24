@@ -2,7 +2,7 @@ openapi: "3.1.0"
 
 info:
   title: oxide-sloc REST API
-  version: "1.5.78"
+  version: "1.6.0"
   description: |
     Machine-readable code metrics API for oxide-sloc — IEEE 1045-1992 SLOC
     analysis, unit test detection, and coverage reporting across 60 languages.
@@ -194,7 +194,7 @@ components:
         nearest_tag:
           type: string
           nullable: true
-          example: "v1.5.78"
+          example: "v1.6.0"
         code_lines:
           type: integer
           format: int64
@@ -272,7 +272,7 @@ components:
           example: "oxide-sloc"
         version:
           type: string
-          example: "1.5.78"
+          example: "1.6.0"
 
     Error:
       type: object
