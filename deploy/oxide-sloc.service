@@ -19,6 +19,19 @@ ExecStart=/usr/local/bin/oxide-sloc serve --server
 Restart=on-failure
 RestartSec=5
 
+# All runtime config (bind address, API keys, TLS, CORS, rate limit, audit, …)
+# comes from this env file. install-systemd.sh generates it with a random API key
+# so the service is authenticated out of the box; base a fuller profile on
+# deploy/corp.env.example. The leading '-' means "start even if the file is
+# absent" — but note `serve --server` is fail-closed and will refuse to start
+# unauthenticated unless the file provides SLOC_API_KEYS or SLOC_ALLOW_UNAUTHENTICATED=1.
+EnvironmentFile=-/etc/oxide-sloc/oxide-sloc.env
+
+# SELinux: binding the default port 4317 as this service works out of the box.
+# If you switch to a privileged (<1024) or otherwise-unlabelled port, first run:
+#   sudo semanage port -a -t http_port_t -p tcp <port>
+# (and open it in firewalld: sudo firewall-cmd --add-port=<port>/tcp --permanent --reload)
+
 # Point the server at the asset root (images/, etc.).
 Environment=OXIDE_SLOC_ROOT=/opt/oxide-sloc
 
