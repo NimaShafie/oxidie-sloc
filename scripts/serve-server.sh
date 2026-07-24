@@ -101,9 +101,12 @@ done
 # When a key IS in use we unset any inherited SLOC_ALLOW_UNAUTHENTICATED so it can't
 # quietly disable the auth middleware and make the key meaningless.
 _no_auth_mode=false
-if [[ -n "${SLOC_API_KEY:-}" ]]; then
-    # User explicitly set a key in the environment — honor it regardless of flags.
-    export SLOC_API_KEY
+if [[ -n "${SLOC_API_KEY:-}" || -n "${SLOC_API_KEYS:-}" ]]; then
+    # A key is set in the environment (single SLOC_API_KEY or comma-list
+    # SLOC_API_KEYS — the binary honors either, and so does the corp.env profile).
+    # Honor it regardless of flags; export whichever was provided.
+    [[ -n "${SLOC_API_KEY:-}" ]]  && export SLOC_API_KEY
+    [[ -n "${SLOC_API_KEYS:-}" ]] && export SLOC_API_KEYS
     unset SLOC_ALLOW_UNAUTHENTICATED
     _key_generated=false
 elif [[ "$WITH_AUTH" == true ]]; then
