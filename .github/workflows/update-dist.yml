@@ -579,9 +579,33 @@ jobs:
           TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # Latest-release guard: only commit this binary to main's dist/ when the tag
+      # being processed is the repository's LATEST release. Backfilling or re-running
+      # an OLD tag (e.g. re-running v1.5.78 while main is on v1.6.0) must never open a
+      # PR that regresses dist/ back to the older binary. Pre-releases are never
+      # "latest" on GitHub, so they correctly skip too. `gh release view` needs only
+      # `contents: read`, satisfied by GITHUB_TOKEN. When not latest, all PR-related
+      # steps below are skipped (clean no-op) — the release-asset upload job is
+      # unaffected and still uploads to any tag.
+      - name: Check latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          IS_LATEST="$(gh release view "$TAG" --repo "$REPO" --json isLatest -q .isLatest)"
+          echo "is_latest=$IS_LATEST" >> "$GITHUB_OUTPUT"
+          if [ "$IS_LATEST" = "true" ]; then
+            echo "Tag $TAG is the latest release — will commit Windows binary to main's dist/."
+          else
+            echo "Tag $TAG is NOT the latest release — skipping the dist/ commit PR to avoid regressing main."
+          fi
+
       # Final safety net before committing to main: unzip the bundle and confirm
       # the exe reports the release version. Never commit a stale dist artifact.
       - name: Assert dist zip binary version matches release tag
+        if: steps.latest.outputs.is_latest == 'true'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
@@ -601,6 +625,7 @@ jobs:
 
       - name: Generate app token
         id: app-token
+        if: steps.latest.outputs.is_latest == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.TOOLCHAIN_APP_ID }}
@@ -608,6 +633,7 @@ jobs:
 
       - name: Open PR with updated Windows binary
         id: cpr
+        if: steps.latest.outputs.is_latest == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -629,7 +655,7 @@ jobs:
       # token, so CI runs on the PR (unlike a GITHUB_TOKEN PR); auto-merge waits
       # for that check to go green. Requires "Allow auto-merge" in repo settings.
       - name: Enable auto-merge
-        if: steps.cpr.outputs.pull-request-number
+        if: steps.latest.outputs.is_latest == 'true' && steps.cpr.outputs.pull-request-number
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.cpr.outputs.pull-request-number }}
@@ -671,11 +697,35 @@ jobs:
           TAG="${INPUT_TAG:-${WORKFLOW_RUN_TAG:-$REF_NAME}}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # Latest-release guard: only commit this binary to main's dist/ when the tag
+      # being processed is the repository's LATEST release. Backfilling or re-running
+      # an OLD tag (e.g. re-running v1.5.78 while main is on v1.6.0) must never open a
+      # PR that regresses dist/ back to the older binary. Pre-releases are never
+      # "latest" on GitHub, so they correctly skip too. `gh release view` needs only
+      # `contents: read`, satisfied by GITHUB_TOKEN. When not latest, all PR-related
+      # steps below are skipped (clean no-op) — the release-asset upload job is
+      # unaffected and still uploads to any tag.
+      - name: Check latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          IS_LATEST="$(gh release view "$TAG" --repo "$REPO" --json isLatest -q .isLatest)"
+          echo "is_latest=$IS_LATEST" >> "$GITHUB_OUTPUT"
+          if [ "$IS_LATEST" = "true" ]; then
+            echo "Tag $TAG is the latest release — will commit Linux binary to main's dist/."
+          else
+            echo "Tag $TAG is NOT the latest release — skipping the dist/ commit PR to avoid regressing main."
+          fi
+
       # Authoritative final gate: the Linux binary DOES run on the ubuntu runner,
       # so extract the tarball and hard-assert its --version equals the release
       # tag before committing it to main's dist/. This is the exact defense
       # against the "dist artifact lags the release by one version" bug.
       - name: Assert dist tarball binary version matches release tag
+        if: steps.latest.outputs.is_latest == 'true'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
@@ -695,6 +745,7 @@ jobs:
 
       - name: Generate app token
         id: app-token
+        if: steps.latest.outputs.is_latest == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.TOOLCHAIN_APP_ID }}
@@ -702,6 +753,7 @@ jobs:
 
       - name: Open PR with updated Linux binary
         id: cpr
+        if: steps.latest.outputs.is_latest == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -723,7 +775,7 @@ jobs:
       # token, so CI runs on the PR (unlike a GITHUB_TOKEN PR); auto-merge waits
       # for that check to go green. Requires "Allow auto-merge" in repo settings.
       - name: Enable auto-merge
-        if: steps.cpr.outputs.pull-request-number
+        if: steps.latest.outputs.is_latest == 'true' && steps.cpr.outputs.pull-request-number
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.cpr.outputs.pull-request-number }}
