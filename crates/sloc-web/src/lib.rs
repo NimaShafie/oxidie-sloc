@@ -1485,6 +1485,9 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
         let url = format!("https://{addr}/");
         println!("OxideSLOC server running at {url} (TLS)");
+        if let Some(lan) = wildcard_lan_url(&url) {
+            println!("  Reachable on the LAN at {lan} (sign in at {lan}auth/login)");
+        }
         println!("Use Ctrl+C to stop.");
 
         return serve_tls(listener, app, acceptor, server_mode).await;
@@ -1516,10 +1519,27 @@ fn primary_lan_ip() -> Option<String> {
     Some(ip.to_string())
 }
 
+/// If `url` binds a wildcard address (`0.0.0.0` or `[::]`), return the same URL
+/// with the primary LAN IP substituted, so the startup log shows a client-usable
+/// address alongside the bind address. Returns `None` for concrete binds or when
+/// no routable LAN address can be determined (e.g. loopback-only / no default route).
+fn wildcard_lan_url(url: &str) -> Option<String> {
+    if url.contains("0.0.0.0") {
+        primary_lan_ip().map(|ip| url.replacen("0.0.0.0", &ip, 1))
+    } else if url.contains("[::]") {
+        primary_lan_ip().map(|ip| url.replacen("[::]", &ip, 1))
+    } else {
+        None
+    }
+}
+
 /// Print the startup URL and, in local mode, open the browser and schedule it.
 fn log_startup_url(url: &str, server_mode: bool) {
     if server_mode {
         println!("OxideSLOC server running at {url}");
+        if let Some(lan) = wildcard_lan_url(url) {
+            println!("  Reachable on the LAN at {lan} (sign in at {lan}auth/login)");
+        }
         println!("Use Ctrl+C to stop.");
     } else {
         println!("OxideSLOC local web UI running at {url}");
@@ -4567,7 +4587,7 @@ fn authorize_preview_path(state: &AppState, resolved: &Path) -> Result<(), Html<
     let config = &state.base_config;
     if config.discovery.allowed_scan_roots.is_empty() {
         return Err(Html(
-            r#"<div class="preview-error">Preview rejected: no allowed_scan_roots configured.</div>"#.to_string()
+            r#"<div class="preview-error">Preview rejected: this server has no scan roots configured. Set SLOC_ALLOWED_ROOTS (colon-separated paths) to enable server-side path scanning; the Browse / upload flow works without it.</div>"#.to_string()
         ));
     }
     let allowed = config.discovery.allowed_scan_roots.iter().any(|root| {
@@ -4699,8 +4719,12 @@ fn validate_server_scan_path(
 ) -> Result<(), Response> {
     if config.discovery.allowed_scan_roots.is_empty() {
         let template = ErrorTemplate {
-            message: "Scan path rejected: no allowed_scan_roots configured on this server. \
-                      Set allowed_scan_roots in the server config to permit scanning."
+            message: "Scan path rejected: this server has no scan roots configured, so \
+                      scanning server-side paths is disabled. Set the SLOC_ALLOWED_ROOTS \
+                      environment variable (colon-separated absolute paths) — or \
+                      allowed_scan_roots in the config TOML — then restart. Tip: the \
+                      Browse / directory-upload flow works without this; uploaded folders \
+                      are scanned from the server's temp area and bypass this check."
                 .to_string(),
             last_report_url: None,
             last_report_label: None,
