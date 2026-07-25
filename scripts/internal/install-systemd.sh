@@ -184,6 +184,14 @@ SLOC_BIND=0.0.0.0:4317
 # Per-client rate limit (requests/min).
 SLOC_RATE_LIMIT=120
 
+# Directories the web UI may scan (colon-separated absolute paths).
+# IMPORTANT: server mode is FAIL-CLOSED on this. While it is unset, every attempt
+# to scan a server-side path is rejected with HTTP 403 — the UI loads and
+# authenticates, but "Analyze <path>" will not run. Set it to the repos you want
+# scannable, then restart the service. (The Browse / directory-upload flow works
+# regardless — uploads are scanned from the server's temp area and bypass this.)
+#SLOC_ALLOWED_ROOTS=/srv/repos:/opt/oxide-sloc/work
+
 # Uncomment for HTTPS (provide the cert/key first):
 #SLOC_TLS_CERT=/etc/oxide-sloc/tls/server.crt
 #SLOC_TLS_KEY=/etc/oxide-sloc/tls/server.key
@@ -200,13 +208,47 @@ systemctl daemon-reload
 # Step 6: enable and start
 printf '  [6/6] Enabling and starting %s...\n' "$SERVICE_NAME"
 systemctl enable --now "$SERVICE_NAME"
+# `enable --now` is a no-op when the unit is ALREADY active — on an upgrade that
+# would leave the OLD process running while the NEW binary sits on disk. Force a
+# restart so the live process is the one we just installed. (try-restart only acts
+# if the unit is active, so it's harmless on a first install.)
+systemctl try-restart "$SERVICE_NAME"
+
+LIVE_VERSION="$("$INSTALL_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 
 printf '\nInstallation complete.\n\n'
+if [[ -n "$LIVE_VERSION" ]]; then
+    printf '  Now serving: oxide-sloc v%s (service restarted to pick up this binary).\n\n' "$LIVE_VERSION"
+fi
 if [[ -n "$GENERATED_KEY" ]]; then
     printf '  API key (generated, stored in %s):\n' "$ENV_FILE"
     printf '    %s\n' "$GENERATED_KEY"
     printf '  Send requests with:  Authorization: Bearer <key>\n\n'
+else
+    # Re-install (env file already existed): the key was printed only on the FIRST
+    # install, so tell the operator where to read the existing one.
+    printf '  API key: kept existing key in %s (only shown on first install).\n' "$ENV_FILE"
+    printf '    View it:  sudo grep -E "^SLOC_API_KEYS?=" %s\n\n' "$ENV_FILE"
 fi
+
+# ── Recommended URL for clients ────────────────────────────────────────────────
+# The startup banner logs the bind address (0.0.0.0:PORT), which is not an address
+# a client can type. Resolve the primary LAN IP the same way serve-server.sh does
+# (ask the OS which source IP it would use for an outbound route — no packet sent)
+# and print a usable URL + the login page.
+_bind="$(grep -E '^SLOC_BIND=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)"
+_port="${_bind##*:}"; [[ -z "$_port" || "$_port" == "$_bind" ]] && _port=4317
+_lan_ip="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1)"
+[[ -z "$_lan_ip" ]] && _lan_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(127\.|$)' | head -1)"
+if [[ -n "$_lan_ip" ]]; then
+    printf '  Reach it from another machine on the LAN:\n'
+    printf '    http://%s:%s/\n' "$_lan_ip" "$_port"
+    printf '    http://%s:%s/auth/login    (sign in with the API key)\n\n' "$_lan_ip" "$_port"
+else
+    printf '  This host binds all interfaces on port %s; give clients its LAN IP\n' "$_port"
+    printf '    (see: hostname -I) as http://<ip>:%s/auth/login\n\n' "$_port"
+fi
+
 printf '  Config:   sudo $EDITOR %s   (see deploy/corp.env.example for all knobs)\n' "$ENV_FILE"
 printf '  Status:   sudo systemctl status %s\n' "$SERVICE_NAME"
 printf '  Logs:     sudo journalctl -u %s -f\n' "$SERVICE_NAME"
@@ -217,5 +259,5 @@ _pri_if="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)"
 if command -v firewall-cmd &>/dev/null; then
     _zone="$(firewall-cmd --get-zone-of-interface="${_pri_if:-}" 2>/dev/null)"
     [[ -z "$_zone" || "$_zone" == "no zone" ]] && _zone="$(firewall-cmd --get-default-zone 2>/dev/null || echo public)"
-    printf '  Firewall: sudo firewall-cmd --zone=%s --add-port=4317/tcp --permanent && sudo firewall-cmd --reload\n\n' "$_zone"
+    printf '  Firewall: sudo firewall-cmd --zone=%s --add-port=%s/tcp --permanent && sudo firewall-cmd --reload\n\n' "$_zone" "$_port"
 fi

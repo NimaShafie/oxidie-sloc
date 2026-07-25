@@ -345,17 +345,68 @@ build_with_progress() {
     return 0
 }
 
+# Version this checkout expects (workspace Cargo.toml — the single source of truth).
+WORKSPACE_VERSION="$(grep '^version' "$REPO_ROOT/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+
+# Print the semver an installed binary reports, or empty if it can't be determined.
+installed_version() {
+    "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+}
+
+# True if a source to reinstall the correct version is available (committed dist/
+# archive for this platform, a Rust toolchain on PATH, or an opted-in online fetch).
+reinstall_source_available() {
+    local dist
+    if [[ "$PLATFORM" == windows ]]; then
+        dist="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
+    else
+        dist="$REPO_ROOT/dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
+    fi
+    [[ -f "$dist" ]] && return 0
+    command -v cargo &>/dev/null && return 0
+    { [[ "$ONLINE_MODE" == true ]] || [[ -n "${SLOC_RELEASE_BASE_URL:-}" ]]; } \
+        && command -v curl &>/dev/null && return 0
+    return 1
+}
+
 echo ""
 echo " oxide-sloc installer"
 echo " ════════════════════"
 
 # ── 1. Already installed ────────────────────────────────────────────────────
+# A bare "file exists" check silently no-ops an upgrade: after `git pull` to a new
+# version the stale binary stays in place. Compare the installed version against
+# this checkout and, on a mismatch, reinstall (or warn loudly) instead of a green [OK].
 if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == false ]]; then
-    echo " [OK] $(basename "$EXE") already present."
-    trust_ca_cert
-    echo " Run: bash scripts/run.sh"
-    echo " To rebuild from source:  bash scripts/internal/install.sh --rebuild"
-    exit 0
+    _installed_ver="$(installed_version "$EXE")"
+    if [[ -n "$WORKSPACE_VERSION" && -n "$_installed_ver" && "$_installed_ver" != "$WORKSPACE_VERSION" ]]; then
+        if reinstall_source_available; then
+            echo ""
+            echo " [WARN] Installed oxide-sloc is OUT OF DATE — reinstalling."
+            echo "        Installed:      v${_installed_ver}"
+            echo "        This checkout:  v${WORKSPACE_VERSION}"
+            echo ""
+            rm -f "$EXE"    # fall through to dist / download / source build below
+        else
+            echo ""
+            echo " [WARN] Installed oxide-sloc is OUT OF DATE and no reinstall source was found." >&2
+            echo "        Installed:      v${_installed_ver}" >&2
+            echo "        This checkout:  v${WORKSPACE_VERSION}" >&2
+            echo "" >&2
+            echo "        The old binary is still in place. To force a refresh:" >&2
+            echo "          rm -f \"$EXE\"" >&2
+            echo "          bash scripts/internal/install.sh          # from committed dist/, or" >&2
+            echo "          bash scripts/internal/install.sh --build   # compile from bundled sources" >&2
+            echo "" >&2
+            exit 1
+        fi
+    else
+        echo " [OK] $(basename "$EXE") already present${_installed_ver:+ (v${_installed_ver})}."
+        trust_ca_cert
+        echo " Run: bash scripts/run.sh"
+        echo " To rebuild from source:  bash scripts/internal/install.sh --rebuild"
+        exit 0
+    fi
 fi
 
 if [[ -f "$EXE" ]] && [[ "$FORCE_REBUILD" == true ]]; then

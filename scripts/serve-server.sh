@@ -6,7 +6,10 @@
 # localhost-only).
 #
 # Usage (the common case needs NO flags — just run it):
-#   bash scripts/serve-server.sh                 # start LAN server (auto-enables LAN access)
+#   bash scripts/serve-server.sh                 # start LAN server (Windows: auto-opens
+#                                                #   the firewall on first run; Linux:
+#                                                #   detects the firewall and prints the
+#                                                #   exact command / use --open-firewall)
 #   bash scripts/serve-server.sh --port 8080
 #   bash scripts/serve-server.sh --with-auth     # generate an API key; all endpoints require it
 #   bash scripts/serve-server.sh --no-auth       # explicit no-auth (same as default)
@@ -29,7 +32,10 @@
 #     SLOC_API_KEY to require authentication
 #   - Binds all interfaces (0.0.0.0) and prints one recommended LAN URL plus each
 #     interface's subnet/gateway so multi-homed / VLAN / VPN hosts are unambiguous
-#   - Auto-enables the inbound firewall rule on first run (one-time admin prompt)
+#   - Windows only: auto-enables the inbound firewall rule on first run (one-time
+#     admin prompt). On Linux the firewall is detected and left to you — the banner
+#     prints the exact firewall-cmd/ufw/iptables command, or pass --open-firewall
+#     to run it via sudo.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
