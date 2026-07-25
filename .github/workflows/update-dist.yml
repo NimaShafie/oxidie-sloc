@@ -540,9 +540,15 @@ jobs:
   # ── Open a PR to commit the Windows binary to dist/ ─────────────────────
   # Main is a protected branch (PRs + "Quality gates" check required), so a
   # direct push is rejected.  peter-evans/create-pull-request pushes to a new
-  # unprotected branch and opens the PR in one atomic step using GITHUB_TOKEN
-  # — no extra secret needed.  The PR can be reviewed and merged normally;
-  # auto-merge is enabled so it merges as soon as Quality gates passes.
+  # unprotected branch and opens the PR in one atomic step.
+  #
+  # The PR is opened with a GitHub App token rather than the default
+  # GITHUB_TOKEN on purpose: GitHub suppresses workflow triggers for any push
+  # or PR created by GITHUB_TOKEN (anti-recursion), so the required "Quality
+  # gates" CI check never ran on the dist PR.  That left it merging without a
+  # CI test, which OpenSSF Scorecard's CI-Tests check flagged (score capped at
+  # 8).  An app token is a distinct actor, so push/pull_request workflows (CI
+  # and auto-approve) run normally; auto-merge then lands it once CI is green.
   commit-dist-windows:
     name: Commit Windows binary to dist/
     needs: upload-release-assets
@@ -593,10 +599,18 @@ jobs:
             exit 1
           fi
 
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.TOOLCHAIN_APP_ID }}
+          private-key: ${{ secrets.TOOLCHAIN_APP_PRIVATE_KEY }}
+
       - name: Open PR with updated Windows binary
+        id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           branch: dist/update-windows-${{ github.run_id }}
           base: main
           add-paths: dist/oxide-sloc-windows-x64.zip
@@ -607,13 +621,26 @@ jobs:
 
             Updates `dist/oxide-sloc-windows-x64.zip` for release ${{ steps.tag.outputs.tag }}.
             This PR was opened automatically because main is a protected branch.
+            Auto-merge is enabled — it lands on main as soon as Quality gates passes.
           labels: "automated,dist"
           delete-branch: true
 
+      # Land on main automatically once Quality gates passes. Opened with the app
+      # token, so CI runs on the PR (unlike a GITHUB_TOKEN PR); auto-merge waits
+      # for that check to go green. Requires "Allow auto-merge" in repo settings.
+      - name: Enable auto-merge
+        if: steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.cpr.outputs.pull-request-number }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge --auto --squash "$PR" --repo "$REPO"
+
   # ── Open a PR to commit the Linux binary to dist/ ────────────────────────
-  # Mirrors commit-dist-windows.  With dist/oxide-sloc-linux-x86_64.tar.gz
-  # present, install.sh step 2b skips the bundled Rust toolchain entirely.
-  # Serialized after commit-dist-windows to avoid any merge-ordering issues.
+  # Mirrors commit-dist-windows (app-token PR so CI runs — see that job's
+  # comment).  With dist/oxide-sloc-linux-x86_64.tar.gz present, install.sh
+  # step 2b skips the bundled Rust toolchain entirely.  Serialized after
+  # commit-dist-windows to avoid any merge-ordering issues.
   commit-dist-linux:
     name: Commit Linux binary to dist/
     needs: commit-dist-windows
@@ -666,10 +693,18 @@ jobs:
           fi
           echo "OK: dist Linux tarball version matches release tag ($EXPECTED)"
 
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.TOOLCHAIN_APP_ID }}
+          private-key: ${{ secrets.TOOLCHAIN_APP_PRIVATE_KEY }}
+
       - name: Open PR with updated Linux binary
+        id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           branch: dist/update-linux-${{ github.run_id }}
           base: main
           add-paths: dist/oxide-sloc-linux-x86_64.tar.gz
@@ -680,5 +715,17 @@ jobs:
 
             Updates `dist/oxide-sloc-linux-x86_64.tar.gz` for release ${{ steps.tag.outputs.tag }}.
             This PR was opened automatically because main is a protected branch.
+            Auto-merge is enabled — it lands on main as soon as Quality gates passes.
           labels: "automated,dist"
           delete-branch: true
+
+      # Land on main automatically once Quality gates passes. Opened with the app
+      # token, so CI runs on the PR (unlike a GITHUB_TOKEN PR); auto-merge waits
+      # for that check to go green. Requires "Allow auto-merge" in repo settings.
+      - name: Enable auto-merge
+        if: steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.cpr.outputs.pull-request-number }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge --auto --squash "$PR" --repo "$REPO"
