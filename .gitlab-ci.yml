@@ -1,56 +1,225 @@
 ---
-# oxide-sloc GitLab CI/CD
+# oxide-sloc GitLab CI/CD — full feature parity with the Jenkinsfile, done the
+# GitLab-native way.
 #
-# Mirrors the same pipeline stages as Jenkinsfile and .github/workflows/ci.yml.
-# Requires a runner with bash and curl; Rust is installed on first run and
-# cached via the .cargo / .rustup directories.
+# Native GitLab surfaces used instead of Jenkins plugins:
+#   • Tests tab / MR widget       ← artifacts:reports:junit          (cargo-nextest)
+#   • Coverage % badge + MR diff  ← artifacts:reports:coverage_report + coverage: regex
+#   • Code Quality MR widget      ← artifacts:reports:codequality    (clippy → CodeClimate)
+#   • Report link in MR widget    ← artifacts:expose_as
+#   • Browsable report site       ← GitLab Pages (pages job)
+#   • Downstream / external scan  ← trigger: (parent-child / multi-project)
 #
-# Usage:
-#   1. Push this file to the root of your repo.
-#   2. GitLab will auto-detect it and run the pipeline on every push.
+# Run-pipeline form: every knob below appears in CI/CD → Run pipeline with a
+# description (the GitLab analogue of the Jenkinsfile `parameters {}` block).
+#
+# Masked CI/CD variables (Settings → CI/CD → Variables — NOT in the form):
+#   SLOC_VCS_TOKEN        MR-comment token (scope: api)          — mr-comment job
+#   SLOC_WEBHOOK_TOKEN    bearer token for `oxide-sloc send`     — deliver:webhook
+#   SLOC_SMTP_HOST/USER/PASS   SMTP credentials                  — deliver:email
+#   SLOC_CONFLUENCE_URL/USER/TOKEN/SPACE   Confluence creds      — notify:confluence
+#   BITBUCKET_BASE_URL/TOKEN/USER/WORKSPACE/REPO   Bitbucket     — notify:bitbucket
+#   ARTIFACT_REPO_USER / ARTIFACT_REPO_PASS   artifact-repo creds — artifact-push
+#
+# Air-gapped runners: place vendor.tar.xz in the workspace; the default
+# before_script verifies its checksum, extracts it, and redirects cargo to the
+# vendored sources. Internet-connected runners just use crates.io.
 
-# Use the official Rust image (pinned by digest) instead of curl|sh rustup install.
-# To update the digest: docker pull rust:slim && docker inspect --format '{{index .RepoDigests 0}}' rust:slim
+# ── Global image / env ────────────────────────────────────────────────────────
+# Official Rust image pinned by digest (update: docker pull rust:slim &&
+# docker inspect --format '{{index .RepoDigests 0}}' rust:slim).
 image: rust:slim@sha256:81099830a1e1d244607b9a7a30f3ff6ecadc52134a933b4635faba24f52840c9
 
+default:
+  interruptible: true
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq build-essential pkg-config libssl-dev ca-certificates git python3
+    - rustup show
+    # Air-gap: extract the committed vendor archive and pin cargo to it.
+    - |
+      if [ -f vendor.tar.xz ] && [ ! -d vendor ]; then
+        echo "Verifying vendor.tar.xz integrity..."
+        sha256sum -c vendor.tar.xz.sha256
+        echo "Decompressing vendor.tar.xz..."
+        tar -xJf vendor.tar.xz
+        mkdir -p .cargo
+        printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
+      fi
+  # Cache keyed on Cargo.lock: all branches share warm build output, busted only
+  # when dependencies change. Leaf jobs pull; `build` does the single pull-push.
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - .rustup/
+      - target/
+      - vendor/
+    policy: pull
+
+# Only run for MRs, the default branch, tags, the Run-pipeline form, and
+# parent-child triggers — never a duplicate branch+MR pipeline pair.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+
+stages:
+  - quality
+  - build
+  - test
+  - analyze
+  - deliver
+  - publish
+  - pages
+
+# ── Variables (Run-pipeline form) ─────────────────────────────────────────────
 variables:
+  # Rust / cargo environment (plumbing; leave as-is).
   CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
   RUSTUP_HOME: "${CI_PROJECT_DIR}/.rustup"
   PATH: "${CI_PROJECT_DIR}/.cargo/bin:${PATH}"
   RUST_LOG: "warn"
   OUT_DIR: "ci-out"
 
-cache:
-  key: "${CI_COMMIT_REF_SLUG}"
-  paths:
-    - .cargo/
-    - .rustup/
-    - target/
-    - vendor/
+  # — Scan configuration —
+  CI_PRESET:
+    value: "none"
+    options: ["none", "default", "strict", "full-scope"]
+    description: "Preset TOML applied to the scan (ci/sloc-ci-<preset>.toml). none = built-in defaults."
+  SCAN_PATH:
+    value: "."
+    description: "Sub-path within the repo to analyze."
+  REPORT_TITLE:
+    value: ""
+    description: "Title shown in the HTML/PDF/XLSX report (blank = auto)."
+  MIXED_LINE_POLICY:
+    value: ""
+    options: ["", "code-only", "code-and-comment", "comment-only", "separate-mixed-category"]
+    description: "How to classify a line holding both code and a comment (blank = config default)."
+  DOCSTRINGS_AS_CODE:
+    value: "false"
+    options: ["false", "true"]
+    description: "Count Python docstrings as code instead of comments."
+  SUBMODULE_BREAKDOWN:
+    value: "true"
+    options: ["true", "false"]
+    description: "Detect .gitmodules and emit per-submodule reports."
+  FOLLOW_SYMLINKS:
+    value: "false"
+    options: ["false", "true"]
+    description: "Follow symbolic links during file discovery."
+  NO_IGNORE_FILES:
+    value: "false"
+    options: ["false", "true"]
+    description: "Ignore .gitignore/.slocignore rules and scan everything."
+  STYLE_COL_THRESHOLD:
+    value: "80"
+    options: ["80", "100", "120"]
+    description: "Column-width threshold for the Code Style compliance chip."
+  ACTIVITY_WINDOW:
+    value: "90"
+    description: "Git Hotspots activity window in days (0 disables)."
+  ENABLED_LANGUAGES:
+    value: ""
+    description: "Comma-separated language filter (blank = all supported)."
+  INCLUDE_GLOBS:
+    value: ""
+    description: "Comma-separated include glob patterns (blank = all files)."
+  EXCLUDE_GLOBS:
+    value: ""
+    description: "Comma-separated exclude glob patterns."
 
-before_script:
-  - apt-get update -qq && apt-get install -y -qq build-essential pkg-config libssl-dev ca-certificates
-  - rustup show
-  # For air-gapped runners: place vendor.tar.xz in the workspace before the job runs.
-  # Internet-connected runners download crates from crates.io via cargo's built-in caching.
-  - |
-    if [ -f vendor.tar.xz ] && [ ! -d vendor ]; then
-      echo "Verifying vendor.tar.xz integrity..."
-      sha256sum -c vendor.tar.xz.sha256
-      echo "Decompressing vendor.tar.xz..."
-      tar -xJf vendor.tar.xz
-      mkdir -p .cargo
-      printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
-    fi
+  # — Output formats —
+  GENERATE_HTML:
+    value: "true"
+    options: ["true", "false"]
+    description: "Write the HTML report."
+  GENERATE_PDF:
+    value: "true"
+    options: ["true", "false"]
+    description: "Write the PDF report (pure-Rust, no browser)."
 
-stages:
-  - quality
-  - build
-  - smoke
-  - archive
-  - publish
+  # — Test & coverage —
+  TEST_RUNNER:
+    value: "cargo-nextest"
+    options: ["cargo-nextest", "cargo-test"]
+    description: "Test runner. nextest emits JUnit XML for the native Tests tab."
+  COVERAGE_STANDALONE:
+    value: "false"
+    options: ["false", "true"]
+    description: "Run the dedicated coverage job (llvm-cov → coverage badge + MR annotations)."
+  COVERAGE_THRESHOLD:
+    value: "0"
+    description: "Minimum line-coverage %% required to pass (0 = disabled)."
 
-# ── Quality gates ─────────────────────────────────────────────────────────────
+  # — Git-ref comparison (MR pipelines) —
+  COMPARE_TO_REF:
+    value: ""
+    description: "Baseline ref for the diff (blank on an MR = target branch)."
+  COMPARE_TO_PREV_TAG:
+    value: "false"
+    options: ["false", "true"]
+    description: "Use the previous release tag as the diff baseline."
+
+  # — External-repo scan (optional) —
+  TARGET_REPO_URL:
+    value: ""
+    description: "Scan an external repo instead of this one (git URL or path)."
+  TARGET_REF:
+    value: "HEAD"
+    description: "Ref to scan when TARGET_REPO_URL is set."
+
+  # — Delivery —
+  WEBHOOK_URL:
+    value: ""
+    description: "POST result.json here after a successful scan (token: SLOC_WEBHOOK_TOKEN)."
+  EMAIL_RECIPIENTS:
+    value: ""
+    description: "Comma-separated report recipients (creds: SLOC_SMTP_* masked vars)."
+  SMTP_FROM:
+    value: ""
+    description: "From: address for the email report."
+
+  # — Artifact repository push (all 7 backends via ci/artifact-push.sh) —
+  ARTIFACT_REPO_TYPE:
+    value: "none"
+    options: ["none", "artifactory", "nexus", "nexus2", "s3", "minio", "azure-blob", "generic-http"]
+    description: "External artifact repository backend."
+  ARTIFACT_REPO_URL:
+    value: ""
+    description: "Base URL of the artifact repository."
+  ARTIFACT_REPO_PATH:
+    value: ""
+    description: "Upload path prefix (blank = oxide-sloc/<project>/<pipeline-iid>)."
+  ARTIFACT_REPO_EXTRA:
+    value: ""
+    description: "Provider-specific extra (Nexus repo, Azure container, MinIO endpoint, S3 flags)."
+  ARTIFACT_GENERATE_MANIFEST:
+    value: "false"
+    options: ["false", "true"]
+    description: "Upload a checksums.sha256 manifest alongside the artifacts."
+
+  # — Downstream chaining —
+  DOWNSTREAM_PROJECT:
+    value: ""
+    description: "Trigger this project's pipeline on success (namespace/project)."
+  DOWNSTREAM_BRANCH:
+    value: "main"
+    description: "Branch of the downstream project to trigger."
+
+# ── Reusable snippets ─────────────────────────────────────────────────────────
+.on_mr:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Quality gates
+# ══════════════════════════════════════════════════════════════════════════════
 
 fmt:
   stage: quality
@@ -64,15 +233,42 @@ clippy:
     - rustup component add clippy
     - cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-test:
+# Non-gating: surface every clippy diagnostic inline in the MR diff via the
+# native Code Quality widget. The strict -D gate lives in the `clippy` job above.
+codequality:
   stage: quality
+  needs: []
   script:
-    - cargo test --workspace --all-features
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets --all-features --message-format=json > clippy.json || true
+    - python3 ci/gitlab/clippy-to-codeclimate.py clippy.json gl-code-quality.json
+  artifacts:
+    reports:
+      codequality: gl-code-quality.json
+    paths:
+      - gl-code-quality.json
+    expire_in: 7 days
+    when: always
+  rules:
+    - when: always
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Build
+# ══════════════════════════════════════════════════════════════════════════════
 
 build:
   stage: build
+  needs: []
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - .rustup/
+      - target/
+      - vendor/
+    policy: pull-push
   script:
     - cargo build --release -p oxide-sloc
   artifacts:
@@ -80,66 +276,81 @@ build:
       - target/release/oxide-sloc
     expire_in: 1 hour
 
-# ── CLI smoke tests ───────────────────────────────────────────────────────────
-#
-# Each job below maps to a specific web UI configuration path:
-#
-#   Web UI step 1: choose project path     → CLI positional arg
-#   Web UI step 2: mixed-line policy       → --mixed-line-policy
-#   Web UI step 2: python docstrings       → enabled by default (no flag)
-#   Web UI step 3: output formats          → --json-out / --html-out / --pdf-out
-#   Web UI step 4: run                     → execute the binary
+# ══════════════════════════════════════════════════════════════════════════════
+# Test — JUnit (native Tests tab) + Coverage (native badge + MR annotations)
+# ══════════════════════════════════════════════════════════════════════════════
+
+test:
+  stage: test
+  needs: []
+  script:
+    - |
+      if [ "${TEST_RUNNER}" = "cargo-nextest" ] && cargo nextest --version >/dev/null 2>&1; then
+        echo "Running cargo-nextest (JUnit output)"
+        cargo nextest run --workspace --all-features --profile ci
+        cp target/nextest/ci/junit.xml junit.xml
+      else
+        echo "Running cargo test (no JUnit report)"
+        cargo test --workspace --all-features
+      fi
+  artifacts:
+    when: always
+    paths:
+      - junit.xml
+    reports:
+      junit: junit.xml
+    expire_in: 7 days
+
+coverage:
+  stage: test
+  needs: []
+  # llvm-cov --all-features pulls in rfd/native-dialog → needs gtk3/xdo/wayland
+  # devel headers on Linux (generate-coverage.sh hard-fails early otherwise).
+  script:
+    - apt-get install -y -qq libgtk-3-dev libxdo-dev libwayland-dev
+    - rustup component add llvm-tools 2>/dev/null || true
+    - bash ci/sonar/generate-coverage.sh coverage
+    - cat coverage/coverage-summary.txt
+    - |
+      if [ "${COVERAGE_THRESHOLD:-0}" != "0" ]; then
+        pct=$(sed -n 's/.*Line coverage[^0-9]*\([0-9.]*\)%.*/\1/p' coverage/coverage-summary.txt | head -n1)
+        echo "Line coverage ${pct}% (threshold ${COVERAGE_THRESHOLD}%)"
+        awk "BEGIN { exit !(${pct:-0} >= ${COVERAGE_THRESHOLD}) }" \
+          || { echo "Coverage ${pct}% is below threshold ${COVERAGE_THRESHOLD}%"; exit 1; }
+      fi
+  coverage: '/Line coverage\s*:\s*(\d+\.\d+)%/'
+  artifacts:
+    paths:
+      - coverage/
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/sonar-coverage.xml
+    expire_in: 7 days
+  rules:
+    - if: '$COVERAGE_STANDALONE == "true"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: manual
+      allow_failure: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLI smoke tests (map to web-UI configuration paths)
+# ══════════════════════════════════════════════════════════════════════════════
 
 smoke:plain:
-  stage: smoke
+  stage: test
   needs: [build]
   script:
     - ./target/release/oxide-sloc analyze testing/fixtures/basic --plain
 
 smoke:per-file:
-  stage: smoke
+  stage: test
   needs: [build]
   script:
     - ./target/release/oxide-sloc analyze testing/fixtures/basic --per-file --plain
 
-smoke:reports:
-  stage: smoke
-  needs: [build]
-  script:
-    - mkdir -p "${OUT_DIR}"
-    - |
-      ./target/release/oxide-sloc analyze testing/fixtures/basic \
-        --report-title "GitLab CI run ${CI_PIPELINE_IID}" \
-        --json-out "${OUT_DIR}/result.json" \
-        --html-out "${OUT_DIR}/report.html"
-    - test -s "${OUT_DIR}/result.json"
-    - test -s "${OUT_DIR}/report.html"
-    - grep -q "OxideSLOC" "${OUT_DIR}/report.html"
-  artifacts:
-    paths:
-      - ci-out/
-    expire_in: 7 days
-
-smoke:re-render:
-  stage: smoke
-  needs: [smoke:reports]
-  script:
-    - |
-      ./target/release/oxide-sloc report "${OUT_DIR}/result.json" \
-        --html-out "${OUT_DIR}/re-rendered.html"
-    - test -s "${OUT_DIR}/re-rendered.html"
-
-smoke:pdf:
-  stage: smoke
-  needs: [smoke:reports]
-  script:
-    - |
-      ./target/release/oxide-sloc report "${OUT_DIR}/result.json" \
-        --pdf-out "${OUT_DIR}/re-rendered.pdf"
-    - test -s "${OUT_DIR}/re-rendered.pdf"
-
 smoke:policies:
-  stage: smoke
+  stage: test
   needs: [build]
   script:
     - |
@@ -150,7 +361,7 @@ smoke:policies:
       done
 
 smoke:web-ui:
-  stage: smoke
+  stage: test
   needs: [build]
   script:
     - ./target/release/oxide-sloc serve &
@@ -161,91 +372,329 @@ smoke:web-ui:
     - wait "${SERVER_PID}" 2>/dev/null || true
     - '[ "${HTTP_CODE}" = "200" ] || (echo "Web UI returned HTTP ${HTTP_CODE}" && exit 1)'
 
-# ── Archive ───────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Analyze — the main SLOC scan (mirrors Jenkins runAnalyze)
+# ══════════════════════════════════════════════════════════════════════════════
 
-archive:
-  stage: archive
-  needs: [smoke:reports]
-  script:
-    - echo "Artifacts already uploaded by smoke:reports job."
-  artifacts:
-    paths:
-      - target/release/oxide-sloc
-      - ci-out/
-    expire_in: 30 days
-
-# ── Publish to Nexus ──────────────────────────────────────────────────────────
-#
-# Pushes all build artifacts to a Sonatype Nexus Repository Manager instance.
-# This job is triggered automatically when NEXUS_REPO_URL is set; otherwise it
-# is available as a manual action.
-#
-# Required GitLab CI/CD variables (Settings → CI/CD → Variables, masked):
-#   NEXUS_REPO_URL    Base URL of the Nexus instance, e.g. https://nexus.example.com
-#   NEXUS_USER        Nexus username
-#   NEXUS_PASS        Nexus password or token  ← mask this variable
-#
-# Optional variables:
-#   NEXUS_REPO_NAME          Raw-format repository name (default: sloc-raw-hosted)
-#   NEXUS_REPO_PATH          Upload path prefix
-#                            (default: oxide-sloc/<project>/<pipeline-iid>)
-#   NEXUS_VERSION            "nexus2" for Nexus Repository Manager 2 (default: nexus = NRM 3)
-#   NEXUS_GENERATE_MANIFEST  Set to "true" to upload a checksums.sha256 manifest
-
-nexus:push:
-  stage: publish
+analyze:
+  stage: analyze
   needs:
-    - job: archive
-      artifacts: true
     - job: build
       artifacts: true
+    - job: coverage
+      artifacts: true
+      optional: true
+  script:
+    - mkdir -p "${OUT_DIR}"
+    - |
+      set -e
+      BIN=./target/release/oxide-sloc
+      args=(analyze "${SCAN_PATH:-.}")
+      args+=(--json-out "${OUT_DIR}/result.json")
+      args+=(--csv-out  "${OUT_DIR}/report.csv")
+      args+=(--xlsx-out "${OUT_DIR}/report.xlsx")
+      args+=(--scan-config-out "${OUT_DIR}/scan-config.json")
+      [ "${GENERATE_HTML}" = "true" ] && args+=(--html-out "${OUT_DIR}/report.html")
+      [ "${GENERATE_PDF}"  = "true" ] && args+=(--pdf-out  "${OUT_DIR}/report.pdf")
+      [ "${CI_PRESET}" != "none" ] && [ -n "${CI_PRESET}" ] && args+=(--config "ci/sloc-ci-${CI_PRESET}.toml")
+      [ -n "${MIXED_LINE_POLICY}" ] && args+=(--mixed-line-policy "${MIXED_LINE_POLICY}")
+      [ "${DOCSTRINGS_AS_CODE}" = "true" ] && args+=(--python-docstrings-as-code)
+      [ "${FOLLOW_SYMLINKS}"   = "true" ] && args+=(--follow-symlinks)
+      [ "${NO_IGNORE_FILES}"   = "true" ] && args+=(--no-ignore-files)
+      [ -n "${STYLE_COL_THRESHOLD}" ] && args+=(--style-col-threshold "${STYLE_COL_THRESHOLD}")
+      [ -n "${ACTIVITY_WINDOW}" ] && args+=(--activity-window "${ACTIVITY_WINDOW}")
+      [ -n "${REPORT_TITLE}" ] && args+=(--report-title "${REPORT_TITLE}")
+      [ -n "${CI_COMMIT_REF_NAME}" ] && args+=(--git-branch "${CI_COMMIT_REF_NAME}")
+      if [ "${SUBMODULE_BREAKDOWN}" = "true" ]; then
+        args+=(--submodule-breakdown --sub-html-out-dir "${OUT_DIR}")
+      fi
+      # Repeatable flags from comma-separated inputs.
+      IFS=',' read -ra _langs <<< "${ENABLED_LANGUAGES}"
+      for l in "${_langs[@]}"; do [ -n "$l" ] && args+=(--enabled-language "$l"); done
+      IFS=',' read -ra _inc <<< "${INCLUDE_GLOBS}"
+      for g in "${_inc[@]}"; do [ -n "$g" ] && args+=(--include-glob "$g"); done
+      IFS=',' read -ra _exc <<< "${EXCLUDE_GLOBS}"
+      for g in "${_exc[@]}"; do [ -n "$g" ] && args+=(--exclude-glob "$g"); done
+      # Attach per-file coverage if the coverage job produced it.
+      [ -f coverage/lcov.info ] && args+=(--coverage-file coverage/lcov.info)
+      echo "+ ${BIN} ${args[*]}"
+      "${BIN}" "${args[@]}"
+    - test -s "${OUT_DIR}/result.json"
+    - test -s "${OUT_DIR}/report.csv"
+  artifacts:
+    name: "sloc-report-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - ${OUT_DIR}/
+    expose_as: "SLOC report"
+    expire_in: 30 days
+
+# Optional: scan an external repository instead of this one.
+analyze-external:
+  stage: analyze
+  needs:
+    - job: build
+      artifacts: true
+  # No local checkout needed — git-scan clones TARGET_REPO_URL itself. The
+  # default before_script still runs (installs git, which git-scan requires).
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - mkdir -p "${OUT_DIR}"
+    - |
+      ./target/release/oxide-sloc git-scan "${TARGET_REPO_URL}" \
+        --git-ref "${TARGET_REF}" \
+        --json-out "${OUT_DIR}/result.json" \
+        --html-out "${OUT_DIR}/report.html" \
+        --csv-out  "${OUT_DIR}/report.csv"
+    - test -s "${OUT_DIR}/result.json"
+  artifacts:
+    paths:
+      - ${OUT_DIR}/
+    expose_as: "SLOC report (external)"
+    expire_in: 30 days
   rules:
-    - if: '$NEXUS_REPO_URL'
-      when: on_success
-    - when: manual
-      allow_failure: true
+    - if: '$TARGET_REPO_URL != ""'
+
+# ── Git-ref diff on merge requests ────────────────────────────────────────────
+# Compares the checked-out tree against the target branch (or previous tag),
+# mirroring Jenkins COMPARE_TO_REF/COMPARE_TO_PREV_TAG. Uses a git worktree +
+# two analyze runs + `oxide-sloc diff` (git-compare only accepts remote URLs,
+# not the local checkout). Emits base.json (for the MR comment baseline) plus
+# diff.json/diff.csv.
+ref-diff:
+  stage: analyze
+  needs:
+    - job: build
+      artifacts: true
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - mkdir -p "${OUT_DIR}"
+    - |
+      set -e
+      BIN=./target/release/oxide-sloc
+      SUB="${SCAN_PATH:-.}"
+      if [ "${COMPARE_TO_PREV_TAG}" = "true" ]; then
+        git fetch -q --tags || true
+        BASE=$(git tag --sort=-version:refname | sed -n '1p')
+      elif [ -n "${COMPARE_TO_REF}" ]; then
+        BASE="${COMPARE_TO_REF}"
+      else
+        BASE="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-$CI_DEFAULT_BRANCH}"
+        git fetch -q origin "${BASE}" || true
+        BASE="origin/${BASE}"
+      fi
+      echo "Diffing checked-out tree against baseline: ${BASE}"
+      # Scan the current tree BEFORE materializing the baseline worktree, so the
+      # worktree copy is never swept into the current scan.
+      "${BIN}" analyze "${SUB}" --activity-window 0 --quiet \
+        --json-out "${OUT_DIR}/current.json"
+      rm -rf .sloc-base
+      git worktree add --detach .sloc-base "${BASE}"
+      "${BIN}" analyze ".sloc-base/${SUB#./}" --activity-window 0 --quiet \
+        --json-out "${OUT_DIR}/base.json"
+      git worktree remove --force .sloc-base || true
+      "${BIN}" diff "${OUT_DIR}/base.json" "${OUT_DIR}/current.json" \
+        --json-out "${OUT_DIR}/diff.json" \
+        --csv-out  "${OUT_DIR}/diff.csv"
+  artifacts:
+    paths:
+      - ${OUT_DIR}/base.json
+      - ${OUT_DIR}/diff.json
+      - ${OUT_DIR}/diff.csv
+    expire_in: 7 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$COMPARE_TO_REF != ""'
+    - if: '$COMPARE_TO_PREV_TAG == "true"'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Deliver — MR comment, webhook, email, Confluence, Bitbucket
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Native MR comment (uses GitLab project ID + MR IID directly).
+mr-comment:
+  stage: deliver
+  needs:
+    - job: analyze
+      artifacts: true
+    - job: ref-diff
+      artifacts: true
+      optional: true
   script:
     - |
-      if [ -z "${NEXUS_REPO_URL:-}" ]; then
-        echo "NEXUS_REPO_URL is not set — nothing to push."
+      base_flag=""
+      [ -f "${OUT_DIR}/base.json" ] && base_flag="--baseline ${OUT_DIR}/base.json"
+      ./target/release/oxide-sloc pr-comment "${OUT_DIR}/result.json" $base_flag \
+        --provider gitlab \
+        --api-url "${CI_SERVER_URL}" \
+        --repo "${CI_PROJECT_ID}" \
+        --pr-number "${CI_MERGE_REQUEST_IID}" \
+        --token "${SLOC_VCS_TOKEN}"
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $SLOC_VCS_TOKEN != ""'
+
+deliver:webhook:
+  stage: deliver
+  needs:
+    - job: analyze
+      artifacts: true
+  script:
+    - |
+      ./target/release/oxide-sloc send "${OUT_DIR}/result.json" \
+        --webhook-url "${WEBHOOK_URL}" \
+        ${SLOC_ALLOW_PRIVATE_WEBHOOK:+--allow-private-net}
+  rules:
+    - if: '$WEBHOOK_URL != ""'
+
+deliver:email:
+  stage: deliver
+  needs:
+    - job: analyze
+      artifacts: true
+  script:
+    - |
+      ./target/release/oxide-sloc send "${OUT_DIR}/result.json" \
+        --smtp-to "${EMAIL_RECIPIENTS}" \
+        ${SMTP_FROM:+--smtp-from "${SMTP_FROM}"}
+  rules:
+    - if: '$EMAIL_RECIPIENTS != ""'
+
+# Native Confluence publish (oxide-sloc send --confluence-*). Reads
+# SLOC_CONFLUENCE_URL/USER/TOKEN/SPACE from masked CI variables. The richer
+# page layout of ci/jenkins/notify-confluence.py remains available (see docs).
+notify:confluence:
+  stage: deliver
+  needs:
+    - job: analyze
+      artifacts: true
+  script:
+    - |
+      ./target/release/oxide-sloc send "${OUT_DIR}/result.json" \
+        --confluence-page-title "oxide-sloc — ${CI_PROJECT_PATH}" \
+        ${CI_PAGES_URL:+--confluence-report-url "${CI_PAGES_URL}"}
+  rules:
+    - if: '$SLOC_CONFLUENCE_URL != "" && $SLOC_CONFLUENCE_SPACE != ""'
+
+# Bitbucket commit build-status via the shared, plugin-independent REST script.
+notify:bitbucket:
+  stage: deliver
+  needs:
+    - job: analyze
+      artifacts: true
+  variables:
+    GIT_COMMIT: "${CI_COMMIT_SHA}"
+    BUILD_KEY: "${CI_PROJECT_PATH_SLUG}"
+    BUILD_NAME: "oxide-sloc CI"
+    BUILD_URL: "${CI_PIPELINE_URL}"
+    REPORT_URL: "${CI_PAGES_URL}"
+  script:
+    - bash ci/jenkins/notify-bitbucket.sh SUCCESSFUL
+  rules:
+    - if: '$BITBUCKET_BASE_URL != ""'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Publish — artifact repository push (all 7 backends) + downstream trigger
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Supersedes the old nexus:push job: drives ci/artifact-push.sh across
+# artifactory / nexus / nexus2 / s3 / minio / azure-blob / generic-http.
+# (NEXUS_REPO_URL etc. still work — see the compatibility shim below.)
+artifact-push:
+  stage: publish
+  needs:
+    - job: build
+      artifacts: true
+    - job: analyze
+      artifacts: true
+    - job: test
+      artifacts: true
+      optional: true
+    - job: coverage
+      artifacts: true
+      optional: true
+    - job: ref-diff
+      artifacts: true
+      optional: true
+  script:
+    - |
+      set -e
+      # Back-compat: fall back to the old NEXUS_* variables if the generic ones
+      # are unset (the previous nexus:push interface).
+      : "${ARTIFACT_REPO_TYPE:=${NEXUS_REPO_URL:+nexus}}"
+      : "${ARTIFACT_REPO_URL:=${NEXUS_REPO_URL:-}}"
+      : "${ARTIFACT_REPO_USER:=${NEXUS_USER:-}}"
+      : "${ARTIFACT_REPO_PASS:=${NEXUS_PASS:-}}"
+      : "${ARTIFACT_REPO_EXTRA:=${NEXUS_REPO_NAME:-}}"
+      if [ -z "${ARTIFACT_REPO_TYPE}" ] || [ "${ARTIFACT_REPO_TYPE}" = "none" ] || [ -z "${ARTIFACT_REPO_URL}" ]; then
+        echo "No artifact repository configured (ARTIFACT_REPO_TYPE/URL) — nothing to push."
         exit 0
       fi
-
-      # Collect all available artifacts into a single staging directory.
-      STAGE_DIR="${CI_PROJECT_DIR}/nexus-upload"
-      mkdir -p "${STAGE_DIR}"
-      FILES_TO_PUSH=""
-
-      stage_file() {
-        local src="$1" dst_name="$2"
-        if [ -f "${src}" ]; then
-          cp "${src}" "${STAGE_DIR}/${dst_name}"
-          FILES_TO_PUSH="${FILES_TO_PUSH} ${dst_name}"
-          echo "  staged: ${dst_name}"
-        fi
-      }
-
-      echo "Staging artifacts…"
-      stage_file "target/release/oxide-sloc"    "oxide-sloc"
-      stage_file "ci-out/result.json"            "result.json"
-      stage_file "ci-out/report.html"            "report.html"
-      stage_file "ci-out/re-rendered.html"       "re-rendered.html"
-      stage_file "ci-out/re-rendered.pdf"        "re-rendered.pdf"
-
-      FILES_TO_PUSH="${FILES_TO_PUSH# }"
-
-      if [ -z "${FILES_TO_PUSH}" ]; then
-        echo "No artifact files found to push — skipping."
-        exit 0
-      fi
-
-      ARTIFACT_REPO_TYPE="${NEXUS_VERSION:-nexus}" \
-      ARTIFACT_REPO_URL="${NEXUS_REPO_URL}" \
-      ARTIFACT_REPO_PATH="${NEXUS_REPO_PATH:-oxide-sloc/${CI_PROJECT_NAME}/${CI_PIPELINE_IID}}" \
-      ARTIFACT_REPO_EXTRA="${NEXUS_REPO_NAME:-sloc-raw-hosted}" \
-      ARTIFACT_REPO_USER="${NEXUS_USER:-}" \
-      ARTIFACT_REPO_PASS="${NEXUS_PASS:-}" \
-      ARTIFACT_DIR="${STAGE_DIR}" \
-      ARTIFACT_FILES="${FILES_TO_PUSH}" \
-      ARTIFACT_GENERATE_MANIFEST="${NEXUS_GENERATE_MANIFEST:-false}" \
+      STAGE="${CI_PROJECT_DIR}/artifact-upload"
+      mkdir -p "${STAGE}"
+      FILES=""
+      stage() { [ -f "$1" ] && cp "$1" "${STAGE}/$2" && FILES="${FILES} $2" && echo "  staged: $2"; }
+      stage "target/release/oxide-sloc"     "oxide-sloc"
+      stage "${OUT_DIR}/result.json"        "result.json"
+      stage "${OUT_DIR}/report.html"        "report.html"
+      stage "${OUT_DIR}/report.pdf"         "report.pdf"
+      stage "${OUT_DIR}/report.csv"         "report.csv"
+      stage "${OUT_DIR}/report.xlsx"        "report.xlsx"
+      stage "junit.xml"                     "junit.xml"
+      stage "coverage/lcov.info"            "lcov.info"
+      stage "coverage/sonar-coverage.xml"   "sonar-coverage.xml"
+      stage "${OUT_DIR}/diff.json"          "diff.json"
+      stage "${OUT_DIR}/diff.csv"           "diff.csv"
+      FILES="${FILES# }"
+      [ -z "${FILES}" ] && { echo "No artifact files found to push."; exit 0; }
+      ARTIFACT_REPO_TYPE="${ARTIFACT_REPO_TYPE}" \
+      ARTIFACT_REPO_URL="${ARTIFACT_REPO_URL}" \
+      ARTIFACT_REPO_PATH="${ARTIFACT_REPO_PATH:-oxide-sloc/${CI_PROJECT_NAME}/${CI_PIPELINE_IID}}" \
+      ARTIFACT_REPO_EXTRA="${ARTIFACT_REPO_EXTRA:-sloc-raw-hosted}" \
+      ARTIFACT_REPO_USER="${ARTIFACT_REPO_USER:-}" \
+      ARTIFACT_REPO_PASS="${ARTIFACT_REPO_PASS:-}" \
+      ARTIFACT_DIR="${STAGE}" \
+      ARTIFACT_FILES="${FILES}" \
+      ARTIFACT_GENERATE_MANIFEST="${ARTIFACT_GENERATE_MANIFEST:-false}" \
       bash ci/artifact-push.sh
+  rules:
+    - if: '$ARTIFACT_REPO_TYPE != "" && $ARTIFACT_REPO_TYPE != "none"'
+    - if: '$NEXUS_REPO_URL != ""'
+    - when: manual
+      allow_failure: true
+
+# Downstream / multi-project pipeline chaining (Jenkins DOWNSTREAM_JOB).
+trigger-downstream:
+  stage: publish
+  needs: [analyze]
+  trigger:
+    project: "${DOWNSTREAM_PROJECT}"
+    branch: "${DOWNSTREAM_BRANCH}"
+    strategy: depend
+  rules:
+    - if: '$DOWNSTREAM_PROJECT != ""'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Pages — browsable HTML report + coverage site (default branch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+pages:
+  stage: pages
+  needs:
+    - job: analyze
+      artifacts: true
+    - job: coverage
+      artifacts: true
+      optional: true
+  script:
+    - rm -rf public && mkdir -p public
+    - cp -r ${OUT_DIR}/. public/ 2>/dev/null || true
+    - '[ -f public/report.html ] && cp public/report.html public/index.html || true'
+    - '[ -d coverage/html ] && mkdir -p public/coverage && cp -r coverage/html/. public/coverage/ || true'
+  artifacts:
+    paths:
+      - public
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

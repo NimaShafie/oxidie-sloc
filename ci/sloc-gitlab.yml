@@ -1,71 +1,174 @@
-# oxide-sloc GitLab CI integration
+# oxide-sloc — reusable GitLab CI include
 #
-# Include in your project's .gitlab-ci.yml:
+# Drop oxide-sloc SLOC analysis into any GitLab project with a one-line include.
+# Uses the modern typed `spec:inputs` interface (GitLab 15.11+, GA 16.0). For
+# older GitLab, use the `variables:`-only fallback shown at the bottom.
+#
+# Include it and configure the inputs:
 #
 #   include:
 #     - project: your-group/oxide-sloc
 #       file: ci/sloc-gitlab.yml
+#       inputs:
+#         scan-path: "."
+#         preset: "default"
+#         server-url: "http://sloc.internal:4317"
+#         ref-diff: true
 #
-# Or copy the job below directly into your pipeline.
+# Native GitLab surfaces produced:
+#   • Report link in the MR widget  ← artifacts:expose_as
+#   • (optional) ingest into a central oxide-sloc server via `oxide-sloc send`
+#   • (optional) push artifacts to any of 7 repositories via ci/artifact-push.sh
 #
-# Required variables (Settings → CI/CD → Variables):
-#   SLOC_SERVER  — base URL of your oxide-sloc instance, e.g. http://sloc.internal:4317
-#
-# Optional variables:
-#   SLOC_API_KEY         — bearer token (required if the server was started with SLOC_API_KEY set)
-#   SLOC_LABEL           — display name in /view-reports (defaults to $CI_PROJECT_PATH)
-#
-# Artifact repository push — all optional (see ci/artifact-push.sh for full docs):
-#   ARTIFACT_REPO_TYPE   — artifactory | nexus | nexus2 | s3 | minio | azure-blob | generic-http
-#   ARTIFACT_REPO_URL    — base URL of the artifact repository
-#   ARTIFACT_REPO_PATH   — path prefix (default: oxide-sloc/<project>/<pipeline-id>)
-#   ARTIFACT_REPO_EXTRA  — provider-specific extra config (Nexus repo, Azure container, MinIO endpoint)
-#   ARTIFACT_REPO_USER   — username / access key (store as masked CI/CD variable)
-#   ARTIFACT_REPO_PASS   — password / API token   (store as masked CI/CD variable)
-#
-# How it works:
-#   1. oxide-sloc analyze runs inside the GitLab runner — no network call to the server.
-#   2. oxide-sloc send POSTs the result JSON to /api/ingest on your server.
-#   3. (optional) ci/artifact-push.sh pushes JSON/HTML to the configured artifact repository.
-#   4. The server renders HTML, stores the artifact, and the scan appears in /view-reports.
+# Masked CI/CD variables (Settings → CI/CD → Variables) referenced by inputs:
+#   <api-key-var>          bearer token for the ingest server (name it below)
+#   ARTIFACT_REPO_USER     artifact-repo username / access key
+#   ARTIFACT_REPO_PASS     artifact-repo password / token
+
+spec:
+  inputs:
+    scan-path:
+      default: "."
+      description: "Directory within the repo to analyze."
+    preset:
+      default: "default"
+      options: ["none", "default", "strict", "full-scope"]
+      description: "Preset TOML (ci/sloc-ci-<preset>.toml)."
+    mixed-line-policy:
+      default: ""
+      options: ["", "code-only", "code-and-comment", "comment-only", "separate-mixed-category"]
+      description: "Classification of lines holding both code and a comment."
+    activity-window:
+      default: "90"
+      description: "Git Hotspots window in days (0 disables)."
+    generate-html:
+      type: boolean
+      default: true
+      description: "Write the HTML report."
+    generate-pdf:
+      type: boolean
+      default: false
+      description: "Write the PDF report."
+    ref-diff:
+      type: boolean
+      default: false
+      description: "On MRs, diff against the target branch and comment on the MR."
+    stage:
+      default: "test"
+      description: "Pipeline stage to attach the job to (must exist in the including pipeline)."
+    server-url:
+      default: ""
+      description: "Base URL of a central oxide-sloc server to ingest results into (blank = skip)."
+    api-key-var:
+      default: "SLOC_API_KEY"
+      description: "Name of the masked CI variable holding the ingest bearer token."
+    label:
+      default: ""
+      description: "Display label in /view-reports (blank = $CI_PROJECT_PATH)."
+    artifact-repo-type:
+      default: "none"
+      options: ["none", "artifactory", "nexus", "nexus2", "s3", "minio", "azure-blob", "generic-http"]
+      description: "Push artifacts to this repository backend (via ci/artifact-push.sh)."
+    artifact-repo-url:
+      default: ""
+      description: "Base URL of the artifact repository."
+
+---
 
 sloc-analysis:
-  stage: test
+  stage: "$[[ inputs.stage ]]"
   image: rust:latest
   variables:
-    SLOC_LABEL: ${CI_PROJECT_PATH}
-    ARTIFACT_REPO_TYPE: ""
-    ARTIFACT_REPO_URL: ""
-    ARTIFACT_REPO_PATH: "oxide-sloc/${CI_PROJECT_PATH}/${CI_PIPELINE_ID}"
-    ARTIFACT_REPO_EXTRA: ""
-    ARTIFACT_DIR: sloc-out
-    ARTIFACT_FILES: "result.json report.html"
+    SLOC_LABEL: "$[[ inputs.label ]]"
+    OUT_DIR: "sloc-out"
   before_script:
     - cargo install oxide-sloc --locked
   script:
-    - mkdir -p sloc-out
+    - mkdir -p "${OUT_DIR}"
     - |
-      oxide-sloc analyze . \
-        --json-out sloc-out/result.json \
-        --html-out sloc-out/report.html
+      set -e
+      LABEL="${SLOC_LABEL:-$CI_PROJECT_PATH}"
+      args=(analyze "$[[ inputs.scan-path ]]")
+      args+=(--json-out "${OUT_DIR}/result.json")
+      args+=(--csv-out  "${OUT_DIR}/report.csv")
+      [ "$[[ inputs.generate-html ]]" = "true" ] && args+=(--html-out "${OUT_DIR}/report.html")
+      [ "$[[ inputs.generate-pdf ]]"  = "true" ] && args+=(--pdf-out  "${OUT_DIR}/report.pdf")
+      [ "$[[ inputs.preset ]]" != "none" ] && args+=(--config "ci/sloc-ci-$[[ inputs.preset ]].toml")
+      [ -n "$[[ inputs.mixed-line-policy ]]" ] && args+=(--mixed-line-policy "$[[ inputs.mixed-line-policy ]]")
+      [ -n "$[[ inputs.activity-window ]]" ] && args+=(--activity-window "$[[ inputs.activity-window ]]")
+      [ -n "${CI_COMMIT_REF_NAME}" ] && args+=(--git-branch "${CI_COMMIT_REF_NAME}")
+      echo "+ oxide-sloc ${args[*]}"
+      oxide-sloc "${args[@]}"
+    # Optional: ref-diff + MR comment.
     - |
-      if [ -n "${SLOC_SERVER}" ]; then
-        oxide-sloc send sloc-out/result.json \
-          --webhook-url "${SLOC_SERVER}/api/ingest?label=${SLOC_LABEL}" \
-          ${SLOC_API_KEY:+--webhook-token "${SLOC_API_KEY}"}
-      else
-        echo "SLOC_SERVER not set — skipping upload"
+      if [ "$[[ inputs.ref-diff ]]" = "true" ] && [ "${CI_PIPELINE_SOURCE}" = "merge_request_event" ]; then
+        git fetch -q origin "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}" || true
+        rm -rf .sloc-base
+        git worktree add --detach .sloc-base "origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+        oxide-sloc analyze ".sloc-base/$[[ inputs.scan-path ]]" --activity-window 0 --quiet \
+          --json-out "${OUT_DIR}/base.json"
+        git worktree remove --force .sloc-base || true
+        if [ -n "${SLOC_VCS_TOKEN:-}" ]; then
+          oxide-sloc pr-comment "${OUT_DIR}/result.json" --baseline "${OUT_DIR}/base.json" \
+            --provider gitlab --api-url "${CI_SERVER_URL}" \
+            --repo "${CI_PROJECT_ID}" --pr-number "${CI_MERGE_REQUEST_IID}" \
+            --token "${SLOC_VCS_TOKEN}" || true
+        fi
       fi
+    # Optional: ingest into a central oxide-sloc server.
     - |
-      if [ -n "${ARTIFACT_REPO_TYPE}" ] && [ "${ARTIFACT_REPO_TYPE}" != "none" ] && [ -n "${ARTIFACT_REPO_URL}" ]; then
-        echo "Pushing artifacts to ${ARTIFACT_REPO_TYPE}..."
-        bash ci/artifact-push.sh
+      SERVER="$[[ inputs.server-url ]]"
+      if [ -n "${SERVER}" ]; then
+        oxide-sloc send "${OUT_DIR}/result.json" \
+          --webhook-url "${SERVER}/api/ingest?label=${LABEL}"
       else
-        echo "ARTIFACT_REPO_TYPE not set or 'none' — skipping artifact repository push"
+        echo "server-url not set — skipping ingest."
+      fi
+    # Optional: push artifacts to an external repository.
+    - |
+      REPO_TYPE="$[[ inputs.artifact-repo-type ]]"
+      REPO_URL="$[[ inputs.artifact-repo-url ]]"
+      if [ "${REPO_TYPE}" != "none" ] && [ -n "${REPO_URL}" ]; then
+        ARTIFACT_REPO_TYPE="${REPO_TYPE}" \
+        ARTIFACT_REPO_URL="${REPO_URL}" \
+        ARTIFACT_REPO_PATH="oxide-sloc/${CI_PROJECT_PATH}/${CI_PIPELINE_ID}" \
+        ARTIFACT_DIR="${OUT_DIR}" \
+        ARTIFACT_FILES="result.json report.html report.csv" \
+        bash ci/artifact-push.sh || echo "artifact-push failed (non-fatal)."
+      else
+        echo "artifact-repo-type not set — skipping artifact push."
       fi
   artifacts:
     paths:
       - sloc-out/
+    expose_as: "SLOC report"
     expire_in: 7 days
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# ── Fallback for GitLab < 15.11 (no spec:inputs) ──────────────────────────────
+#
+# Copy this job directly into your .gitlab-ci.yml and set the variables inline
+# instead of using `include: … inputs:`:
+#
+#   sloc-analysis:
+#     stage: test
+#     image: rust:latest
+#     variables:
+#       SLOC_PRESET: "default"
+#       SLOC_SERVER: ""            # e.g. http://sloc.internal:4317
+#       SLOC_LABEL: "${CI_PROJECT_PATH}"
+#     before_script:
+#       - cargo install oxide-sloc --locked
+#     script:
+#       - mkdir -p sloc-out
+#       - |
+#         oxide-sloc analyze . --json-out sloc-out/result.json --html-out sloc-out/report.html \
+#           ${SLOC_PRESET:+--config ci/sloc-ci-${SLOC_PRESET}.toml}
+#       - |
+#         [ -n "${SLOC_SERVER}" ] && oxide-sloc send sloc-out/result.json \
+#           --webhook-url "${SLOC_SERVER}/api/ingest?label=${SLOC_LABEL}" || true
+#     artifacts:
+#       paths: [sloc-out/]
+#       expose_as: "SLOC report"
+#       expire_in: 7 days

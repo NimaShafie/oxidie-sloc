@@ -975,56 +975,132 @@ The job uses `continue-on-error: true` so a VT outage or quota exhaustion never 
 
 ## GitLab CI
 
-`.gitlab-ci.yml` ships at the repo root and is auto-detected by GitLab.
+`.gitlab-ci.yml` ships at the repo root and is auto-detected by GitLab. It is a
+full-parity port of the Jenkins pipeline, built on GitLab-native surfaces rather
+than plugins: the merge-request widget shows the Tests tab, coverage badge +
+diff annotations, and the Code Quality report; the HTML report is exposed
+directly in the MR and published to GitLab Pages.
 
-**Stages:** `quality` → `build` → `smoke` → `archive`
+**Stages:** `quality` → `build` → `test` → `analyze` → `deliver` → `publish` → `pages`
 
-Smoke jobs run in parallel: `smoke:plain`, `smoke:per-file`, `smoke:reports`, `smoke:re-render`, `smoke:policies`, `smoke:web-ui`, `smoke:pdf`.
-
-### Adding a scan to your project's pipeline
-
-```yaml
-sloc-scan:
-  stage: test
-  image: rust:latest
-  script:
-    - apt-get update -qq && apt-get install -y -qq xz-utils
-    - tar -xJf vendor.tar.xz
-    - cargo install --path crates/sloc-cli
-    - |
-      oxide-sloc analyze ./src \
-        --json-out out/result.json \
-        --html-out out/report.html \
-        --report-title "SLOC — $CI_PIPELINE_ID"
-  artifacts:
-    paths:
-      - out/
-    expire_in: 7 days
-  only:
-    - main
-    - merge_requests
+```
+quality:  fmt        clippy(-D warnings)   codequality(→ Code Quality widget)
+build:    build (release binary, seeds the Cargo.lock-keyed cache)
+test:     test(→ JUnit/Tests tab)   coverage(→ badge + Cobertura MR annotations)
+          smoke:plain  smoke:per-file  smoke:policies  smoke:web-ui
+analyze:  analyze(json/csv/xlsx/html/pdf, → "SLOC report" in MR)   analyze-external
+          ref-diff (MR: diff vs target branch / prev tag)
+deliver:  mr-comment   deliver:webhook   deliver:email   notify:confluence   notify:bitbucket
+publish:  artifact-push (7 backends)   trigger-downstream
+pages:    pages (HTML report + coverage HTML site, default branch)
 ```
 
-### Pushing to Confluence from GitLab CI
+### Native GitLab features
 
-Use the same `curl`/`python3` approach as Jenkins, with GitLab CI environment variables:
+| Feature | Mechanism | Where it shows |
+|---|---|---|
+| Test results | `cargo nextest … --profile ci` → `artifacts:reports:junit` | MR widget + **Tests** tab |
+| Coverage % | `ci/sonar/generate-coverage.sh` + `coverage:` regex | pipeline/MR coverage badge |
+| Coverage per-line | `artifacts:reports:coverage_report:cobertura` | MR diff annotations |
+| Clippy findings | `ci/gitlab/clippy-to-codeclimate.py` → `artifacts:reports:codequality` | **Code Quality** widget in MR diff |
+| HTML report | `artifacts:expose_as: "SLOC report"` + Pages | MR widget link + Pages site |
+| MR comment | `oxide-sloc pr-comment --provider gitlab` | comment on the MR |
+
+The `coverage` job installs `libgtk-3-dev libxdo-dev libwayland-dev` (required by
+`cargo llvm-cov --all-features`) and runs only when `COVERAGE_STANDALONE=true`,
+on the default branch, or manually.
+
+### Run-pipeline parameters
+
+Every scan knob is a form variable (CI/CD → **Run pipeline**), mirroring the
+Jenkins `parameters {}` block: `CI_PRESET`, `SCAN_PATH`, `MIXED_LINE_POLICY`,
+`DOCSTRINGS_AS_CODE`, `SUBMODULE_BREAKDOWN`, `STYLE_COL_THRESHOLD`,
+`ACTIVITY_WINDOW`, `ENABLED_LANGUAGES`, `INCLUDE_GLOBS`, `EXCLUDE_GLOBS`,
+`GENERATE_HTML`, `GENERATE_PDF`, `TEST_RUNNER`, `COVERAGE_STANDALONE`,
+`COVERAGE_THRESHOLD`, `COMPARE_TO_REF`, `COMPARE_TO_PREV_TAG`, `TARGET_REPO_URL`,
+`TARGET_REF`, `WEBHOOK_URL`, `EMAIL_RECIPIENTS`, `ARTIFACT_REPO_*`,
+`DOWNSTREAM_PROJECT`.
+
+Secrets go in **Settings → CI/CD → Variables** (masked), *not* the form:
+
+| Variable | Used by |
+|---|---|
+| `SLOC_VCS_TOKEN` (scope: `api`) | `mr-comment` |
+| `SLOC_WEBHOOK_TOKEN` | `deliver:webhook` |
+| `SLOC_SMTP_HOST` / `SLOC_SMTP_USER` / `SLOC_SMTP_PASS` | `deliver:email` |
+| `SLOC_CONFLUENCE_URL` / `_USER` / `_TOKEN` / `_SPACE` | `notify:confluence` |
+| `BITBUCKET_BASE_URL` / `_TOKEN` / `_USER` / `_WORKSPACE` / `_REPO` | `notify:bitbucket` |
+| `ARTIFACT_REPO_USER` / `ARTIFACT_REPO_PASS` | `artifact-push` |
+
+### Adding a scan to your project's pipeline (reusable include)
+
+Use the typed `spec:inputs` include (GitLab 15.11+, GA 16.0):
 
 ```yaml
-publish-to-confluence:
-  stage: deploy
-  script:
-    - |
-      CODE_LINES=$(python3 -c "import json; d=json.load(open('out/result.json')); print(d['summary_totals']['code_lines'])")
-      echo "Code lines: $CODE_LINES"
-      # Use the same curl commands as the Jenkins section above,
-      # substituting GitLab CI variables for credentials:
-      #   CONFLUENCE_USER  → stored in CI/CD variables as CONFLUENCE_USER
-      #   CONFLUENCE_TOKEN → stored in CI/CD variables as CONFLUENCE_TOKEN
-  only:
-    - main
+include:
+  - project: your-group/oxide-sloc
+    file: ci/sloc-gitlab.yml
+    inputs:
+      scan-path: "."
+      preset: "default"
+      generate-html: true
+      ref-diff: true                 # diff vs target branch + comment on MRs
+      server-url: "http://sloc.internal:4317"   # optional central-server ingest
+      artifact-repo-type: "nexus"    # optional external push
 ```
 
-Store credentials in **Settings → CI/CD → Variables** as `CONFLUENCE_USER` and `CONFLUENCE_TOKEN` (masked, protected).
+For GitLab older than 15.11, copy the `variables:`-only fallback job printed at
+the bottom of `ci/sloc-gitlab.yml`.
+
+### Merge-request workflow
+
+On MR pipelines the `ref-diff` job checks out the target branch into a git
+worktree, analyzes both sides, and runs `oxide-sloc diff`; `mr-comment` then
+posts the delta with `oxide-sloc pr-comment --provider gitlab` (using
+`$CI_PROJECT_ID` + `$CI_MERGE_REQUEST_IID` directly). Set `SLOC_VCS_TOKEN`
+(scope `api`) to enable the comment.
+
+### Confluence and Bitbucket from GitLab
+
+Confluence publishing uses the native `oxide-sloc send --confluence-*` path
+(reads `SLOC_CONFLUENCE_*`). For a richer page layout, call the shared
+`ci/jenkins/notify-confluence.py` instead — it is plugin-independent and reads
+pure env vars. Bitbucket commit statuses reuse `ci/jenkins/notify-bitbucket.sh`
+verbatim; the `notify:bitbucket` job maps GitLab variables onto the script's
+inputs:
+
+| Script env | GitLab source |
+|---|---|
+| `GIT_COMMIT` | `$CI_COMMIT_SHA` |
+| `BUILD_KEY` | `$CI_PROJECT_PATH_SLUG` |
+| `BUILD_URL` | `$CI_PIPELINE_URL` |
+| `REPORT_URL` | `$CI_PAGES_URL` |
+
+### Jenkins → GitLab capability parity
+
+| Jenkins capability | GitLab mechanism | Notes |
+|---|---|---|
+| fmt / clippy / test gates | `fmt`, `clippy`, `test` jobs | equivalent |
+| Clippy warnings trend (warnings-ng) | `codequality` → Code Quality widget | native, inline in MR |
+| nextest "Test Result" | `reports:junit` → Tests tab | native |
+| Coverage (llvm-cov) | `reports:coverage_report` + `coverage:` regex | native badge + annotations |
+| `COVERAGE_THRESHOLD` gate | awk gate on the summary | equivalent |
+| Analyze json/html/pdf/csv/xlsx | `analyze` job | equivalent |
+| CI presets (TOMLs) | `CI_PRESET` → `--config` | equivalent |
+| Analysis-rule params | form variables → CLI flags | equivalent |
+| HTML report publishing | `expose_as` + Pages | native, nicer |
+| Trends / dashboards | Pages + native pipeline/coverage/test analytics | equivalent |
+| Git-ref scan | `analyze-external` (`git-scan`) | equivalent |
+| Git-ref compare / prev-tag | `ref-diff` (worktree + `diff`) | MR baseline is native |
+| Webhook / email delivery | `deliver:webhook` / `deliver:email` | equivalent |
+| Confluence upsert | `notify:confluence` (`send --confluence-*`) | equivalent |
+| Bitbucket commit status | `notify:bitbucket` (shared script) | equivalent |
+| PR/MR comment | `mr-comment` (`pr-comment --provider gitlab`) | native |
+| Artifact push (7 backends) | `artifact-push` → `ci/artifact-push.sh` | equivalent |
+| Web UI health check | `smoke:web-ui` | equivalent |
+| Downstream chaining | `trigger-downstream` (`trigger:`) | native |
+| Air-gap vendor / offline | default `before_script` | equivalent |
+| CSP relax / plugin install / disk preflight / Groovy badges | — | not needed on GitLab |
 
 ---
 
@@ -1306,26 +1382,37 @@ Or via **Manage Jenkins → Credentials → System → Global credentials → Ad
 
 ### Publishing from GitLab CI
 
-The `.gitlab-ci.yml` included in this repository has a `nexus:push` job in the `publish` stage. It runs automatically when `NEXUS_REPO_URL` is set as a project variable, or can be triggered manually from the pipeline UI.
+The `.gitlab-ci.yml` in this repository has an `artifact-push` job in the
+`publish` stage that drives `ci/artifact-push.sh` across **all seven backends**
+(`artifactory`, `nexus`, `nexus2`, `s3`, `minio`, `azure-blob`, `generic-http`).
+It runs automatically when `ARTIFACT_REPO_TYPE` (and `ARTIFACT_REPO_URL`) are
+set, and is otherwise available as a manual action.
 
 **GitLab CI/CD variables to set** (Settings → CI/CD → Variables):
 
 | Variable | Required | Description |
 |---|---|---|
-| `NEXUS_REPO_URL` | Yes | Base URL, e.g. `https://nexus.example.com` |
-| `NEXUS_USER` | Yes | Nexus username |
-| `NEXUS_PASS` | Yes — mask it | Nexus password or user token |
-| `NEXUS_REPO_NAME` | No | Raw repository name (default: `sloc-raw-hosted`) |
-| `NEXUS_REPO_PATH` | No | Upload path prefix (default: `oxide-sloc/<project>/<pipeline-iid>`) |
-| `NEXUS_VERSION` | No | `nexus2` for NRM 2 (default: `nexus` for NRM 3) |
-| `NEXUS_GENERATE_MANIFEST` | No | `true` to upload `checksums.sha256` alongside |
+| `ARTIFACT_REPO_TYPE` | Yes | One of `artifactory` / `nexus` / `nexus2` / `s3` / `minio` / `azure-blob` / `generic-http` |
+| `ARTIFACT_REPO_URL` | Yes | Base URL of the repository service |
+| `ARTIFACT_REPO_USER` | Backend-dependent — mask it | Username / access-key ID |
+| `ARTIFACT_REPO_PASS` | Backend-dependent — mask it | Password / API token / secret key |
+| `ARTIFACT_REPO_PATH` | No | Upload path prefix (default: `oxide-sloc/<project>/<pipeline-iid>`) |
+| `ARTIFACT_REPO_EXTRA` | No | Provider-specific (Nexus repo name, Azure container, MinIO endpoint, S3 flags) |
+| `ARTIFACT_GENERATE_MANIFEST` | No | `true` to upload a `checksums.sha256` manifest alongside |
 
-The job stages these artifacts for upload: the compiled `oxide-sloc` binary, `result.json`, `report.html`, `re-rendered.html`, and `re-rendered.pdf` (each skipped if not produced by an earlier job).
+The job stages every artifact produced by the pipeline (binary, `result.json`,
+`report.{html,pdf,csv,xlsx}`, `junit.xml`, `lcov.info`, `sonar-coverage.xml`,
+`diff.{json,csv}` — each skipped if absent).
 
-**Running the job manually** when `NEXUS_REPO_URL` is not set:
+**Nexus back-compatibility:** the older `NEXUS_REPO_URL` / `NEXUS_USER` /
+`NEXUS_PASS` / `NEXUS_REPO_NAME` variables are still honored — if set (and the
+generic `ARTIFACT_REPO_*` are not), the job pushes to Nexus 3 exactly as the
+former `nexus:push` job did.
+
+**Running the job manually** when no repository is configured:
 
 1. Open the pipeline in GitLab UI.
-2. Click the ▶ (play) button on the `nexus:push` job.
+2. Click the ▶ (play) button on the `artifact-push` job.
 3. The job has `allow_failure: true` so it will not block the pipeline even if the push fails.
 
 ---
