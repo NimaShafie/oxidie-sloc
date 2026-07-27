@@ -90,6 +90,9 @@ perf.data.old
 # Generated report artefacts under testing/fixtures/
 testing/fixtures/**/sloc/
 
+# JUnit test report written to the repo root by the CI test job
+junit.xml
+
 # Transferable bundle archives created by `make bundle`
 /oxide-sloc-bundle*.7z
 /oxide-sloc-bundle*.tar.gz

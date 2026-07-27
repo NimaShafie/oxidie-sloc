@@ -15,6 +15,13 @@ publish = false
 [dependencies]
 cargo-llvm-cov = "0.6"
 cargo-nextest = "0.9"
+# cargo-nextest pulls in `locked-tripwire`, a crate whose high-numbered
+# release (0.1.1002) is a poison pill that compile_error!s unless nextest is
+# installed with --locked. `cargo vendor` re-resolves and always picks that
+# one, so the vendored offline install fails. Pin the benign release; do not
+# switch the pipeline to --locked (nextest's bundled lock wants chrono
+# 0.4.44, which the vendor set does not carry).
+locked-tripwire = "=0.1.0"
 tar = "0.4.46"
 
 # Prevents cargo from treating this package as a member of the parent workspace.
