@@ -12,6 +12,12 @@ __pycache__/
 # so that online dev builds continue to use crates.io by default.
 /.cargo/config.toml
 
+# CI/local air-gap replay homes: CARGO_HOME=${CI_PROJECT_DIR}/.cargo and
+# RUSTUP_HOME=${CI_PROJECT_DIR}/.rustup, where the committed toolchain bundle is
+# extracted (~1 GB). Never commit — the bundle lives under toolchain/.
+/.cargo/
+/.rustup/
+
 # Logs and temp files
 *.log
 *.tmp
