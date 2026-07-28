@@ -93,10 +93,15 @@ def runUnitTests() {
                 echo 'cargo-nextest installed from vendor successfully.'
                 useNextest = true
             } else {
-                echo 'WARNING: cargo-nextest unavailable (not on PATH and not in vendor).'
+                // TEST_RUNNER explicitly requested cargo-nextest but it is not on
+                // PATH and the offline install failed. Do NOT degrade silently to a
+                // green build with no JUnit report — mark the build UNSTABLE so the
+                // regression is visible (yellow, notified), while still running the
+                // cargo test fallback below so the suite is not skipped entirely.
+                unstable('cargo-nextest was requested (TEST_RUNNER=cargo-nextest) but is unavailable and the offline install failed — falling back to cargo test with NO JUnit report. Bake cargo-nextest into the agent image to restore the Tests report.')
                 echo '  JUnit XML output will not be produced this run.'
                 echo '  To enable: cargo install cargo-nextest  on the agent (then re-run install-rust-cache.sh).'
-                echo '  Falling back to cargo test.'
+                echo '  Falling back to cargo test (build marked UNSTABLE).'
             }
         } else {
             useNextest = true
