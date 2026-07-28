@@ -42,6 +42,17 @@ def _extract_finding(d, project_root, seen):
     # rules in ci/sonar/sonar-project.properties) is inert on the server, so the
     # suppression must happen before findings are imported. Mirrors e1's
     # resourceKey=**/tests/**/*.rs.
+    #
+    # LIMITATION (by design): this is PATH-based, matching e1 exactly, so it only
+    # covers files under a tests/ directory. It does NOT see unit tests written as
+    # inline `#[cfg(test)] mod tests { … }` blocks inside src/*.rs — where most of this
+    # workspace's unit tests actually live (measured: ~69% of /src/ clippy findings
+    # under an aggressive lint set fall inside such blocks). Closing that gap would
+    # need span-aware filtering (track each #[cfg(test)] block's line range per file
+    # and drop findings whose line_start falls inside), not another path check — and a
+    # naive brace counter would risk wrongly dropping production findings, so it is not
+    # done here. It costs nothing under the documented CI clippy flags (pedantic/
+    # nursery leave test code clean); revisit only if the lint set is tightened.
     if "tests" in path.replace("\\", "/").split("/"):
         return None
     key = (code, path, primary["line_start"], primary["column_start"], msg.get("message", ""))

@@ -54,6 +54,20 @@ Run each command from the repository root.
 
 ### Step 1 — Clippy (external-issues source)
 
+> **Cold cache first — or the report silently under-reports.** `cargo clippy`
+> reuses its warm cache and only re-lints crates that changed since the last build,
+> so a warm run can emit findings for only *some* workspace members and a
+> verification then passes vacuously. Force a cold lint of every crate first:
+>
+> ```bash
+> cargo clean -p sloc-config -p sloc-languages -p sloc-core -p sloc-report \
+>             -p sloc-git -p sloc-web -p sloc-mcp -p oxide-sloc
+> ```
+>
+> There is **no `sloc-cli` package** — the binary crate in `crates/sloc-cli/` is
+> named `oxide-sloc`, so `cargo clean -p sloc-cli` fails and cleans nothing. A plain
+> `cargo clean` also works but rebuilds everything.
+
 ```bash
 cargo clippy --workspace --all-targets --all-features \
     --message-format=json --offline \
@@ -64,8 +78,13 @@ cargo clippy --workspace --all-targets --all-features \
 python3 scripts/internal/clippy_to_sonar.py clippy.json clippy-sonar.json "$PWD"
 ```
 
-The converter strips the deprecated `type` / `engineId` fields from the
-issue objects so SonarQube 26.x accepts the report without aborting.
+`clippy_to_sonar.py` also drops findings that would be false positives against
+production-code rules before they are imported: any finding under a `tests/`
+directory, plus `clippy::multiple_crate_versions` (a workspace-level artifact). It
+filters by **file path**, so clippy findings inside inline `#[cfg(test)]` modules in
+`src/*.rs` are *not* dropped — harmless under the pedantic/nursery flags above (test
+code is clean there), relevant only if the lint set is tightened. See the comment in
+`scripts/internal/clippy_to_sonar.py`.
 
 ### Step 2 — Coverage (LCOV + Cobertura)
 
@@ -110,6 +129,47 @@ running on the host's LAN interface (e.g. `http://10.x.x.x:9000`).
 ### Step 4 — View results
 
 Open `$SONAR_HOST/dashboard?id=oxide-sloc` in a browser.
+
+### Step 5 — Verify test/main classification and clippy suppression
+
+Confirm the `ci/sonar/sonar-project.properties` scoping is behaving. These queries
+need an **admin** login — an analysis token gets `Insufficient privileges` on
+`api/components/tree`.
+
+```bash
+ADMIN="admin:<password>"
+
+# Test files should total 14 (UTS); main files 45 (FIL).
+curl -s -u "$ADMIN" \
+  "$SONAR_HOST/api/components/tree?component=oxide-sloc&qualifiers=UTS&ps=500" \
+  | jq -r '.paging.total'   # expect 14
+curl -s -u "$ADMIN" \
+  "$SONAR_HOST/api/components/tree?component=oxide-sloc&qualifiers=FIL&ps=500" \
+  | jq -r '.paging.total'   # expect 45
+```
+
+For clippy suppression, two API gotchas will otherwise produce a false result:
+
+- **Pass `resolved=false`.** Without it the search also returns CLOSED/stale issues
+  from earlier scans, so a test file can report hundreds of already-resolved
+  `external_clippy` issues and look like a failure when the live count is 0.
+- **Don't trust `.total` for a client-side filter, and don't let the default page
+  size truncate.** Fetch with `ps=500` and count client-side.
+
+```bash
+# Live clippy issues on a test file — expect 0 (filtered in the converter).
+curl -s -u "$ADMIN" \
+  "$SONAR_HOST/api/issues/search?componentKeys=oxide-sloc:crates/sloc-web/tests/integration.rs&resolved=false&ps=500" \
+  | jq '[.issues[]|select(.rule|startswith("external_clippy:"))]|length'   # expect 0
+
+# Sanity that the import path still works — main code carries clippy issues.
+# Count external_clippy unfiltered by rule id (a specific lint like doc_markdown may
+# not fire on a given file under this lint set — e.g. it lands on sloc-cli/src/main.rs,
+# not sloc-web/src/lib.rs).
+curl -s -u "$ADMIN" \
+  "$SONAR_HOST/api/issues/search?componentKeys=oxide-sloc:crates/sloc-web/src/lib.rs&resolved=false&ps=500" \
+  | jq '[.issues[]|select(.rule|startswith("external_clippy:"))]|length'   # expect > 0
+```
 
 ## Discovering the correct Rust coverage key
 
