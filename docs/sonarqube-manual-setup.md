@@ -109,6 +109,14 @@ rustup component add llvm-tools
 
 Coverage is optional — the scanner silently skips missing report files.
 
+> **Regenerate coverage for the exact commit you are scanning.** Reusing an
+> `lcov.info` from an earlier commit makes `new_coverage` unreliable: its line
+> numbers no longer align with edited files, so the figure drifts (and near the 80%
+> gate that can flip pass/fail on noise, not real coverage). If `cargo-llvm-cov`
+> isn't available on the scan host, generate coverage in CI (the `coverage` job in
+> `.github/workflows/ci.yml`) and pull the fresh `lcov.info` — do not treat a reused
+> report as authoritative.
+
 ### Step 3 — Scanner container
 
 ```bash
@@ -170,6 +178,30 @@ curl -s -u "$ADMIN" \
   "$SONAR_HOST/api/issues/search?componentKeys=oxide-sloc:crates/sloc-web/src/lib.rs&resolved=false&ps=500" \
   | jq '[.issues[]|select(.rule|startswith("external_clippy:"))]|length'   # expect > 0
 ```
+
+> **This suppression check is VACUOUS under the documented flags.** With
+> `-W clippy::pedantic -W clippy::nursery` (Step 1), the test files emit **zero**
+> clippy findings to begin with — so "0 live issues on a test file" proves nothing.
+> To exercise the converter's `tests/` filter for real, re-run Step 1 with an
+> aggressive set that makes test code noisy, e.g. add
+> `-W clippy::unwrap_used -W clippy::expect_used -W clippy::panic -W clippy::indexing_slicing`,
+> and confirm the raw `clippy.json` has hundreds of test-path findings while
+> `clippy-sonar.json` has zero (jq on both). Do that as a **separate, non-scanning**
+> run so it doesn't perturb the imported gate numbers.
+
+## Scanning from a git worktree
+
+Running the scan in a throwaway `git worktree` (to avoid disturbing an in-progress
+checkout) has three traps — the last one is dangerous because it fails *green*:
+
+- `.cargo/config.toml` and `vendor/` are **untracked**, so a fresh worktree can't
+  build offline until you copy or symlink them in. Delete a `vendor/` symlink again
+  **before** `git worktree remove`, or the remove refuses.
+- Mount the worktree at its **real absolute path** in the scanner container, not a
+  synthetic `/usr/src`. A worktree's `.git` is a file pointing back at the main
+  repo's `.git/worktrees/<name>`; mounting elsewhere breaks that resolution, the
+  scanner indexes **0 files**, and the quality gate **passes vacuously** — a green
+  gate that analysed nothing. Verify the "N files indexed" line is non-zero every run.
 
 ## Discovering the correct Rust coverage key
 
