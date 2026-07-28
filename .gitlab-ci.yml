@@ -21,9 +21,13 @@
 #   BITBUCKET_BASE_URL/TOKEN/USER/WORKSPACE/REPO   Bitbucket     — notify:bitbucket
 #   ARTIFACT_REPO_USER / ARTIFACT_REPO_PASS   artifact-repo creds — artifact-push
 #
-# Air-gapped runners: place vendor.tar.xz in the workspace; the default
-# before_script verifies its checksum, extracts it, and redirects cargo to the
-# vendored sources. Internet-connected runners just use crates.io.
+# Air-gap scope: this pipeline vendors the Rust *toolchain* (committed under
+# toolchain/, extracted + pinned in the default before_script) and the Rust
+# *crate sources* (vendor.tar.xz, checksum-verified + extracted, with cargo
+# redirected to them). System packages (build-essential, gtk3, etc.) are NOT
+# vendored — a fully offline runner needs them prebaked into the image (apt is
+# skipped when they are already present; see apt_ensure) or reachable via an apt
+# mirror. Internet-connected runners just use crates.io and apt normally.
 
 # ── Global image / env ────────────────────────────────────────────────────────
 # Official Rust image pinned by digest (update: docker pull rust:slim &&
@@ -33,7 +37,22 @@ image: rust:slim@sha256:81099830a1e1d244607b9a7a30f3ff6ecadc52134a933b4635faba24
 default:
   interruptible: true
   before_script:
-    - apt-get update -qq && apt-get install -y -qq build-essential pkg-config libssl-dev ca-certificates git python3
+    # Prepend the cargo bin dir using the shell's real PATH (see the note in
+    # variables: — PATH must not be set there or it truncates to the empty string).
+    - export PATH="${CARGO_HOME}/bin:${PATH}"
+    # apt_ensure installs system packages only when some are missing, so a prebaked
+    # air-gap image (packages already present) never touches the network, while a
+    # networked runner installs them as before. Reused by the test/coverage jobs.
+    # A missing package on an offline runner with no prebake fails here, which is
+    # correct — the build cannot proceed without it.
+    - |
+      apt_ensure() {
+        miss=""
+        for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || miss="$miss $p"; done
+        [ -z "$miss" ] && return 0
+        apt-get update -qq && apt-get install -y -qq $miss
+      }
+    - apt_ensure build-essential pkg-config libssl-dev ca-certificates git python3
     # Air-gap: the pinned image ships a different Rust than rust-toolchain.toml
     # pins, so on an offline runner `rustup show` (and every later cargo call)
     # would reach the network to sync the pinned channel and abort. Extract the
@@ -120,7 +139,11 @@ variables:
   # Rust / cargo environment (plumbing; leave as-is).
   CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
   RUSTUP_HOME: "${CI_PROJECT_DIR}/.rustup"
-  PATH: "${CI_PROJECT_DIR}/.cargo/bin:${PATH}"
+  # NOTE: do NOT set PATH here. GitLab expands `variables:` values against its own
+  # variable list, where PATH is undefined, so "${CI_PROJECT_DIR}/.cargo/bin:${PATH}"
+  # collapses to ".../.cargo/bin:" and the job loses /usr/bin (apt/git stop
+  # resolving). It is exported in before_script instead, where the shell's real
+  # PATH is in scope.
   RUST_LOG: "warn"
   OUT_DIR: "ci-out"
 
@@ -321,12 +344,38 @@ build:
 test:
   stage: test
   needs: []
+  # --all-features enables the native-dialog/rfd feature, which needs the
+  # gtk3/xdo/wayland devel headers on Linux (same as the coverage job below) —
+  # without them the build fails before any test runs.
   script:
+    - apt_ensure libgtk-3-dev libxdo-dev libwayland-dev
+    - |
+      # rust:slim ships no cargo-nextest and nothing else in this file installs
+      # it, so the probe below always failed → silent fallback to `cargo test` →
+      # no junit.xml → an empty Tests tab on a green job. Install it offline from
+      # the committed vendor set (verified working), with an online fallback for
+      # networked runners that lack the vendor archive. Do NOT add --locked to the
+      # offline `--path` install: nextest's bundled lock wants chrono 0.4.44 while
+      # the vendor set carries 0.4.45 by design (see ci/tools/Cargo.toml).
+      if [ "${TEST_RUNNER}" = "cargo-nextest" ] && ! cargo nextest --version >/dev/null 2>&1; then
+        if [ -d vendor/cargo-nextest ]; then
+          mkdir -p /tmp/ci-tools && cp -r vendor/cargo-nextest /tmp/ci-tools/
+          cargo install --offline --path /tmp/ci-tools/cargo-nextest \
+            || cargo install cargo-nextest --locked
+        else
+          cargo install cargo-nextest --locked
+        fi
+      fi
     - |
       if [ "${TEST_RUNNER}" = "cargo-nextest" ] && cargo nextest --version >/dev/null 2>&1; then
         echo "Running cargo-nextest (JUnit output)"
-        cargo nextest run --workspace --all-features --profile ci
-        cp target/nextest/ci/junit.xml junit.xml
+        # Capture the status so a failing test run STILL yields a populated Tests
+        # tab: without this, `cargo nextest run` aborting under set -e skips the
+        # copy below — exactly when the junit report matters most.
+        rc=0
+        cargo nextest run --workspace --all-features --profile ci || rc=$?
+        [ -f target/nextest/ci/junit.xml ] && cp target/nextest/ci/junit.xml junit.xml
+        exit "$rc"
       else
         echo "Running cargo test (no JUnit report)"
         cargo test --workspace --all-features
@@ -345,7 +394,7 @@ coverage:
   # llvm-cov --all-features pulls in rfd/native-dialog → needs gtk3/xdo/wayland
   # devel headers on Linux (generate-coverage.sh hard-fails early otherwise).
   script:
-    - apt-get install -y -qq libgtk-3-dev libxdo-dev libwayland-dev
+    - apt_ensure libgtk-3-dev libxdo-dev libwayland-dev
     - rustup component add llvm-tools 2>/dev/null || true
     - bash ci/sonar/generate-coverage.sh coverage
     - cat coverage/coverage-summary.txt
