@@ -137,6 +137,25 @@ build_one() {
     fi
     echo "  Toolchain installed: $tc_dir"
 
+    # ── Add the components declared in rust-toolchain.toml ────────────────────
+    # rustup-init installs a --profile minimal toolchain (rustc/cargo/rust-std
+    # only).  The air-gapped CI quality-gate jobs (fmt, clippy, coverage) need
+    # rustfmt, clippy, and llvm-tools, so bake them into the bundle here — an
+    # offline toolchain that cannot run the quality gates is only half air-gapped.
+    # Read the list straight from rust-toolchain.toml so it can never drift from
+    # what the repo pins.
+    local components=""
+    components="$(sed -n 's/.*components *= *\[\(.*\)\].*/\1/p' "$TOOLCHAIN_TOML" \
+        | grep -oE '"[A-Za-z0-9_-]+"' | tr -d '"' | tr '\n' ' ')" || components=""
+    if [[ -n "${components// /}" ]]; then
+        echo "  Adding declared components: ${components}"
+        local tc_name; tc_name="$(basename "$tc_dir")"
+        local rustup_bin="$cargo_home/bin/rustup"
+        [[ -x "$rustup_bin" ]] || rustup_bin="$cargo_home/bin/rustup.exe"
+        RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
+            "$rustup_bin" component add --toolchain "$tc_name" ${components}
+    fi
+
     local tc_size
     tc_size="$(du -sm "$tc_dir" | awk '{print $1}')"; echo "  Uncompressed size: ${tc_size} MB"
 
