@@ -14,6 +14,11 @@ final-status-level = "flaky"
 # the Jenkinsfile moves it to <OUTPUT_SUBDIR>/test-results/junit.xml for archiving
 # and the junit() step.
 [profile.ci]
+# Run the whole suite even after a failure so the JUnit report is complete.
+# This governs GitLab's `cargo nextest run --profile ci` (it passes no fail-fast
+# flag, so the config wins). Jenkins passes an explicit --fail-fast/--no-fail-fast
+# flag which overrides this, so the setting is inert there.
+fail-fast = false
 # Parallelism: match available CPU count (fast on multi-core agents).
 test-threads = "num-cpus"
 # Show output of failing tests immediately and in the final summary.

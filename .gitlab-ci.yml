@@ -374,7 +374,12 @@ test:
         # copy below — exactly when the junit report matters most.
         rc=0
         cargo nextest run --workspace --all-features --profile ci || rc=$?
-        [ -f target/nextest/ci/junit.xml ] && cp target/nextest/ci/junit.xml junit.xml
+        # Copy the JUnit report if nextest wrote one, then exit with the captured
+        # status. Explicit if/then/fi (not `[ -f … ] && cp …`) keeps the flow
+        # before `exit "$rc"` unambiguous under `set -e` across shells.
+        if [ -f target/nextest/ci/junit.xml ]; then
+          cp target/nextest/ci/junit.xml junit.xml
+        fi
         exit "$rc"
       else
         echo "Running cargo test (no JUnit report)"
