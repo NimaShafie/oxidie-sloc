@@ -127,7 +127,7 @@ fn is_mutating(method: &axum::http::Method) -> bool {
 }
 
 /// True for non-state-changing methods that a read-only credential may perform.
-fn is_safe_method(method: &axum::http::Method) -> bool {
+const fn is_safe_method(method: &axum::http::Method) -> bool {
     use axum::http::Method;
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }

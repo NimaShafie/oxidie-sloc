@@ -613,6 +613,12 @@ pub(crate) struct SessionState {
     pub(crate) last_seen: Instant,
 }
 
+// The bool fields below are independent runtime flags (server mode, unauth-allow,
+// TLS, proxy trust), not a state machine. Folding them into an enum/sub-struct would
+// churn every construction and access site across this crate for no clarity gain —
+// and that mechanical churn is exactly what risks the new_duplicated_lines_density
+// gate. Scope the allow to this struct rather than refactoring.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) base_config: AppConfig,
@@ -866,7 +872,6 @@ pub const TEST_SERVER_MODE_API_KEY: &str = "oxide-sloc-test-server-mode-internal
 ///
 /// Always suppresses native OS dialogs (file pickers, open-path) via `SLOC_HEADLESS`.
 fn test_app_state(tmp_subdir: &str) -> AppState {
-    std::env::set_var("SLOC_HEADLESS", "1");
     // Root every router in its OWN temp subdirectory. Multiple routers share a
     // namespace prefix (e.g. "sloc_test"), so a fixed name would make parallel
     // tests read/write the same registry.json + artifact tree and race — a
@@ -874,6 +879,7 @@ fn test_app_state(tmp_subdir: &str) -> AppState {
     // A per-call counter (plus PID, to avoid leftover-dir collisions across
     // runs) guarantees isolation, honouring this fn's "per-test subdir" contract.
     static TEST_DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::set_var("SLOC_HEADLESS", "1");
     let seq = TEST_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("{tmp_subdir}-{}-{seq}", std::process::id()));
     AppState {
@@ -1042,7 +1048,7 @@ pub(crate) fn session_idle_timeout() -> Option<Duration> {
     {
         Some(0) => None,
         Some(secs) => Some(Duration::from_secs(secs)),
-        None if hardened_mode() => Some(Duration::from_secs(15 * 60)),
+        None if hardened_mode() => Some(Duration::from_mins(15)),
         None => None,
     }
 }
@@ -1070,6 +1076,19 @@ fn consent_banner_text() -> Option<String> {
 /// should intercept. APIs, assets, webhooks, health checks, and the accept
 /// endpoint itself are never gated.
 fn consent_gate_applies(req: &Request<Body>) -> bool {
+    const EXEMPT: &[&str] = &[
+        "/auth/consent",
+        "/static/",
+        "/images/",
+        "/assets/",
+        "/badge/",
+        "/healthz",
+        "/api/",
+        "/webhooks/",
+        "/metrics",
+        "/favicon",
+        "/llms",
+    ];
     if !matches!(
         *req.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
@@ -1085,19 +1104,6 @@ fn consent_gate_applies(req: &Request<Body>) -> bool {
         return false;
     }
     let path = req.uri().path();
-    const EXEMPT: &[&str] = &[
-        "/auth/consent",
-        "/static/",
-        "/images/",
-        "/assets/",
-        "/badge/",
-        "/healthz",
-        "/api/",
-        "/webhooks/",
-        "/metrics",
-        "/favicon",
-        "/llms",
-    ];
     !EXEMPT.iter().any(|p| path.starts_with(p))
 }
 

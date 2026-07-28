@@ -167,24 +167,22 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     let timeout = git_timeout();
     let start = Instant::now();
     let status = loop {
-        match child.try_wait().context("failed to poll git process")? {
-            Some(status) => break status,
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!(
-                        "git {} timed out after {}s — the remote did not respond in time. \
-                         On a corporate network this usually means a proxy or VPN is slow or \
-                         blocking the connection. Raise the ceiling with SLOC_GIT_TIMEOUT=<seconds>, \
-                         or check your proxy/VPN configuration.",
-                        args.first().copied().unwrap_or(""),
-                        timeout.as_secs()
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
+        if let Some(status) = child.try_wait().context("failed to poll git process")? {
+            break status;
         }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "git {} timed out after {}s — the remote did not respond in time. \
+                 On a corporate network this usually means a proxy or VPN is slow or \
+                 blocking the connection. Raise the ceiling with SLOC_GIT_TIMEOUT=<seconds>, \
+                 or check your proxy/VPN configuration.",
+                args.first().copied().unwrap_or(""),
+                timeout.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
     };
 
     let stdout = out_handle.join().unwrap_or_default();
@@ -562,8 +560,9 @@ pub fn get_sha(repo: &Path, ref_name: &str) -> Result<String> {
 
 // ── worktree helpers ──────────────────────────────────────────────────────────
 
-/// Resolve a user-facing ref name to a concrete commit SHA the worktree/scan commands
-/// accept. A clone only materialises a *local* branch for the repository's default branch;
+/// Resolve a user-facing ref name to a concrete commit SHA the worktree/scan commands accept.
+///
+/// A clone only materialises a *local* branch for the repository's default branch;
 /// every other branch exists solely as a remote-tracking ref (`refs/remotes/origin/<name>`).
 /// Ref listing strips the `origin/` prefix for display, so a bare branch name like "test"
 /// won't resolve directly — we fall back to the remote-tracking form. Tags and raw SHAs
