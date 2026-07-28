@@ -34,6 +34,44 @@ default:
   interruptible: true
   before_script:
     - apt-get update -qq && apt-get install -y -qq build-essential pkg-config libssl-dev ca-certificates git python3
+    # Air-gap: the pinned image ships a different Rust than rust-toolchain.toml
+    # pins, so on an offline runner `rustup show` (and every later cargo call)
+    # would reach the network to sync the pinned channel and abort. Extract the
+    # committed toolchain bundle into RUSTUP_HOME/CARGO_HOME instead. The bundle
+    # installs e.g. 1.97.0-<triple> while the repo pins the "1.97" channel; offline
+    # rustup would still try to sync the 1.97 channel manifest, so pin
+    # RUSTUP_TOOLCHAIN to the exact bundled name. Networked runners with no bundle
+    # just let rustup fetch as before.
+    - |
+      case "$(uname -m)" in
+        aarch64|arm64) TC_PLAT=linux-arm64 ;;
+        *)             TC_PLAT=linux-x86_64 ;;
+      esac
+      TC_CHANNEL="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+      if ls "toolchain/rust-toolchain-${TC_PLAT}.tar.gz."* >/dev/null 2>&1 \
+         && [ -z "$(ls -A "${RUSTUP_HOME}/toolchains" 2>/dev/null)" ]; then
+        echo "Air-gap: verifying + extracting bundled Rust toolchain (${TC_PLAT})..."
+        grep "rust-toolchain-${TC_PLAT}\.tar\.gz\." toolchain/checksums.sha256 \
+          | sha256sum -c - || { echo "toolchain checksum verification failed" >&2; exit 1; }
+        _tc_tmp="$(mktemp -d)"
+        cat "toolchain/rust-toolchain-${TC_PLAT}.tar.gz."* | tar -xzf - -C "$_tc_tmp" \
+          || { echo "toolchain extraction failed" >&2; exit 1; }
+        mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+        cp -a "$_tc_tmp/rustup/." "$RUSTUP_HOME/"
+        cp -a "$_tc_tmp/cargo/." "$CARGO_HOME/"
+        rm -rf "$_tc_tmp"
+      fi
+      # Pin to the exact bundled toolchain, but only when it matches the pinned
+      # channel (guards against a stale bundle after a toolchain bump).
+      _tc="$(ls -d "${RUSTUP_HOME}/toolchains/"*/ 2>/dev/null | head -n1)"
+      if [ -n "$_tc" ]; then
+        _tc_name="$(basename "$_tc")"
+        case "$_tc_name" in
+          "${TC_CHANNEL}".*|"${TC_CHANNEL}"-*)
+            export RUSTUP_TOOLCHAIN="$_tc_name"
+            echo "Pinned RUSTUP_TOOLCHAIN=${_tc_name}" ;;
+        esac
+      fi
     - rustup show
     # Air-gap: extract the committed vendor archive and pin cargo to it.
     - |
@@ -224,13 +262,13 @@ variables:
 fmt:
   stage: quality
   script:
-    - rustup component add rustfmt
+    - rustup component add rustfmt 2>/dev/null || true
     - cargo fmt --all -- --check
 
 clippy:
   stage: quality
   script:
-    - rustup component add clippy
+    - rustup component add clippy 2>/dev/null || true
     - cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Non-gating: surface every clippy diagnostic inline in the MR diff via the
@@ -239,7 +277,7 @@ codequality:
   stage: quality
   needs: []
   script:
-    - rustup component add clippy
+    - rustup component add clippy 2>/dev/null || true
     - cargo clippy --workspace --all-targets --all-features --message-format=json > clippy.json || true
     - python3 ci/gitlab/clippy-to-codeclimate.py clippy.json gl-code-quality.json
   artifacts:
