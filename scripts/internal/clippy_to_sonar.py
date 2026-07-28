@@ -35,6 +35,15 @@ def _extract_finding(d, project_root, seen):
     if not primary:
         return None
     path = normalize_path(primary["file_name"], project_root)
+    # Drop clippy findings in TEST code (any file under a tests/ directory). Test code
+    # legitimately uses unwrap/expect/panic/indexing and ad-hoc helpers that trip
+    # production-code lints as false positives. This filters at the source, which is
+    # where it actually works: SonarQube's analysis-level issue-ignore (the old e1/e2
+    # rules in ci/sonar/sonar-project.properties) is inert on the server, so the
+    # suppression must happen before findings are imported. Mirrors e1's
+    # resourceKey=**/tests/**/*.rs.
+    if "tests" in path.replace("\\", "/").split("/"):
+        return None
     key = (code, path, primary["line_start"], primary["column_start"], msg.get("message", ""))
     if key in seen:
         return None
