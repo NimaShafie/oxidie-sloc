@@ -92,7 +92,7 @@ enum Commands {
     /// Verify the integrity of a hash-chained audit log.
     /// Recomputes each record's keyed MAC and checks the chain links; reports the
     /// first altered/removed record. Requires the same key used when writing
-    /// (SLOC_AUDIT_HMAC_KEY, or pass --key).
+    /// (`SLOC_AUDIT_HMAC_KEY`, or pass `--key`).
     #[command(name = "verify-audit")]
     VerifyAudit(VerifyAuditArgs),
     /// Print shell completion script to stdout.
@@ -108,11 +108,11 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct VerifyAuditArgs {
-    /// Path to the audit log to verify. Defaults to $SLOC_AUDIT_LOG.
+    /// Path to the audit log to verify. Defaults to `$SLOC_AUDIT_LOG`.
     #[arg(value_name = "PATH")]
     log: Option<PathBuf>,
 
-    /// Integrity key. Defaults to $SLOC_AUDIT_HMAC_KEY.
+    /// Integrity key. Defaults to `$SLOC_AUDIT_HMAC_KEY`.
     #[arg(long, value_name = "KEY")]
     key: Option<String>,
 }

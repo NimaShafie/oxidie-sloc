@@ -937,13 +937,12 @@ pub async fn maybe_auto_post_confluence(
                 let map = state.artifacts.lock().await;
                 map.get(run_id).cloned()
             };
-            let artifacts = match artifacts {
-                Some(a) => Some(a),
-                None => {
-                    let reg = state.registry.lock().await;
-                    reg.find_by_run_id(run_id)
-                        .map(recover_artifacts_from_registry)
-                }
+            let artifacts = if let Some(a) = artifacts {
+                Some(a)
+            } else {
+                let reg = state.registry.lock().await;
+                reg.find_by_run_id(run_id)
+                    .map(recover_artifacts_from_registry)
             };
             if let Some(a) = artifacts {
                 attach_reports(

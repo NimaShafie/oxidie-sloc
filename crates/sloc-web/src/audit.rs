@@ -247,6 +247,7 @@ fn verify_failure(records: usize, line: usize, msg: &str) -> AuditVerifyReport {
 ///
 /// Never returns `Err`; read/parse problems are reported via the returned
 /// [`AuditVerifyReport`] (`ok == false`).
+#[must_use]
 pub fn verify_audit_file(path: &std::path::Path, key: &str) -> AuditVerifyReport {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
