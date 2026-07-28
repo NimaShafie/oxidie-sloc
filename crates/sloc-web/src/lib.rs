@@ -6444,6 +6444,7 @@ fn render_result_page(
         delta_files_removed: scan_delta.as_ref().map(|d| d.files_removed),
         delta_files_modified: scan_delta.as_ref().map(|d| d.files_modified),
         delta_files_unchanged: scan_delta.as_ref().map(|d| d.files_unchanged),
+        delta_files_total: scan_delta.as_ref().map(|d| d.files_total),
         delta_unmodified_lines: scan_delta.as_ref().map(delta_unmodified_lines),
         git_branch,
         git_branch_url,
@@ -8583,6 +8584,10 @@ async fn compare_handler(
         code_lines_removed: lines_removed,
         code_lines_modified: sum_modified_code_lines(&comparison),
         code_lines_unmodified: sum_unmodified_code_lines(&comparison),
+        code_lines_total: lines_added
+            + lines_removed
+            + sum_modified_code_lines(&comparison)
+            + sum_unmodified_code_lines(&comparison),
         new_scope: churn.new_scope,
         churn_rate_str: churn.churn_rate_str,
         churn_rate_class: churn.churn_rate_class,
@@ -8591,6 +8596,7 @@ async fn compare_handler(
         files_removed: comparison.files_removed,
         files_modified: comparison.files_modified,
         files_unchanged: comparison.files_unchanged,
+        files_total: comparison.files_total,
         file_rows,
         baseline_git_author: baseline_entry.git_author.clone(),
         current_git_author: current_entry.git_author.clone(),
@@ -11029,6 +11035,7 @@ fn multi_compare_page(
         r1(s1(0,'Added')+n1(1,cAdd,4)+s1(2,pct(cAdd)));
         r1(s1(0,'Removed')+n1(1,cRem,4)+s1(2,pct(cRem)));
         r1(s1(0,'Unchanged')+n1(1,cUnch,4)+s1(2,pct(cUnch)));
+        r1(s1(0,'Total')+n1(1,cMod+cAdd+cRem+cUnch,4)+s1(2,pct(cMod+cAdd+cRem+cUnch)));
         var lm={{}};
         FILES.forEach(function(f){{var l=f.l||'Unknown',d=+f.t||0;if(!lm[l])lm[l]={{f:0,d:0}};lm[l].f++;lm[l].d+=d;}});
         var langs=Object.keys(lm).sort(function(a,b){{return Math.abs(lm[b].d)-Math.abs(lm[a].d);}});
@@ -12646,10 +12653,10 @@ async fn trend_report_handler(
       // (sorted is newest-first), so a given project/commit appears at most once.
       var seenPC={{}},dedup=[];
       sorted.forEach(function(d){{var k=(d.project_label||'')+'|'+(d.commit||'');if(!seenPC[k]){{seenPC[k]=1;dedup.push(d);}}}});
-      var s1H=['Date','Project','Commit','Branch','Tags','Code Lines','Comment Lines','Blank Lines','Physical Lines','Files Analyzed','Report URL','Added','Deleted','Modified','Unmodified'];
+      var s1H=['Date','Project','Commit','Branch','Tags','Code Lines','Comment Lines','Blank Lines','Physical Lines','Files Analyzed','Report URL','Added','Deleted','Modified','Unmodified','Total'];
       var s1R=dedup.map(function(d){{
         var c=churnMap[d.run_id]||{{}};
-        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',(d.commit||'').substring(0,7),d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||'',+(c.added)||0,+(c.removed)||0,+(c.modified)||0,+(c.unmodified)||0];
+        return[d.timestamp.substring(0,16).replace('T',' '),d.project_label||'',(d.commit||'').substring(0,7),d.branch||'',(d.tags||[]).join('; '),+(d.code_lines)||0,+(d.comment_lines)||0,+(d.blank_lines)||0,+(d.physical_lines)||0,+(d.files_analyzed)||0,d.html_url||'',+(c.added)||0,+(c.removed)||0,+(c.modified)||0,+(c.unmodified)||0,(+(c.added)||0)+(+(c.removed)||0)+(+(c.modified)||0)+(+(c.unmodified)||0)];
       }});
       var pm={{}};
       dedup.forEach(function(d){{var p=d.project_label||'Unknown';if(!pm[p])pm[p]=[];pm[p].push(d);}});
@@ -12691,7 +12698,7 @@ async fn trend_report_handler(
             if(typeof cell==='number'){{x+='<c r="'+addr+'"><v>'+cell+'</v></c>';}}
             else{{x+='<c r="'+addr+'" t="inlineStr"><is><t>'+xe(String(cell))+'</t></is></c>';}}
           }});
-          if(withCtrl){{x+="<c r=\"Q"+rn+"\"><f>CHOOSE(MATCH('Focus Chart'!$B$1,{{\"Code Lines\",\"Comment Lines\",\"Blank Lines\",\"Physical Lines\",\"Added\",\"Deleted\",\"Modified\",\"Unmodified\"}},0),F"+rn+",G"+rn+",H"+rn+",I"+rn+",L"+rn+",M"+rn+",N"+rn+",O"+rn+")</f><v>"+Number(row[5])+"</v></c>";}}
+          if(withCtrl){{x+="<c r=\"Q"+rn+"\"><f>CHOOSE(MATCH('Focus Chart'!$B$1,{{\"Code Lines\",\"Comment Lines\",\"Blank Lines\",\"Physical Lines\",\"Added\",\"Deleted\",\"Modified\",\"Unmodified\",\"Total\"}},0),F"+rn+",G"+rn+",H"+rn+",I"+rn+",L"+rn+",M"+rn+",N"+rn+",O"+rn+",P"+rn+")</f><v>"+Number(row[5])+"</v></c>";}}
           x+='</row>';
         }});
         x+='</sheetData>';
@@ -12789,7 +12796,7 @@ async fn trend_report_handler(
         x+='<c r="B1" t="inlineStr"><is><t>Code Lines</t></is></c>';
         x+='<c r="D1" t="inlineStr"><is><t>&#8592; Pick a metric from the dropdown to update the chart below</t></is></c>';
         x+='</row></sheetData>';
-        x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="B1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines,Added,Deleted,Modified,Unmodified"</formula1></dataValidation></dataValidations>';
+        x+='<dataValidations count="1"><dataValidation type="list" allowBlank="1" showDropDown="0" showInputMessage="1" showErrorAlert="1" sqref="B1"><formula1>"Code Lines,Comment Lines,Blank Lines,Physical Lines,Added,Deleted,Modified,Unmodified,Total"</formula1></dataValidation></dataValidations>';
         if(drawRid){{x+='<drawing r:id="'+drawRid+'"/>';}}
         return x+'</worksheet>';
       }}
@@ -16350,6 +16357,7 @@ fn generate_offline_index(
         delta_files_removed: scan_delta.as_ref().map(|d| d.files_removed),
         delta_files_modified: scan_delta.as_ref().map(|d| d.files_modified),
         delta_files_unchanged: scan_delta.as_ref().map(|d| d.files_unchanged),
+        delta_files_total: scan_delta.as_ref().map(|d| d.files_total),
         delta_unmodified_lines: scan_delta.as_ref().map(delta_unmodified_lines),
         git_branch: run.git_branch.clone(),
         git_branch_url,
@@ -23799,6 +23807,11 @@ struct ScanSetupTemplate {
               <div class="delta-card-lbl">files unchanged</div>
               <div class="delta-card-tip">Files with no changes since the previous scan</div>
             </div>
+            <div class="delta-card-inline">
+              <div class="delta-card-val">{% if let Some(v) = delta_files_total %}{{ v|commas }}{% else %}—{% endif %}</div>
+              <div class="delta-card-lbl">files total</div>
+              <div class="delta-card-tip">Total files across both scans (modified + added + removed + unchanged)</div>
+            </div>
           </div>
           {% else %}
           <p style="font-size:12px;color:var(--muted);line-height:1.5;flex:1;">
@@ -24013,6 +24026,12 @@ struct ScanSetupTemplate {
                 <td class="mt-val-na">—</td>
                 <td class="mt-val-na">—</td>
                 <td>{% if let Some(v) = delta_files_unchanged %}<span>{{ v|commas }}</span>{% else %}<span class="mt-val-na">—</span>{% endif %}</td>
+              </tr>
+              <tr>
+                <td>Files total</td>
+                <td class="mt-val-na">—</td>
+                <td class="mt-val-na">—</td>
+                <td>{% if let Some(v) = delta_files_total %}<span>{{ v|commas }}</span>{% else %}<span class="mt-val-na">—</span>{% endif %}</td>
               </tr>
             </tbody>
           </table>
@@ -25605,6 +25624,7 @@ struct ResultTemplate {
     delta_files_removed: Option<usize>,
     delta_files_modified: Option<usize>,
     delta_files_unchanged: Option<usize>,
+    delta_files_total: Option<usize>,
     delta_unmodified_lines: Option<u64>,
     // git context
     git_branch: Option<String>,
@@ -29192,6 +29212,9 @@ struct CompareSelectTemplate {
     .fc-added .fc-count{color:var(--pos);}
     .fc-removed .fc-count{color:var(--neg);}
     .fc-unchanged .fc-count{color:var(--muted);}
+    .fc-total{border-top:1px solid var(--line);margin-top:3px;padding-top:5px;}
+    .fc-total .fc-count{color:var(--text);}
+    .fc-total .fc-label{font-weight:700;}
     body.dark-theme .fc-modified .fc-count{color:#f0c060;}
     .change-summary{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
     .chip{padding:4px 12px;border-radius:999px;font-size:13px;font-weight:700;}
@@ -29544,6 +29567,7 @@ struct CompareSelectTemplate {
             <div class="fc-row fc-added"><span class="fc-count">{{ files_added|commas }}</span><span class="fc-label">Added</span></div>
             <div class="fc-row fc-removed"><span class="fc-count">{{ files_removed|commas }}</span><span class="fc-label">Removed</span></div>
             <div class="fc-row fc-unchanged"><span class="fc-count">{{ files_unchanged|commas }}</span><span class="fc-label">Unchanged (identical code counts)</span></div>
+            <div class="fc-row fc-total"><span class="fc-count">{{ files_total|commas }}</span><span class="fc-label">Total (modified + added + removed + unchanged)</span></div>
           </div>
         </div>
       </div>
@@ -29571,6 +29595,12 @@ struct CompareSelectTemplate {
           <div class="insight-label">Lines Unmodified</div>
           <div class="insight-val">{{ code_lines_unmodified }}</div>
           <div class="insight-sub">Code lines in unchanged files</div>
+        </div>
+        <div class="insight-card">
+          <div class="dc-tip up">Sum of the added, removed, modified, and unmodified code-line metrics across the two scans.</div>
+          <div class="insight-label">Lines Total</div>
+          <div class="insight-val">{{ code_lines_total }}</div>
+          <div class="insight-sub">Added + removed + modified + unmodified</div>
         </div>
         <div class="insight-card">
           <div class="dc-tip up">Measures total editing activity relative to codebase size.<br>Formula: (lines added + lines removed) &divide; baseline code lines &times; 100%.<br>Above 20% = high activity<br>5&ndash;20% = normal velocity<br>Below 5% = stable baseline.</div>
@@ -30125,7 +30155,7 @@ struct CompareSelectTemplate {
           '.mc-b{font-size:10px;color:#999;margin-top:2px;}'+
           '.mc-p{font-size:11px;font-weight:700;margin-top:2px;}'+
           '.mc-p.pos{color:#2a6846;}.mc-p.neg{color:#b23030;}.mc-p.zero{color:#999;}'+
-          '.fcsec{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px;margin-bottom:10px;}'+
+          '.fcsec{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:8px;margin-bottom:10px;}'+
           '.fcc{border:1px solid #e5e0d8;border-radius:8px;padding:8px 11px;display:flex;align-items:center;gap:9px;background:#faf8f6;}'+
           '.fcc-n{font-size:18px;font-weight:900;}'+
           '.fcc-l{font-size:10px;font-weight:600;color:#666;line-height:1.25;}';
@@ -30164,6 +30194,7 @@ struct CompareSelectTemplate {
           '<div class="fcc"><span class="fcc-n" style="color:#2a6846">'+fullN(sd.fa)+'</span><span class="fcc-l">Added</span></div>'+
           '<div class="fcc"><span class="fcc-n" style="color:#b23030">'+fullN(sd.fr)+'</span><span class="fcc-l">Removed</span></div>'+
           '<div class="fcc"><span class="fcc-n" style="color:#555">'+fullN(sd.fu)+'</span><span class="fcc-l">Unchanged (identical code counts)</span></div>'+
+          '<div class="fcc"><span class="fcc-n" style="color:#1a2035">'+fullN(Number(sd.fm)+Number(sd.fa)+Number(sd.fr)+Number(sd.fu))+'</span><span class="fcc-l">Total (modified + added + removed + unchanged)</span></div>'+
           '</div></div>'+
           (langs.length?'<div class="sec"><p class="sh">Language Breakdown</p><table><thead><tr><th>Language</th><th style="text-align:right">Files</th><th style="text-align:right">Code Lines</th><th style="text-align:right">Code \u0394</th></tr></thead><tbody>'+langRows+'</tbody></table></div>':'')+
           '<div class="sec">'+
@@ -30256,6 +30287,7 @@ struct CompareSelectTemplate {
       r1(s1(0,'Added')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fa,4)+s1(4,_tp(sd.fa)));
       r1(s1(0,'Removed')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fr,4)+s1(4,_tp(sd.fr)));
       r1(s1(0,'Unchanged')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fu,4)+s1(4,_tp(sd.fu)));
+      r1(s1(0,'Total')+n1(1,0,4)+n1(2,0,4)+n1(3,sd.fm+sd.fa+sd.fr+sd.fu,4)+s1(4,_tp(sd.fm+sd.fa+sd.fr+sd.fu)));
       if(langs.length){
         r1('');r1(s1(0,'LANGUAGE BREAKDOWN',8));
         r1(s1(0,'Language',3)+s1(1,'Files Changed',3)+s1(2,'Code Delta',3));
@@ -30910,6 +30942,8 @@ struct CompareTemplate {
     code_lines_modified: i64,
     /// Code lines residing in files identical between the two scans.
     code_lines_unmodified: i64,
+    /// Sum of added + removed + modified + unmodified code-line metrics.
+    code_lines_total: i64,
     /// True when baseline had 0 code lines — the scope is entirely new in the current scan.
     new_scope: bool,
     churn_rate_str: String,
@@ -30919,6 +30953,7 @@ struct CompareTemplate {
     files_removed: usize,
     files_modified: usize,
     files_unchanged: usize,
+    files_total: usize,
     file_rows: Vec<CompareFileDeltaRow>,
     baseline_git_author: Option<String>,
     current_git_author: Option<String>,
@@ -34546,6 +34581,7 @@ mod utility_tests {
             files_removed: 1,
             files_modified: 1,
             files_unchanged: 1,
+            files_total: 4,
         }
     }
 

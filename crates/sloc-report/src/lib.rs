@@ -609,6 +609,12 @@ fn render_html_inner(
         delta_files_removed: delta_ctx.map_or(0, |d| d.delta_files_removed),
         delta_files_modified: delta_ctx.map_or(0, |d| d.delta_files_modified),
         delta_files_unchanged: delta_ctx.map_or(0, |d| d.delta_files_unchanged),
+        delta_files_total: delta_ctx.map_or(0, |d| {
+            d.delta_files_added
+                + d.delta_files_removed
+                + d.delta_files_modified
+                + d.delta_files_unchanged
+        }),
         prev_code_lines: delta_ctx.map_or(0, |d| d.prev_code_lines),
         prev_scan_count: delta_ctx.map_or(0, |d| d.prev_scan_count),
         prev_scan_label: delta_ctx
@@ -5648,6 +5654,11 @@ struct WarningOpportunityRow {
             <div class="delta-card-lbl">Files unchanged</div>
             <div class="delta-card-tip">Files with no changes since {{ prev_scan_label }}</div>
           </div>
+          <div class="delta-card-inline">
+            <div class="delta-card-val">{{ delta_files_total|commas }}</div>
+            <div class="delta-card-lbl">Files total</div>
+            <div class="delta-card-tip">Total files across both scans (modified + added + removed + unchanged)</div>
+          </div>
         </div>
       </div>
       {% else %}
@@ -9823,6 +9834,7 @@ struct ReportTemplate<'a> {
     delta_files_removed: usize,
     delta_files_modified: usize,
     delta_files_unchanged: usize,
+    delta_files_total: usize,
     prev_code_lines: u64,
     prev_scan_count: usize,
     prev_scan_label: String,
@@ -10011,6 +10023,7 @@ pub fn write_diff_csv(cmp: &sloc_core::ScanComparison, path: &Path) -> Result<()
     let _ = write!(out, "Files Removed,{}\r\n", cmp.files_removed);
     let _ = write!(out, "Files Modified,{}\r\n", cmp.files_modified);
     let _ = write!(out, "Files Unchanged,{}\r\n", cmp.files_unchanged);
+    let _ = write!(out, "Files Total,{}\r\n", cmp.files_total);
     let _ = write!(out, "Code Δ,{}\r\n", s.code_lines_delta);
     let _ = write!(out, "Comment Δ,{}\r\n", s.comment_lines_delta);
     let _ = write!(out, "Blank Δ,{}\r\n", s.blank_lines_delta);
@@ -10650,6 +10663,7 @@ pub fn write_diff_xlsx(cmp: &sloc_core::ScanComparison, path: &Path) -> Result<(
         vec!["Files Removed".into(), cmp.files_removed.to_string()],
         vec!["Files Modified".into(), cmp.files_modified.to_string()],
         vec!["Files Unchanged".into(), cmp.files_unchanged.to_string()],
+        vec!["Files Total".into(), cmp.files_total.to_string()],
         vec!["Code Δ".into(), s.code_lines_delta.to_string()],
         vec!["Comment Δ".into(), s.comment_lines_delta.to_string()],
         vec!["Blank Δ".into(), s.blank_lines_delta.to_string()],

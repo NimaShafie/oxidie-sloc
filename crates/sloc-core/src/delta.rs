@@ -73,6 +73,8 @@ pub struct ScanComparison {
     pub files_removed: usize,
     pub files_modified: usize,
     pub files_unchanged: usize,
+    /// Total files across both scans (`files_added + files_removed + files_modified + files_unchanged`).
+    pub files_total: usize,
 }
 
 fn build_modified(record: &FileRecord, base: &EffectiveCounts, lang: Option<String>) -> FileDelta {
@@ -266,6 +268,7 @@ pub fn compute_delta(baseline: &AnalysisRun, current: &AnalysisRun) -> ScanCompa
         files_removed,
         files_modified,
         files_unchanged,
+        files_total: files_added + files_removed + files_modified + files_unchanged,
     }
 }
 

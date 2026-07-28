@@ -2170,6 +2170,7 @@ fn print_diff_summary(cmp: &ScanComparison, plain: bool) {
         println!("files_removed={}", cmp.files_removed);
         println!("files_modified={}", cmp.files_modified);
         println!("files_unchanged={}", cmp.files_unchanged);
+        println!("files_total={}", cmp.files_total);
         println!("code_lines_delta={}", s.code_lines_delta);
         println!("comment_lines_delta={}", s.comment_lines_delta);
         println!("blank_lines_delta={}", s.blank_lines_delta);
@@ -2184,11 +2185,12 @@ fn print_diff_summary(cmp: &ScanComparison, plain: bool) {
     println!("  Current  : {}", s.current_run_id);
     println!();
     println!(
-        "  Files  added={} removed={} modified={} unchanged={}",
+        "  Files  added={} removed={} modified={} unchanged={} total={}",
         paint!(col, "32", cmp.files_added),
         paint!(col, "31", cmp.files_removed),
         paint!(col, "33", cmp.files_modified),
         paint!(col, "2", cmp.files_unchanged),
+        paint!(col, "1", cmp.files_total),
     );
     println!("  Code Δ   : {}", fmt_delta(col, s.code_lines_delta));
     println!("  Comment Δ: {}", fmt_delta(col, s.comment_lines_delta));
@@ -2565,8 +2567,8 @@ fn build_pr_comment_body(
         writeln!(out, "| Blank Δ | {} |", sign(s.blank_lines_delta)).expect("infallible");
         writeln!(
             out,
-            "| Files | +{} added / -{} removed / ~{} modified |",
-            cmp.files_added, cmp.files_removed, cmp.files_modified
+            "| Files | +{} added / -{} removed / ~{} modified / {} total |",
+            cmp.files_added, cmp.files_removed, cmp.files_modified, cmp.files_total
         )
         .expect("infallible");
     }
