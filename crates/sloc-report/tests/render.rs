@@ -945,6 +945,7 @@ fn make_scan_comparison() -> ScanComparison {
         files_removed: 0,
         files_modified: 1,
         files_unchanged: 4,
+        files_total: 6,
     }
 }
 
@@ -1087,6 +1088,7 @@ fn write_diff_csv_empty_comparison() {
         files_removed: 0,
         files_modified: 0,
         files_unchanged: 0,
+        files_total: 0,
     };
     write_diff_csv(&cmp, tmp.path()).unwrap();
     let content = std::fs::read_to_string(tmp.path()).unwrap();
@@ -1138,6 +1140,7 @@ fn write_diff_xlsx_empty_comparison() {
         files_removed: 0,
         files_modified: 0,
         files_unchanged: 0,
+        files_total: 0,
     };
     write_diff_xlsx(&cmp, tmp.path()).unwrap();
     let meta = std::fs::metadata(tmp.path()).unwrap();
