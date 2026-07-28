@@ -930,6 +930,18 @@ pub fn make_test_router_with_key(api_key: &str) -> Router {
     build_router(state)
 }
 
+/// Test router with a full-access key AND a read-only key. Exercises the read-only
+/// credential branch in the auth middleware: a read-only key authenticates safe
+/// (GET/HEAD/OPTIONS) requests but is rejected with 403 on state-changing methods.
+pub fn make_test_router_with_readonly_key(full_key: &str, readonly_key: &str) -> Router {
+    let mut state = test_app_state("sloc_test_readonly");
+    state.api_keys = Arc::new(vec![secrecy::SecretBox::new(Box::new(full_key.to_owned()))]);
+    state.readonly_api_keys = Arc::new(vec![secrecy::SecretBox::new(Box::new(
+        readonly_key.to_owned(),
+    ))]);
+    build_router(state)
+}
+
 /// Test router with `server_mode = true`. Exercises server-mode-gated code paths such as
 /// the locked watched-bar in trend-reports, path validation in analyze, and upload-only
 /// preview restrictions.
