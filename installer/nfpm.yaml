@@ -27,6 +27,8 @@ contents:
       mode: 0755
 
 overrides:
+  # chromium is a soft dependency: it is only needed for headless-Chromium PDF
+  # export. The CLI, web UI, and HTML reports work without it.
   deb:
     recommends:
       - chromium-browser
