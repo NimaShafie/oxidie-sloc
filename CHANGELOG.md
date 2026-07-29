@@ -10,6 +10,37 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.1] — 2026-07-29
+
+### Added
+
+- **"Files total" / "Lines total" in scan comparisons** (`crates/sloc-core`,
+  `crates/sloc-web`): the diff/compare view now reports absolute file and line totals
+  alongside the per-language deltas, so a comparison shows both what changed and the
+  full size of each scan.
+
+### Fixed
+
+- **CI shell-pipe status masking** (`ci/jenkins`): guard against status-masking shell
+  pipes (including `| tee`) in the Jenkins Groovy pipeline so a failing stage can no
+  longer be hidden by a downstream pipe; genhtml failures now surface in `runCoverage`
+  and pipe usage is reported as a finding rather than a self-test failure.
+- **GitLab air-gap pipeline defects** (`.gitlab-ci.yml`): four pipeline defects found
+  during air-gap verification are repaired; the pinned toolchain install is now fully
+  offline.
+
+### Documentation
+
+- **Installer note**: Chromium is documented as a soft dependency — required only for
+  PDF export, not for core analysis.
+
+### Internal
+
+- **SonarQube debt cleanup**: cleared latent maintainability debt, reduced cognitive
+  complexity (S3776), and widened the coverage buffer.
+
+---
+
 ## [1.6.0] — 2026-07-24
 
 ### Added
