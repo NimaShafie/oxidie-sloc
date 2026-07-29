@@ -85,10 +85,15 @@ def runUnitTests() {
         ) == 0
         if (!alreadyInstalled) {
             echo 'cargo-nextest not found — attempting offline install from vendor...'
+            // Redirect to a log rather than piping to tail: Jenkins `sh` is dash,
+            // which has no `pipefail`, so a pipeline's exit status is tail's
+            // (always 0) and `installed` would be unconditionally true — making
+            // the unstable() branch below dead code.
             def installed = sh(
-                script: 'cargo install --offline cargo-nextest 2>&1 | tail -5',
+                script: 'cargo install --offline cargo-nextest > .nextest-install.log 2>&1',
                 returnStatus: true
             ) == 0
+            sh 'tail -5 .nextest-install.log 2>/dev/null || true'
             if (installed) {
                 echo 'cargo-nextest installed from vendor successfully.'
                 useNextest = true
@@ -110,10 +115,15 @@ def runUnitTests() {
 
     if (useNextest) {
         def failFastFlag = params.TEST_FAIL_FAST ? '--fail-fast' : '--no-fail-fast'
-        sh """
+        // Capture nextest's status instead of letting `| tee` swallow it (a bash
+        // shebang + pipefail is required — dash rejects `set -o pipefail`). The
+        // status is acted on AFTER the junit move/publish below, so a red or
+        // aborted run still gets its report collected.
+        def testStatus = sh(script: """#!/bin/bash
+            set -o pipefail
             cargo nextest run --workspace ${failFastFlag} --profile ci \
                 2>&1 | tee '${resultsDir}/nextest-output.txt'
-        """
+        """, returnStatus: true)
         // nextest writes JUnit XML into the profile store dir
         // (target/nextest/ci/junit.xml), NOT the workspace root. Move from there;
         // fall back to a search in case a custom CARGO_TARGET_DIR relocates it.
@@ -137,6 +147,13 @@ def runUnitTests() {
             } catch (Throwable t) {
                 echo "junit publish skipped (JUnit plugin not installed): ${t.message}"
             }
+        }
+        // Decide only after the report is collected. junit() flags a red suite on
+        // its own, but a nextest run that dies WITHOUT writing junit.xml (compile
+        // error, missing test binary, OOM) leaves nothing to parse — this keeps
+        // that case off green.
+        if (testStatus != 0) {
+            unstable("cargo nextest exited ${testStatus}")
         }
     } else {
         def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
