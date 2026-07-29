@@ -629,6 +629,10 @@ pipeline {
                         }
                         stage('Lint') {
                             steps {
+                                // Guard against status-masking shell pipes in
+                                // Jenkins Groovy / ci shell (dash makes `cmd | tail`
+                                // report 0 even on failure). Fast; runs before clippy.
+                                sh 'bash ci/lint-pipeline-shell.sh'
                                 // Single clippy run emitting JSON: it feeds the
                                 // warnings-ng "Warnings" trend view AND still enforces
                                 // -D warnings (we re-raise the failure below, after
