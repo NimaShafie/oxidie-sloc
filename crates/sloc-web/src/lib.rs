@@ -1022,7 +1022,7 @@ struct RuntimeSecurityConfig {
 fn allow_unauthenticated_server_mode() -> bool {
     matches!(
         std::env::var("SLOC_ALLOW_UNAUTHENTICATED").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
+        Ok("1" | "true" | "TRUE")
     )
 }
 
@@ -1186,6 +1186,10 @@ h1{{color:#b85d33;font-size:20px}}.notice{{line-height:1.65;background:#f7efe7;b
 
 /// Emit operator-facing warnings for insecure server-mode configurations.
 /// Pure side-effect (stdout); no bearing on the returned config values.
+// The bools are independent configuration facts read from the resolved config, not
+// a mode enum — folding them into a struct just to pass them here would add
+// ceremony without clarity. Scope the allow to this diagnostic helper.
+#[allow(clippy::fn_params_excessive_bools)]
 fn emit_server_mode_warnings(
     server_mode: bool,
     api_keys_empty: bool,

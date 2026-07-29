@@ -777,7 +777,7 @@ pub fn looks_like_cpp(text: &str) -> bool {
 fn tree_sitter_fast_path(
     language: Language,
     text: &str,
-    options: &AnalysisOptions,
+    options: AnalysisOptions,
 ) -> Option<RawFileAnalysis> {
     if options.blank_in_block_comment_as_comment || options.collapse_continuation_lines {
         return None;
@@ -799,7 +799,7 @@ fn tree_sitter_fast_path(
 pub fn analyze_text(language: Language, text: &str, options: AnalysisOptions) -> RawFileAnalysis {
     // tree-sitter fast-path (compiled out when the feature is disabled).
     #[cfg(feature = "tree-sitter")]
-    if let Some(result) = tree_sitter_fast_path(language, text, &options) {
+    if let Some(result) = tree_sitter_fast_path(language, text, options) {
         return result;
     }
 

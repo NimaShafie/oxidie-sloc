@@ -643,11 +643,11 @@ struct PruneArgs {
     keep_last: Option<u32>,
 
     /// Output tree to prune (defaults to the same location the web server uses:
-    /// $OXIDE_SLOC_ROOT/out/web, or ./out/web)
+    /// `$OXIDE_SLOC_ROOT/out/web`, or `./out/web`)
     #[arg(long, value_name = "DIR")]
     output_dir: Option<PathBuf>,
 
-    /// Also rotate/remove the audit log ($SLOC_AUDIT_LOG) and its rotated history
+    /// Also rotate/remove the audit log (`$SLOC_AUDIT_LOG`) and its rotated history
     #[arg(long)]
     logs: bool,
 
@@ -2930,7 +2930,7 @@ fn run_prune(args: &PruneArgs) -> Result<()> {
     };
     let log_bytes: u64 = log_targets
         .iter()
-        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .map(|p| std::fs::metadata(p).map_or(0, |m| m.len()))
         .sum();
 
     if args.json {
@@ -3054,7 +3054,7 @@ fn print_log_sweep(c: bool, log_targets: &[PathBuf], log_bytes: u64) {
 fn remove_log_targets(targets: &[PathBuf]) -> u64 {
     let mut freed = 0;
     for p in targets {
-        let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let sz = std::fs::metadata(p).map_or(0, |m| m.len());
         if std::fs::remove_file(p).is_ok() {
             freed += sz;
         }

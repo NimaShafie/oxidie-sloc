@@ -88,7 +88,7 @@ pub fn dir_size_bytes(path: &Path) -> u64 {
     }
     let mut total = 0;
     if path.is_file() {
-        return std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        return std::fs::metadata(path).map_or(0, |m| m.len());
     }
     walk(path, &mut total);
     total
@@ -138,7 +138,7 @@ pub struct PrunePlan {
 
 impl PrunePlan {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.runs.is_empty()
     }
 }
@@ -186,7 +186,7 @@ pub fn plan_run_prune(
             continue;
         }
         let output_dir = run_output_dir(e);
-        let bytes = output_dir.as_deref().map(dir_size_bytes).unwrap_or(0);
+        let bytes = output_dir.as_deref().map_or(0, dir_size_bytes);
         total_bytes += bytes;
         runs.push(PrunedRun {
             run_id: e.run_id.clone(),
@@ -385,7 +385,8 @@ mod tests {
         let root = tmp();
         let mut reg = ScanRegistry::default();
         for (i, id) in ["a", "b", "c", "d"].iter().enumerate() {
-            reg.entries.push(entry(id, i as i64, &root)); // a newest .. d oldest
+            reg.entries
+                .push(entry(id, i64::try_from(i).unwrap(), &root)); // a newest .. d oldest
         }
         let plan = plan_run_prune(&reg, None, Some(2));
         let ids: Vec<_> = plan.runs.iter().map(|r| r.run_id.clone()).collect();
@@ -538,7 +539,7 @@ mod tests {
         // remove_dir_all fails with a non-NotFound error, exercising the
         // failure-collection branch without racing on OS file locks.
         let bogus = root.join("target").join("json").join("result.json");
-        plan.runs[0].output_dir = Some(bogus.clone());
+        plan.runs[0].output_dir = Some(bogus);
         let report = execute_run_prune(&mut reg, &plan);
         assert_eq!(report.deleted_runs, 0);
         assert_eq!(report.failures.len(), 1);

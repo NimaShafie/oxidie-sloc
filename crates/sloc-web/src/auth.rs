@@ -118,7 +118,7 @@ to enable access.</p>
 }
 
 /// True for state-changing HTTP methods (the ones worth auditing on success).
-fn is_mutating(method: &axum::http::Method) -> bool {
+const fn is_mutating(method: &axum::http::Method) -> bool {
     use axum::http::Method;
     matches!(
         *method,

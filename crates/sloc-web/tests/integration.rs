@@ -1763,6 +1763,31 @@ async fn git_compare_refs_missing_params_not_5xx() {
 // across multiple oneshot calls, allowing us to exercise the result-rendering
 // code paths that only activate once a completed scan is stored.
 
+/// True if `body` looks like a full HTML document (either doctype casing).
+fn is_html_doc(body: &str) -> bool {
+    body.contains("<!doctype html>") || body.contains("<!DOCTYPE html>")
+}
+
+/// Poll `/api/runs/{wait_id}/status` until the async scan reports `complete`
+/// (returning its `run_id`), or it fails/cancels/times out (returning an empty
+/// string). Extracted so the end-to-end tests below stay flat.
+async fn poll_run_complete(app: &axum::Router, wait_id: &str) -> String {
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        if v["state"] == "complete" {
+            return v["run_id"].as_str().unwrap_or("").to_owned();
+        }
+        if v["status"] == "failed" || v["status"] == "cancelled" {
+            return String::new();
+        }
+    }
+    String::new()
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn full_analyze_cycle_html_json_csv_artifacts() {
@@ -1791,20 +1816,7 @@ async fn full_analyze_cycle_html_json_csv_artifacts() {
     assert!(!wait_id.is_empty(), "should receive x-wait-id");
 
     // Step 2: poll status until complete or timeout (10 s)
-    let mut run_id = String::new();
-    for _ in 0..100 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wait_id}/status")).await;
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-            if v["state"] == "complete" {
-                run_id = v["run_id"].as_str().unwrap_or("").to_owned();
-                break;
-            }
-            if v["status"] == "failed" || v["status"] == "cancelled" {
-                break;
-            }
-        }
-    }
+    let run_id = poll_run_complete(&app, &wait_id).await;
 
     // Step 3: fetch artifacts only if scan completed
     if run_id.is_empty() {
@@ -1834,7 +1846,7 @@ async fn full_analyze_cycle_html_json_csv_artifacts() {
             "html artifact must have html content-type"
         );
         assert!(
-            html_body.contains("<!doctype html>") || html_body.contains("<!DOCTYPE html>"),
+            is_html_doc(&html_body),
             "html artifact must be a full HTML document"
         );
     }
@@ -1875,7 +1887,7 @@ async fn full_analyze_cycle_html_json_csv_artifacts() {
         "/runs/result must not 5xx, got {status}"
     );
     if status == StatusCode::OK {
-        assert!(result_body.contains("<!doctype html>") || result_body.contains("<!DOCTYPE html>"));
+        assert!(is_html_doc(&result_body));
     }
 
     // API metrics for the specific run
@@ -1893,7 +1905,7 @@ async fn full_analyze_cycle_html_json_csv_artifacts() {
     // View-reports page should now show an entry
     let (status, _, vr_body) = get_shared(app.clone(), "/view-reports").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(vr_body.contains("<!doctype html>") || vr_body.contains("<!DOCTYPE html>"));
+    assert!(is_html_doc(&vr_body));
 
     // API metrics history
     let (status, _, history_body) = get_shared(app.clone(), "/api/metrics/history").await;
@@ -1960,30 +1972,8 @@ async fn full_analyze_cycle_compare_two_runs() {
         return;
     }
 
-    let mut rid1 = String::new();
-    let mut rid2 = String::new();
-    for _ in 0..100 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if rid1.is_empty() {
-            let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wid1}/status")).await;
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if v["state"] == "complete" {
-                    rid1 = v["run_id"].as_str().unwrap_or("").to_owned();
-                }
-            }
-        }
-        if rid2.is_empty() {
-            let (_, _, body) = get_shared(app.clone(), &format!("/api/runs/{wid2}/status")).await;
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if v["state"] == "complete" {
-                    rid2 = v["run_id"].as_str().unwrap_or("").to_owned();
-                }
-            }
-        }
-        if !rid1.is_empty() && !rid2.is_empty() {
-            break;
-        }
-    }
+    let rid1 = poll_run_complete(&app, &wid1).await;
+    let rid2 = poll_run_complete(&app, &wid2).await;
 
     if rid1.is_empty() || rid2.is_empty() {
         return;
@@ -1994,9 +1984,7 @@ async fn full_analyze_cycle_compare_two_runs() {
         get_shared(app.clone(), &format!("/compare?a={rid1}&b={rid2}")).await;
     assert!(status.as_u16() < 500, "/compare must not 5xx, got {status}");
     if status == StatusCode::OK {
-        assert!(
-            compare_body.contains("<!doctype html>") || compare_body.contains("<!DOCTYPE html>")
-        );
+        assert!(is_html_doc(&compare_body));
     }
 
     // Project history after two runs
