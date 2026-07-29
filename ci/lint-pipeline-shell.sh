@@ -6,4 +6,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# Re-verify the guard itself against its regression fixtures before scanning, so a
+# silent guard regression fails CI instead of passing green.
+python3 "${here}/lint-pipeline-shell-test.py"
 exec python3 "${here}/lint-pipeline-shell.py" "$@"
