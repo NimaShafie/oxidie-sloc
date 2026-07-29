@@ -12,15 +12,18 @@ Rules (see ci-integration docs / commit history):
      step, when the pipe can mask the status the pipeline actually cares about:
        (a) any top-level pipe in a `returnStatus:`/`returnStdout:` step — the
            captured value is the last command's, so the check always sees 0; or
-       (b) a top-level pipe into `tail`/`head` in any `sh` step — the classic
-           truncation idiom silently swallows the upstream failure.
+       (b) a top-level pipe into `tail`/`head`/`tee` in any `sh` step — the
+           truncation/duplication idioms silently swallow the upstream failure.
+           A bare `… | tee out.txt` is the defect that let a compile error with
+           no junit.xml produce a green build.
      Exempt when the step begins with a `#!/bin/bash` shebang and sets pipefail.
   2. `set -o pipefail` in an `sh` step that does NOT begin with `#!/bin/bash` —
      Jenkins `sh` is dash, which aborts with "set: Illegal option -o pipefail".
   3. Any `ci/**/*.sh` whose `set` options omit `pipefail`.
 
 Fast (<2s), no Jenkins/cargo/network. Run: `python3 ci/lint-pipeline-shell.py`
-(scans the repo) or pass explicit files (used by the self-test).
+(scans the repo) or pass explicit files. Regression coverage lives in
+`ci/lint-pipeline-shell-test.py` (run by the wrapper before the scan).
 """
 from __future__ import annotations
 
@@ -34,7 +37,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root (ci/..)
 # (crates/**/tests/corpus) is intentionally excluded — it is analyzer input,
 # not pipeline code.
 GROOVY_GLOBS = ["Jenkinsfile", "testing/examples/jenkins/Jenkinsfile"]
-MASKING_FILTERS = {"tail", "head"}
+MASKING_FILTERS = {"tail", "head", "tee"}
 
 
 # ── string / paren scanning over Groovy source ───────────────────────────────
