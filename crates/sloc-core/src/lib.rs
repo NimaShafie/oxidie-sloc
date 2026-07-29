@@ -2080,12 +2080,11 @@ pub fn detect_repository_layout(root: &Path) -> RepositoryLayout {
             }
             visited += 1;
             match classify_child(&child, &submodule_dirs, root) {
-                ChildAction::Skip => {}
                 ChildAction::RecordRepo(rel) => layout.nested_repos.push(rel),
                 ChildAction::Recurse if depth + 1 < REPO_SCAN_MAX_DEPTH => {
                     stack.push((child, depth + 1));
                 }
-                ChildAction::Recurse => {}
+                ChildAction::Skip | ChildAction::Recurse => {}
             }
         }
     }

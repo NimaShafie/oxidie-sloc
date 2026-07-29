@@ -18,8 +18,44 @@ use serde_json::Value;
 use sloc_web::make_test_router_with_key;
 use tower::ServiceExt;
 
+/// Send one request with the WRONG key: an authentication failure that routes
+/// through the audit hook.
+async fn fail_auth() {
+    let resp = make_test_router_with_key("the-real-key")
+        .oneshot(
+            Request::get("/api-docs")
+                .header(header::ACCEPT, "application/json")
+                .header(header::AUTHORIZATION, "Bearer definitely-wrong-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::OK);
+    let _ = resp.into_body().collect().await;
+}
+
+/// Parse the non-blank lines of the audit log into JSON records.
+fn records(log: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(log)
+        .expect("audit log readable")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("line is JSON"))
+        .collect()
+}
+
+fn mac(rec: &Value) -> String {
+    rec.get("mac")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
 #[tokio::test]
 async fn failed_auth_appends_a_chained_record_seeded_from_the_existing_log() {
+    static INIT: Once = Once::new();
+
     let dir = std::env::temp_dir().join(format!("sloc-audit-chain-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("audit.jsonl");
@@ -33,47 +69,38 @@ async fn failed_auth_appends_a_chained_record_seeded_from_the_existing_log() {
     )
     .unwrap();
 
-    static INIT: Once = Once::new();
     INIT.call_once(|| {
         std::env::set_var("SLOC_AUDIT_LOG", log.to_string_lossy().to_string());
         std::env::set_var("SLOC_AUDIT_HMAC_KEY", "chain-test-key");
     });
 
     // A request with the WRONG key is an authentication failure → audit::record →
-    // append_json_line under the configured sink + HMAC key.
-    let resp = make_test_router_with_key("the-real-key")
-        .oneshot(
-            Request::get("/api-docs")
-                .header(header::ACCEPT, "application/json")
-                .header(header::AUTHORIZATION, "Bearer definitely-wrong-key")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    // The exact status isn't the point (401), only that it was rejected, not served.
-    assert_ne!(resp.status(), StatusCode::OK);
-    let _ = resp.into_body().collect().await;
-
-    let contents = std::fs::read_to_string(&log).expect("audit log readable");
-    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert!(
-        lines.len() >= 2,
-        "a new audit record must have been appended: {contents}"
-    );
-
-    // The appended record is a valid chained record linked to the seed tip.
-    let last: Value = serde_json::from_str(lines.last().unwrap()).expect("appended line is JSON");
+    // append_json_line under the configured sink + HMAC key. Fire it twice: the
+    // first append recovers the tip from the file (seed_prev_from_file); the second
+    // links off the in-memory tip carried in chain_last, exercising both paths.
+    fail_auth().await;
+    let after_first = records(&log);
+    assert!(after_first.len() >= 2, "first record appended");
+    // First appended record links to the tip recovered from the pre-seeded file.
     assert_eq!(
-        last.get("prev").and_then(Value::as_str),
+        after_first[1].get("prev").and_then(Value::as_str),
         Some(seed_mac),
         "new record's prev must link to the recovered chain tip"
     );
     assert!(
-        last.get("mac")
-            .and_then(Value::as_str)
-            .is_some_and(|m| !m.is_empty()),
-        "new record carries a computed MAC"
+        !mac(&after_first[1]).is_empty(),
+        "record carries a computed MAC"
+    );
+
+    fail_auth().await;
+    let after_second = records(&log);
+    assert_eq!(after_second.len(), 3, "second record appended");
+    // Second appended record chains off the FIRST appended record's mac — proving
+    // the in-memory chain tip (chain_last) advanced rather than re-seeding.
+    assert_eq!(
+        after_second[2].get("prev").and_then(Value::as_str),
+        Some(mac(&after_second[1]).as_str()),
+        "second record must chain off the in-memory tip"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

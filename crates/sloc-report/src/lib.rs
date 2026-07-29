@@ -1612,6 +1612,9 @@ fn pdf_info_parts_tests(tot: &SummaryTotals) -> Vec<String> {
 /// ("Code:") followed by its regular-weight value, with a muted separator between parts, so the
 /// dense metric strip reads cleanly. Measured with the exact Helvetica advance table so the
 /// whole line is always shown — never truncated. Returns the y position below the last line.
+// x/y are page coordinates and r/g/b are colour channels — the conventional
+// single-letter names in graphics code; renaming them would hurt, not help.
+#[allow(clippy::many_single_char_names)]
 fn pdf_info_emit_line(
     ctx: &PdfCtx<'_>,
     mut y: f32,
