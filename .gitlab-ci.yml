@@ -285,6 +285,9 @@ variables:
 fmt:
   stage: quality
   script:
+    # Guard against status-masking shell pipes in Jenkins Groovy / ci shell (dash
+    # makes `cmd | tail` report 0 even on failure). Fast, no rust needed.
+    - bash ci/lint-pipeline-shell.sh
     - rustup component add rustfmt 2>/dev/null || true
     - cargo fmt --all -- --check
 
