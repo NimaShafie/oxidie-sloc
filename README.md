@@ -3,7 +3,7 @@
 [![CI](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/ci.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/ci.yml)
 [![Release](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml)
 [![Docker](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml)
-[![Latest Release](https://badgen.net/github/release/oxide-sloc/oxide-sloc?label=release&color=blue)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?label=release&color=blue)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
 [![crates.io](https://badgen.net/crates/v/oxide-sloc?label=crates.io&color=orange)](https://crates.io/crates/oxide-sloc)
 [![codecov](https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg)](https://codecov.io/gh/oxide-sloc/oxide-sloc)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
