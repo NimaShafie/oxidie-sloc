@@ -153,6 +153,23 @@ fn make_run() -> AnalysisRun {
     }
 }
 
+#[test]
+fn pdf_info_line_wraps_when_git_metadata_overflows() {
+    // A very long branch name makes the packed git info strip exceed the usable page
+    // width, forcing pdf_info_emit_line to wrap onto a fresh line (the overflow
+    // branch). Pure-Rust PDF path — no browser, fully deterministic.
+    let mut run = make_run();
+    run.git_branch = Some(format!("release/{}", "x".repeat(240)));
+    run.git_commit_short = Some("abcdef1".into());
+    run.git_nearest_tag = Some("v1.2.3".into());
+
+    let path = std::env::temp_dir().join(format!("sloc-pdf-wrap-{}.pdf", std::process::id()));
+    write_pdf_from_run(&run, &path).expect("pure-Rust PDF generation succeeds");
+    let len = std::fs::metadata(&path).expect("pdf written").len();
+    assert!(len > 0, "a non-empty PDF is produced");
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Run with zero files (empty project).
 fn make_empty_run() -> AnalysisRun {
     AnalysisRun {

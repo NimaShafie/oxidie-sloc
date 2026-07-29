@@ -23,9 +23,10 @@ use crate::history::{RegistryEntry, ScanRegistry};
 
 // ── Output-root / registry resolution (shared by CLI + web) ─────────────────────
 
-/// Workspace root used to anchor the default output tree. `OXIDE_SLOC_ROOT`
-/// wins when it names a real directory (Docker / systemd / CI); otherwise the
-/// current working directory is used, matching the web server's resolution.
+/// Workspace root used to anchor the default output tree.
+///
+/// `OXIDE_SLOC_ROOT` wins when it names a real directory (Docker / systemd / CI);
+/// otherwise the current working directory is used, matching the web server's resolution.
 #[must_use]
 pub fn workspace_root() -> PathBuf {
     if let Ok(root) = std::env::var("OXIDE_SLOC_ROOT") {
@@ -37,9 +38,11 @@ pub fn workspace_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Resolve the artifact output root. Mirrors the web server so the CLI prunes
-/// exactly the tree the server writes to. An explicit `raw` path (e.g. a CLI
-/// `--output-dir`) overrides; a relative value is anchored at [`workspace_root`].
+/// Resolve the artifact output root.
+///
+/// Mirrors the web server so the CLI prunes exactly the tree the server writes to.
+/// An explicit `raw` path (e.g. a CLI `--output-dir`) overrides; a relative value
+/// is anchored at [`workspace_root`].
 #[must_use]
 pub fn resolve_output_root(raw: Option<&str>) -> PathBuf {
     let value = raw.unwrap_or("out/web").trim();
@@ -91,10 +94,11 @@ pub fn dir_size_bytes(path: &Path) -> u64 {
     total
 }
 
-/// Derive the on-disk output directory that holds a run's artifacts from its
-/// registry entry. Handles both the current layout (files nested in
-/// `html/` `json/` `pdf/` `excel/` subfolders — go up two levels) and the older
-/// flat layout (go up one level). Returns `None` when the entry stored no paths.
+/// Derive the on-disk output directory that holds a run's artifacts from its registry entry.
+///
+/// Handles both the current layout (files nested in `html/` `json/` `pdf/` `excel/`
+/// subfolders — go up two levels) and the older flat layout (go up one level).
+/// Returns `None` when the entry stored no paths.
 #[must_use]
 pub fn run_output_dir(entry: &RegistryEntry) -> Option<PathBuf> {
     let p = entry
