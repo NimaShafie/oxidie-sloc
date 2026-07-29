@@ -184,12 +184,15 @@ def runCoverage() {
                 --html --output-dir '${coverageDir}/html'
         elif command -v genhtml >/dev/null 2>&1; then
             echo "==> Generating HTML report with genhtml (lcov fallback)"
-            genhtml '${coverageDir}/lcov.info' \
-                --output-directory '${coverageDir}/html' \
-                --legend \
-                --branch-coverage \
-                --title 'oxide-sloc coverage' \
-                2>&1 | tail -20
+            if ! genhtml '${coverageDir}/lcov.info' \
+                    --output-directory '${coverageDir}/html' \
+                    --legend \
+                    --branch-coverage \
+                    --title 'oxide-sloc coverage' \
+                    > '${coverageDir}/genhtml.log' 2>&1; then
+                echo "WARNING: genhtml failed — HTML coverage report not generated."
+            fi
+            tail -20 '${coverageDir}/genhtml.log' 2>/dev/null || true
         else
             echo "HTML coverage report: skipped (install cargo-llvm-cov or lcov package)."
         fi
