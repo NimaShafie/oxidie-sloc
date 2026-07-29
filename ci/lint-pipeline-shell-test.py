@@ -10,9 +10,14 @@ wrong reason). Asserts:
   - a bash + pipefail step piping into tee is exempt,
   - rule 2 fires on `set -o pipefail` in a non-bash step and stays quiet with a
     bash shebang,
-  - rule 3 fires on a ci .sh without pipefail,
-  - a pipe inside `$( … )` under returnStdout is NOT flagged, and
-  - the real repo (current main) is clean.
+  - rule 3 fires on a ci .sh without pipefail, and
+  - a pipe inside `$( … )` under returnStdout is NOT flagged.
+
+This tests guard BEHAVIOUR against embedded fixtures only. It deliberately does
+NOT assert the live repo is clean — that is the scan's job, and the scan prints
+the offending file:line + rule. (If the self-test owned that assertion, a real bad
+pipe would fail the self-test and the wrapper's `set -e` would abort before the
+scan ran, hiding the actionable finding behind a misleading "self-test failed".)
 
 Run: `python3 ci/lint-pipeline-shell-test.py`  →  exit 0 all-pass / 1 on regression.
 The wrapper (ci/lint-pipeline-shell.sh) runs this before the repo scan, so every
@@ -99,16 +104,6 @@ R3_BAD = "#!/usr/bin/env bash\nset -eu\necho hi\n"
 R3_OK = "#!/usr/bin/env bash\nset -euo pipefail\necho hi\n"
 
 
-def _repo_findings():
-    findings: list = []
-    groovy, shell = G._default_targets()
-    for rel in groovy:
-        G.check_groovy(rel, (G.ROOT / rel).read_text(encoding="utf-8", errors="replace"), findings)
-    for rel in shell:
-        G.check_shell(rel, (G.ROOT / rel).read_text(encoding="utf-8", errors="replace"), findings)
-    return findings
-
-
 CHECKS = [
     ("D1  |tail under returnStatus flagged", lambda: 1 in _rules(_groovy(D1))),
     ("D2  bare |tee flagged (the dangerous gap)", lambda: 1 in _rules(_groovy(D2))),
@@ -119,7 +114,6 @@ CHECKS = [
     ("rule 3 flags ci .sh without pipefail", lambda: 3 in _rules(_shell(R3_BAD))),
     ("rule 3 quiet with pipefail", lambda: _shell(R3_OK) == []),
     ("$( ... | ... ) under returnStdout not flagged", lambda: _groovy(FP) == []),
-    ("current main is clean", lambda: _repo_findings() == []),
 ]
 
 
@@ -135,7 +129,9 @@ def main() -> int:
         if not ok:
             failed.append(name)
     if failed:
-        print(f"\nself-test: {len(failed)}/{len(CHECKS)} FAILED", file=sys.stderr)
+        passed = len(CHECKS) - len(failed)
+        print(f"\nself-test: {passed}/{len(CHECKS)} passed, {len(failed)} FAILED",
+              file=sys.stderr)
         return 1
     print(f"self-test: {len(CHECKS)}/{len(CHECKS)} passed")
     return 0
