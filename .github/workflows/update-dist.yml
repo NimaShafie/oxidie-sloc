@@ -594,7 +594,8 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          IS_LATEST="$(gh release view "$TAG" --repo "$REPO" --json isLatest -q .isLatest)"
+          LATEST_TAG="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || echo "")"
+          IS_LATEST="false"; [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" = "$TAG" ] && IS_LATEST="true"
           echo "is_latest=$IS_LATEST" >> "$GITHUB_OUTPUT"
           if [ "$IS_LATEST" = "true" ]; then
             echo "Tag $TAG is the latest release — will commit Windows binary to main's dist/."
@@ -712,7 +713,8 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          IS_LATEST="$(gh release view "$TAG" --repo "$REPO" --json isLatest -q .isLatest)"
+          LATEST_TAG="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || echo "")"
+          IS_LATEST="false"; [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" = "$TAG" ] && IS_LATEST="true"
           echo "is_latest=$IS_LATEST" >> "$GITHUB_OUTPUT"
           if [ "$IS_LATEST" = "true" ]; then
             echo "Tag $TAG is the latest release — will commit Linux binary to main's dist/."
