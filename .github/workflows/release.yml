@@ -633,7 +633,14 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [build, vendor, sign, virustotal, sbom]
+    # NOTE: virustotal is intentionally NOT a dependency. VT is best-effort
+    # (continue-on-error), but a VT *timeout* is recorded as `cancelled`, not
+    # `failure`, and continue-on-error does not cover cancellation — so listing
+    # it here let a slow VT scan cancel the whole release (skipping publish).
+    # The VT scan report is still consumed opportunistically below via a
+    # continue-on-error download; if VT has not finished, the release notes
+    # simply omit the scan summary.
+    needs: [build, vendor, sign, sbom]
     runs-on: ubuntu-latest
     # Creating a GitHub Release requires a tag ref; skip on workflow_dispatch (branch run)
     if: github.event_name == 'push'
