@@ -73,6 +73,11 @@ skip = [
   # linux-raw-sys 0.4 (via rustix 0.38 → procfs → prometheus) and 0.12 (via rustix 1.x) coexist
   { name = "linux-raw-sys", version = "0.4" },
   { name = "linux-raw-sys", version = "0.12" },
+  # base64 0.22 (headless_chrome / hyper-util) coexists with 0.23 (our direct dep)
+  { name = "base64", version = "0.22" },
+  # syn 2 (older proc-macros) and syn 3 (async-trait ≥ 0.1.91, clap_derive ≥ 4.6.4) coexist
+  # during the proc-macro ecosystem's transition to syn 3
+  { name = "syn", version = "2" },
 ]
 
 [advisories]
@@ -91,14 +96,6 @@ ignore = [
   # ttf-parser is unmaintained, pulled transitively by printpdf 0.9 (allsorts font parsing).
   # No safe upgrade is available; it runs only at build time and ships nothing exploitable.
   { id = "RUSTSEC-2026-0192", reason = "unmaintained transitive dep of printpdf; no safe upgrade" },
-  # quick-xml < 0.41 quadratic-runtime / unbounded-allocation DoS when parsing untrusted XML.
-  # quick-xml enters the tree only via wayland-scanner (proc-macro) -> wayland-client -> rfd
-  # (native file-dialog dep), where it parses trusted Wayland protocol XML at build time only,
-  # never attacker-controlled runtime input. wayland-scanner 0.31.10 (latest, pinned by rfd
-  # 0.17.2) requires quick-xml ^0.39, so it cannot be upgraded without replacing the file-dialog
-  # stack. Drop these once rfd's wayland deps advance to a quick-xml >= 0.41 release.
-  { id = "RUSTSEC-2026-0194", reason = "quick-xml DoS unreachable; build-time trusted Wayland XML via rfd; no safe upgrade" },
-  { id = "RUSTSEC-2026-0195", reason = "quick-xml DoS unreachable; build-time trusted Wayland XML via rfd; no safe upgrade" },
 ]
 
 [sources]

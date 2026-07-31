@@ -53,7 +53,7 @@ tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-base64 = "0.22"
+base64 = "0.23"
 
 [workspace.lints.clippy]
 # Transitive dependency version splits that are unavoidable given the current
@@ -65,6 +65,8 @@ base64 = "0.22"
 #   getrandom  0.2 (ring) / 0.3 (rand) / 0.4 (uuid ≥ 1.23, tempfile ≥ 3.27)
 #   windows-sys 0.52 / 0.59 / 0.60 / 0.61 (Windows crate ecosystem transition)
 #   wit-bindgen 0.51 / 0.57 (wasmtime dependency split)
+#   base64     0.22 (headless_chrome / hyper-util) vs 0.23 (our direct dep)
+#   syn        2 (older proc-macros) vs 3 (async-trait / clap_derive transition)
 multiple_crate_versions = "allow"
 
 [workspace.metadata.oxide-sloc]

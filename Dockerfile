@@ -1,10 +1,11 @@
 # Stage 1: build the release binary
-# Pin builder to rust:1.95-slim-bookworm so the toolchain and runtime both use
+# Pin builder to rust:1.97-slim-bookworm so the toolchain and runtime both use
 # Debian bookworm (glibc 2.36). rust:slim can resolve to a trixie-based digest
 # (glibc 2.39) while the runtime stage below is still bookworm-slim, causing
-# "GLIBC_2.39 not found" at container startup.
+# "GLIBC_2.39 not found" at container startup. The minor series tracks
+# rust-toolchain.toml (channel 1.97).
 # Digest pinned to prevent silent base-image substitution.
-# To update: docker pull rust:1.95-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' rust:1.95-slim-bookworm
+# To update: docker pull rust:1.97-slim-bookworm && docker inspect --format '{{index .RepoDigests 0}}' rust:1.97-slim-bookworm
 #
 # Base images are build ARGs so a hardened build can substitute an approved
 # registry image (e.g. Chainguard, distroless, or a private mirror) WITHOUT
@@ -15,7 +16,7 @@
 #     --build-arg INSTALL_CHROMIUM=0 .
 # Defaults remain the digest-pinned Docker Hub images for the public build.
 # NOTE: ARGs used in FROM must be declared before the first FROM (global scope).
-ARG BUILDER_IMAGE=rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082
+ARG BUILDER_IMAGE=rust:1.97-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777
 ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 FROM ${BUILDER_IMAGE} AS builder
 
