@@ -37,7 +37,7 @@ FROM ${BUILDER_IMAGE} AS builder
 # Rust toolchain version — keep in lockstep with rust-toolchain.toml (channel).
 # Passing the minor series ("1.96") lets rustup select the latest matching patch,
 # which is what the workspace's rust-toolchain.toml also resolves to.
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.97
 
 # gcc (+ its binutils dependency) is the linker; tar/gzip/xz unpack the vendor
 # archive; findutils/coreutils provide sha256sum. UBI repos serve all of these
