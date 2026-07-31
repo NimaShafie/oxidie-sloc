@@ -20,7 +20,10 @@ ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c8988
 FROM ${BUILDER_IMAGE} AS builder
 
 # Upgrade base packages first to pull in any OS-level security fixes
-# that have landed since the image was published.
+# that have landed since the image was published. Package versions are left
+# unpinned on purpose so each build tracks the current upstream patch level; the
+# builder base image is digest-pinned above to keep the source reproducible.
+# hadolint ignore=DL3005,DL3008
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
@@ -69,6 +72,9 @@ FROM ${RUNTIME_IMAGE}
 # images can omit it with `--build-arg INSTALL_CHROMIUM=0`.
 # For a fully air-gapped Docker host, build this layer from a pre-populated apt mirror.
 ARG INSTALL_CHROMIUM=1
+# Versions left unpinned so the patch level tracks upstream; the runtime base
+# image is digest-pinned above to keep the source reproducible.
+# hadolint ignore=DL3005,DL3008
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates \

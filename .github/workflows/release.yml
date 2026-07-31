@@ -864,13 +864,15 @@ jobs:
       - name: Smoke test server with auth
         shell: bash
         run: |
-          SLOC_API_KEY=test ./oxide-sloc serve --server &
+          SLOC_API_KEY="ci-smoke-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+          export SLOC_API_KEY
+          ./oxide-sloc serve --server &
           PID=$!
           sleep 4
           FAILED=0
           for path in /auth/login /healthz; do
             code=$(curl -s -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer test" "http://127.0.0.1:4317${path}")
+              -H "Authorization: Bearer ${SLOC_API_KEY}" "http://127.0.0.1:4317${path}")
             if [[ "$code" != "200" ]]; then
               echo "FAIL: ${path} -> ${code}"
               FAILED=1

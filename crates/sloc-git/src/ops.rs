@@ -1093,6 +1093,8 @@ mod tests {
 
     // ── host_of_git_url ───────────────────────────────────────────────────────
 
+    // The URL embeds userinfo purely to prove the parser drops it and returns
+    // only the host — no real secret, this is a parsing fixture.
     #[test]
     fn host_of_git_url_https_with_port_and_creds() {
         assert_eq!(
