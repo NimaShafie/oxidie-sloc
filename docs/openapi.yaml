@@ -20,9 +20,12 @@ info:
     url: https://github.com/oxide-sloc/oxide-sloc
   x-generated-by: "Claude (claude-sonnet-4-6) — built entirely by AI"
 
+# The server binds to loopback over plain HTTP by default: traffic never leaves
+# the host, so the bearer token is not exposed on the wire. Production/off-host
+# deployments enable TLS by setting SLOC_TLS_CERT / SLOC_TLS_KEY (see auth notes).
 servers:
   - url: http://127.0.0.1:4317
-    description: Default local server
+    description: Default local server (loopback)
 
 security:
   - bearerAuth: []

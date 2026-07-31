@@ -362,8 +362,10 @@ jobs:
 
       - name: Diff against base branch (PRs only)
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          base="${{ github.event.pull_request.base.ref }}"
+          base="$BASE_REF"
           git fetch --no-tags --depth=1 origin "$base"
           git worktree add /tmp/sloc-base FETCH_HEAD
           ./target/release/oxide-sloc analyze /tmp/sloc-base \

@@ -51,6 +51,8 @@ FROM jenkins/jenkins:lts-jdk21@sha256:01c992ffef29dcf41c7164e8c16285c657c2368c49
 USER root
 
 # xz-utils — required to decompress jenkins-plugins.tar.xz during image build.
+# Versions left unpinned so the patch level tracks upstream.
+# hadolint ignore=DL3005,DL3008
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends xz-utils \
