@@ -82,21 +82,12 @@ skip = [
 
 [advisories]
 version = 2
-ignore = [
-  # lopdf stack overflow when parsing deeply-nested PDF objects. oxide-sloc uses lopdf
-  # write-only (PDF generation via printpdf) and never parses untrusted PDFs, so the
-  # vulnerable parser path is unreachable. No published printpdf release depends on
-  # lopdf >= 0.42 yet (0.9.1 pins ^0.39) — drop this once one does.
-  { id = "RUSTSEC-2026-0187", reason = "lopdf used write-only via printpdf; parser DoS unreachable" },
-  # anyhow unsoundness in Error::downcast_mut(): UB only occurs when calling downcast_mut()
-  # on an error that had context added via Error::context(). The workspace never calls
-  # downcast_mut() on any anyhow error (verified across all crates), so the unsound path is
-  # unreachable. Drop this once the vendored anyhow is bumped to a patched release.
-  { id = "RUSTSEC-2026-0190", reason = "anyhow downcast_mut unsoundness unreachable; workspace never calls downcast_mut" },
-  # ttf-parser is unmaintained, pulled transitively by printpdf 0.9 (allsorts font parsing).
-  # No safe upgrade is available; it runs only at build time and ships nothing exploitable.
-  { id = "RUSTSEC-2026-0192", reason = "unmaintained transitive dep of printpdf; no safe upgrade" },
-]
+# No ignores: the current dependency graph is clean under cargo-audit and cargo-deny.
+# Previously-ignored advisories are all resolved — lopdf is >= 0.42 (RUSTSEC-2026-0187
+# patched), anyhow is on a fixed release (RUSTSEC-2026-0190), and printpdf 0.12 no longer
+# pulls the unmaintained ttf-parser (RUSTSEC-2026-0192). Add a scoped ignore back here only
+# if a genuinely unreachable advisory surfaces.
+ignore = []
 
 [sources]
 unknown-registry = "deny"
