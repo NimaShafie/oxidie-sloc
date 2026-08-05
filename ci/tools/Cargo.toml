@@ -13,7 +13,7 @@ publish = false
 # then commit vendor.tar.xz + vendor.tar.xz.sha256.
 
 [dependencies]
-cargo-llvm-cov = "0.6"
+cargo-llvm-cov = "0.8"
 cargo-nextest = "0.9"
 # cargo-nextest pulls in `locked-tripwire`, a crate whose high-numbered
 # release (0.1.1002) is a poison pill that compile_error!s unless nextest is
