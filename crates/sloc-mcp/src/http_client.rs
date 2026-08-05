@@ -143,6 +143,10 @@ mod tests {
             .route(
                 "/not-found",
                 get(|| async { StatusCode::NOT_FOUND.into_response() }),
+            )
+            .route(
+                "/post-error",
+                post(|| async { StatusCode::BAD_GATEWAY.into_response() }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -208,5 +212,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn post_json_returns_error_on_non_success_status() {
+        // The server answers POST /post-error with 502, exercising the
+        // `!status.is_success()` bail branch of post_json.
+        let (base, _handle) = spawn_mock("{}", "{}").await;
+        let client = HttpClient::new(None);
+        let result = client
+            .post_json(&format!("{base}/post-error"), &serde_json::json!({"x": 1}))
+            .await;
+        assert!(result.is_err(), "a 502 response must return an error");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("502"),
+            "error should mention the status: {msg}"
+        );
     }
 }
