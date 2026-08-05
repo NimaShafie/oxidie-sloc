@@ -16,8 +16,8 @@
 #     --build-arg INSTALL_CHROMIUM=0 .
 # Defaults remain the digest-pinned Docker Hub images for the public build.
 # NOTE: ARGs used in FROM must be declared before the first FROM (global scope).
-ARG BUILDER_IMAGE=rust:1.97-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777
-ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+ARG BUILDER_IMAGE=rust:1.97-slim-bookworm@sha256:b93beca49a16e4459e51e3886658afece337bb2e991325b2919e84f7ae4a42ef
+ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 FROM ${BUILDER_IMAGE} AS builder
 
 # Upgrade base packages first to pull in any OS-level security fixes

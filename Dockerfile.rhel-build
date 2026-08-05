@@ -27,7 +27,7 @@
 # Digest pinned to prevent silent base-image substitution (Scorecard Pinned-Dependencies).
 # To update: docker buildx imagetools inspect registry.access.redhat.com/ubi8/ubi:8.10
 #            (copy the top-level "Digest:" manifest-list sha256).
-ARG BUILDER_IMAGE=registry.access.redhat.com/ubi8/ubi:8.10@sha256:8e573e1d76ff27f9e1219b33c114e48b0f7b86f2e6858cd8861e84431c7416e4
+ARG BUILDER_IMAGE=registry.access.redhat.com/ubi8/ubi:8.10@sha256:efe7eaa64e1efb79c34d0e9ec4ac6d0a95f512dfa8673c2d0d7dfa78a6787efe
 FROM ${BUILDER_IMAGE} AS builder
 
 # This builder stage runs as root only while compiling and is then discarded; the

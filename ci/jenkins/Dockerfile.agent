@@ -38,7 +38,7 @@
 
 # Digest pinned to prevent silent base-image substitution.
 # To update: docker pull jenkins/jenkins:lts-jdk21 && docker inspect --format '{{index .RepoDigests 0}}' jenkins/jenkins:lts-jdk21
-FROM jenkins/jenkins:lts-jdk21@sha256:01c992ffef29dcf41c7164e8c16285c657c2368c4943dda8d68c93fdf54447d5
+FROM jenkins/jenkins:lts-jdk21@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02
 
 USER root
 
