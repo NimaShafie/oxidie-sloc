@@ -504,4 +504,19 @@ mod tests {
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, crate::protocol::INVALID_PARAMS);
     }
+
+    #[tokio::test]
+    async fn dispatch_compare_runs_missing_current_returns_invalid_params() {
+        // baseline_path is present but current_path is absent — exercises the
+        // second string_arg guard in the compare_runs dispatch arm.
+        let srv = test_server();
+        let req = crate::protocol::McpRequest {
+            id: json!(107),
+            method: "tools/call".into(),
+            params: Some(json!({"name":"compare_runs","arguments":{"baseline_path":"b"}})),
+        };
+        let resp = srv.dispatch(req).await;
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, crate::protocol::INVALID_PARAMS);
+    }
 }

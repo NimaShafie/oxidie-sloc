@@ -329,4 +329,20 @@ mod tests {
         assert_eq!(cfg.allowed_roots.len(), 2);
         assert_eq!(cfg.allowed_roots[0], PathBuf::from("/tmp"));
     }
+
+    #[test]
+    fn check_path_allowed_skips_uncanonicalizable_root_then_matches_valid_root() {
+        // The first root does not exist on disk, forcing the
+        // `canonicalize(root).unwrap_or_else(|_| root.clone())` fallback; the loop
+        // then continues and matches against the second, valid root (cwd).
+        let cwd = std::env::current_dir().expect("cwd must be readable");
+        let cfg = McpConfig {
+            server_url: None,
+            bin_path: "oxide-sloc".into(),
+            api_key: None,
+            allowed_roots: vec![PathBuf::from("/nonexistent/__uncanon_root__/x"), cwd],
+        };
+        // "." canonicalises into the cwd, which is the second (valid) root.
+        assert!(cfg.check_path_allowed(".").is_ok());
+    }
 }
