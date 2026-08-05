@@ -7,14 +7,14 @@
 //   3. Rate-limiter inline functions exercised via HTTP.
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use http_body_util::BodyExt;
 use sloc_web::{
-    make_test_router, make_test_router_server_mode, make_test_router_tight_auth_lockout,
-    make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
+    TEST_SERVER_MODE_API_KEY, make_test_router, make_test_router_server_mode,
+    make_test_router_tight_auth_lockout, make_test_router_with_key,
 };
 use tower::ServiceExt;
 
@@ -264,7 +264,7 @@ async fn upload_tarball_invalid_gzip_returns_4xx() {
 
 #[tokio::test]
 async fn upload_tarball_valid_archive_not_5xx() {
-    use flate2::{write::GzEncoder, Compression};
+    use flate2::{Compression, write::GzEncoder};
     use std::io::Write as _;
 
     let app = make_test_router_server_mode();

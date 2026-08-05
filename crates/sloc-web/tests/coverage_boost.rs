@@ -9,9 +9,9 @@
 //     including submodule and super-project scope filters.
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use http_body_util::BodyExt;
 use sloc_web::make_test_router;
@@ -563,7 +563,7 @@ async fn upload_directory_multipart_stages_and_not_5xx() {
 #[tokio::test]
 async fn upload_tarball_extracts_and_not_5xx() {
     // Build a tiny .tar.gz in-memory containing one source file.
-    use flate2::{write::GzEncoder, Compression};
+    use flate2::{Compression, write::GzEncoder};
     use std::io::Write;
     let mut tar_buf = Vec::new();
     {

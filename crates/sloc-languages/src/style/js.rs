@@ -6,9 +6,9 @@
 //! TS guides: Airbnb TS, Google TS, Angular, Microsoft TS.
 
 use super::common::{
-    classify_indent, count_first_quote, count_over, scan_indent, score_indent_2, score_indent_4,
-    score_line100, score_line120, score_line80, score_line_n, top_guide, weighted_score,
-    StyleAnalysis, StyleGuideScore, StyleSignal,
+    StyleAnalysis, StyleGuideScore, StyleSignal, classify_indent, count_first_quote, count_over,
+    scan_indent, score_indent_2, score_indent_4, score_line_n, score_line80, score_line100,
+    score_line120, top_guide, weighted_score,
 };
 use crate::Language;
 

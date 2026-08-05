@@ -14,10 +14,9 @@ use sloc_core::{
 };
 use sloc_languages::{Language, ParseMode, RawLineCounts};
 use sloc_report::{
-    render_confluence_storage, render_confluence_wiki_markup, render_html, render_html_with_delta,
-    render_sub_report_html, write_csv, write_diff_csv, write_diff_xlsx,
+    ReportDeltaContext, render_confluence_storage, render_confluence_wiki_markup, render_html,
+    render_html_with_delta, render_sub_report_html, write_csv, write_diff_csv, write_diff_xlsx,
     write_html as write_html_report, write_html_with_pdf_link, write_pdf_from_run, write_xlsx,
-    ReportDeltaContext,
 };
 
 // ── Fixture helpers ───────────────────────────────────────────────────────────
@@ -1979,10 +1978,11 @@ fn write_pdf_from_run_without_hotspots_unchanged_path() {
     // No git activity → no hotspots page; the standard path still produces a valid PDF.
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let run = make_run();
-    assert!(run
-        .per_file_records
-        .iter()
-        .all(|r| r.commit_count.is_none()));
+    assert!(
+        run.per_file_records
+            .iter()
+            .all(|r| r.commit_count.is_none())
+    );
     write_pdf_from_run(&run, tmp.path()).unwrap();
     assert!(std::fs::metadata(tmp.path()).unwrap().len() > 0);
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use axum::{
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
 use base64::Engine as _;
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sloc_core::read_json;
 use sloc_report::{render_confluence_storage, render_confluence_wiki_markup};
 
-use super::{recover_artifacts_from_registry, AppState};
+use super::{AppState, recover_artifacts_from_registry};
 
 // ── URL validation ────────────────────────────────────────────────────────────
 
@@ -156,10 +156,10 @@ impl ConfluenceConfigStore {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        if let Some(ref mut cfg) = store.config {
-            if let Ok(token) = std::env::var("SLOC_CONFLUENCE_TOKEN") {
-                cfg.credential = token;
-            }
+        if let Some(ref mut cfg) = store.config
+            && let Ok(token) = std::env::var("SLOC_CONFLUENCE_TOKEN")
+        {
+            cfg.credential = token;
         }
         store
     }
@@ -1374,7 +1374,7 @@ mod tests {
 #[cfg(test)]
 mod http_tests {
     use super::*;
-    use axum::{routing, Json, Router};
+    use axum::{Json, Router, routing};
     use std::net::SocketAddr;
 
     fn setup_tls() {
@@ -1829,8 +1829,8 @@ mod http_tests {
 
     #[tokio::test]
     async fn api_post_to_confluence_processes_run_then_revalidates() {
-        use axum::extract::State;
         use axum::Json as AxumJson;
+        use axum::extract::State;
         setup_tls();
         let state = crate::test_app_state("conf_didp_post");
 

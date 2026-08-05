@@ -5,8 +5,8 @@
 //! Guides: Official rustfmt defaults, Mozilla Rust, Rust API Guidelines.
 
 use super::common::{
-    classify_indent, scan_base_metrics, score_indent_4, score_line100, score_line120, score_line80,
-    weighted_score, IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+    IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal, classify_indent, scan_base_metrics,
+    score_indent_4, score_line80, score_line100, score_line120, weighted_score,
 };
 
 pub fn analyze(text: &str) -> StyleAnalysis {

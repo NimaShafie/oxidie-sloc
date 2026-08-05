@@ -8,7 +8,7 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{GitCommit, GitRef, GitRefKind, RepoRefs};
 
@@ -578,10 +578,10 @@ pub fn resolve_committish(repo: &Path, ref_name: &str) -> Result<String> {
     ];
     for cand in &candidates {
         let spec = format!("{cand}^{{commit}}");
-        if let Ok(sha) = run_git(repo, &["rev-parse", "--verify", "-q", &spec]) {
-            if !sha.is_empty() {
-                return Ok(sha);
-            }
+        if let Ok(sha) = run_git(repo, &["rev-parse", "--verify", "-q", &spec])
+            && !sha.is_empty()
+        {
+            return Ok(sha);
         }
     }
     bail!(

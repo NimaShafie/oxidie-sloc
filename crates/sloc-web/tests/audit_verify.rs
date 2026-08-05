@@ -46,11 +46,12 @@ fn non_json_line_is_flagged_at_its_line_number() {
     let r = verify_audit_file(&p, "key");
     assert!(!r.ok);
     assert_eq!(r.first_bad_line, Some(1));
-    assert!(r
-        .detail
-        .as_deref()
-        .unwrap_or_default()
-        .contains("not a JSON object"));
+    assert!(
+        r.detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not a JSON object")
+    );
 }
 
 #[test]

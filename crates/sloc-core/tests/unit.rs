@@ -75,7 +75,8 @@ impl CiEnvIsolation {
             .map(|&k| (k, std::env::var(k).ok()))
             .collect();
         for (k, _) in &saved {
-            std::env::remove_var(k);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(k) };
         }
         Self { saved }
     }
@@ -85,8 +86,10 @@ impl Drop for CiEnvIsolation {
     fn drop(&mut self) {
         for (k, v) in &self.saved {
             match v {
-                Some(val) => std::env::set_var(k, val),
-                None => std::env::remove_var(k),
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                Some(val) => unsafe { std::env::set_var(k, val) },
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                None => unsafe { std::env::remove_var(k) },
             }
         }
     }
@@ -94,13 +97,13 @@ impl Drop for CiEnvIsolation {
 
 use chrono::Utc;
 use sloc_config::AppConfig;
+use sloc_core::{AnalysisRun, FileCoverage};
 use sloc_core::{
-    aggregate_line_coverage, check_against_baseline, compute_delta, lookup_coverage, parse_lcov,
     BaselineEntry, BaselineStore, CleanupPolicyStore, EffectiveCounts, EnvironmentMetadata,
     FileRecord, FileStatus, LanguageSummary, RegistryEntry, ScanRegistry, ScanSummarySnapshot,
-    SummaryTotals, ToolMetadata, WatchedDirsStore,
+    SummaryTotals, ToolMetadata, WatchedDirsStore, aggregate_line_coverage, check_against_baseline,
+    compute_delta, lookup_coverage, parse_lcov,
 };
-use sloc_core::{AnalysisRun, FileCoverage};
 use sloc_languages::{Language, RawLineCounts};
 
 // ── Test fixture helpers ──────────────────────────────────────────────────────
@@ -1422,16 +1425,19 @@ fn resolve_baselines_path_uses_env_var() {
     let _guard = env_lock();
     let dir = tempfile::tempdir().unwrap();
     let custom = dir.path().join("my_baselines.json");
-    std::env::set_var("SLOC_BASELINES_PATH", custom.to_str().unwrap());
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("SLOC_BASELINES_PATH", custom.to_str().unwrap()) };
     let resolved = sloc_core::baseline::resolve_baselines_path();
-    std::env::remove_var("SLOC_BASELINES_PATH");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SLOC_BASELINES_PATH") };
     assert_eq!(resolved, custom);
 }
 
 #[test]
 fn resolve_baselines_path_default_when_env_unset() {
     let _guard = env_lock();
-    std::env::remove_var("SLOC_BASELINES_PATH");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SLOC_BASELINES_PATH") };
     let resolved = sloc_core::baseline::resolve_baselines_path();
     assert!(
         resolved.to_string_lossy().contains("baselines.json"),
@@ -1446,7 +1452,8 @@ fn resolve_baselines_path_default_when_env_unset() {
 fn resolve_coverage_file_from_config_path() {
     use sloc_core::coverage::resolve_coverage_file;
     let _guard = env_lock();
-    std::env::remove_var("SLOC_COVERAGE_FILE");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SLOC_COVERAGE_FILE") };
     let path = std::path::Path::new("/tmp/coverage.info");
     let result = resolve_coverage_file(Some(path));
     assert_eq!(result, Some(std::path::PathBuf::from("/tmp/coverage.info")));
@@ -1456,7 +1463,8 @@ fn resolve_coverage_file_from_config_path() {
 fn resolve_coverage_file_none_when_no_config_and_no_env() {
     use sloc_core::coverage::resolve_coverage_file;
     let _guard = env_lock();
-    std::env::remove_var("SLOC_COVERAGE_FILE");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SLOC_COVERAGE_FILE") };
     let result = resolve_coverage_file(None);
     assert!(result.is_none());
 }
@@ -1667,7 +1675,8 @@ fn analyze_ci_name_set_when_github_actions_env_present() {
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
-    std::env::set_var("GITHUB_ACTIONS", "true");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("GITHUB_ACTIONS", "true") };
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
 
@@ -1686,7 +1695,8 @@ fn analyze_sets_git_branch_from_github_ref_when_no_git_dir() {
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn g() {}\n").unwrap();
-    std::env::set_var("GITHUB_REF", "refs/heads/feature-branch");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("GITHUB_REF", "refs/heads/feature-branch") };
     let cfg = analysis_config_for(dir.path());
     let run = analyze(&cfg, "test", None, None).unwrap();
 
@@ -2268,12 +2278,14 @@ fn analysis_run_environment_ci_name_travis() {
     let _lock = env_lock();
     // Clear all known CI vars first to avoid false positives from the ambient env.
     let _ci = CiEnvIsolation::new();
-    std::env::set_var("TRAVIS", "true");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("TRAVIS", "true") };
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rs"), "fn f() {}\n").unwrap();
     let cfg = analysis_config_for(dir.path());
     let result = sloc_core::analyze(&cfg, "ci-travis-test", None, None);
-    std::env::remove_var("TRAVIS");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("TRAVIS") };
     // The CI name field should be set when TRAVIS=true
     if let Ok(run) = result {
         assert_eq!(run.environment.ci_name.as_deref(), Some("Travis CI"));
@@ -2284,12 +2296,14 @@ fn analysis_run_environment_ci_name_travis() {
 fn analysis_run_environment_ci_name_azure_devops() {
     let _lock = env_lock();
     let _ci = CiEnvIsolation::new();
-    std::env::set_var("TF_BUILD", "true");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("TF_BUILD", "true") };
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("b.rs"), "fn g() {}\n").unwrap();
     let cfg = analysis_config_for(dir.path());
     let result = sloc_core::analyze(&cfg, "ci-azure-test", None, None);
-    std::env::remove_var("TF_BUILD");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("TF_BUILD") };
     if let Ok(run) = result {
         assert_eq!(run.environment.ci_name.as_deref(), Some("Azure DevOps"));
     }
@@ -2299,12 +2313,14 @@ fn analysis_run_environment_ci_name_azure_devops() {
 fn analysis_run_environment_ci_name_teamcity() {
     let _lock = env_lock();
     let _ci = CiEnvIsolation::new();
-    std::env::set_var("TEAMCITY_VERSION", "2024.1");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("TEAMCITY_VERSION", "2024.1") };
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("c.rs"), "fn h() {}\n").unwrap();
     let cfg = analysis_config_for(dir.path());
     let result = sloc_core::analyze(&cfg, "ci-teamcity-test", None, None);
-    std::env::remove_var("TEAMCITY_VERSION");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("TEAMCITY_VERSION") };
     if let Ok(run) = result {
         assert_eq!(run.environment.ci_name.as_deref(), Some("TeamCity"));
     }
@@ -2317,12 +2333,14 @@ fn analysis_run_git_branch_from_github_ref_name() {
     // Clear ambient CI branch vars first so a Jenkins-provided BRANCH_NAME/GIT_BRANCH
     // can't take precedence over the value under test.
     let _ci = CiEnvIsolation::new();
-    std::env::set_var("GITHUB_REF_NAME", "my-feature-branch");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("GITHUB_REF_NAME", "my-feature-branch") };
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("d.rs"), "fn i() {}\n").unwrap();
     let cfg = analysis_config_for(dir.path());
     let result = sloc_core::analyze(&cfg, "ci-branch-test", None, None);
-    std::env::remove_var("GITHUB_REF_NAME");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("GITHUB_REF_NAME") };
     // If the directory has no .git, the branch comes from CI env var
     if let Ok(run) = result {
         // Branch may be set from env var when no .git is present
@@ -2425,11 +2443,13 @@ fn parse_coverage_py_without_files_key_returns_empty() {
 #[test]
 fn resolve_coverage_file_prefers_env_var() {
     let _lock = env_lock();
-    std::env::set_var("SLOC_COVERAGE_FILE", "from-env-coverage.info");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("SLOC_COVERAGE_FILE", "from-env-coverage.info") };
     let resolved = sloc_core::coverage::resolve_coverage_file(Some(std::path::Path::new(
         "config-coverage.info",
     )));
-    std::env::remove_var("SLOC_COVERAGE_FILE");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SLOC_COVERAGE_FILE") };
     let resolved = resolved.expect("env var path should resolve to Some");
     assert!(
         resolved

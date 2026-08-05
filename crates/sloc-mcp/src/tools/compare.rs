@@ -125,11 +125,7 @@ mod tests {
             .join("target")
             .join("debug")
             .join(format!("oxide-sloc{ext}"));
-        if bin.exists() {
-            Some(bin)
-        } else {
-            None
-        }
+        if bin.exists() { Some(bin) } else { None }
     }
 
     /// Run a full analysis and return the JSON path to the result file.

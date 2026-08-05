@@ -14,13 +14,13 @@ use axum::{
 };
 use serde::Deserialize;
 
-use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, list_refs, RepoRefs};
+use sloc_git::{RepoRefs, clone_or_fetch, create_worktree, destroy_worktree, list_refs};
 
 use sloc_report::render_html;
 
 use super::{
-    build_run_registry_entry, git_clone_dest, sanitize_project_label, scan_path_to_artifacts,
-    AppState, CspNonce, RunArtifacts,
+    AppState, CspNonce, RunArtifacts, build_run_registry_entry, git_clone_dest,
+    sanitize_project_label, scan_path_to_artifacts,
 };
 
 // ── query types ───────────────────────────────────────────────────────────────
@@ -1144,10 +1144,10 @@ fn run_ref_scan(
     // returns empty. Use the ref_name we checked out instead.
     if run.git_branch.is_none() {
         run.git_branch = Some(ref_name.to_owned());
-        if let Some(html_path) = &artifacts.html_path {
-            if let Ok(html) = render_html(&run) {
-                let _ = std::fs::write(html_path, html);
-            }
+        if let Some(html_path) = &artifacts.html_path
+            && let Ok(html) = render_html(&run)
+        {
+            let _ = std::fs::write(html_path, html);
         }
     }
     let html_url = format!("/runs/html/{run_id}");
@@ -1182,10 +1182,10 @@ fn run_compare_refs(
     let (b_id, b_arts, mut b_run) = b_result?;
     if b_run.git_branch.is_none() {
         b_run.git_branch = Some(baseline_ref.to_owned());
-        if let Some(p) = &b_arts.html_path {
-            if let Ok(html) = render_html(&b_run) {
-                let _ = std::fs::write(p, html);
-            }
+        if let Some(p) = &b_arts.html_path
+            && let Ok(html) = render_html(&b_run)
+        {
+            let _ = std::fs::write(p, html);
         }
     }
 
@@ -1196,10 +1196,10 @@ fn run_compare_refs(
     let (c_id, c_arts, mut c_run) = c_result?;
     if c_run.git_branch.is_none() {
         c_run.git_branch = Some(current_ref.to_owned());
-        if let Some(p) = &c_arts.html_path {
-            if let Ok(html) = render_html(&c_run) {
-                let _ = std::fs::write(p, html);
-            }
+        if let Some(p) = &c_arts.html_path
+            && let Ok(html) = render_html(&c_run)
+        {
+            let _ = std::fs::write(p, html);
         }
     }
 

@@ -709,12 +709,11 @@ pub fn detect_language(
         .map(str::to_ascii_lowercase);
 
     // Extension override check (user-configured mappings win over everything)
-    if let Some(ext) = extension.as_ref() {
-        if let Some(override_name) = extension_overrides.get(ext.as_str()) {
-            if let Some(lang) = Language::from_name(override_name) {
-                return Some(lang);
-            }
-        }
+    if let Some(ext) = extension.as_ref()
+        && let Some(override_name) = extension_overrides.get(ext.as_str())
+        && let Some(lang) = Language::from_name(override_name)
+    {
+        return Some(lang);
     }
 
     // Filename-based detection for files that have no extension or use exact names
@@ -731,12 +730,11 @@ pub fn detect_language(
     }
 
     // Shebang detection (last resort — only for extensionless scripts)
-    if shebang_detection {
-        if let Some(line) = first_line {
-            if let Some(lang) = detect_by_shebang(line) {
-                return Some(lang);
-            }
-        }
+    if shebang_detection
+        && let Some(line) = first_line
+        && let Some(lang) = detect_by_shebang(line)
+    {
+        return Some(lang);
     }
 
     None
@@ -3102,10 +3100,10 @@ fn process_block_comment_char(chars: &[char], i: usize, close: &str) -> (bool, u
 ///
 /// Returns `Some((new_state, advance))` when a string opener is detected, else `None`.
 fn try_open_string(chars: &[char], i: usize, config: &ScanConfig) -> Option<(StringState, usize)> {
-    if config.allow_raw_strings {
-        if let Some((hashes, advance)) = try_open_raw_string(chars, i) {
-            return Some((StringState::RawHash(hashes), advance));
-        }
+    if config.allow_raw_strings
+        && let Some((hashes, advance)) = try_open_raw_string(chars, i)
+    {
+        return Some((StringState::RawHash(hashes), advance));
     }
     if config.allow_csharp_verbatim_strings && starts_with(chars, i, "@\"") {
         return Some((StringState::VerbatimDouble, 2));

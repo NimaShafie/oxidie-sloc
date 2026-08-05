@@ -16,12 +16,12 @@ use std::{
 use axum::{
     body::Body,
     extract::{Form, Query, State},
-    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Response},
 };
 
-use crate::{audit, AppState, CspNonce, LoginTemplate};
+use crate::{AppState, CspNonce, LoginTemplate, audit};
 use askama::Template as _;
 
 // ── Trusted-proxy / client-IP resolution ───────────────────────────────────────
@@ -50,10 +50,10 @@ fn client_ip_from(headers: &HeaderMap, peer_ip: IpAddr) -> IpAddr {
     }
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         for entry in xff.split(',').rev() {
-            if let Ok(ip) = entry.trim().parse::<IpAddr>() {
-                if !trusted_proxies().contains(&ip) {
-                    return ip;
-                }
+            if let Ok(ip) = entry.trim().parse::<IpAddr>()
+                && !trusted_proxies().contains(&ip)
+            {
+                return ip;
             }
         }
     }
@@ -566,10 +566,8 @@ pub(crate) async fn auth_logout(State(state): State<AppState>, req: Request<Body
 
     // Expire the cookie on the client side regardless. We don't know which name was
     // set (plain vs `__Host-` Secure), so expire both variants.
-    let expire_plain =
-        "sloc_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
-    let expire_host =
-        "__Host-sloc_session=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    let expire_plain = "sloc_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    let expire_host = "__Host-sloc_session=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
 
     let redirect_to = if state.api_keys.is_empty() {
         "/"

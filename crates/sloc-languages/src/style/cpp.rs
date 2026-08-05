@@ -5,9 +5,9 @@
 //! Guides: LLVM, Google, Mozilla, Microsoft, `WebKit`.
 
 use super::common::{
-    classify_brace, classify_indent, scan_base_metrics, score_allman_brace, score_attach_brace,
-    score_indent_2, score_indent_4, score_line100, score_line80, weighted_score, BraceStyle,
-    IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal,
+    BraceStyle, IndentStyle, StyleAnalysis, StyleGuideScore, StyleSignal, classify_brace,
+    classify_indent, scan_base_metrics, score_allman_brace, score_attach_brace, score_indent_2,
+    score_indent_4, score_line80, score_line100, weighted_score,
 };
 
 /// Pointer/reference declarator alignment.
@@ -273,11 +273,7 @@ const fn score_ptr_name(p: PointerStyle) -> f32 {
 #[allow(clippy::cast_precision_loss)] // counts bounded well within f32 precision
 fn score_sp(with: u32, no: u32) -> f32 {
     let t = with + no;
-    if t == 0 {
-        0.50
-    } else {
-        with as f32 / t as f32
-    }
+    if t == 0 { 0.50 } else { with as f32 / t as f32 }
 }
 
 #[allow(clippy::too_many_arguments)]

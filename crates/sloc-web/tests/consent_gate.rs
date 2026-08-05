@@ -15,7 +15,7 @@ use std::sync::Once;
 use axum::http::Request;
 use axum::{
     body::Body,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
 };
 use http_body_util::BodyExt;
 use sloc_web::make_test_router;
@@ -26,7 +26,8 @@ const BANNER: &str = r#"Restricted & <monitored> "system""#;
 
 fn enable_banner() {
     static INIT: Once = Once::new();
-    INIT.call_once(|| std::env::set_var("SLOC_CONSENT_BANNER", BANNER));
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    INIT.call_once(|| unsafe { std::env::set_var("SLOC_CONSENT_BANNER", BANNER) });
 }
 
 async fn body_string(resp: axum::response::Response) -> String {

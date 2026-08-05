@@ -128,7 +128,7 @@ mod tests {
     // ── in-process mock server (success paths) ────────────────────────────────
 
     async fn spawn_ingest_server() -> (String, tokio::task::AbortHandle) {
-        use axum::{routing::post, Json, Router};
+        use axum::{Json, Router, routing::post};
         let app = Router::new().route(
             "/api/ingest",
             post(|| async { Json(serde_json::json!({"ok": true, "run_id": "new-run"})) }),

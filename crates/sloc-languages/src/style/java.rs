@@ -6,9 +6,9 @@
 //! Kotlin guides: `JetBrains`, Android, Google Kotlin.
 
 use super::common::{
-    classify_brace, classify_indent, scan_base_metrics, score_attach_brace, score_indent_2,
-    score_indent_4, score_line100, score_line120, score_line80, weighted_score, BraceStyle,
-    StyleAnalysis, StyleGuideScore, StyleSignal,
+    BraceStyle, StyleAnalysis, StyleGuideScore, StyleSignal, classify_brace, classify_indent,
+    scan_base_metrics, score_attach_brace, score_indent_2, score_indent_4, score_line80,
+    score_line100, score_line120, weighted_score,
 };
 use crate::Language;
 

@@ -98,10 +98,9 @@ fn seed_prev_from_file(path: &str) -> String {
             continue;
         }
         if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(serde_json::Value::String(mac)) = obj.get("mac")
         {
-            if let Some(serde_json::Value::String(mac)) = obj.get("mac") {
-                return mac.clone();
-            }
+            return mac.clone();
         }
         break;
     }
@@ -146,13 +145,12 @@ fn append_json_line(path: &str, event: &str, outcome: &str, fields: &[(&str, &st
     // Self-maintaining: rotate the sink by size before appending so it can never
     // grow without bound. Rotation failure is non-fatal — we still try to append.
     let max_bytes = audit_log_max_bytes();
-    if max_bytes > 0 {
-        if let Err(e) =
+    if max_bytes > 0
+        && let Err(e) =
             sloc_core::rotate_log(std::path::Path::new(path), max_bytes, audit_log_keep())
-        {
-            tracing::error!(target: "audit", error = %e, path = %path,
+    {
+        tracing::error!(target: "audit", error = %e, path = %path,
                 "failed to rotate audit log");
-        }
     }
 
     let mut map = serde_json::Map::with_capacity(fields.len() + 5);
@@ -257,7 +255,7 @@ pub fn verify_audit_file(path: &std::path::Path, key: &str) -> AuditVerifyReport
                 ok: false,
                 first_bad_line: None,
                 detail: Some(format!("cannot read log: {e}")),
-            }
+            };
         }
     };
     let mut expected_prev = AUDIT_CHAIN_GENESIS.to_owned();

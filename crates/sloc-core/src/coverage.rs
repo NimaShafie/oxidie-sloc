@@ -611,10 +611,10 @@ fn extract_attr(fragment: &str, attr: &str) -> Option<String> {
 /// provided config path, normalising to an absolute `PathBuf`.
 #[must_use]
 pub fn resolve_coverage_file(config_path: Option<&Path>) -> Option<PathBuf> {
-    if let Ok(env_path) = std::env::var("SLOC_COVERAGE_FILE") {
-        if !env_path.is_empty() {
-            return Some(PathBuf::from(env_path));
-        }
+    if let Ok(env_path) = std::env::var("SLOC_COVERAGE_FILE")
+        && !env_path.is_empty()
+    {
+        return Some(PathBuf::from(env_path));
     }
     config_path.map(PathBuf::from)
 }

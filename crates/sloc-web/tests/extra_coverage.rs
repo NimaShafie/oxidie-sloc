@@ -33,14 +33,14 @@
 //   * Rate-limit middleware — trust-proxy header path with XFF
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use http_body_util::BodyExt;
 use sloc_web::{
-    make_test_router, make_test_router_exhausted_semaphore, make_test_router_server_mode,
-    make_test_router_with_key, TEST_SERVER_MODE_API_KEY,
+    TEST_SERVER_MODE_API_KEY, make_test_router, make_test_router_exhausted_semaphore,
+    make_test_router_server_mode, make_test_router_with_key,
 };
 use tower::ServiceExt;
 
