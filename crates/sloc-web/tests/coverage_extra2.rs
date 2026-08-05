@@ -14,9 +14,9 @@
 //     submodule breakdown, then fetching the per-submodule HTML/PDF artifacts.
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use http_body_util::BodyExt;
 use sloc_web::make_test_router;

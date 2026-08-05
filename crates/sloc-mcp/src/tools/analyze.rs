@@ -1,6 +1,6 @@
 use crate::config::McpConfig;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokio::process::Command;
 

@@ -18,16 +18,16 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use sloc_git::{
-    clone_or_fetch, create_worktree, destroy_worktree, get_sha, parse_bitbucket_push,
-    parse_github_push, parse_gitlab_push,
+    ScanSchedule, ScanScheduleKind, ScanScheduleProvider, WebhookEvent, clone_or_fetch,
+    create_worktree, destroy_worktree, get_sha, parse_bitbucket_push, parse_github_push,
+    parse_gitlab_push,
     webhook::{verify_bitbucket_sig, verify_github_sig},
-    ScanSchedule, ScanScheduleKind, ScanScheduleProvider, WebhookEvent,
 };
 
 use sloc_core::AnalysisRun;
 
 use super::{
-    git_clone_dest, register_artifacts_in_registry, scan_path_to_artifacts, AppState, RunArtifacts,
+    AppState, RunArtifacts, git_clone_dest, register_artifacts_in_registry, scan_path_to_artifacts,
 };
 
 // ── request types ─────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 /// immediately on CI.
 use std::path::Path;
 
-use sloc_languages::{analyze_text, detect_language, looks_like_cpp, AnalysisOptions, Language};
+use sloc_languages::{AnalysisOptions, Language, analyze_text, detect_language, looks_like_cpp};
 
 fn corpus(rel: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))

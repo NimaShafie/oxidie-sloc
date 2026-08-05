@@ -61,7 +61,9 @@ fn embed_windows_resources() {
         return;
     }
 
-    println!("cargo:warning=oxide-sloc: PE version info not embedded (rc.exe and windres not found — install Windows SDK or MinGW)");
+    println!(
+        "cargo:warning=oxide-sloc: PE version info not embedded (rc.exe and windres not found — install Windows SDK or MinGW)"
+    );
 }
 
 fn make_manifest(ver_dots: &str) -> String {

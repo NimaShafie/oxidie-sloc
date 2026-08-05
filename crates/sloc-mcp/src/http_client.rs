@@ -110,10 +110,10 @@ mod tests {
         post_json: &'static str,
     ) -> (String, tokio::task::AbortHandle) {
         use axum::{
+            Router,
             http::StatusCode,
             response::IntoResponse,
             routing::{get, post},
-            Router,
         };
         let app = Router::new()
             .route(

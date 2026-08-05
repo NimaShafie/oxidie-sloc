@@ -23,7 +23,7 @@ static IMG_ICON_MAKEFILE: &[u8] = include_bytes!("../assets/icons/makefile.svg")
 static IMG_ICON_PERL: &[u8] = include_bytes!("../assets/icons/perl.svg");
 
 pub(crate) mod audit;
-pub use audit::{verify_audit_file, AuditVerifyReport};
+pub use audit::{AuditVerifyReport, verify_audit_file};
 pub(crate) mod auth;
 pub(crate) mod confluence;
 pub(crate) mod error;
@@ -45,13 +45,13 @@ use std::{
 use anyhow::{Context, Result};
 use askama::Template;
 use axum::{
+    Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Form, Path as AxumPath, Query, State},
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -70,13 +70,13 @@ static CHART_JS: &[u8] = include_bytes!("../static/chart.umd.min.js");
 static REPORT_CHART_JS: &[u8] = include_bytes!("../static/chart.min.js");
 
 use sloc_core::{
-    analyze, compute_delta, compute_multi_delta, read_json, AnalysisRun, CleanupPolicy,
-    CleanupPolicyStore, FileChangeStatus, MultiScanComparison, RegistryEntry, ScanRegistry,
-    ScanSummarySnapshot, SummaryTotals, WatchedDirsStore,
+    AnalysisRun, CleanupPolicy, CleanupPolicyStore, FileChangeStatus, MultiScanComparison,
+    RegistryEntry, ScanRegistry, ScanSummarySnapshot, SummaryTotals, WatchedDirsStore, analyze,
+    compute_delta, compute_multi_delta, read_json,
 };
 use sloc_report::{
-    render_html, render_html_with_delta, render_sub_report_html, write_pdf_from_html,
-    write_pdf_from_run, ReportDeltaContext,
+    ReportDeltaContext, render_html, render_html_with_delta, render_sub_report_html,
+    write_pdf_from_html, write_pdf_from_run,
 };
 const MAX_CONCURRENT_ANALYSES: usize = 4;
 
@@ -117,7 +117,7 @@ mod win_dialog_focus {
     const FLASHW_TIMERNOFG: DWORD = 0xC;
 
     #[link(name = "user32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetForegroundWindow() -> HWND;
         fn SetForegroundWindow(hWnd: HWND) -> BOOL;
         fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
@@ -149,12 +149,12 @@ mod win_dialog_focus {
     }
 
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetCurrentThreadId() -> DWORD;
     }
 
     #[link(name = "shell32")]
-    extern "system" {
+    unsafe extern "system" {
         // Opens a folder (or file) via the Windows shell.  Passing the current
         // foreground window as `hwnd` gives the new window proper activation
         // context so it surfaces in the foreground without needing
@@ -202,81 +202,88 @@ mod win_dialog_focus {
     }
 
     unsafe fn snapshot_explorer_hwnds(class_w: &[u16]) -> std::collections::HashSet<usize> {
-        let mut existing = std::collections::HashSet::new();
-        let mut prev: HWND = core::ptr::null_mut();
-        loop {
-            let w = FindWindowExW(
-                core::ptr::null_mut(),
-                prev,
-                class_w.as_ptr(),
-                core::ptr::null(),
-            );
-            if w.is_null() {
-                break;
+        unsafe {
+            let mut existing = std::collections::HashSet::new();
+            let mut prev: HWND = core::ptr::null_mut();
+            loop {
+                let w = FindWindowExW(
+                    core::ptr::null_mut(),
+                    prev,
+                    class_w.as_ptr(),
+                    core::ptr::null(),
+                );
+                if w.is_null() {
+                    break;
+                }
+                existing.insert(w as usize);
+                prev = w;
             }
-            existing.insert(w as usize);
-            prev = w;
+            existing
         }
-        existing
     }
 
     unsafe fn find_new_explorer_hwnd(
         class_w: &[u16],
         existing: &std::collections::HashSet<usize>,
     ) -> Option<HWND> {
-        let mut prev: HWND = core::ptr::null_mut();
-        loop {
-            let w = FindWindowExW(
-                core::ptr::null_mut(),
-                prev,
-                class_w.as_ptr(),
-                core::ptr::null(),
-            );
-            if w.is_null() {
-                return None;
+        unsafe {
+            let mut prev: HWND = core::ptr::null_mut();
+            loop {
+                let w = FindWindowExW(
+                    core::ptr::null_mut(),
+                    prev,
+                    class_w.as_ptr(),
+                    core::ptr::null(),
+                );
+                if w.is_null() {
+                    return None;
+                }
+                if !existing.contains(&(w as usize)) {
+                    return Some(w);
+                }
+                prev = w;
             }
-            if !existing.contains(&(w as usize)) {
-                return Some(w);
-            }
-            prev = w;
         }
     }
 
     unsafe fn bring_to_front(hwnd: HWND) {
-        // Surfacing a window owned by another process (Explorer) from a
-        // background thread is blocked by Windows' foreground lock:
-        // SetForegroundWindow silently fails and only the taskbar button
-        // flashes.  The reliable workaround is to temporarily attach our input
-        // queue to the thread that currently owns the foreground window — while
-        // attached, SetForegroundWindow/BringWindowToTop actually activate the
-        // window instead of merely flashing it.
-        let my_tid = GetCurrentThreadId();
-        let fg_hwnd = GetForegroundWindow();
-        let fg_tid = if fg_hwnd.is_null() {
-            0
-        } else {
-            GetWindowThreadProcessId(fg_hwnd, core::ptr::null_mut())
-        };
-        let attached = fg_tid != 0 && fg_tid != my_tid && AttachThreadInput(my_tid, fg_tid, 1) != 0;
+        unsafe {
+            // Surfacing a window owned by another process (Explorer) from a
+            // background thread is blocked by Windows' foreground lock:
+            // SetForegroundWindow silently fails and only the taskbar button
+            // flashes.  The reliable workaround is to temporarily attach our input
+            // queue to the thread that currently owns the foreground window — while
+            // attached, SetForegroundWindow/BringWindowToTop actually activate the
+            // window instead of merely flashing it.
+            let my_tid = GetCurrentThreadId();
+            let fg_hwnd = GetForegroundWindow();
+            let fg_tid = if fg_hwnd.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg_hwnd, core::ptr::null_mut())
+            };
+            let attached =
+                fg_tid != 0 && fg_tid != my_tid && AttachThreadInput(my_tid, fg_tid, 1) != 0;
 
-        // SW_RESTORE = 9 — un-minimise the Explorer window (it may have opened
-        // as a taskbar button) without forcing a full-screen maximise.
-        ShowWindow(hwnd, 9);
-        BringWindowToTop(hwnd);
-        SetForegroundWindow(hwnd);
-        // Extra belt-and-braces activation that also bypasses the foreground
-        // lock on older Windows builds.
-        SwitchToThisWindow(hwnd, 1);
+            // SW_RESTORE = 9 — un-minimise the Explorer window (it may have opened
+            // as a taskbar button) without forcing a full-screen maximise.
+            ShowWindow(hwnd, 9);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            // Extra belt-and-braces activation that also bypasses the foreground
+            // lock on older Windows builds.
+            SwitchToThisWindow(hwnd, 1);
 
-        // Force the Z-order to the very top regardless of the foreground-lock
-        // outcome by flipping TOPMOST on then off, so the window jumps above all
-        // others without staying pinned. HWND_TOPMOST = -1, HWND_NOTOPMOST = -2;
-        // SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE = 0x0013.
-        SetWindowPos(hwnd, (-1isize) as HWND, 0, 0, 0, 0, 0x0013);
-        SetWindowPos(hwnd, (-2isize) as HWND, 0, 0, 0, 0, 0x0013);
+            // Force the Z-order to the very top regardless of the foreground-lock
+            // outcome by flipping TOPMOST on then off, so the window jumps above all
+            // others without staying pinned. HWND_TOPMOST = -1, HWND_NOTOPMOST = -2;
+            // SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE = 0x0013.
+            SetWindowPos(hwnd, (-1isize) as HWND, 0, 0, 0, 0, 0x0013);
+            SetWindowPos(hwnd, (-2isize) as HWND, 0, 0, 0, 0, 0x0013);
 
-        if attached {
-            AttachThreadInput(my_tid, fg_tid, 0);
+            if attached {
+                AttachThreadInput(my_tid, fg_tid, 0);
+            }
         }
     }
 
@@ -879,7 +886,8 @@ fn test_app_state(tmp_subdir: &str) -> AppState {
     // A per-call counter (plus PID, to avoid leftover-dir collisions across
     // runs) guarantees isolation, honouring this fn's "per-test subdir" contract.
     static TEST_DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::set_var("SLOC_HEADLESS", "1");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("SLOC_HEADLESS", "1") };
     let seq = TEST_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("{tmp_subdir}-{}-{seq}", std::process::id()));
     AppState {
@@ -1657,8 +1665,8 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
 /// Build a client-certificate verifier when `SLOC_TLS_CLIENT_CA` is configured,
 /// enabling mutual TLS. Returns `None` (no client auth) when unset — the default.
 fn client_cert_verifier() -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>> {
-    use rustls_pki_types::pem::PemObject;
     use rustls_pki_types::CertificateDer;
+    use rustls_pki_types::pem::PemObject;
 
     let Some(ca_path) = std::env::var("SLOC_TLS_CLIENT_CA")
         .ok()
@@ -2954,21 +2962,21 @@ async fn stage_decoded_entry(
     }
 
     let rel = std::path::Path::new(&entry.path);
-    if project_root.is_none() {
-        if let Some(first) = rel.components().next() {
-            *project_root = Some(staging.join(first.as_os_str()));
-        }
+    if project_root.is_none()
+        && let Some(first) = rel.components().next()
+    {
+        *project_root = Some(staging.join(first.as_os_str()));
     }
 
     let dest = staging.join(rel);
-    if let Some(parent) = dest.parent() {
-        if tokio::fs::create_dir_all(parent).await.is_err() {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Failed to create directory structure"})),
-            )
-                .into_response());
-        }
+    if let Some(parent) = dest.parent()
+        && tokio::fs::create_dir_all(parent).await.is_err()
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Failed to create directory structure"})),
+        )
+            .into_response());
     }
 
     if tokio::fs::write(&dest, &data).await.is_err() {
@@ -3532,10 +3540,10 @@ fn find_html_report_in_tree(dir: &Path) -> Option<PathBuf> {
     if let Ok(rd) = fs::read_dir(dir) {
         for entry in rd.flatten() {
             let sub = entry.path();
-            if sub.is_dir() {
-                if let Some(f) = find_html_report_in_dir(&sub) {
-                    return Some(f);
-                }
+            if sub.is_dir()
+                && let Some(f) = find_html_report_in_dir(&sub)
+            {
+                return Some(f);
             }
         }
     }
@@ -3638,10 +3646,10 @@ fn redirect_or_json_ok(want_json: bool, redirect: &str) -> Response {
 /// first parseable run when `expected` is empty).  Returns `(path, run_id)`.
 fn find_json_run_by_id(candidates: &[PathBuf], expected: &str) -> Option<(PathBuf, String)> {
     for jpath in candidates {
-        if let Ok(run) = read_json(jpath) {
-            if expected.is_empty() || run.tool.run_id == expected {
-                return Some((jpath.clone(), run.tool.run_id));
-            }
+        if let Ok(run) = read_json(jpath)
+            && (expected.is_empty() || run.tool.run_id == expected)
+        {
+            return Some((jpath.clone(), run.tool.run_id));
         }
     }
     None
@@ -4178,10 +4186,10 @@ fn subdir_result_json_candidates(sub: &std::path::Path) -> Vec<PathBuf> {
         out.push(j);
     }
     let json_sub = sub.join("json");
-    if json_sub.is_dir() {
-        if let Some(j) = find_result_json_in_dir(&json_sub) {
-            out.push(j);
-        }
+    if json_sub.is_dir()
+        && let Some(j) = find_result_json_in_dir(&json_sub)
+    {
+        out.push(j);
     }
     out
 }
@@ -4346,11 +4354,7 @@ struct WatchedDirRefreshForm {
 
 /// Reject any redirect target that is not a relative path to prevent open-redirect attacks.
 fn safe_redirect(dest: &str) -> &str {
-    if dest.starts_with('/') {
-        dest
-    } else {
-        "/"
-    }
+    if dest.starts_with('/') { dest } else { "/" }
 }
 
 // ── Watched-dir handlers ──────────────────────────────────────────────────────
@@ -4647,10 +4651,10 @@ async fn preview_handler(
         );
     }
 
-    if state.server_mode {
-        if let Err(resp) = authorize_preview_path(&state, &resolved) {
-            return resp;
-        }
+    if state.server_mode
+        && let Err(resp) = authorize_preview_path(&state, &resolved)
+    {
+        return resp;
     }
 
     let include_patterns = split_patterns(query.include_globs.as_deref());
@@ -4838,12 +4842,12 @@ fn apply_output_dir_exclusions(
     } else {
         workspace_root().join(raw_out)
     };
-    if let Ok(rel) = resolved_out.strip_prefix(&project_root) {
-        if let Some(first) = rel.iter().next().and_then(|c| c.to_str()) {
-            let dir = first.to_string();
-            if !config.discovery.excluded_directories.contains(&dir) {
-                config.discovery.excluded_directories.push(dir);
-            }
+    if let Ok(rel) = resolved_out.strip_prefix(&project_root)
+        && let Some(first) = rel.iter().next().and_then(|c| c.to_str())
+    {
+        let dir = first.to_string();
+        if !config.discovery.excluded_directories.contains(&dir) {
+            config.discovery.excluded_directories.push(dir);
         }
     }
     if !config
@@ -4968,12 +4972,11 @@ fn apply_style_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm
 }
 
 fn apply_style_col_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
-    if let Some(threshold_str) = form.style_col_threshold.as_deref() {
-        if let Ok(t) = threshold_str.parse::<u16>() {
-            if t == 80 || t == 100 || t == 120 {
-                config.analysis.style_col_threshold = t;
-            }
-        }
+    if let Some(threshold_str) = form.style_col_threshold.as_deref()
+        && let Ok(t) = threshold_str.parse::<u16>()
+        && (t == 80 || t == 100 || t == 120)
+    {
+        config.analysis.style_col_threshold = t;
     }
 }
 
@@ -4984,10 +4987,10 @@ fn apply_style_analysis_enabled(config: &mut sloc_config::AppConfig, form: &Anal
 }
 
 fn apply_style_score_threshold(config: &mut sloc_config::AppConfig, form: &AnalyzeForm) {
-    if let Some(v) = form.style_score_threshold.as_deref() {
-        if let Ok(t) = v.parse::<u8>() {
-            config.analysis.style_score_threshold = t.min(100);
-        }
+    if let Some(v) = form.style_score_threshold.as_deref()
+        && let Ok(t) = v.parse::<u8>()
+    {
+        config.analysis.style_score_threshold = t.min(100);
     }
 }
 
@@ -5005,10 +5008,10 @@ fn apply_activity_window(config: &mut sloc_config::AppConfig, form: &AnalyzeForm
     // including 0, which disables hotspots. A blank/unparseable field keeps the default.
     if let Some(w) = form.activity_window.as_deref() {
         let w = w.trim();
-        if !w.is_empty() {
-            if let Ok(days) = w.parse::<u32>() {
-                config.analysis.activity_window_days = Some(days);
-            }
+        if !w.is_empty()
+            && let Ok(days) = w.parse::<u32>()
+        {
+            config.analysis.activity_window_days = Some(days);
         }
     }
 }
@@ -5231,10 +5234,9 @@ async fn analyze_handler(
         if state.server_mode
             && !is_upload_tmp_path(&resolved_path)
             && !is_sample_path(&resolved_path)
+            && let Err(resp) = validate_server_scan_path(&config, &resolved_path, &csp_nonce)
         {
-            if let Err(resp) = validate_server_scan_path(&config, &resolved_path, &csp_nonce) {
-                return resp;
-            }
+            return resp;
         }
         config.discovery.root_paths = vec![resolved_path];
     }
@@ -5324,10 +5326,10 @@ async fn analyze_handler(
         .render()
         .unwrap_or_else(|err| format!("<pre>{err}</pre>"));
     let mut response = Html(html).into_response();
-    if let Ok(name) = axum::http::HeaderName::from_bytes(b"x-wait-id") {
-        if let Ok(val) = axum::http::HeaderValue::from_str(&wait_id) {
-            response.headers_mut().insert(name, val);
-        }
+    if let Ok(name) = axum::http::HeaderName::from_bytes(b"x-wait-id")
+        && let Ok(val) = axum::http::HeaderValue::from_str(&wait_id)
+    {
+        response.headers_mut().insert(name, val);
     }
     response
 }
@@ -6642,7 +6644,7 @@ async fn download_bundle_handler(
     // Build tar.gz in a blocking thread to avoid blocking the async runtime.
     let run_id_clone = run_id.clone();
     let archive_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        use flate2::{write::GzEncoder, Compression};
+        use flate2::{Compression, write::GzEncoder};
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         {
             let mut tar = tar::Builder::new(&mut enc);
@@ -6776,14 +6778,14 @@ async fn cleanup_runs_handler(
         // Remove from in-memory cache.
         state.artifacts.lock().await.remove(run_id);
         // Delete on-disk artifacts (non-fatal if already gone).
-        if output_dir.exists() {
-            if let Err(e) = tokio::fs::remove_dir_all(output_dir).await {
-                eprintln!(
-                    "[oxide-sloc] cleanup: failed to remove {}: {e:#}",
-                    output_dir.display()
-                );
-                continue;
-            }
+        if output_dir.exists()
+            && let Err(e) = tokio::fs::remove_dir_all(output_dir).await
+        {
+            eprintln!(
+                "[oxide-sloc] cleanup: failed to remove {}: {e:#}",
+                output_dir.display()
+            );
+            continue;
         }
         deleted += 1;
     }
@@ -7355,7 +7357,7 @@ async fn resolve_or_queue_pdf(
 /// Self-refreshing "please wait" page shown while the background PDF task is still running.
 fn pdf_generating_response(run_id: &str, csp_nonce: &str) -> Response {
     let html = format!(
-                    "<!doctype html><html lang=\"en\"><head>\
+        "<!doctype html><html lang=\"en\"><head>\
                      <meta charset=utf-8>\
                      <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
                      <meta http-equiv=\"refresh\" content=\"5\">\
@@ -7701,20 +7703,18 @@ async fn serve_pdf_arm(
         // Distinguish a stale registry path (folder moved) from an in-progress
         // background generation. Only show the locate page when the PDF was
         // already recorded in the registry but the file is now missing.
-        if had_pdf_in_registry {
-            if let Some(expected_filename) = stale_html_name {
-                let html = LocateFileTemplate {
-                    run_id: run_id.to_string(),
-                    artifact_type: "pdf".to_string(),
-                    expected_filename,
-                    server_mode: state.server_mode,
-                    csp_nonce: csp_nonce.to_string(),
-                    version: env!("CARGO_PKG_VERSION"),
-                }
-                .render()
-                .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
-                return (StatusCode::NOT_FOUND, Html(html)).into_response();
+        if had_pdf_in_registry && let Some(expected_filename) = stale_html_name {
+            let html = LocateFileTemplate {
+                run_id: run_id.to_string(),
+                artifact_type: "pdf".to_string(),
+                expected_filename,
+                server_mode: state.server_mode,
+                csp_nonce: csp_nonce.to_string(),
+                version: env!("CARGO_PKG_VERSION"),
             }
+            .render()
+            .unwrap_or_else(|_| "<pre>File not found.</pre>".to_string());
+            return (StatusCode::NOT_FOUND, Html(html)).into_response();
         }
         return pdf_generating_response(run_id, csp_nonce);
     }
@@ -7928,12 +7928,12 @@ fn extract_long_commit_from_json(path: &Path, short: &str) -> Option<String> {
         let Some(colon) = rest.find(':') else { break };
         let value_region = rest[colon + 1..].trim_start();
         // Skip `null` (or any non-string) values without consuming the next field.
-        if let Some(open) = value_region.strip_prefix('"') {
-            if let Some(close) = open.find('"') {
-                let val = &open[..close];
-                if val.len() >= short.len() && val.to_ascii_lowercase().starts_with(&short_lower) {
-                    found = Some(val.to_string());
-                }
+        if let Some(open) = value_region.strip_prefix('"')
+            && let Some(close) = open.find('"')
+        {
+            let val = &open[..close];
+            if val.len() >= short.len() && val.to_ascii_lowercase().starts_with(&short_lower) {
+                found = Some(val.to_string());
             }
         }
     }
@@ -7951,19 +7951,19 @@ fn make_history_rows(reg: &ScanRegistry) -> Vec<HistoryEntryRow> {
                     .as_ref()
                     .and_then(|p| p.parent())
                     .or_else(|| e.json_path.as_ref().and_then(|p| p.parent()));
-                if let Some(dir) = sub_dir {
-                    if let Ok(rd) = std::fs::read_dir(dir) {
-                        for entry_res in rd.flatten() {
-                            let fname = entry_res.file_name();
-                            let fname_str = fname.to_string_lossy();
-                            if fname_str.starts_with("sub_") && fname_str.ends_with(".html") {
-                                let stem = &fname_str[..fname_str.len() - 5];
-                                let display = stem[4..].replace('-', " ");
-                                links.push(SubmoduleLinkRow {
-                                    name: display,
-                                    url: format!("/runs/{stem}/{}", e.run_id),
-                                });
-                            }
+                if let Some(dir) = sub_dir
+                    && let Ok(rd) = std::fs::read_dir(dir)
+                {
+                    for entry_res in rd.flatten() {
+                        let fname = entry_res.file_name();
+                        let fname_str = fname.to_string_lossy();
+                        if fname_str.starts_with("sub_") && fname_str.ends_with(".html") {
+                            let stem = &fname_str[..fname_str.len() - 5];
+                            let display = stem[4..].replace('-', " ");
+                            links.push(SubmoduleLinkRow {
+                                name: display,
+                                url: format!("/runs/{stem}/{}", e.run_id),
+                            });
                         }
                     }
                 }
@@ -8344,7 +8344,7 @@ fn narrow_run_pair_by_scope(
     active_sub: &Option<String>,
     super_scope: bool,
 ) -> (AnalysisRun, AnalysisRun) {
-    if let Some(ref sub_name) = active_sub {
+    if let Some(sub_name) = active_sub {
         baseline
             .per_file_records
             .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
@@ -8365,7 +8365,7 @@ fn narrow_run_pair_by_scope(
 /// Filter all runs in a multi-compare to a single submodule scope or super-repo scope.
 #[allow(clippy::ref_option)]
 fn apply_scope_filter(runs: &mut [AnalysisRun], active_sub: &Option<String>, super_scope: bool) {
-    if let Some(ref sub_name) = active_sub {
+    if let Some(sub_name) = active_sub {
         for run in runs.iter_mut() {
             run.per_file_records
                 .retain(|f| f.submodule.as_deref() == Some(sub_name.as_str()));
@@ -16160,21 +16160,23 @@ fn persist_run_artifacts(
     // CSV and XLSX in excel/.
     let csv_path = {
         let path = excel_dir.join(format!("report_{file_stem}.csv"));
-        if let Err(e) = sloc_report::write_csv(run, &path) {
-            eprintln!("[oxide-sloc] CSV write failed (non-fatal): {e:#}");
-            None
-        } else {
-            Some(path)
+        match sloc_report::write_csv(run, &path) {
+            Err(e) => {
+                eprintln!("[oxide-sloc] CSV write failed (non-fatal): {e:#}");
+                None
+            }
+            _ => Some(path),
         }
     };
 
     let xlsx_path = {
         let path = excel_dir.join(format!("report_{file_stem}.xlsx"));
-        if let Err(e) = sloc_report::write_xlsx(run, &path) {
-            eprintln!("[oxide-sloc] XLSX write failed (non-fatal): {e:#}");
-            None
-        } else {
-            Some(path)
+        match sloc_report::write_xlsx(run, &path) {
+            Err(e) => {
+                eprintln!("[oxide-sloc] XLSX write failed (non-fatal): {e:#}");
+                None
+            }
+            _ => Some(path),
         }
     };
 
@@ -17600,10 +17602,10 @@ fn handle_preview_file_entry(
         PreviewKind::Dir => {}
     }
     let language = detect_language_name(name);
-    if let Some(lang) = language {
-        if !languages.contains(&lang) {
-            languages.push(lang);
-        }
+    if let Some(lang) = language
+        && !languages.contains(&lang)
+    {
+        languages.push(lang);
     }
     rows.push(PreviewRow {
         row_id,
@@ -33251,10 +33253,12 @@ mod form_config_tests {
 
     #[test]
     fn header_footer_none_when_absent() {
-        assert!(apply(&blank_form())
-            .reporting
-            .report_header_footer
-            .is_none());
+        assert!(
+            apply(&blank_form())
+                .reporting
+                .report_header_footer
+                .is_none()
+        );
     }
 
     #[test]
@@ -34712,33 +34716,51 @@ mod coverage_boost_unit_tests {
     // env vars — parallel sub-tests would race on both.
     #[tokio::test]
     async fn runtime_security_config_scenarios() {
-        std::env::remove_var("SLOC_API_KEYS");
-        std::env::remove_var("SLOC_API_KEY");
-        std::env::remove_var("SLOC_TLS_CERT");
-        std::env::remove_var("SLOC_TLS_KEY");
-        std::env::remove_var("SLOC_TRUST_PROXY");
-        std::env::remove_var("SLOC_TRUSTED_PROXY_IPS");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_API_KEYS") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_API_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_TLS_CERT") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_TLS_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_TRUST_PROXY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_TRUSTED_PROXY_IPS") };
         let cfg = load_runtime_security_config(false);
         assert!(cfg.api_keys.is_empty());
         assert!(!cfg.tls_enabled);
         assert!(!cfg.trust_proxy);
 
-        std::env::set_var("SLOC_API_KEYS", "alpha, beta ,");
-        std::env::set_var("SLOC_TRUST_PROXY", "1");
-        std::env::set_var("SLOC_TRUSTED_PROXY_IPS", "127.0.0.1, 10.0.0.2");
-        std::env::set_var("SLOC_RATE_LIMIT", "250");
-        std::env::set_var("SLOC_AUTH_LOCKOUT_FAILS", "5");
-        std::env::set_var("SLOC_AUTH_LOCKOUT_SECS", "60");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_API_KEYS", "alpha, beta ,") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_TRUST_PROXY", "1") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_TRUSTED_PROXY_IPS", "127.0.0.1, 10.0.0.2") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_RATE_LIMIT", "250") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_AUTH_LOCKOUT_FAILS", "5") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_AUTH_LOCKOUT_SECS", "60") };
         let cfg = load_runtime_security_config(true);
         assert_eq!(cfg.api_keys.len(), 2, "two non-empty keys parsed");
         assert!(cfg.trust_proxy);
         assert_eq!(cfg.trusted_proxy_ips.len(), 2);
-        std::env::remove_var("SLOC_API_KEYS");
-        std::env::remove_var("SLOC_TRUST_PROXY");
-        std::env::remove_var("SLOC_TRUSTED_PROXY_IPS");
-        std::env::remove_var("SLOC_RATE_LIMIT");
-        std::env::remove_var("SLOC_AUTH_LOCKOUT_FAILS");
-        std::env::remove_var("SLOC_AUTH_LOCKOUT_SECS");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_API_KEYS") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_TRUST_PROXY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_TRUSTED_PROXY_IPS") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_RATE_LIMIT") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_AUTH_LOCKOUT_FAILS") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_AUTH_LOCKOUT_SECS") };
     }
 
     #[test]
@@ -34763,13 +34785,17 @@ mod coverage_boost_unit_tests {
 
     #[test]
     fn tarball_size_caps_env_override() {
-        std::env::set_var("SLOC_MAX_TARBALL_MB", "1");
-        std::env::set_var("SLOC_MAX_TARBALL_DECOMPRESSED_MB", "2");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_MAX_TARBALL_MB", "1") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_MAX_TARBALL_DECOMPRESSED_MB", "2") };
         let (c, d) = parse_tarball_size_caps();
         assert_eq!(c, 1024 * 1024);
         assert_eq!(d, 2 * 1024 * 1024);
-        std::env::remove_var("SLOC_MAX_TARBALL_MB");
-        std::env::remove_var("SLOC_MAX_TARBALL_DECOMPRESSED_MB");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_MAX_TARBALL_MB") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_MAX_TARBALL_DECOMPRESSED_MB") };
         let (c2, _) = parse_tarball_size_caps();
         assert_eq!(c2, 2048 * 1024 * 1024, "default 2048 MB");
     }
@@ -34788,15 +34814,18 @@ mod coverage_boost_unit_tests {
 
     #[test]
     fn git_clones_dir_env_override() {
-        std::env::remove_var("SLOC_GIT_CLONES_DIR");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_GIT_CLONES_DIR") };
         let def = resolve_git_clones_dir(Path::new("/out"));
         assert_eq!(def, PathBuf::from("/out").join("git-clones"));
-        std::env::set_var("SLOC_GIT_CLONES_DIR", "/custom/clones");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_GIT_CLONES_DIR", "/custom/clones") };
         assert_eq!(
             resolve_git_clones_dir(Path::new("/out")),
             PathBuf::from("/custom/clones")
         );
-        std::env::remove_var("SLOC_GIT_CLONES_DIR");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_GIT_CLONES_DIR") };
     }
 
     #[test]
@@ -34828,9 +34857,10 @@ mod coverage_boost_unit_tests {
         let dest = git_clone_dest("https://github.com/org/repo.git", Path::new("/clones"));
         assert!(dest.starts_with("/clones"));
         let name = dest.file_name().unwrap().to_str().unwrap();
-        assert!(name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.')));
+        assert!(
+            name.chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        );
     }
 }
 
@@ -34857,17 +34887,20 @@ mod tests_private {
     // process-global env var would otherwise race across parallel test threads.
     #[test]
     fn server_mode_auth_gate_respects_optin() {
-        std::env::remove_var("SLOC_ALLOW_UNAUTHENTICATED");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_ALLOW_UNAUTHENTICATED") };
         assert!(
             refuse_unauthenticated_server(true, false),
             "server mode + no key must fail closed by default"
         );
-        std::env::set_var("SLOC_ALLOW_UNAUTHENTICATED", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_ALLOW_UNAUTHENTICATED", "1") };
         assert!(
             !refuse_unauthenticated_server(true, false),
             "explicit opt-in must allow the unauthenticated server"
         );
-        std::env::remove_var("SLOC_ALLOW_UNAUTHENTICATED");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_ALLOW_UNAUTHENTICATED") };
     }
 
     // ── Zip-slip / path-traversal on tarball extraction ────────────────────────

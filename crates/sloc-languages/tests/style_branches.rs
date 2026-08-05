@@ -3,7 +3,7 @@
 // style-guide analyzers (crates/sloc-languages/src/style/*). Each test feeds a
 // crafted snippet whose shape forces a specific quote/brace/indent/naming arm.
 
-use sloc_languages::{style, Language};
+use sloc_languages::{Language, style};
 
 fn style_of(lang: Language, text: &str) -> style::StyleAnalysis {
     style::analyze_style(lang, text).expect("language has a style analyzer")

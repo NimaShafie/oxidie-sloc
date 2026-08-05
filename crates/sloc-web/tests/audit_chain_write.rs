@@ -12,7 +12,7 @@
 use std::sync::Once;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sloc_web::make_test_router_with_key;
@@ -70,8 +70,10 @@ async fn failed_auth_appends_a_chained_record_seeded_from_the_existing_log() {
     .unwrap();
 
     INIT.call_once(|| {
-        std::env::set_var("SLOC_AUDIT_LOG", log.to_string_lossy().to_string());
-        std::env::set_var("SLOC_AUDIT_HMAC_KEY", "chain-test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_AUDIT_LOG", log.to_string_lossy().to_string()) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_AUDIT_HMAC_KEY", "chain-test-key") };
     });
 
     // A request with the WRONG key is an authentication failure → audit::record →

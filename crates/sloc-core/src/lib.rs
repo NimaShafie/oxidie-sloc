@@ -7,26 +7,26 @@ pub mod coverage;
 pub mod delta;
 pub mod history;
 pub mod maintenance;
-pub use baseline::{check_against_baseline, resolve_baselines_path, BaselineEntry, BaselineStore};
-pub use coverage::{aggregate_line_coverage, lookup_coverage, parse_lcov, FileCoverage};
+pub use baseline::{BaselineEntry, BaselineStore, check_against_baseline, resolve_baselines_path};
+pub use coverage::{FileCoverage, aggregate_line_coverage, lookup_coverage, parse_lcov};
 pub use delta::{
-    compute_delta, compute_multi_delta, FileChangeStatus, FileDelta, MultiFileDelta,
-    MultiScanComparison, MultiScanPoint, ScanComparison, SummaryDelta,
+    FileChangeStatus, FileDelta, MultiFileDelta, MultiScanComparison, MultiScanPoint,
+    ScanComparison, SummaryDelta, compute_delta, compute_multi_delta,
 };
 pub use history::{
     CleanupPolicy, CleanupPolicyStore, RegistryEntry, ScanRegistry, ScanSummarySnapshot,
     WatchedDirsStore,
 };
 pub use maintenance::{
-    dir_size_bytes, execute_run_prune, plan_run_prune, resolve_output_root, resolve_registry_path,
-    rotate_log, rotated_log_paths, run_output_dir, PrunePlan, PruneReport, PrunedRun,
+    PrunePlan, PruneReport, PrunedRun, dir_size_bytes, execute_run_prune, plan_run_prune,
+    resolve_output_root, resolve_registry_path, rotate_log, rotated_log_paths, run_output_dir,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -42,8 +42,8 @@ use sloc_config::{
 };
 use sloc_languages::style::IndentStyle;
 use sloc_languages::{
-    analyze_text, detect_language, supported_languages, AnalysisOptions, Language, ParseMode,
-    RawLineCounts, StyleAnalysis, StyleLangScope,
+    AnalysisOptions, Language, ParseMode, RawLineCounts, StyleAnalysis, StyleLangScope,
+    analyze_text, detect_language, supported_languages,
 };
 
 // ── Detection sample sizes and thresholds ────────────────────────────────────
@@ -460,10 +460,10 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
         if candidate.is_dir() {
             return Some(candidate);
         }
-        if candidate.is_file() {
-            if let Some(resolved) = resolve_git_file_pointer(&candidate, dir) {
-                return Some(resolved);
-            }
+        if candidate.is_file()
+            && let Some(resolved) = resolve_git_file_pointer(&candidate, dir)
+        {
+            return Some(resolved);
         }
         current = dir.parent();
     }
@@ -536,11 +536,7 @@ fn parse_url_line(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("url")?;
     let rest = rest.trim_start_matches([' ', '\t']);
     let url = rest.strip_prefix('=')?.trim();
-    if url.is_empty() {
-        None
-    } else {
-        Some(url)
-    }
+    if url.is_empty() { None } else { Some(url) }
 }
 
 /// Parse `.git/config` and return the URL of the `origin` remote, if present.
@@ -551,10 +547,8 @@ fn read_git_remote_url(git_dir: &Path) -> Option<String> {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             in_origin = trimmed == r#"[remote "origin"]"#;
-        } else if in_origin {
-            if let Some(url) = parse_url_line(trimmed) {
-                return Some(url.to_owned());
-            }
+        } else if in_origin && let Some(url) = parse_url_line(trimmed) {
+            return Some(url.to_owned());
         }
     }
     None
@@ -582,7 +576,7 @@ fn detect_git_for_run(project_path: &Path) -> GitInfo {
             return GitInfo {
                 branch: ci_branch,
                 ..GitInfo::default()
-            }
+            };
         }
     };
 
@@ -798,11 +792,7 @@ fn get_current_username() -> String {
 
 fn non_empty_env(var: &str) -> Option<String> {
     let v = std::env::var(var).ok()?;
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
+    if v.is_empty() { None } else { Some(v) }
 }
 
 fn is_jenkins_env() -> bool {
@@ -814,20 +804,20 @@ fn is_jenkins_env() -> bool {
 fn get_hostname() -> String {
     // In CI environments prefer a human-readable agent/runner identifier over
     // whatever hostname the container was assigned.
-    if is_jenkins_env() {
-        if let Some(n) = non_empty_env("NODE_NAME") {
-            return n;
-        }
+    if is_jenkins_env()
+        && let Some(n) = non_empty_env("NODE_NAME")
+    {
+        return n;
     }
-    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
-        if let Some(r) = non_empty_env("RUNNER_NAME") {
-            return r;
-        }
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+        && let Some(r) = non_empty_env("RUNNER_NAME")
+    {
+        return r;
     }
-    if std::env::var("GITLAB_CI").as_deref() == Ok("true") {
-        if let Some(r) = non_empty_env("CI_RUNNER_DESCRIPTION") {
-            return r;
-        }
+    if std::env::var("GITLAB_CI").as_deref() == Ok("true")
+        && let Some(r) = non_empty_env("CI_RUNNER_DESCRIPTION")
+    {
+        return r;
     }
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -1437,15 +1427,16 @@ fn check_metadata_policy(
             ),
         );
     }
-    if let Some(globs) = include_globs {
-        if !globs.is_match(Path::new(relative_path)) && !globs.is_match(path) {
-            return MetadataPolicyOutcome::Exclude;
-        }
+    if let Some(globs) = include_globs
+        && !globs.is_match(Path::new(relative_path))
+        && !globs.is_match(path)
+    {
+        return MetadataPolicyOutcome::Exclude;
     }
-    if let Some(globs) = exclude_globs {
-        if globs.is_match(Path::new(relative_path)) || globs.is_match(path) {
-            return skip_with_reason(path, root, size, "path matched exclude glob");
-        }
+    if let Some(globs) = exclude_globs
+        && (globs.is_match(Path::new(relative_path)) || globs.is_match(path))
+    {
+        return skip_with_reason(path, root, size, "path matched exclude glob");
     }
     if is_known_lockfile(path) && !config.analysis.include_lockfiles {
         return skip_with_reason(path, root, size, "lockfile skipped by default policy");
@@ -1606,19 +1597,19 @@ fn resolve_language(
         language = Language::Cpp;
     }
 
-    if let Some(enabled) = enabled_languages {
-        if !enabled.contains(&language) {
-            return LanguageOutcome::Skip(Box::new(skipped_record(
-                path,
-                root,
-                size_bytes,
-                FileStatus::SkippedByPolicy,
-                vec![format!(
-                    "language {} disabled by configuration",
-                    language.display_name()
-                )],
-            )));
-        }
+    if let Some(enabled) = enabled_languages
+        && !enabled.contains(&language)
+    {
+        return LanguageOutcome::Skip(Box::new(skipped_record(
+            path,
+            root,
+            size_bytes,
+            FileStatus::SkippedByPolicy,
+            vec![format!(
+                "language {} disabled by configuration",
+                language.display_name()
+            )],
+        )));
     }
 
     LanguageOutcome::Resolved(language)
@@ -2179,11 +2170,11 @@ pub fn detect_submodules(root: &Path) -> Vec<(String, PathBuf)> {
             }
             let name = trimmed["[submodule \"".len()..trimmed.len() - 2].to_string();
             current_name = Some(name);
-        } else if let Some(rest) = trimmed.strip_prefix("path") {
-            if let Some(eq_pos) = rest.find('=') {
-                let path_str = rest[eq_pos + 1..].trim();
-                current_path = Some(PathBuf::from(path_str));
-            }
+        } else if let Some(rest) = trimmed.strip_prefix("path")
+            && let Some(eq_pos) = rest.find('=')
+        {
+            let path_str = rest[eq_pos + 1..].trim();
+            current_path = Some(PathBuf::from(path_str));
         }
     }
     if let (Some(name), Some(path)) = (current_name, current_path) {
@@ -3232,7 +3223,8 @@ mod tests {
             "TF_BUILD",
             "TEAMCITY_VERSION",
         ] {
-            std::env::remove_var(var);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(var) };
         }
         // Result depends on test runner env; just assert no panic
         let _ = detect_ci_system();
@@ -3269,11 +3261,13 @@ mod tests {
 
     #[test]
     fn resolve_git_file_pointer_unreadable_path_returns_none() {
-        assert!(resolve_git_file_pointer(
-            Path::new("/nonexistent/__sloc_test_git_file__"),
-            Path::new("/nonexistent")
-        )
-        .is_none());
+        assert!(
+            resolve_git_file_pointer(
+                Path::new("/nonexistent/__sloc_test_git_file__"),
+                Path::new("/nonexistent")
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -3499,7 +3493,8 @@ mod tests {
             "TRAVIS_BRANCH",
             "BUILD_SOURCEBRANCH",
         ] {
-            std::env::remove_var(v);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(v) };
         }
     }
 
@@ -3508,7 +3503,8 @@ mod tests {
         let _lock = ci_env_lock();
         clear_branch_env_vars();
         // Azure DevOps sets BUILD_SOURCEBRANCH = "refs/heads/main"
-        std::env::set_var("BUILD_SOURCEBRANCH", "refs/heads/my-branch");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("BUILD_SOURCEBRANCH", "refs/heads/my-branch") };
         let branch = ci_branch_from_env();
         clear_branch_env_vars();
         assert_eq!(branch.as_deref(), Some("my-branch"));
@@ -3518,7 +3514,8 @@ mod tests {
     fn ci_branch_from_env_strips_origin_prefix() {
         let _lock = ci_env_lock();
         clear_branch_env_vars();
-        std::env::set_var("GIT_BRANCH", "origin/develop");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("GIT_BRANCH", "origin/develop") };
         let branch = ci_branch_from_env();
         clear_branch_env_vars();
         assert_eq!(branch.as_deref(), Some("develop"));
@@ -3529,7 +3526,8 @@ mod tests {
         let _lock = ci_env_lock();
         clear_branch_env_vars();
         // "HEAD" is filtered out; with no other vars, should return None
-        std::env::set_var("BRANCH_NAME", "HEAD");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("BRANCH_NAME", "HEAD") };
         let branch = ci_branch_from_env();
         clear_branch_env_vars();
         // HEAD value is filtered → None (or falls through to other vars, but all cleared)

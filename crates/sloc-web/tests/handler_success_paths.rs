@@ -5,9 +5,9 @@
 // application/json`) response variants.
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use http_body_util::BodyExt;
 use sloc_web::{make_test_router, make_test_router_with_key};
@@ -565,11 +565,13 @@ async fn serve_linked_html_and_json_artifacts() {
     // JSON artifact — inline + download.
     let (s_json, h_json, _) = get(app.clone(), &format!("/runs/json/{run_id}")).await;
     assert_eq!(s_json, StatusCode::OK);
-    assert!(h_json
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .contains("json"));
+    assert!(
+        h_json
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .contains("json")
+    );
     let (s_json_download, _, _) =
         get(app.clone(), &format!("/runs/json/{run_id}?download=1")).await;
     assert_eq!(s_json_download, StatusCode::OK);

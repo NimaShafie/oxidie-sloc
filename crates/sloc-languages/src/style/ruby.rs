@@ -5,8 +5,8 @@
 //! Guides: `RuboCop` (community), Airbnb Ruby, Standard Ruby.
 
 use super::common::{
-    classify_indent, count_first_quote, scan_base_metrics, score_indent_2, score_line100,
-    score_line120, score_line80, weighted_score, StyleAnalysis, StyleGuideScore, StyleSignal,
+    StyleAnalysis, StyleGuideScore, StyleSignal, classify_indent, count_first_quote,
+    scan_base_metrics, score_indent_2, score_line80, score_line100, score_line120, weighted_score,
 };
 
 pub fn analyze(text: &str) -> StyleAnalysis {

@@ -221,17 +221,15 @@ pub fn execute_run_prune(reg: &mut ScanRegistry, plan: &PrunePlan) -> PruneRepor
     let mut removed_ids: HashSet<String> = HashSet::new();
 
     for run in &plan.runs {
-        if let Some(dir) = &run.output_dir {
-            if dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(dir) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        report
-                            .failures
-                            .push((dir.display().to_string(), e.to_string()));
-                        continue;
-                    }
-                }
-            }
+        if let Some(dir) = &run.output_dir
+            && dir.exists()
+            && let Err(e) = std::fs::remove_dir_all(dir)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            report
+                .failures
+                .push((dir.display().to_string(), e.to_string()));
+            continue;
         }
         report.bytes_freed += run.bytes;
         report.deleted_runs += 1;
@@ -460,12 +458,15 @@ mod tests {
     fn workspace_root_prefers_env_dir_then_falls_back() {
         let _guard = env_lock();
         let dir = tmp();
-        std::env::set_var("OXIDE_SLOC_ROOT", &dir);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("OXIDE_SLOC_ROOT", &dir) };
         assert_eq!(workspace_root(), dir);
         // A non-existent path is ignored → falls back to CWD (a real dir).
-        std::env::set_var("OXIDE_SLOC_ROOT", dir.join("does-not-exist"));
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("OXIDE_SLOC_ROOT", dir.join("does-not-exist")) };
         assert!(workspace_root().is_dir());
-        std::env::remove_var("OXIDE_SLOC_ROOT");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("OXIDE_SLOC_ROOT") };
         assert!(workspace_root().is_dir());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -478,7 +479,8 @@ mod tests {
         let abs = dir.join("art");
         assert_eq!(resolve_output_root(Some(abs.to_str().unwrap())), abs);
         // Empty/whitespace falls back to the default relative tree under the root.
-        std::env::set_var("OXIDE_SLOC_ROOT", &dir);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("OXIDE_SLOC_ROOT", &dir) };
         assert_eq!(resolve_output_root(Some("   ")), dir.join("out/web"));
         assert_eq!(resolve_output_root(None), dir.join("out/web"));
         // A relative override is anchored at the workspace root.
@@ -486,7 +488,8 @@ mod tests {
             resolve_output_root(Some("custom/out")),
             dir.join("custom/out")
         );
-        std::env::remove_var("OXIDE_SLOC_ROOT");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("OXIDE_SLOC_ROOT") };
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -494,11 +497,14 @@ mod tests {
     fn resolve_registry_path_honours_env_override() {
         let _guard = env_lock();
         let dir = tmp();
-        std::env::remove_var("SLOC_REGISTRY_PATH");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_REGISTRY_PATH") };
         assert_eq!(resolve_registry_path(&dir), dir.join("registry.json"));
-        std::env::set_var("SLOC_REGISTRY_PATH", dir.join("shared.json"));
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_REGISTRY_PATH", dir.join("shared.json")) };
         assert_eq!(resolve_registry_path(&dir), dir.join("shared.json"));
-        std::env::remove_var("SLOC_REGISTRY_PATH");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_REGISTRY_PATH") };
         std::fs::remove_dir_all(&dir).ok();
     }
 

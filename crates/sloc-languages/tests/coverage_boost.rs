@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use sloc_languages::{analyze_text, detect_language, style, AnalysisOptions, Language};
+use sloc_languages::{AnalysisOptions, Language, analyze_text, detect_language, style};
 
 /// Every Language variant with a tiny representative snippet. Calling
 /// `analyze_text` on each forces `language_scan_config` to resolve that arm.

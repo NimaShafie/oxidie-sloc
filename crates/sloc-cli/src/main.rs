@@ -9,17 +9,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use lettre::{
-    message::{header::ContentType, MultiPart, SinglePart},
-    transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::{MultiPart, SinglePart, header::ContentType},
+    transport::smtp::authentication::Credentials,
 };
 use tracing_subscriber::EnvFilter;
 
 use sloc_config::{AppConfig, BlankInBlockCommentPolicy, ContinuationLinePolicy, MixedLinePolicy};
 use sloc_core::{
-    analyze, check_against_baseline, compute_delta, execute_run_prune, plan_run_prune, read_json,
+    AnalysisRun, BaselineEntry, BaselineStore, ScanComparison, ScanRegistry, analyze,
+    check_against_baseline, compute_delta, execute_run_prune, plan_run_prune, read_json,
     resolve_baselines_path, resolve_output_root, resolve_registry_path, rotated_log_paths,
-    write_json, AnalysisRun, BaselineEntry, BaselineStore, ScanComparison, ScanRegistry,
+    write_json,
 };
 use sloc_git::{clone_or_fetch, create_worktree, destroy_worktree, get_sha};
 use sloc_report::{
@@ -36,7 +37,7 @@ fn color_enabled() -> bool {
 }
 
 macro_rules! paint {
-    ($enabled:expr, $code:expr, $val:expr) => {
+    ($enabled:expr_2021, $code:expr_2021, $val:expr_2021) => {
         if $enabled {
             format!("\x1b[{}m{}\x1b[0m", $code, $val)
         } else {
@@ -873,20 +874,18 @@ fn check_exit_conditions(
         std::process::exit(2);
     }
 
-    if let Some(threshold) = fail_below {
-        if run.summary_totals.code_lines < threshold {
-            eprintln!(
-                "error: code lines ({}) below threshold {} (--fail-below)",
-                run.summary_totals.code_lines, threshold
-            );
-            std::process::exit(3);
-        }
+    if let Some(threshold) = fail_below
+        && run.summary_totals.code_lines < threshold
+    {
+        eprintln!(
+            "error: code lines ({}) below threshold {} (--fail-below)",
+            run.summary_totals.code_lines, threshold
+        );
+        std::process::exit(3);
     }
 
-    if fail_on_budget {
-        if let Some(budget) = &run.effective_configuration.analysis.budget {
-            check_budget(run, budget);
-        }
+    if fail_on_budget && let Some(budget) = &run.effective_configuration.analysis.budget {
+        check_budget(run, budget);
     }
 }
 
@@ -906,16 +905,16 @@ fn check_budget(run: &AnalysisRun, budget: &sloc_config::BudgetConfig) {
 
     for lang_row in &run.totals_by_language {
         let key = lang_row.language.display_name().to_ascii_lowercase();
-        if let Some(&limit) = budget.per_language.get(&key) {
-            if lang_row.code_lines > limit {
-                eprintln!(
-                    "error: budget exceeded — {} code lines {} > limit {} (--fail-on-budget)",
-                    lang_row.language.display_name(),
-                    lang_row.code_lines,
-                    limit
-                );
-                violated = true;
-            }
+        if let Some(&limit) = budget.per_language.get(&key)
+            && lang_row.code_lines > limit
+        {
+            eprintln!(
+                "error: budget exceeded — {} code lines {} > limit {} (--fail-on-budget)",
+                lang_row.language.display_name(),
+                lang_row.code_lines,
+                limit
+            );
+            violated = true;
         }
     }
 
@@ -956,10 +955,10 @@ async fn run_analyze(args: AnalyzeArgs) -> Result<()> {
 
     // Allow explicit CI override of the git branch when auto-detection yields
     // nothing (e.g. detached HEAD checkouts in Jenkins with no env vars set).
-    if let Some(ref branch) = args.git_branch {
-        if !branch.is_empty() {
-            run.git_branch = Some(branch.clone());
-        }
+    if let Some(ref branch) = args.git_branch
+        && !branch.is_empty()
+    {
+        run.git_branch = Some(branch.clone());
     }
 
     if !quiet {
@@ -1210,11 +1209,11 @@ fn run_init(args: &InitArgs) -> Result<()> {
 # enabled_languages = ["Rust", "Python", "SQL"]
 "##;
 
-    if let Some(parent) = args.output.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
+    if let Some(parent) = args.output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 
     std::fs::write(&args.output, content)
@@ -1277,21 +1276,21 @@ fn run_validate(args: &ValidateArgs) -> Result<()> {
         "discovery.exclude_globs",
     ));
 
-    if let Some(logo) = &config.reporting.logo_path {
-        if !logo.exists() {
-            errors.push(format!(
-                "reporting.logo_path: '{}' does not exist",
-                logo.display()
-            ));
-        }
+    if let Some(logo) = &config.reporting.logo_path
+        && !logo.exists()
+    {
+        errors.push(format!(
+            "reporting.logo_path: '{}' does not exist",
+            logo.display()
+        ));
     }
 
-    if let Some(color) = &config.reporting.accent_color {
-        if sloc_config::validate_hex_color(color).is_err() {
-            errors.push(format!(
-                "reporting.accent_color: '{color}' is not a valid hex colour (use #RGB or #RRGGBB)"
-            ));
-        }
+    if let Some(color) = &config.reporting.accent_color
+        && sloc_config::validate_hex_color(color).is_err()
+    {
+        errors.push(format!(
+            "reporting.accent_color: '{color}' is not a valid hex colour (use #RGB or #RRGGBB)"
+        ));
     }
 
     for name in config.profiles.keys() {
@@ -1495,13 +1494,13 @@ fn validate_webhook_url(raw: &str, allow_private_net: bool) -> Result<()> {
     if BLOCKED_WEBHOOK_HOSTS.contains(&host) || host.to_ascii_lowercase().ends_with(".local") {
         anyhow::bail!("webhook URL host is blocked: {host}");
     }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_ip_blocked(ip) {
-            anyhow::bail!(
-                "webhook URL resolves to a blocked IP address: {ip}; \
+    if let Ok(ip) = host.parse::<std::net::IpAddr>()
+        && is_ip_blocked(ip)
+    {
+        anyhow::bail!(
+            "webhook URL resolves to a blocked IP address: {ip}; \
                  use --allow-private-net to send to private addresses"
-            );
-        }
+        );
     }
     Ok(())
 }
@@ -2869,10 +2868,13 @@ fn run_watch_scan(
 fn write_watch_output(run: &AnalysisRun, output_dir: Option<&Path>, sha: &str, quiet: bool) {
     let Some(dir) = output_dir else { return };
     let path = dir.join(format!("{}.json", &sha[..sha.len().min(8)]));
-    if let Err(e) = write_json(run, &path) {
-        eprintln!("[watch] write failed: {e}");
-    } else {
-        log_written(&path, quiet);
+    match write_json(run, &path) {
+        Err(e) => {
+            eprintln!("[watch] write failed: {e}");
+        }
+        _ => {
+            log_written(&path, quiet);
+        }
     }
 }
 

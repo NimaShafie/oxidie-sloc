@@ -3,8 +3,8 @@
 
 use sloc_git::webhook::verify_github_sig;
 use sloc_git::{
-    normalize_git_url, parse_bitbucket_push, parse_github_push, parse_gitlab_push, ScanSchedule,
-    ScanScheduleKind, ScanScheduleProvider, ScheduleStore, WebhookProvider,
+    ScanSchedule, ScanScheduleKind, ScanScheduleProvider, ScheduleStore, WebhookProvider,
+    normalize_git_url, parse_bitbucket_push, parse_github_push, parse_gitlab_push,
 };
 
 // ── normalize_git_url ─────────────────────────────────────────────────────────

@@ -5,9 +5,8 @@
 //! Guides: PEP 8, Black, Google Python.
 
 use super::common::{
-    classify_indent, count_first_quote, count_over, scan_base_metrics, score_indent_4,
-    score_line80, score_line88, score_line_n, weighted_score, StyleAnalysis, StyleGuideScore,
-    StyleSignal,
+    StyleAnalysis, StyleGuideScore, StyleSignal, classify_indent, count_first_quote, count_over,
+    scan_base_metrics, score_indent_4, score_line_n, score_line80, score_line88, weighted_score,
 };
 
 pub fn analyze(text: &str) -> StyleAnalysis {

@@ -3785,11 +3785,7 @@ fn helvetica_advance(ch: char, bold: bool) -> u32 {
             return if bold { bold_w } else { regular_w };
         }
     }
-    if bold {
-        556
-    } else {
-        500
-    }
+    if bold { 556 } else { 500 }
 }
 
 /// Convert a string to mm given a font size (pt) and bold flag, using exact PDF Helvetica metrics.
@@ -10338,11 +10334,7 @@ const fn xl_cell_style(is_kv: bool, ci: usize, is_num: bool, is_alt: bool) -> u3
             XLS_KV_VAL
         }
     } else if is_num {
-        if is_alt {
-            XLS_NUM_ALT
-        } else {
-            XLS_NUM
-        }
+        if is_alt { XLS_NUM_ALT } else { XLS_NUM }
     } else if is_alt {
         XLS_BODY_ALT
     } else {
@@ -10953,9 +10945,11 @@ mod tests {
         let data: Vec<u8> = (0u8..=255).collect();
         let encoded = base64_encode(&data);
         assert!(!encoded.is_empty());
-        assert!(encoded
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     // ── json_escape ──────────────────────────────────────────────────────────────
@@ -11349,8 +11343,10 @@ mod coverage_boost_report_tests {
     fn browser_discovery_is_callable_without_panicking() {
         // With no SLOC_BROWSER set, discovery walks the candidate list and
         // returns None (no browser in the test sandbox) — exercising the loop.
-        std::env::remove_var("SLOC_BROWSER");
-        std::env::remove_var("BROWSER");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_BROWSER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("BROWSER") };
         let _ = discover_browser();
         let _ = discover_browser_from_env();
         #[cfg(windows)]
@@ -11358,11 +11354,13 @@ mod coverage_boost_report_tests {
         #[cfg(not(windows))]
         let _ = linux_browser_candidates();
         // With a bogus SLOC_BROWSER, normalize_browser_env_path is exercised.
-        std::env::set_var("SLOC_BROWSER", "/no/such/browser/path");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_BROWSER", "/no/such/browser/path") };
         let _ = discover_browser_from_env();
         let p = normalize_browser_env_path("\"/quoted/path/chrome\"");
         assert!(p.to_string_lossy().contains("chrome"));
-        std::env::remove_var("SLOC_BROWSER");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_BROWSER") };
     }
 
     #[test]
@@ -11372,8 +11370,10 @@ mod coverage_boost_report_tests {
 
     #[test]
     fn write_pdf_from_html_without_browser_errors_gracefully() {
-        std::env::remove_var("SLOC_BROWSER");
-        std::env::remove_var("BROWSER");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_BROWSER") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("BROWSER") };
         let dir = std::env::temp_dir().join("sloc_report_pdf_test");
         let _ = std::fs::create_dir_all(&dir);
         let html = dir.join("in.html");

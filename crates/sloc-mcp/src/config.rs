@@ -195,9 +195,10 @@ mod tests {
             allowed_roots: vec![],
         };
         assert!(cfg.resolve_server_url(None).is_err());
-        assert!(cfg
-            .resolve_server_url(Some("http://localhost:4317"))
-            .is_err());
+        assert!(
+            cfg.resolve_server_url(Some("http://localhost:4317"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -219,7 +220,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = cfg_no_roots();
         // Without SLOC_MCP_UNRESTRICTED=1 an empty roots list must be rejected.
-        std::env::remove_var("SLOC_MCP_UNRESTRICTED");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_MCP_UNRESTRICTED") };
         assert!(cfg.check_path_allowed("/arbitrary/path").is_err());
         assert!(cfg.check_path_allowed(".").is_err());
     }
@@ -231,10 +233,12 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = cfg_no_roots();
         // With SLOC_MCP_UNRESTRICTED=1 the empty-roots bypass is active.
-        std::env::set_var("SLOC_MCP_UNRESTRICTED", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SLOC_MCP_UNRESTRICTED", "1") };
         let result_a = cfg.check_path_allowed("/arbitrary/path");
         let result_b = cfg.check_path_allowed(".");
-        std::env::remove_var("SLOC_MCP_UNRESTRICTED");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("SLOC_MCP_UNRESTRICTED") };
         assert!(result_a.is_ok());
         assert!(result_b.is_ok());
     }

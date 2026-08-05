@@ -151,7 +151,7 @@ mod tests {
     // ── in-process mock server ────────────────────────────────────────────────
 
     async fn spawn_mock_metrics_server() -> (String, tokio::task::AbortHandle) {
-        use axum::{routing::get, Json, Router};
+        use axum::{Json, Router, routing::get};
         let app = Router::new()
             .route("/api/metrics/latest", get(|| async {
                 Json(serde_json::json!({"run_id":"latest-run","summary_totals":{"code_lines":100}}))
@@ -247,7 +247,7 @@ mod tests {
     async fn health_check_version_failure_still_returns_ok() {
         // The health_check function uses unwrap_or_default() for the version call,
         // so even if /api/version returns an error, health must still succeed.
-        use axum::{routing::get, Json, Router};
+        use axum::{Json, Router, routing::get};
         let app = Router::new()
             .route(
                 "/api/health",
