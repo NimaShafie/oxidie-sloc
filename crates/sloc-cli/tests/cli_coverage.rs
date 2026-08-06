@@ -390,3 +390,153 @@ fn analyze_missing_path_runs_with_zero_files() {
         "a missing path yields an empty/zero-file summary: {text}"
     );
 }
+
+/// `diff` with every artifact flag covers run_diff's json/csv/xlsx writers,
+/// including write_diff_xlsx.
+#[test]
+fn diff_writes_json_csv_xlsx_artifacts() {
+    let root = scratch("diffart");
+    let a = root.join("a");
+    let b = root.join("b");
+    seed_sources(&a);
+    seed_sources(&b);
+    // Make b larger so the delta is non-trivial.
+    write(&b.join("more.rs"), "pub fn added() -> u8 {\n    42\n}\n");
+
+    let aj = root.join("a.json");
+    let bj = root.join("b.json");
+    for (src, out) in [(&a, &aj), (&b, &bj)] {
+        assert!(
+            bin()
+                .args(["analyze"])
+                .arg(src)
+                .arg("--quiet")
+                .arg("--json-out")
+                .arg(out)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    let dj = root.join("delta.json");
+    let dc = root.join("delta.csv");
+    let dx = root.join("delta.xlsx");
+    let status = bin()
+        .args(["diff"])
+        .arg(&aj)
+        .arg(&bj)
+        .arg("--json-out")
+        .arg(&dj)
+        .arg("--csv-out")
+        .arg(&dc)
+        .arg("--xlsx-out")
+        .arg(&dx)
+        .status()
+        .unwrap();
+    assert!(status.success(), "diff with artifacts should succeed");
+    for f in [&dj, &dc, &dx] {
+        assert!(f.is_file(), "diff must write {f:?}");
+    }
+}
+
+/// A tight SLOC budget triggers the exit-code-4 gate (check_budget, both the
+/// total and per-language branches).
+#[test]
+fn analyze_fail_on_budget_exits_4() {
+    let root = scratch("budget");
+    let src = root.join("src");
+    seed_sources(&src);
+    let cfg = root.join("budget.toml");
+    write(
+        &cfg,
+        "[analysis.budget]\ntotal_max = 1\n\n[analysis.budget.per_language]\nrust = 1\n",
+    );
+    let out = bin()
+        .args(["analyze"])
+        .arg(&src)
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--fail-on-budget")
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "exceeding the SLOC budget must exit 4"
+    );
+}
+
+/// A zero complexity ceiling flags any file with computed cyclomatic complexity
+/// (apply_complexity_gate, exit 6).
+#[test]
+fn analyze_max_complexity_exits_6() {
+    let root = scratch("complexity");
+    let src = root.join("src");
+    // A function with several branches so cyclomatic complexity is clearly > 0.
+    write(
+        &src.join("branchy.rs"),
+        "pub fn classify(n: i32) -> &'static str {\n    if n < 0 {\n        \"neg\"\n    } else if n == 0 {\n        \"zero\"\n    } else if n < 10 {\n        \"small\"\n    } else {\n        match n % 2 {\n            0 => \"even\",\n            _ => \"odd\",\n        }\n    }\n}\n",
+    );
+    let out = bin()
+        .args(["analyze"])
+        .arg(&src)
+        .arg("--max-complexity")
+        .arg("0")
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(6),
+        "a file over the complexity ceiling must exit 6"
+    );
+}
+
+/// Growth beyond a saved baseline triggers the exit-code-5 gate
+/// (check_against_baseline / --fail-above-baseline).
+#[test]
+fn analyze_fail_above_baseline_exits_5_on_growth() {
+    let root = scratch("grow");
+    let src = root.join("src");
+    seed_sources(&src);
+
+    // Save the baseline for the small tree.
+    assert!(
+        bin()
+            .args(["analyze"])
+            .arg(&src)
+            .arg("--quiet")
+            .arg("--set-baseline")
+            .arg("main")
+            .env("OXIDE_SLOC_ROOT", &root)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    // Grow the tree substantially, then enforce with no allowed growth.
+    let mut big = String::new();
+    for i in 0..50 {
+        big.push_str(&format!("pub fn f{i}() -> i32 {{\n    {i}\n}}\n"));
+    }
+    write(&src.join("grown.rs"), &big);
+
+    let out = bin()
+        .args(["analyze"])
+        .arg(&src)
+        .arg("--quiet")
+        .arg("--fail-above-baseline")
+        .arg("main")
+        .arg("--max-delta-pct")
+        .arg("0")
+        .env("OXIDE_SLOC_ROOT", &root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "code growth beyond the baseline must exit 5"
+    );
+}
