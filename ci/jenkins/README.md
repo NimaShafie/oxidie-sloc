@@ -50,9 +50,11 @@ Enable each tier by setting the corresponding build parameters.
 
 Set `TEST_RUNNER = cargo-nextest` and `PUBLISH_TEST_RESULTS = true`.
 
-Requires `cargo-nextest` on the agent:
+Requires `cargo-nextest` on the agent (`--locked` is mandatory — current nextest
+refuses to install without it: "Nextest does not support being installed without
+--locked"):
 ```bash
-cargo install cargo-nextest
+cargo install --locked cargo-nextest
 ```
 
 What you get:
@@ -494,6 +496,17 @@ curl -sS -X POST -u "${JENKINS_USER}:${JENKINS_TOKEN}" -H "${CRUMB}" \
 A successful deletion returns HTTP 302. Re-run `bash ci/jenkins/preflight.sh`
 afterwards — the `[ok] No existing job named 'oxide-sloc' — safe to create`
 line confirms you may proceed.
+
+> **Trend history survives job deletion.** SLOC trend data is kept per-job on the
+> agent at `~/.oxide-sloc-history/<job>.csv` (`<job>` = the sanitized `JOB_NAME`),
+> **outside** the job's `$JENKINS_HOME` directory, so it persists across a
+> delete → recreate cycle by design (a recycled workspace or renamed controller
+> keeps its history). A freshly recreated `oxide-sloc` job therefore inherits any
+> prior data points in its trend charts. If a job blow-out should mean a clean
+> trend reset, also remove the history file before recreating:
+> ```bash
+> rm -f ~/.oxide-sloc-history/oxide-sloc.csv   # run on the build agent
+> ```
 
 ### Step 2 — Trigger the first (seed) build
 

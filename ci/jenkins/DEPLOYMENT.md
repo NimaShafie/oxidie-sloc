@@ -72,8 +72,10 @@ repo), rebuild, and restart the agent.
 
 ```dockerfile
 # --- oxide-sloc test + coverage tooling (Rust already present on the agent) ---
-# cargo-nextest → JUnit XML → Jenkins "Test Result" view (TEST_RUNNER default is
-# now cargo-nextest; it falls back to cargo test if this is missing).
+# cargo-nextest → JUnit XML → Jenkins "Test Result" view. TEST_RUNNER defaults to
+# cargo-test (green on a bare agent); bake nextest in so the "Test Result" view is
+# available once an operator selects TEST_RUNNER=cargo-nextest. --locked is
+# mandatory (nextest refuses to install without it).
 RUN cargo install cargo-nextest --locked
 
 # cargo-llvm-cov + llvm-tools → LCOV → Jenkins "Coverage" view (+ LCOV to SonarQube)
@@ -90,14 +92,20 @@ tools: the pipeline then falls back to `cargo test` (no Test Result view) and
 skips Coverage until the next provision. The pipeline's offline auto-install is a
 safety net, **not** a guarantee.
 
-Offline/air-gapped agents: both tools are also vendored in `ci/tools/Cargo.toml`,
-so `cargo install --offline cargo-nextest` / `cargo-llvm-cov` work without
-internet (the pipeline attempts this as its fallback).
+Offline/air-gapped agents: both tools are also vendored in `ci/tools/Cargo.toml`.
+The pipeline's fallback installs nextest offline by **path** — it copies
+`vendor/cargo-nextest` out and runs `cargo install --offline --path …` so the dep
+tree resolves against the workspace `vendored-sources`. A plain
+`cargo install --offline cargo-nextest` does **not** work: `cargo install` ignores
+the workspace `.cargo/config.toml` source replacement and fails with
+"could not find 'cargo-nextest' in registry 'crates-io'".
 
 After the rebuild:
 
-- **Test Result** appears automatically — `TEST_RUNNER` defaults to
-  `cargo-nextest` and `PUBLISH_TEST_RESULTS` defaults to true.
+- **Test Result** appears once a build sets `TEST_RUNNER=cargo-nextest`
+  (`PUBLISH_TEST_RESULTS` defaults to true). The default `TEST_RUNNER` is
+  `cargo-test` so a bare agent stays green; with nextest baked into the image as
+  above, selecting `cargo-nextest` yields the Test Result view with no fallback.
 - **Coverage** appears when a build runs with `COVERAGE_STANDALONE=true` (left
   opt-in: it recompiles instrumented, ~4–5 min/build, and runs oxide-sloc's *own*
   llvm-cov — meaningful for self-CI, not external-repo scans). The view is served
