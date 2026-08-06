@@ -228,9 +228,16 @@ center cannot replace them, and restarts Jenkins.
    | `Credentials Binding` | Binds secrets as environment variables |
    | `Workspace Cleanup` | `cleanWs()` in `post { cleanup }` |
    | `Pipeline Utility Steps` | `readJSON`, `readFile`, `fileExists` in post steps |
+   | `Badge` *(optional)* | `addBadge()` / `createSummary()` — SLOC/test/coverage headline on the run row and boxed build summary. Pipeline degrades to the plain-text description when absent |
+   | `Warnings Next Generation` *(optional)* | `recordIssues()` — trend graphs + per-issue drill-down for style findings. Pipeline degrades to the native dashboard when absent |
 
    > **Optional — Bitbucket:** `Bitbucket Branch Source` and
    > `Bitbucket Build Status Notifier`.
+   >
+   > The `Badge` and `Warnings Next Generation` rows above are optional too — they
+   > match `ci/jenkins/plugins.txt` and `preflight.sh` (both list them as optional
+   > run-page enrichment). A system-admin build can also install them automatically
+   > at runtime; without them the build still succeeds with a reduced dashboard.
 
 3. Click **Install**, then check **"Restart Jenkins when installation is complete"**.
 
@@ -499,8 +506,10 @@ once.  The first build must run **without parameters** to register them.
    Coverage → Analyze → Web UI health check → Deliver results (Send webhook, Send email) →
    Archive & Publish → Push to Artifact Repository → Git-Ref Scan → Git-Ref Compare**,
    then succeeds.  Analyze targets `testing/fixtures/basic` which exists in the repository.
-   Optional stages (Coverage, Web UI health check, webhook, email, artifact push, ref scan)
-   are skipped unless the corresponding parameters are configured.
+   With default parameters the Analyze stage scans the **whole tooling repo itself**
+   (`TARGET_REPO_URL` blank, `SCAN_PATH` blank → `analyze .`), producing the full
+   report set. Optional stages (Coverage, Web UI health check, webhook, email,
+   artifact push, ref scan) are skipped unless the corresponding parameters are configured.
 
    > **If the build fails** with `MethodTooLargeException` at compile time (before any
    > stage runs), see the [Troubleshooting → MethodTooLargeException](#methodtoolarge
@@ -510,7 +519,7 @@ once.  The first build must run **without parameters** to register them.
 
 3. Refresh the job page.  The left sidebar now shows **"Build with Parameters"**.
 
-From this point on, all 58 configuration parameters are visible in the build form.
+From this point on, all configuration parameters are visible in the build form.
 
 ---
 
@@ -518,24 +527,27 @@ From this point on, all 58 configuration parameters are visible in the build for
 
 1. Click **"Build with Parameters"** in the left sidebar.
 
-2. The build form opens with all 58 parameters grouped by function.
+2. The build form opens with all parameters grouped by function.
    Adjust at minimum:
 
    | Parameter | Default | What to set |
    |-----------|---------|------------|
-   | `REPO_URL` | GitHub upstream | URL of the repository you want to scan |
-   | `SCAN_PATH` | `testing/fixtures/basic` | Path within the repository to analyze (e.g., `src` or `.`) |
+   | `TARGET_REPO_URL` | `` (blank) | Git URL of the repository to scan. **Leave blank to scan oxide-sloc itself.** Cloned into `./_target`; `SCAN_PATH` is resolved inside it |
+   | `SCAN_PATH` | `` (blank = whole repo) | Optional subdirectory of the target repo to scan (e.g., `src` or `packages/api`); blank scans the whole repo |
    | `REPORT_TITLE` | `oxide-sloc CI Report` | A descriptive title for the HTML report |
    | `GENERATE_HTML` | ✓ checked | Check to produce an HTML report (recommended) |
    | `GENERATE_PDF` | ✓ checked | PDF is produced by default; uncheck to skip. **Pure-Rust — no browser required on the agent** |
    | `SKIP_WEB_CHECK` | ✓ checked | Keep checked if port 4317 is not available on the agent |
+
+   > **Note:** `REPO_URL` is the *tooling* repo the scanner is built from (the Jenkinsfile's
+   > own checkout) — leave it at its default. The **scan target** is `TARGET_REPO_URL` above.
 
    **To enable unit test results** (requires cargo-nextest on the agent — see Step 13):
 
    | Parameter | Value |
    |-----------|-------|
    | `TEST_RUNNER` | `cargo-nextest` |
-   | `PUBLISH_TEST_RESULTS` | ✓ checked |
+   | `PUBLISH_TEST_RESULTS` | ✓ checked (already the default) |
    | `TEST_FAIL_FAST` | unchecked (see all failures) |
 
    **To enable code coverage** (requires cargo-llvm-cov on the agent — see Step 14):
@@ -726,7 +738,10 @@ Enable `TEST_RUNNER = cargo-nextest` only after installing nextest on the agent.
 
 ```bash
 # Install cargo-nextest (requires Rust toolchain already installed)
-cargo install cargo-nextest
+# --locked is mandatory: current nextest ships a tripwire crate that
+# compile_error!s ("Nextest does not support being installed without --locked")
+# unless the exact bundled lockfile is used.
+cargo install --locked cargo-nextest
 
 # Verify
 cargo nextest --version

@@ -94,9 +94,34 @@ CRUMB="$(crumb_header)"
 CRUMB_ARG=()
 [ -n "${CRUMB}" ] && CRUMB_ARG=(-H "${CRUMB}")
 
+# Snapshot the plugins already installed on the controller so we skip them rather
+# than re-uploading. Re-uploading a plugin that was pinned from the update centre
+# could silently replace it with a different version — a no-op check avoids that
+# and stops the summary claiming it "installed" plugins that were already present.
+installed_shortnames() {
+    [ -z "${BASE}" ] && return 0
+    curl -fsS ${USER_ID:+-u "${USER_ID}:${TOKEN}"} \
+        "${BASE}/pluginManager/api/json?depth=1&tree=plugins[shortName]" 2>/dev/null \
+    | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(" ".join(p.get("shortName", "") for p in d.get("plugins", [])))
+except Exception:
+    pass' 2>/dev/null || true
+}
+PRESENT=" $(installed_shortnames) "
+
 installed=()
+skipped=()
 for name in "${PLUGINS[@]}"; do
     [ -z "${name}" ] && continue
+    case "${PRESENT}" in
+        *" ${name} "*)
+            echo "==> ${name} already installed — skipping (no-op)."
+            skipped+=("${name}")
+            continue
+            ;;
+    esac
     ok=1
     hpi="$(find "${STAGE:-/nonexistent}" -maxdepth 1 -name "${name}*.hpi" -o -name "${name}*.jpi" 2>/dev/null | head -1)"
     if [ -n "${hpi}" ] && [ -f "${hpi}" ]; then
@@ -130,6 +155,9 @@ except Exception:
     pass
 PY
 
-echo "install-plugins: installed ${#installed[@]} plugin(s): ${installed[*]:-none}"
-echo "                 (a controller restart may be required to activate them)"
+echo "install-plugins: installed ${#installed[@]} new plugin(s): ${installed[*]:-none}" \
+     "(${#skipped[@]} already present: ${skipped[*]:-none})"
+if [ "${#installed[@]}" -gt 0 ]; then
+    echo "                 (a controller restart may be required to activate them)"
+fi
 exit 0

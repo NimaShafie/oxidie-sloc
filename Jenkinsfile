@@ -262,14 +262,18 @@ pipeline {
         // ── Test runner & results ──────────────────────────────────────────────
         choice(
             name:    'TEST_RUNNER',
-            choices: ['cargo-nextest', 'cargo-test'],
-            description: 'Test runner for the Unit tests stage. Default cargo-nextest so the ' +
-                         '"Test Result" view + trend appear; falls back to cargo test automatically ' +
-                         'if nextest is not on the agent (no failure).\n' +
+            choices: ['cargo-test', 'cargo-nextest'],
+            description: 'Test runner for the Unit tests stage. Default cargo-test so a fresh ' +
+                         'agent with no extra tooling passes green. Switch to cargo-nextest to ' +
+                         'get the "Test Result" view + trend (requires cargo-nextest on the ' +
+                         'agent — see docs/jenkins-manual-setup.md Step 13). If cargo-nextest ' +
+                         'is selected but is not on the agent and the offline install fails, ' +
+                         'the stage falls back to cargo test and marks the build UNSTABLE ' +
+                         '(yellow) so the missing JUnit report is visible.\n' +
+                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)\n' +
                          '  cargo-nextest — faster parallel runner with JUnit XML output (needs ' +
-                         'cargo-nextest on the agent; "cargo install cargo-nextest"). ' +
-                         'Publishes the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.\n' +
-                         '  cargo-test    — standard stable cargo test; console output only (no JUnit XML)'
+                         'cargo-nextest on the agent; "cargo install --locked cargo-nextest"). ' +
+                         'Publishes the "Test Result" trend when PUBLISH_TEST_RESULTS is checked.'
         )
         booleanParam(
             name:         'PUBLISH_TEST_RESULTS',
@@ -837,6 +841,16 @@ pipeline {
 
     post {
         success {
+            script {
+                if (h != null) { h.runPostSuccess() }
+            }
+        }
+        unstable {
+            // A fresh agent without cargo-nextest produces an UNSTABLE build (the
+            // Unit tests stage falls back to cargo test with no JUnit report). Run
+            // the same summary so the build row gets its description/displayName
+            // instead of showing blank; runPostSuccess skips the downstream trigger
+            // on a non-SUCCESS result.
             script {
                 if (h != null) { h.runPostSuccess() }
             }

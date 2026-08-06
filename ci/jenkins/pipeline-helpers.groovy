@@ -44,20 +44,51 @@ def runSetup() {
                     def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
                     if (base) {
                         withEnv(["SLOC_JENKINS_BASE=${base}",
-                                 "SLOC_CSP=${RELAXED_CSP}"]) {
-                            sh '''
-                                CRUMB=$(curl -sS -u "admin:${JEN_API_TOK}" \
-                                    "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22::%22,//crumb)" \
+                                 "SLOC_CSP=${RELAXED_CSP}",
+                                 // Derive the API user from the same place runArchivePublish
+                                 // does — JENKINS_API_USER, defaulting to admin — rather than
+                                 // hardcoding 'admin'.
+                                 "SLOC_JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}"]) {
+                            // Report success ONLY when the Script Console POST returns 200.
+                            // The old code echoed success unconditionally (a lie) and used the
+                            // "::" xpath separator, which Jenkins rejects with HTTP 403
+                            // ("primitive XPath result sets forbidden") — only the exact
+                            // concat(...,":",...) form is whitelisted. Split the crumb on the
+                            // FIRST ':' only (crumb values never contain ':').
+                            def cspStatus = sh(returnStatus: true, script: '''
+                                CRUMB=$(curl -fsS -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
+                                    "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)" \
                                     2>/dev/null || echo "")
-                                FIELD="${CRUMB%%::*}"
-                                CRUMB_VAL="${CRUMB##*::}"
+                                FIELD="${CRUMB%%:*}"
+                                CRUMB_VAL="${CRUMB#*:}"
                                 GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
-                                curl -sS -u "admin:${JEN_API_TOK}" \
-                                    -H "${FIELD}: ${CRUMB_VAL}" \
-                                    --data-urlencode "script=${GROOVY}" \
-                                    "${SLOC_JENKINS_BASE}/scriptText" >/dev/null 2>&1 || true
-                                echo "Artifact-viewer CSP relaxed (Script Console API)."
-                            '''
+                                # A modern LTS exempts API-token POSTs from CSRF, so proceed
+                                # even when the crumb fetch returned nothing; only the HTTP
+                                # code decides success.
+                                if [ -n "${FIELD}" ] && [ -n "${CRUMB_VAL}" ]; then
+                                    CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+                                        -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
+                                        -H "${FIELD}: ${CRUMB_VAL}" \
+                                        --data-urlencode "script=${GROOVY}" \
+                                        "${SLOC_JENKINS_BASE}/scriptText" 2>/dev/null || echo 000)
+                                else
+                                    CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+                                        -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
+                                        --data-urlencode "script=${GROOVY}" \
+                                        "${SLOC_JENKINS_BASE}/scriptText" 2>/dev/null || echo 000)
+                                fi
+                                if [ "${CODE}" = "200" ]; then
+                                    echo "Artifact-viewer CSP relaxed (Script Console API)."
+                                    exit 0
+                                fi
+                                echo "Script Console CSP relaxation returned HTTP ${CODE} (not applied)."
+                                exit 1
+                            ''')
+                            if (cspStatus != 0) {
+                                echo 'In-pipeline CSP relaxation did not take effect. For a ' +
+                                     'permanent fix, deploy ci/jenkins/init.groovy.d/relax-csp.groovy ' +
+                                     '(bash ci/jenkins/preflight.sh --install-csp).'
+                            }
                         }
                     }
                 } else {
@@ -89,8 +120,32 @@ def runUnitTests() {
             // which has no `pipefail`, so a pipeline's exit status is tail's
             // (always 0) and `installed` would be unconditionally true — making
             // the unstable() branch below dead code.
+            //
+            // `cargo install cargo-nextest --offline` alone can never resolve from
+            // vendor/: cargo install runs in a temp dir and does NOT pick up the
+            // workspace .cargo/config.toml source replacement, so it looks for the
+            // crate in registry 'crates-io' and fails. Instead copy the vendored
+            // crate out of vendor/ and install it by --path, which resolves its
+            // dependency tree against the workspace vendored-sources (cwd here is
+            // the workspace, where setup-vendor.sh wrote .cargo/config.toml). This
+            // mirrors the verified-working GitLab CI path. Do NOT add --locked to
+            // the --path install: nextest's bundled lock wants chrono 0.4.44 while
+            // the vendor set carries 0.4.45 by design (see ci/tools/Cargo.toml).
+            // The `--locked` online fallback is a no-op offline (it just fails and
+            // the unstable() branch fires) but lets a networked agent recover.
             def installed = sh(
-                script: 'cargo install --offline cargo-nextest > .nextest-install.log 2>&1',
+                script: '''
+                    {
+                        if [ -d vendor/cargo-nextest ]; then
+                            rm -rf .ci-tools && mkdir -p .ci-tools
+                            cp -r vendor/cargo-nextest .ci-tools/
+                            cargo install --offline --path .ci-tools/cargo-nextest \
+                                || cargo install --locked cargo-nextest
+                        else
+                            cargo install --locked cargo-nextest
+                        fi
+                    } > .nextest-install.log 2>&1
+                ''',
                 returnStatus: true
             ) == 0
             sh 'tail -5 .nextest-install.log 2>/dev/null || true'
@@ -105,7 +160,7 @@ def runUnitTests() {
                 // cargo test fallback below so the suite is not skipped entirely.
                 unstable('cargo-nextest was requested (TEST_RUNNER=cargo-nextest) but is unavailable and the offline install failed — falling back to cargo test with NO JUnit report. Bake cargo-nextest into the agent image to restore the Tests report.')
                 echo '  JUnit XML output will not be produced this run.'
-                echo '  To enable: cargo install cargo-nextest  on the agent (then re-run install-rust-cache.sh).'
+                echo '  To enable: cargo install --locked cargo-nextest  on the agent (then re-run install-rust-cache.sh).'
                 echo '  Falling back to cargo test (build marked UNSTABLE).'
             }
         } else {
@@ -929,9 +984,17 @@ def runPostSuccess() {
     } catch (Throwable ex) {
         echo "Could not set build metadata: ${ex.message}"
     }
-    echo 'All stages passed. Artifacts and reports archived.'
+    if (currentBuild.result == 'UNSTABLE') {
+        echo 'Build UNSTABLE — artifacts and reports archived; review the stage warnings above.'
+    } else {
+        echo 'All stages passed. Artifacts and reports archived.'
+    }
 
-    if (params.DOWNSTREAM_JOB?.trim()) {
+    // Only chain a downstream job on a clean SUCCESS. runPostSuccess is also invoked
+    // from post{unstable} (to populate the build row), where triggering downstream
+    // would be wrong.
+    if (params.DOWNSTREAM_JOB?.trim()
+            && (currentBuild.result == null || currentBuild.result == 'SUCCESS')) {
         build job: params.DOWNSTREAM_JOB,
               parameters: [
                   string(name: 'UPSTREAM_JOB',   value: env.JOB_NAME),
