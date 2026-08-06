@@ -10,6 +10,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.11] — 2026-08-06
+
+### Changed
+
+- **Rust 2024 edition**: the workspace migrated from the 2021 to the 2024 edition; all crates
+  now build under edition 2024 (`env::set_var`/`remove_var` are `unsafe` and wrapped accordingly).
+
+### Fixed
+
+- **CI/Jenkins pipeline**: green-by-default seed build, a working `nextest` install, an honest
+  CSP fallback, a `globoff` plugin-probe `curl`, and removal of a stale pipeline clause.
+- **2024 clippy**: collapsed a Linux-only nested `if` into a let-chain to satisfy the 2024
+  lint set.
+
+### Internal
+
+- **Dependency refresh**: bumped dependencies to their latest semver-compatible patches;
+  upgraded `printpdf` 0.11 → 0.12 (dropping resolved advisory ignores), the vendored
+  `cargo-llvm-cov` 0.6 → 0.8 for offline CI coverage, and refreshed pinned GitHub Actions and
+  base-image digests.
+- **Test coverage**: added coverage-gap tests across all crates, plus CLI end-to-end coverage
+  for `sloc-cli` `main.rs` (diff artifacts and exit-code gates).
+- **OpenAPI version sync**: the served OpenAPI `info.version` now tracks the release version.
+
+---
+
 ## [1.6.1] — 2026-07-29
 
 ### Added
