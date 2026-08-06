@@ -4097,13 +4097,13 @@ fn linux_browser_candidates() -> Vec<PathBuf> {
 #[cfg(not(windows))]
 fn which_subprocess(names: &[&str]) -> Option<PathBuf> {
     for name in names {
-        if let Ok(out) = std::process::Command::new("which").arg(name).output() {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout);
-                let path = PathBuf::from(s.trim());
-                if path.is_file() {
-                    return Some(path);
-                }
+        if let Ok(out) = std::process::Command::new("which").arg(name).output()
+            && out.status.success()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let path = PathBuf::from(s.trim());
+            if path.is_file() {
+                return Some(path);
             }
         }
     }
