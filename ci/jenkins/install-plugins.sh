@@ -100,7 +100,11 @@ CRUMB_ARG=()
 # and stops the summary claiming it "installed" plugins that were already present.
 installed_shortnames() {
     [ -z "${BASE}" ] && return 0
-    curl -fsS ${USER_ID:+-u "${USER_ID}:${TOKEN}"} \
+    # -g/--globoff is REQUIRED: the tree=plugins[shortName] query contains [ ]
+    # which curl otherwise parses as a glob range and aborts before sending
+    # ("curl: (3) bad range in URL"), leaving the probe empty so every plugin
+    # looks "new" and the no-op skip never triggers.
+    curl -fsS -g ${USER_ID:+-u "${USER_ID}:${TOKEN}"} \
         "${BASE}/pluginManager/api/json?depth=1&tree=plugins[shortName]" 2>/dev/null \
     | python3 -c 'import json,sys
 try:

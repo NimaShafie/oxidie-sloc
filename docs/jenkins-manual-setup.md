@@ -505,7 +505,7 @@ once.  The first build must run **without parameters** to register them.
    **Checkout → Load helpers → Setup → Quality Gates (Format, Lint, Unit tests) → Build →
    Coverage → Analyze → Web UI health check → Deliver results (Send webhook, Send email) →
    Archive & Publish → Push to Artifact Repository → Git-Ref Scan → Git-Ref Compare**,
-   then succeeds.  Analyze targets `testing/fixtures/basic` which exists in the repository.
+   then succeeds.
    With default parameters the Analyze stage scans the **whole tooling repo itself**
    (`TARGET_REPO_URL` blank, `SCAN_PATH` blank → `analyze .`), producing the full
    report set. Optional stages (Coverage, Web UI health check, webhook, email,
