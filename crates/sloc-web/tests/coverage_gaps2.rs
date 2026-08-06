@@ -68,7 +68,7 @@ fn base_run(id: &str) -> AnalysisRun {
     AnalysisRun {
         tool: ToolMetadata {
             name: "oxide-sloc".into(),
-            version: "1.6.1".into(),
+            version: "1.6.11".into(),
             run_id: id.into(),
             timestamp_utc: Utc::now(),
         },
