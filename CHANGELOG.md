@@ -10,6 +10,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.12] — 2026-08-07
+
+### Fixed
+
+- **Air-gapped Jenkins CI**: de-hardcoded the tooling `REPO_URL` so air-gapped controllers
+  resolve it from the build parameter, environment, or `checkout scm` instead of a baked-in
+  GitHub URL; repaired additional repository defects surfaced during air-gapped Jenkins
+  verification.
+
+### Internal
+
+- **Make target**: added a `jenkins-tests` target that runs the Jenkins CI guard suites
+  (including the air-gap `REPO_URL` guard) locally.
+- **Release**: version bump to 1.6.12 across the workspace, installers, docs, and OpenAPI spec.
+
+---
+
 ## [1.6.11] — 2026-08-06
 
 ### Changed
