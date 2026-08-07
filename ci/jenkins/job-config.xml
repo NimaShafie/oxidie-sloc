@@ -1,5 +1,9 @@
 <?xml version='1.1' encoding='UTF-8'?>
-<!-- Importable Pipeline-from-SCM job definition. Bootstrap: see ci/jenkins/README.md -->
+<!-- Pipeline-from-SCM job definition. This is a TEMPLATE: the __REPO_URL__ and
+     __REPO_BRANCH__ tokens must be substituted before import. Do NOT import as-is.
+       JOB_XML=$(bash ci/jenkins/render-job-config.sh)   # reads REPO_URL / REPO_BRANCH
+     No internet URL is baked in, so this is safe to keep in an air-gapped clone.
+     Bootstrap: see ci/jenkins/README.md -->
 <flow-definition plugin="workflow-job">
   <description>oxide-sloc — SLOC analysis pipeline. Scans source repositories and produces HTML, JSON, and PDF reports with build-over-build trend data.</description>
   <keepDependencies>false</keepDependencies>
@@ -18,12 +22,12 @@
       <configVersion>2</configVersion>
       <userRemoteConfigs>
         <hudson.plugins.git.UserRemoteConfig>
-          <url>https://github.com/oxide-sloc/oxide-sloc.git</url>
+          <url>__REPO_URL__</url>
         </hudson.plugins.git.UserRemoteConfig>
       </userRemoteConfigs>
       <branches>
         <hudson.plugins.git.BranchSpec>
-          <name>*/main</name>
+          <name>__REPO_BRANCH__</name>
         </hudson.plugins.git.BranchSpec>
       </branches>
       <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>

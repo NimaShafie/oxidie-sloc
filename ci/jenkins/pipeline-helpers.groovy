@@ -395,8 +395,14 @@ def runAnalyze() {
     // Derive a project slug that matches the local-run naming convention:
     //   {repo-name}_{short-sha}  (e.g. airgap-devkit_a78a632)
     // Name comes from the last path segment of the scanned repo's URL (strip .git).
-    // When scanning an external project that is TARGET_REPO_URL, otherwise REPO_URL.
-    def slugSource = scanningExternal ? params.TARGET_REPO_URL : params.REPO_URL
+    // When scanning an external project that is TARGET_REPO_URL; otherwise the tooling
+    // repo — REPO_URL if the operator set it, else the URL the job actually checked out
+    // from (SLOC_REPO_URL_EFFECTIVE, set in the Checkout stage). This keeps the self-scan
+    // slug stable (repo-name_shortsha) even when REPO_URL is blank and the pipeline fell
+    // back to `checkout scm` on an air-gapped controller.
+    def slugSource = scanningExternal
+                        ? params.TARGET_REPO_URL
+                        : (params.REPO_URL?.trim() ?: env.SLOC_REPO_URL_EFFECTIVE)
     def repoSlug = (slugSource?.trim()
                         ? slugSource.trim()
                               .replaceAll(/\.git$/, '')

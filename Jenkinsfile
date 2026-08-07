@@ -114,9 +114,20 @@ pipeline {
         // ── Optional — output naming ───────────────────────────────────────────
         string(
             name:         'REPO_URL',
-            defaultValue: 'https://github.com/oxide-sloc/oxide-sloc.git',
-            description:  '(optional) Tooling repo the scanner is built from — leave at the default ' +
-                          '(or your fork). This is NOT the project to scan; use TARGET_REPO_URL for that.'
+            defaultValue: '',
+            description:  '(optional) Tooling repo the scanner is BUILT from — NOT the project to scan ' +
+                          '(use TARGET_REPO_URL for that). BLANK = reuse the SCM this job was configured ' +
+                          'from (a local mirror on an air-gapped controller) — no internet URL is ever ' +
+                          'assumed. Resolution order: this parameter → the REPO_URL environment variable ' +
+                          '(e.g. a Jenkins global property sourced from ci/jenkins/.env) → the job\'s own ' +
+                          'SCM. Set this only to override with a fork/mirror URL.'
+        )
+        string(
+            name:         'REPO_BRANCH',
+            defaultValue: '',
+            description:  '(optional) Branch/ref spec used only when REPO_URL is set (e.g. */main, ' +
+                          '*/develop, refs/tags/v1.2.0). BLANK = the REPO_BRANCH environment variable, ' +
+                          'else */main. Ignored when REPO_URL is blank — the job\'s own SCM branch is used.'
         )
         string(
             name:         'REPORT_TITLE',
@@ -541,16 +552,50 @@ pipeline {
         stage('Checkout') {
             steps {
                 script {
-                    // Capture the tooling checkout's commit explicitly. With
-                    // skipDefaultCheckout(true) + a scripted checkout, relying on the
-                    // git plugin's implicit env.GIT_COMMIT is fragile (it reflects
-                    // whichever checkout ran last). runBitbucketNotify() needs a real
-                    // SHA or it treats itself as "not configured" and skips — so we
-                    // set env.GIT_COMMIT here from the checkout return value.
-                    def scmVars = checkout([$class: 'GitSCM',
-                                            branches: [[name: '*/main']],
-                                            userRemoteConfigs: [[url: params.REPO_URL]]])
+                    // Resolve the tooling repo (the scanner is built from it) WITHOUT
+                    // ever hardcoding an internet URL — this is what makes the pipeline
+                    // work unchanged on an air-gapped controller. Priority order:
+                    //   1. REPO_URL build parameter        (explicit per-build override)
+                    //   2. REPO_URL environment variable   (Jenkins global property /
+                    //      node env, typically sourced from ci/jenkins/.env) — the
+                    //      air-gap knob: point it at your local mirror once.
+                    //   3. the job's OWN configured SCM (checkout scm) — on an
+                    //      air-gapped controller the job already points at a local
+                    //      mirror, so a no-parameter build never touches github.com.
+                    //
+                    // Capture the checkout's commit explicitly: with
+                    // skipDefaultCheckout(true) + a scripted checkout, the git plugin's
+                    // implicit env.GIT_COMMIT is fragile (reflects whichever checkout
+                    // ran last). runBitbucketNotify() needs a real SHA or it treats
+                    // itself as "not configured" and skips.
+                    def repoUrl = params.REPO_URL?.trim() ?: env.REPO_URL?.trim()
+                    def scmVars
+                    if (repoUrl) {
+                        def branch = params.REPO_BRANCH?.trim() ?: env.REPO_BRANCH?.trim() ?: '*/main'
+                        echo "Checkout: tooling repo from REPO_URL=${repoUrl} (branch: ${branch})"
+                        scmVars = checkout([$class: 'GitSCM',
+                                            branches: [[name: branch]],
+                                            userRemoteConfigs: [[url: repoUrl]]])
+                    } else {
+                        // No explicit URL: reuse whatever SCM this job was configured
+                        // from. Guarded so a Pipeline-script (non-SCM) job fails with a
+                        // clear, actionable message instead of a raw MissingProperty.
+                        echo 'Checkout: REPO_URL unset — reusing the job\'s own SCM (checkout scm).'
+                        try {
+                            scmVars = checkout scm
+                        } catch (Throwable t) {
+                            error("No REPO_URL was provided and this job has no SCM to fall " +
+                                  "back to (checkout scm failed: ${t.message}). Set the REPO_URL " +
+                                  "build parameter, or a REPO_URL environment variable " +
+                                  "(see ci/jenkins/.env.example), or run this pipeline as a " +
+                                  "Pipeline-from-SCM job.")
+                        }
+                    }
                     env.GIT_COMMIT = scmVars.GIT_COMMIT ?: env.GIT_COMMIT
+                    // Expose the effective URL so the analyze stage can derive a stable
+                    // project slug (repo-name_shortsha) for a self-scan even when
+                    // REPO_URL was blank and we fell back to checkout scm.
+                    env.SLOC_REPO_URL_EFFECTIVE = scmVars.GIT_URL ?: repoUrl ?: ''
                 }
                 script {
                     if (params.TARGET_REF?.trim() &&

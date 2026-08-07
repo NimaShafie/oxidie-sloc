@@ -299,6 +299,9 @@ jobs:
       - name: Atlassian notify — pipeline-helpers static guards (P0/P3)
         run: python3 ci/jenkins/tests/test-pipeline-helpers-guards.py
 
+      - name: Jenkins REPO_URL air-gap resilience guards
+        run: python3 ci/jenkins/tests/test-repo-url-airgap.py
+
       - name: Atlassian notify — Bitbucket state/URL/auth tests
         run: bash ci/jenkins/tests/test-notify-bitbucket.sh
 
