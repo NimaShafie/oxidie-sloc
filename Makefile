@@ -1,4 +1,4 @@
-.PHONY: help dev check fmt lint test build serve analyze bundle docker-build docker-run clean ci-lint
+.PHONY: help dev check fmt lint test build serve analyze bundle docker-build docker-run clean ci-lint jenkins-tests
 
 help:
 	@echo ""
@@ -10,6 +10,7 @@ help:
 	@echo "    make fmt            cargo fmt --all"
 	@echo "    make lint           cargo clippy -D warnings"
 	@echo "    make test           cargo test --workspace"
+	@echo "    make jenkins-tests  run the Jenkins CI guard suites (pure Python/bash, no Rust)"
 	@echo "    make serve          start web UI on http://127.0.0.1:4317"
 	@echo "    make analyze DIR=.  analyze a directory from the CLI"
 	@echo ""
@@ -70,3 +71,12 @@ clean:
 
 ci-lint:
 	python3 -c "import xml.etree.ElementTree as ET; ET.parse('ci/jenkins/job-config.xml')"
+
+# Jenkins CI guard suites — mirrors the ci.yml "pipeline-sim" job. Pure Python/bash,
+# no Rust build, runs in seconds. Includes the REPO_URL air-gap resilience guards.
+jenkins-tests:
+	python3 ci/jenkins/tests/simulate-scenarios.py
+	python3 ci/jenkins/tests/test-notify-confluence.py
+	python3 ci/jenkins/tests/test-pipeline-helpers-guards.py
+	python3 ci/jenkins/tests/test-repo-url-airgap.py
+	bash   ci/jenkins/tests/test-notify-bitbucket.sh
