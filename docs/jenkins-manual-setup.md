@@ -533,6 +533,7 @@ From this point on, all configuration parameters are visible in the build form.
    | Parameter | Default | What to set |
    |-----------|---------|------------|
    | `TARGET_REPO_URL` | `` (blank) | Git URL of the repository to scan. **Leave blank to scan oxide-sloc itself.** Cloned into `./_target`; `SCAN_PATH` is resolved inside it |
+   | `TARGET_REF` | `` (blank = `main`) | Branch/tag/SHA to scan. **Blank defaults to `main`** — set explicitly (e.g. `master`) for repos whose default branch is not `main` |
    | `SCAN_PATH` | `` (blank = whole repo) | Optional subdirectory of the target repo to scan (e.g., `src` or `packages/api`); blank scans the whole repo |
    | `REPORT_TITLE` | `oxide-sloc CI Report` | A descriptive title for the HTML report |
    | `GENERATE_HTML` | ✓ checked | Check to produce an HTML report (recommended) |

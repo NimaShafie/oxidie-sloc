@@ -78,8 +78,9 @@ pipeline {
         string(
             name:         'TARGET_REF',
             defaultValue: '',
-            description:  'Branch, tag, or commit SHA to scan (blank = the repo default branch). ' +
-                          'e.g. main, develop, v2.1.0, a3f9d2c'
+            description:  'Branch, tag, or commit SHA to scan. BLANK defaults to "main" — set this ' +
+                          'explicitly for a repo whose default branch is not main (e.g. master). ' +
+                          'e.g. main, master, develop, v2.1.0, a3f9d2c'
         )
         string(
             name:         'TARGET_CREDENTIALS_ID',

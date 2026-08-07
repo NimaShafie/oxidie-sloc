@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
 use std::io::Read as _;
-use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -363,7 +362,7 @@ fn check_resolved_ips(host: &str, url: &str) -> Result<()> {
     let Some(port) = port_of_git_url(url) else {
         return Ok(());
     };
-    let Ok(addrs) = (host, port).to_socket_addrs() else {
+    let Ok(addrs) = resolve_host_port(host, port) else {
         return Ok(());
     };
     for addr in addrs {
@@ -376,6 +375,36 @@ fn check_resolved_ips(host: &str, url: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Live DNS resolution seam for `check_resolved_ips`. Production performs a real
+/// `getaddrinfo`; the `cfg(test)` build resolves purely in-process so the unit
+/// suite is network-hermetic (no `github.com` A/AAAA lookups on every `cargo test`,
+/// which trip DNS alarms on monitored air-gapped sites). The DNS-rebinding path it
+/// guards needs a real hostile record and is exercised by integration tests, not
+/// these offline units.
+#[cfg(not(test))]
+fn resolve_host_port(
+    host: &str,
+    port: u16,
+) -> std::io::Result<std::vec::IntoIter<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs as _;
+    (host, port).to_socket_addrs()
+}
+
+#[cfg(test)]
+fn resolve_host_port(
+    host: &str,
+    port: u16,
+) -> std::io::Result<std::vec::IntoIter<std::net::SocketAddr>> {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    // IP-literal hosts resolve to themselves, so the SSRF-blocked-IP assertions still
+    // hold without touching the network; any real hostname resolves to a fixed public
+    // address so the block-loop is still exercised but no DNS query is emitted.
+    let ip = host
+        .parse::<IpAddr>()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)));
+    Ok(vec![SocketAddr::new(ip, port)].into_iter())
 }
 
 /// Extract the host (lowercased, brackets stripped) from a git clone URL.
