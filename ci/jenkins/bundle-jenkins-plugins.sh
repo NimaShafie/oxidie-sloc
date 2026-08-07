@@ -122,7 +122,10 @@ LC_ALL=C tar \
     -C "${DOWNLOAD_DIR}" \
     .
 
-sha256sum "${ARCHIVE}" > "${SHA_FILE}"
+# Write the checksum with a BARE (basename) path, not the absolute build path, so
+# `sha256sum -c` passes from any directory — Dockerfile.controller COPYs the archive
+# to /tmp and verifies it there.
+(cd "${REPO_ROOT}" && sha256sum "$(basename "${ARCHIVE}")" > "${SHA_FILE}")
 
 SIZE=$(du -sh "${ARCHIVE}" | cut -f1)
 echo ""

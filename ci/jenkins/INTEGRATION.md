@@ -21,7 +21,7 @@ Bitbucket Cloud/Server, and `file://` all work the same way.
 | Parameter | Value |
 |---|---|
 | `TARGET_REPO_URL` | your repo's Git URL, e.g. `https://gitlab.com/acme/widgets.git` |
-| `TARGET_REF` | branch / tag / SHA (blank = the repo's default branch) |
+| `TARGET_REF` | branch / tag / SHA (blank defaults to `main` — set e.g. `master` for repos whose default branch is not `main`) |
 | `TARGET_CREDENTIALS_ID` | a Jenkins credential ID — **only for private repos** |
 | `SCAN_PATH` | **blank = scan the whole repo** (or `src`, `packages/api`, …) |
 
