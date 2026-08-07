@@ -19,13 +19,28 @@
 //   - Script Console: pass a binding variable, e.g. -DJOB_NAME=oxide-sloc-manual.
 //   Use 'oxide-sloc-manual' if 'oxide-sloc' already exists in this Jenkins instance.
 //
-// Repo URL: defaults to the upstream GitHub repo. Override by setting REPO_URL:
+// Repo URL: REQUIRED — no hardcoded internet default, so this works on an
+//   air-gapped controller. Set REPO_URL to the tooling repo (or your fork/mirror):
 //   - Job DSL seed job: add a String parameter named REPO_URL to the seed job.
 //   - Script Console: set an env var or pass a binding variable.
+//   Air-gapped? Use your local mirror, e.g. file:///srv/git/oxide-sloc.git or
+//   https://git.internal.example/oxide-sloc/oxide-sloc.git — never the public github.com URL.
+// Repo branch: optional; defaults to */main. Override via REPO_BRANCH (param or env).
 
 def jobName = (binding.hasVariable('JOB_NAME') ? JOB_NAME : System.getenv('JOB_NAME')) ?: 'oxide-sloc'
-def repoUrl = (binding.hasVariable('REPO_URL') ? REPO_URL : System.getenv('REPO_URL')) \
-              ?: 'https://github.com/oxide-sloc/oxide-sloc.git'
+def repoUrl = (binding.hasVariable('REPO_URL') ? REPO_URL : System.getenv('REPO_URL')) ?: ''
+def repoBranch = (binding.hasVariable('REPO_BRANCH') ? REPO_BRANCH : System.getenv('REPO_BRANCH')) \
+                 ?: '*/main'
+
+if (!repoUrl?.trim()) {
+    throw new IllegalStateException(
+        'REPO_URL is not set. The seed job needs the Git URL of the oxide-sloc tooling repo ' +
+        '(or your fork/mirror) to point the pipeline SCM at it.\n' +
+        '  - Job DSL seed job: add a String parameter named REPO_URL.\n' +
+        '  - Script Console:   set the REPO_URL environment variable, or define a REPO_URL binding.\n' +
+        'Air-gapped? Use your local mirror, e.g. file:///srv/git/oxide-sloc.git or ' +
+        'https://git.internal.example/oxide-sloc/oxide-sloc.git — never the public github.com URL.')
+}
 
 pipelineJob(jobName) {
     description('''\
@@ -69,7 +84,7 @@ Full setup guide: docs/jenkins-manual-setup.md''')
                     remote {
                         url(repoUrl)
                     }
-                    branch('*/main')
+                    branch(repoBranch)
                     extensions {
                         cloneOptions {
                             shallow(false)

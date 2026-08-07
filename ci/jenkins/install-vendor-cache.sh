@@ -9,6 +9,9 @@
 # Usage:
 #   # Option A — download from GitHub releases (requires internet, run once):
 #   bash ci/jenkins/install-vendor-cache.sh --download vX.Y.Z
+#   #   Override the host for an internal mirror (no github.com):
+#   VENDOR_RELEASE_BASE=https://artifacts.internal/oxide-sloc/releases \
+#     bash ci/jenkins/install-vendor-cache.sh --download vX.Y.Z
 #
 #   # Option B — use a local copy you already have:
 #   bash ci/jenkins/install-vendor-cache.sh /path/to/vendor.tar.xz
@@ -42,8 +45,14 @@ if [ "${1:-}" = "--download" ]; then
         echo "Usage: $0 --download vX.Y.Z" >&2
         exit 1
     fi
-    BASE="https://github.com/oxide-sloc/oxide-sloc/releases/download/${TAG}"
-    echo "Downloading vendor.tar.xz from release ${TAG}..."
+    # Release-asset host is overridable for mirrors / internal artifact stores, so a
+    # semi-connected environment can pull the vendor archive from its own server
+    # instead of github.com (fully air-gapped hosts use Option B/C — a local file).
+    #   VENDOR_RELEASE_BASE=https://artifacts.internal/oxide-sloc/releases \
+    #     bash ci/jenkins/install-vendor-cache.sh --download vX.Y.Z
+    RELEASE_BASE="${VENDOR_RELEASE_BASE:-https://github.com/oxide-sloc/oxide-sloc/releases/download}"
+    BASE="${RELEASE_BASE%/}/${TAG}"
+    echo "Downloading vendor.tar.xz from ${BASE}..."
     curl -fL --retry 3 --retry-delay 2 -o "${DEST_ARCHIVE}" "${BASE}/vendor.tar.xz"
     echo "Downloading vendor.tar.xz.sha256..."
     curl -fL --retry 3 --retry-delay 2 -o "${DEST_SHA}"    "${BASE}/vendor.tar.xz.sha256"

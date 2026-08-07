@@ -540,7 +540,12 @@ From this point on, all configuration parameters are visible in the build form.
    | `SKIP_WEB_CHECK` | ✓ checked | Keep checked if port 4317 is not available on the agent |
 
    > **Note:** `REPO_URL` is the *tooling* repo the scanner is built from (the Jenkinsfile's
-   > own checkout) — leave it at its default. The **scan target** is `TARGET_REPO_URL` above.
+   > own checkout) — **not** the scan target (that's `TARGET_REPO_URL` above). Leave it
+   > **blank** to reuse the SCM this job was configured from — no internet URL is hardcoded,
+   > so an air-gapped controller pointed at a local mirror just works. It resolves in order:
+   > `REPO_URL` build parameter → `REPO_URL` environment variable (e.g. sourced from
+   > `ci/jenkins/.env`) → the job's own SCM. `REPO_BRANCH` (default `*/main`) sets the ref
+   > when you supply an explicit `REPO_URL`.
 
    **To enable unit test results** (requires cargo-nextest on the agent — see Step 13):
 
