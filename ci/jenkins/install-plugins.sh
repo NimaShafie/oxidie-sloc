@@ -104,9 +104,13 @@ installed_shortnames() {
     # which curl otherwise parses as a glob range and aborts before sending
     # ("curl: (3) bad range in URL"), leaving the probe empty so every plugin
     # looks "new" and the no-op skip never triggers.
-    curl -fsS -g ${USER_ID:+-u "${USER_ID}:${TOKEN}"} \
-        "${BASE}/pluginManager/api/json?depth=1&tree=plugins[shortName]" 2>/dev/null \
-    | python3 -c 'import json,sys
+    # The HTTP body is captured into a variable first, then parsed — curl output
+    # is never piped straight into the interpreter.
+    local body
+    body="$(curl -fsS -g ${USER_ID:+-u "${USER_ID}:${TOKEN}"} \
+        "${BASE}/pluginManager/api/json?depth=1&tree=plugins[shortName]" 2>/dev/null || true)"
+    [ -z "${body}" ] && return 0
+    printf '%s' "${body}" | python3 -c 'import json,sys
 try:
     d = json.load(sys.stdin)
     print(" ".join(p.get("shortName", "") for p in d.get("plugins", [])))
