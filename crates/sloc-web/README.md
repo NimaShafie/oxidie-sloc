@@ -2,7 +2,8 @@
 
 Axum web server and UI for [oxide-sloc](https://github.com/oxide-sloc/oxide-sloc) — a local code analysis tool.
 
-![View Reports — full scan history with branch, commit, and submodule breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png)
+<!-- Absolute URL for crates.io; falls back to the in-repo copy when viewed offline. -->
+<img alt="View Reports — full scan history with branch, commit, and submodule breakdown" src="https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png" onerror="this.onerror=null;this.src='../../docs/screenshots/view-reports.png'">
 
 ## Overview
 
