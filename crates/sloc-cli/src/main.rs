@@ -543,6 +543,15 @@ struct GitScanArgs {
     #[arg(long, value_name = "DIR")]
     clones_dir: Option<PathBuf>,
 
+    /// Allow offline import from a git bundle, file:// mirror, or local path
+    /// (sets SLOC_GIT_ALLOW_LOCAL; requires --local-root or SLOC_GIT_LOCAL_ROOT)
+    #[arg(long)]
+    allow_local: bool,
+
+    /// Directory local/offline sources must resolve under (sets SLOC_GIT_LOCAL_ROOT)
+    #[arg(long, value_name = "DIR")]
+    local_root: Option<PathBuf>,
+
     /// Write JSON result to this path
     #[arg(long, short = 'j', value_name = "PATH")]
     json_out: Option<PathBuf>,
@@ -584,6 +593,15 @@ struct GitCompareArgs {
     #[arg(long, value_name = "DIR")]
     clones_dir: Option<PathBuf>,
 
+    /// Allow offline import from a git bundle, file:// mirror, or local path
+    /// (sets SLOC_GIT_ALLOW_LOCAL; requires --local-root or SLOC_GIT_LOCAL_ROOT)
+    #[arg(long)]
+    allow_local: bool,
+
+    /// Directory local/offline sources must resolve under (sets SLOC_GIT_LOCAL_ROOT)
+    #[arg(long, value_name = "DIR")]
+    local_root: Option<PathBuf>,
+
     /// Write delta JSON to this path
     #[arg(long, short = 'j', value_name = "PATH")]
     json_out: Option<PathBuf>,
@@ -620,6 +638,15 @@ struct WatchArgs {
     /// Directory to cache cloned repositories
     #[arg(long, value_name = "DIR")]
     clones_dir: Option<PathBuf>,
+
+    /// Allow offline import from a git bundle, file:// mirror, or local path
+    /// (sets SLOC_GIT_ALLOW_LOCAL; requires --local-root or SLOC_GIT_LOCAL_ROOT)
+    #[arg(long)]
+    allow_local: bool,
+
+    /// Directory local/offline sources must resolve under (sets SLOC_GIT_LOCAL_ROOT)
+    #[arg(long, value_name = "DIR")]
+    local_root: Option<PathBuf>,
 
     /// Write each scan's JSON result to this directory
     #[arg(long, value_name = "DIR")]
@@ -1655,7 +1682,12 @@ async fn send_teams_card(
 // ── config helpers ────────────────────────────────────────────────────────────
 
 fn load_base_config(config_path: Option<&Path>) -> Result<AppConfig> {
-    config_path.map_or_else(|| Ok(AppConfig::default()), AppConfig::load_from_file)
+    let config = config_path.map_or_else(|| Ok(AppConfig::default()), AppConfig::load_from_file)?;
+    // Propagate the non-secret `[git]` offline-import gate into the env sloc-git reads
+    // (explicit env vars still win). Done here so `serve`, `analyze`, and `validate` all
+    // honor a config-file setting without each re-implementing it.
+    config.apply_git_settings_to_env();
+    Ok(config)
 }
 
 fn resolve_analyze_config(args: &AnalyzeArgs) -> Result<AppConfig> {
@@ -2680,7 +2712,23 @@ async fn post_gitlab_comment(args: &PrCommentArgs, body: &str) -> Result<()> {
 
 // ── git-scan handler ──────────────────────────────────────────────────────────
 
+/// Apply the CLI `--allow-local` / `--local-root` flags to the environment `sloc-git` reads.
+/// An explicit env var always wins (values are only set when unset).
+fn apply_local_gate(allow_local: bool, local_root: Option<&Path>) {
+    if allow_local && std::env::var_os("SLOC_GIT_ALLOW_LOCAL").is_none() {
+        // SAFETY: set at CLI command entry before any git op or worker task is spawned.
+        unsafe { std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1") };
+    }
+    if let Some(root) = local_root
+        && std::env::var_os("SLOC_GIT_LOCAL_ROOT").is_none()
+    {
+        // SAFETY: see above.
+        unsafe { std::env::set_var("SLOC_GIT_LOCAL_ROOT", root) };
+    }
+}
+
 async fn run_git_scan(args: GitScanArgs) -> Result<()> {
+    apply_local_gate(args.allow_local, args.local_root.as_deref());
     let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
     let quiet = args.quiet;
 
@@ -2748,6 +2796,7 @@ fn write_git_scan_outputs(
 // Args are matched by the dispatch pattern; taking ownership is idiomatic for handler functions.
 #[allow(clippy::needless_pass_by_value)]
 fn run_git_compare(args: GitCompareArgs) -> Result<()> {
+    apply_local_gate(args.allow_local, args.local_root.as_deref());
     let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
     let quiet = args.quiet;
     let dest = git_clone_path(&args.repo, &clones_dir);
@@ -2802,6 +2851,7 @@ fn write_compare_outputs(
 // ── watch handler ─────────────────────────────────────────────────────────────
 
 async fn run_watch(args: WatchArgs) -> Result<()> {
+    apply_local_gate(args.allow_local, args.local_root.as_deref());
     let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
     let quiet = args.quiet;
     let interval = args.interval.max(60);

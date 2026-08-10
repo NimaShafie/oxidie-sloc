@@ -217,6 +217,8 @@ Full OpenAPI 3.1 spec: `GET /api/openapi.yaml` or [`docs/openapi.yaml`](./docs/o
 
 For Jenkins/GitLab setup, Confluence publishing, and artifact repository integration, see [`docs/ci-integrations.md`](./docs/ci-integrations.md).
 
+To scan repositories hosted on **different git instances** than the tool/pipeline (e.g. tooling on `bitbucket.instance1.com`, code on `bitbucket.instance2.com`) — with per-host credentials, corporate proxy/VLAN support, and air-gapped offline import — across local, server, and Jenkins modes, see [`docs/multi-instance.md`](./docs/multi-instance.md).
+
 ---
 
 ## LAN Server

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Nima Shafie <nimzshafie@gmail.com>
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -65,6 +65,179 @@ fn git_timeout() -> Duration {
     })
 }
 
+// ── per-host credential registry ───────────────────────────────────────────────
+
+/// A credential resolved for a specific git host from the in-app registry.
+///
+/// The secret (`token` / the key file's contents) is NEVER placed in a git argv or
+/// written to disk. It travels only in the child process environment (`GIT_U`/`GIT_P`
+/// for HTTPS, `GIT_SSH_COMMAND` for SSH); see [`cred_injection`].
+enum GitCredential {
+    /// HTTPS personal-access-token auth (`username` + `token`).
+    Https { user: String, token: String },
+    /// SSH key auth (path to a private key file).
+    Ssh { key_path: String },
+}
+
+/// Map a hostname to the env-var suffix used by the credential registry:
+/// uppercase, with every non-alphanumeric byte replaced by `_`
+/// (`bitbucket.instance2.com` → `BITBUCKET_INSTANCE2_COM`, `host:7990` → `HOST_7990`).
+///
+/// Note: this is intentionally lossy — `a.b.com`, `a-b.com`, and `a_b.com` all map to
+/// `A_B_COM`. That collision is documented; keep instance hostnames distinct beyond
+/// punctuation, or use `SLOC_GIT_CRED_FILE` (which keys on the exact hostname).
+fn hostkey(host: &str) -> String {
+    host.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Resolve a per-host credential from the in-app registry, or `None` to fall through
+/// to git's own credential resolution (OS credential helper, `~/.netrc`, ssh-agent).
+///
+/// Resolution order for host `H` (first match wins):
+/// 1. `SLOC_GIT_CRED_<HOSTKEY>` = `username:token` — HTTPS PAT.
+/// 2. `SLOC_GIT_SSHKEY_<HOSTKEY>` = path to an SSH private key.
+/// 3. `SLOC_GIT_CRED_FILE` — a bulk `host = "user:token"` map (see [`cred_from_file`]).
+///
+/// Not cached: env is read live so the value is correct under runtime changes and the
+/// unit tests can mutate it. Cheap relative to a network clone.
+fn resolve_credential(host: &str) -> Option<GitCredential> {
+    let key = hostkey(host);
+    if let Ok(v) = std::env::var(format!("SLOC_GIT_CRED_{key}"))
+        && let Some((user, token)) = v.split_once(':')
+        && !token.is_empty()
+    {
+        return Some(GitCredential::Https {
+            user: user.to_owned(),
+            token: token.to_owned(),
+        });
+    }
+    if let Ok(p) = std::env::var(format!("SLOC_GIT_SSHKEY_{key}"))
+        && !p.trim().is_empty()
+    {
+        return Some(GitCredential::Ssh { key_path: p });
+    }
+    cred_from_file(host)
+}
+
+/// Look `host` up in the optional bulk credentials file named by `SLOC_GIT_CRED_FILE`.
+///
+/// Format: one `host = "user:token"` entry per line (`#` comments and blank lines are
+/// ignored); quotes optional; host match is case-insensitive on the exact hostname.
+/// The file is treated as a secret — its contents are never logged. On Unix a warning is
+/// emitted if it is group/world-readable.
+fn cred_from_file(host: &str) -> Option<GitCredential> {
+    let path = std::env::var("SLOC_GIT_CRED_FILE").ok()?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    warn_if_world_readable(path);
+    let content = std::fs::read_to_string(path).ok()?;
+    let host_lower = host.to_lowercase();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim().trim_matches('"').to_lowercase() != host_lower {
+            continue;
+        }
+        let v = v.trim().trim_matches('"');
+        if let Some((user, token)) = v.split_once(':')
+            && !token.is_empty()
+        {
+            return Some(GitCredential::Https {
+                user: user.to_owned(),
+                token: token.to_owned(),
+            });
+        }
+    }
+    None
+}
+
+/// Warn (once per call, best-effort) if a secrets file is readable beyond its owner.
+#[cfg(unix)]
+fn warn_if_world_readable(path: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        eprintln!(
+            "warning: SLOC_GIT_CRED_FILE {path:?} is group/world-readable; \
+             restrict it with chmod 600"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_world_readable(_path: &str) {}
+
+/// Extra git config (`-c` pairs) and child-process env for a resolved credential.
+///
+/// - HTTPS: an empty `credential.helper=` first (resets any inherited system/GCM helper
+///   so it can't win or pop a GUI), then a shell-snippet helper that echoes the credential
+///   read from `$GIT_U`/`$GIT_P`. The helper text contains only the variable *names* — the
+///   secret is supplied via `env` and never appears in argv or on disk.
+/// - SSH: `GIT_SSH_COMMAND` pinning the key with `IdentitiesOnly=yes` (so an ssh-agent key
+///   can't shadow it) and `BatchMode=yes` (fail fast, matching the non-interactive model).
+#[derive(Default)]
+struct CredInjection {
+    config: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+fn cred_injection(host: &str) -> CredInjection {
+    match resolve_credential(host) {
+        Some(GitCredential::Https { user, token }) => CredInjection {
+            config: vec![
+                "credential.helper=".to_owned(),
+                "credential.helper=!f() { test \"$1\" = get && echo \"username=$GIT_U\" && \
+                 echo \"password=$GIT_P\"; }; f"
+                    .to_owned(),
+            ],
+            env: vec![("GIT_U".to_owned(), user), ("GIT_P".to_owned(), token)],
+        },
+        Some(GitCredential::Ssh { key_path }) => CredInjection {
+            config: Vec::new(),
+            env: vec![(
+                "GIT_SSH_COMMAND".to_owned(),
+                format!("ssh -i \"{key_path}\" -o IdentitiesOnly=yes -o BatchMode=yes"),
+            )],
+        },
+        None => CredInjection::default(),
+    }
+}
+
+// ── offline / local-source import gate ───────────────────────────────────────────
+
+/// Whether local/offline git sources (bundle, `file://`, local path) are permitted.
+/// `SLOC_GIT_ALLOW_LOCAL` truthy. Default OFF preserves the SSRF posture for
+/// internet-facing servers (a bare `file:///etc/...` clone is an LFI otherwise).
+fn allow_local() -> bool {
+    std::env::var("SLOC_GIT_ALLOW_LOCAL").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// The directory local sources must resolve under, from `SLOC_GIT_LOCAL_ROOT`.
+/// Required whenever `allow_local()` is on (fail closed) — the filesystem analog of
+/// `SLOC_GIT_HOST_ALLOWLIST`.
+fn local_root() -> Option<PathBuf> {
+    std::env::var("SLOC_GIT_LOCAL_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
 /// `-c key=value` config flags applied to every network-touching git invocation
 /// (clone/fetch). Makes internal/corporate repos work with zero configuration:
 /// - `http.sslBackend=schannel` (Windows only) — validate TLS against the Windows system
@@ -112,9 +285,24 @@ fn with_config<'a>(cfg: &'a [String], tail: &[&'a str]) -> Vec<&'a str> {
 /// lazy fetches too, so scanning a ref works on the same corporate network the clone did.
 /// Best-effort: a failure here doesn't invalidate an otherwise-successful clone.
 fn persist_repo_config(dest: &Path, cfg: &[String]) {
+    let mut helper_reset = false;
     for kv in cfg {
         if let Some((key, value)) = kv.split_once('=') {
-            let _ = run_git(dest, &["config", key, value]);
+            if key == "credential.helper" {
+                // `credential.helper` is a multi-valued key: we persist BOTH the empty
+                // reset (drops inherited system/GCM helpers so the promisor fetch can't
+                // fall back to a GUI prompt and hang) AND the env-reading helper. A plain
+                // `git config` would overwrite, clobbering the reset — so clear once, then
+                // `--add` each value in order. No secret is written: the helper text holds
+                // only `$GIT_U`/`$GIT_P` variable names.
+                if !helper_reset {
+                    let _ = run_git(dest, &["config", "--unset-all", "credential.helper"]);
+                    helper_reset = true;
+                }
+                let _ = run_git(dest, &["config", "--add", "credential.helper", value]);
+            } else {
+                let _ = run_git(dest, &["config", key, value]);
+            }
         }
     }
 }
@@ -122,6 +310,14 @@ fn persist_repo_config(dest: &Path, cfg: &[String]) {
 // ── low-level git runner ───────────────────────────────────────────────────────
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
+    run_git_env(repo, args, &[])
+}
+
+/// Like [`run_git`], but sets additional child-process environment variables (e.g. the
+/// per-host credential secret `GIT_U`/`GIT_P`, or `GIT_SSH_COMMAND`). The secret lives
+/// only in the child env — never in argv, never on disk. All the spawn/drain/timeout
+/// logic is shared with `run_git` (which calls this with an empty `extra_env`).
+fn run_git_env(repo: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
     // Force non-interactive operation. Without this, a `clone`/`fetch` that hits an
     // authentication challenge (e.g. a rate-limited anonymous clone returning 401, or a
@@ -134,8 +330,13 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         .env("GIT_ASKPASS", "")
-        .env("SSH_ASKPASS", "")
-        .args(args)
+        .env("SSH_ASKPASS", "");
+    // Per-host credential secrets injected by the caller (clone/fetch/worktree). Set after
+    // the interactive-suppression vars so a resolved credential's helper can answer git.
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.args(args)
         .current_dir(repo)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -507,25 +708,82 @@ fn is_ssrf_blocked_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// How a clone source string should be treated. The four forms are NOT interchangeable
+/// under the blobless partial-clone flags, so each gets its own clone-arg construction.
+enum GitSource {
+    /// `https://`, `http://`, `git://`, `ssh://`, `git@host:` — network transport, SSRF-gated.
+    Remote,
+    /// `file:///local/path` — regular git transport, so `--filter` / promisor work.
+    FileUrl,
+    /// A bare local filesystem path (`/path`, `C:\path`). git ignores `--filter` and
+    /// hardlinks objects for these; we force `--no-local` for safety + partial-clone parity.
+    LocalPath,
+    /// A `*.bundle` file (a static packfile) — verify then clone; `--filter` is meaningless.
+    Bundle,
+}
+
+/// Classify a (already-normalized) clone source string.
+fn classify_source(url: &str) -> GitSource {
+    let u = url.trim();
+    let lower = u.to_lowercase();
+    if lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("git://")
+        || lower.starts_with("ssh://")
+        || u.starts_with("git@")
+    {
+        GitSource::Remote
+    } else if lower.starts_with("file://") {
+        GitSource::FileUrl
+    } else if lower.ends_with(".bundle") {
+        GitSource::Bundle
+    } else {
+        GitSource::LocalPath
+    }
+}
+
 /// Clone `url` into `dest`, or fetch all refs if the repo already exists.
 ///
-/// Browse URLs (GitHub, GitLab, Bitbucket web pages) are automatically converted
-/// to their corresponding git clone URLs before cloning.
+/// Browse URLs (GitHub, GitLab, Bitbucket web pages) are automatically converted to their
+/// corresponding git clone URLs first. Remote sources are SSRF-gated and get per-host
+/// credentials from the in-app registry (see [`cred_injection`]). Local/offline sources
+/// (a git bundle, a `file://` mirror, or a local path) are only permitted when
+/// `SLOC_GIT_ALLOW_LOCAL` is set and resolve under `SLOC_GIT_LOCAL_ROOT`.
 ///
 /// # Errors
-/// Returns an error if the URL is rejected, the clone directory cannot be created,
+/// Returns an error if the source is rejected, the clone directory cannot be created,
 /// or the underlying `git clone` / `git fetch` command fails.
 pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
     let normalized = normalize_git_url(url);
     let url = normalized.as_str();
+    match classify_source(url) {
+        GitSource::Remote => clone_or_fetch_remote(url, dest),
+        source => clone_or_fetch_local(url, dest, &source),
+    }
+}
+
+/// Remote clone/fetch: SSRF validation, network hardening config, per-host credential
+/// injection, blobless fast path with a full-clone fallback for servers that reject filters.
+fn clone_or_fetch_remote(url: &str, dest: &Path) -> Result<()> {
     validate_clone_url(url)?;
     // `network_git_config()` supplies `http.followRedirects=false` (SSRF hardening — a
     // redirect can't escape the validated host), the low-speed abort (a stalled VPN/proxy
     // fails fast), and optional `http.sslVerify=false` for TLS-inspecting corporate proxies.
-    let cfg = network_git_config();
+    let mut cfg = network_git_config();
+    // Per-host credential from the registry (HTTPS helper config and/or the secret env).
+    let inj = host_of_git_url(url)
+        .map(|h| cred_injection(&h))
+        .unwrap_or_default();
+    cfg.extend(inj.config.iter().cloned());
+    let env: Vec<(&str, &str)> = inj
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
     if dest.join(".git").exists() {
         let args = with_config(&cfg, &["fetch", "--all", "--tags", "--prune"]);
-        run_git(dest, &args)?;
+        run_git_env(dest, &args, &env)?;
         return Ok(());
     }
 
@@ -536,10 +794,8 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
     // Fast path: a blobless (`--filter=blob:none`), no-checkout clone. Only commit and tree
     // metadata is downloaded — no file blobs, no working tree — which is all that ref
     // listing needs, and is dramatically faster than a full clone on large repos and slow
-    // corporate links (the original `--depth=50 --no-single-branch` still pulled every
-    // blob for HEAD across every branch). File contents are fetched lazily by the promisor
-    // when a ref is later scanned into a worktree. `--no-tags` is NOT passed: the Tags tab
-    // needs them.
+    // corporate links. File contents are fetched lazily by the promisor when a ref is later
+    // scanned into a worktree. `--no-tags` is NOT passed: the Tags tab needs them.
     let fast = with_config(
         &cfg,
         &[
@@ -551,7 +807,7 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
             dest_str,
         ],
     );
-    if let Err(e) = run_git(parent, &fast) {
+    if let Err(e) = run_git_env(parent, &fast, &env) {
         // A handful of older self-hosted servers (e.g. legacy Bitbucket Server) reject
         // object filtering outright instead of degrading to a full clone. Only in that
         // specific case do we clean up the partial directory and retry without the filter —
@@ -573,10 +829,131 @@ pub fn clone_or_fetch(url: &str, dest: &Path) -> Result<()> {
                 dest_str,
             ],
         );
-        run_git(parent, &full)?;
+        run_git_env(parent, &full, &env)?;
     }
     persist_repo_config(dest, &cfg);
     Ok(())
+}
+
+/// Local/offline clone from a git bundle, a `file://` mirror, or a local path. Gated by
+/// `SLOC_GIT_ALLOW_LOCAL` + `SLOC_GIT_LOCAL_ROOT`; no network, no credentials, no SSRF risk
+/// once the source is confirmed to resolve under the configured root.
+fn clone_or_fetch_local(url: &str, dest: &Path, source: &GitSource) -> Result<()> {
+    let src = validate_local_source(url, source)?;
+    let cfg = network_git_config();
+    if dest.join(".git").exists() {
+        let args = with_config(&cfg, &["fetch", "--all", "--tags", "--prune"]);
+        run_git(dest, &args)?;
+        return Ok(());
+    }
+    std::fs::create_dir_all(dest).context("failed to create clone directory")?;
+    let dest_str = dest.to_str().unwrap_or(".");
+    let parent = dest.parent().unwrap_or(dest);
+
+    let tail: Vec<&str> = match source {
+        // A bundle is a self-contained packfile — a plain no-checkout clone. `git clone`
+        // validates the bundle itself (a corrupt/incomplete bundle fails the clone), and
+        // `git bundle verify` can't run here (it needs an existing repository). `--filter`
+        // has no promisor remote to defer to, so it is intentionally omitted.
+        GitSource::Bundle => vec!["clone", "--no-checkout", &src, dest_str],
+        // `file://` uses the regular git transport, so partial clone + promisor work as remote.
+        GitSource::FileUrl => vec![
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--no-single-branch",
+            &src,
+            dest_str,
+        ],
+        // A bare local path defaults to `--local` (hardlink/copy, ignores `--filter`, and
+        // historically dereferences symlinks in objects/). Force `--no-local` for the safe
+        // copy transport, which also re-enables `--filter`.
+        GitSource::LocalPath => vec![
+            "clone",
+            "--no-local",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--no-single-branch",
+            &src,
+            dest_str,
+        ],
+        GitSource::Remote => unreachable!("remote sources are handled by clone_or_fetch_remote"),
+    };
+    let args = with_config(&cfg, &tail);
+    run_git(parent, &args)?;
+    persist_repo_config(dest, &cfg);
+    Ok(())
+}
+
+/// Validate a local/offline source against the fail-closed gate and return the filesystem
+/// path git should clone from. Enforces: `SLOC_GIT_ALLOW_LOCAL` on; `SLOC_GIT_LOCAL_ROOT`
+/// set; `file://` has no host authority; no UNC (SMB is a network fetch, not local); and the
+/// canonicalized source resolves under the configured root (defeats `..`/symlink traversal).
+fn validate_local_source(url: &str, source: &GitSource) -> Result<String> {
+    if !allow_local() {
+        bail!(
+            "local/offline git source rejected: set SLOC_GIT_ALLOW_LOCAL=1 to enable bundle / \
+             file:// / local-path imports (got {url:?})"
+        );
+    }
+    let Some(root) = local_root() else {
+        bail!(
+            "SLOC_GIT_ALLOW_LOCAL is set but SLOC_GIT_LOCAL_ROOT is not — refusing local import \
+             (fail-closed). Point SLOC_GIT_LOCAL_ROOT at the directory holding your bundles/mirrors."
+        );
+    };
+
+    let raw = url.trim();
+    let path = match source {
+        GitSource::FileUrl => file_url_to_path(raw)?,
+        _ => raw.to_owned(),
+    };
+    // UNC (`\\server\share` or `//server/share`) is an SMB fetch to an attacker-chosen host —
+    // that is remote (SSRF + credential-leak), not local. Never accept it under the local gate.
+    if path.starts_with("\\\\") || path.starts_with("//") {
+        bail!("UNC path rejected: SMB shares are network sources, not local ({url:?})");
+    }
+
+    let canon = std::fs::canonicalize(&path)
+        .with_context(|| format!("local git source not found or unreadable: {path:?}"))?;
+    let root_canon = std::fs::canonicalize(&root)
+        .with_context(|| format!("SLOC_GIT_LOCAL_ROOT not found: {}", root.display()))?;
+    if !canon.starts_with(&root_canon) {
+        bail!(
+            "local git source {} is outside SLOC_GIT_LOCAL_ROOT {}",
+            canon.display(),
+            root_canon.display()
+        );
+    }
+    // Strip any Windows verbatim (`\\?\`) prefix so git accepts the path.
+    Ok(deverbatim(&canon))
+}
+
+/// Convert a `file://` URL to a local filesystem path, rejecting a non-empty host authority
+/// (`file://host/path` is an SMB/UNC fetch on Windows — treated as remote and refused).
+/// Handles `file:///home/x` → `/home/x` and `file:///C:/x` → `C:/x`.
+fn file_url_to_path(url: &str) -> Result<String> {
+    let rest = &url.trim()[7..]; // strip "file://"
+    if !rest.starts_with('/') {
+        bail!(
+            "file:// URL with a host authority is not permitted (use file:///local/path): {url:?}"
+        );
+    }
+    // Drop exactly one leading slash for a Windows drive path (`/C:/x` → `C:/x`); keep the
+    // rooted slash for a POSIX path (`/home/x`).
+    let after = &rest[1..];
+    if after.len() >= 2 && after.as_bytes()[1] == b':' {
+        Ok(after.to_owned())
+    } else {
+        Ok(rest.to_owned())
+    }
+}
+
+/// Strip a Windows verbatim path prefix (`\\?\`) that `std::fs::canonicalize` adds, since
+/// git does not accept it. No-op on other platforms / non-verbatim paths.
+fn deverbatim(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned()
 }
 
 /// Resolve `ref_name` to its full SHA in `repo`.
@@ -630,8 +1007,31 @@ pub fn resolve_committish(repo: &Path, ref_name: &str) -> Result<String> {
 pub fn create_worktree(repo: &Path, ref_name: &str, worktree_path: &Path) -> Result<()> {
     let wt = worktree_path.to_str().unwrap_or(".");
     let committish = resolve_committish(repo, ref_name)?;
-    run_git(repo, &["worktree", "add", "--detach", wt, &committish])?;
+    // A blobless clone fetches file contents lazily: `worktree add` triggers a promisor
+    // fetch against origin. That fetch needs the same per-host credential the clone used, so
+    // re-resolve it from the repo's origin URL and pass the secret env through (the helper
+    // config itself is already persisted in the repo config by `persist_repo_config`).
+    let env = cred_env_for_repo(repo);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    run_git_env(
+        repo,
+        &["worktree", "add", "--detach", wt, &committish],
+        &env_refs,
+    )?;
     Ok(())
+}
+
+/// Resolve the per-host credential *env* (secret) for an already-cloned repo by reading its
+/// `remote.origin.url`. Returns empty when there is no origin, no host, or no registry match
+/// (local/offline clones, or hosts that use git's own credential resolution).
+fn cred_env_for_repo(repo: &Path) -> Vec<(String, String)> {
+    let Ok(url) = run_git(repo, &["config", "--get", "remote.origin.url"]) else {
+        return Vec::new();
+    };
+    let Some(host) = host_of_git_url(&url) else {
+        return Vec::new();
+    };
+    cred_injection(&host).env
 }
 
 /// Remove a worktree previously created with [`create_worktree`].
@@ -762,6 +1162,21 @@ fn parse_git_date(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+/// Serializes tests that mutate process-global env vars (credential registry / local-import
+/// gate settings), which would otherwise race under the parallel test runner. Shared by both
+/// the `tests` and `git_integration` modules.
+#[cfg(test)]
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`ENV_LOCK`], tolerating a prior panic (poisoning) so one failing env-mutating
+/// test doesn't cascade into spurious `PoisonError` failures that hide the real cause.
+#[cfg(test)]
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -1366,6 +1781,262 @@ mod tests {
         assert_eq!(port_of_git_url("file://host/repo"), None);
         assert_eq!(port_of_git_url("ftp://host/repo"), None);
     }
+
+    // ── per-host credential registry ──────────────────────────────────────────
+
+    #[test]
+    fn hostkey_normalizes_punctuation_and_case() {
+        assert_eq!(
+            hostkey("bitbucket.instance2.com"),
+            "BITBUCKET_INSTANCE2_COM"
+        );
+        assert_eq!(hostkey("git-host.corp"), "GIT_HOST_CORP");
+        assert_eq!(hostkey("host:7990"), "HOST_7990");
+    }
+
+    #[test]
+    fn resolve_credential_https_env_wins() {
+        let _g = env_lock();
+        let host = "cred-https-test.example";
+        let key = format!("SLOC_GIT_CRED_{}", hostkey(host));
+        // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
+        unsafe { std::env::set_var(&key, "alice:secrettoken") };
+        let cred = resolve_credential(host);
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(&key) };
+        match cred {
+            Some(GitCredential::Https { user, token }) => {
+                assert_eq!(user, "alice");
+                assert_eq!(token, "secrettoken");
+            }
+            _ => panic!("expected an HTTPS credential from the env registry"),
+        }
+    }
+
+    #[test]
+    fn resolve_credential_ssh_key_env() {
+        let _g = env_lock();
+        let host = "cred-ssh-test.example";
+        let key = format!("SLOC_GIT_SSHKEY_{}", hostkey(host));
+        // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
+        unsafe { std::env::set_var(&key, "/home/u/.ssh/id_ed25519") };
+        let cred = resolve_credential(host);
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(&key) };
+        match cred {
+            Some(GitCredential::Ssh { key_path }) => {
+                assert_eq!(key_path, "/home/u/.ssh/id_ed25519");
+            }
+            _ => panic!("expected an SSH credential from the env registry"),
+        }
+    }
+
+    #[test]
+    fn resolve_credential_none_falls_through() {
+        // No registry entry → None, so git falls back to its own credential resolution.
+        assert!(resolve_credential("no-such-cred-host.invalid").is_none());
+    }
+
+    #[test]
+    fn cred_injection_https_keeps_secret_out_of_config() {
+        let _g = env_lock();
+        let host = "inj-test.example";
+        let key = format!("SLOC_GIT_CRED_{}", hostkey(host));
+        // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
+        unsafe { std::env::set_var(&key, "bob:tok123") };
+        let inj = cred_injection(host);
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(&key) };
+
+        // First config entry resets inherited helpers; the helper reads the secret from env.
+        assert_eq!(
+            inj.config.first().map(String::as_str),
+            Some("credential.helper=")
+        );
+        assert!(
+            inj.config
+                .iter()
+                .any(|c| c.contains("$GIT_U") && c.contains("$GIT_P"))
+        );
+        assert!(
+            !inj.config.iter().any(|c| c.contains("tok123")),
+            "the token must NEVER appear in git config / argv"
+        );
+        assert!(inj.env.iter().any(|(k, v)| k == "GIT_U" && v == "bob"));
+        assert!(inj.env.iter().any(|(k, v)| k == "GIT_P" && v == "tok123"));
+    }
+
+    // ── source classification / normalize passthrough ─────────────────────────
+
+    #[test]
+    fn classify_source_recognizes_each_form() {
+        assert!(matches!(
+            classify_source("https://github.com/o/r.git"),
+            GitSource::Remote
+        ));
+        assert!(matches!(
+            classify_source("git@github.com:o/r.git"),
+            GitSource::Remote
+        ));
+        assert!(matches!(
+            classify_source("ssh://git@h/o/r.git"),
+            GitSource::Remote
+        ));
+        assert!(matches!(
+            classify_source("file:///srv/mirror/r"),
+            GitSource::FileUrl
+        ));
+        assert!(matches!(
+            classify_source("/srv/mirror/r.bundle"),
+            GitSource::Bundle
+        ));
+        assert!(matches!(
+            classify_source(r"C:\mirror\r"),
+            GitSource::LocalPath
+        ));
+    }
+
+    #[test]
+    fn normalize_git_url_passes_local_sources_through() {
+        for u in [
+            "file:///srv/mirror/r",
+            r"C:\mirror\repo",
+            r"\\srv\share\repo",
+            "/srv/x.bundle",
+        ] {
+            assert_eq!(
+                normalize_git_url(u),
+                u,
+                "local source must pass through unchanged: {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_url_to_path_posix_windows_and_rejects_host() {
+        assert_eq!(
+            file_url_to_path("file:///home/u/repo").unwrap(),
+            "/home/u/repo"
+        );
+        assert_eq!(
+            file_url_to_path("file:///C:/mirror/repo").unwrap(),
+            "C:/mirror/repo"
+        );
+        assert!(
+            file_url_to_path("file://server/share/repo").is_err(),
+            "a file:// URL with a host authority must be rejected"
+        );
+    }
+
+    // ── local-import gate (validate_local_source) ─────────────────────────────
+
+    #[test]
+    fn validate_local_source_rejected_when_disabled() {
+        let _g = env_lock();
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SLOC_GIT_ALLOW_LOCAL");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+        assert!(validate_local_source("/srv/x.bundle", &GitSource::Bundle).is_err());
+    }
+
+    #[test]
+    fn validate_local_source_requires_root_when_enabled() {
+        let _g = env_lock();
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe {
+            std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+        let err = validate_local_source("/srv/x.bundle", &GitSource::Bundle)
+            .unwrap_err()
+            .to_string();
+        // SAFETY: see above.
+        unsafe { std::env::remove_var("SLOC_GIT_ALLOW_LOCAL") };
+        assert!(
+            err.contains("SLOC_GIT_LOCAL_ROOT"),
+            "must fail closed without a configured root: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_local_source_rejects_outside_root() {
+        let _g = env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe {
+            std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1");
+            std::env::set_var("SLOC_GIT_LOCAL_ROOT", root.path());
+        }
+        let outside_path = outside.path().to_string_lossy().into_owned();
+        let res = validate_local_source(&outside_path, &GitSource::LocalPath);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("SLOC_GIT_ALLOW_LOCAL");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+        assert!(
+            res.is_err(),
+            "a source outside SLOC_GIT_LOCAL_ROOT must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_local_source_accepts_inside_root() {
+        let _g = env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("sub");
+        std::fs::create_dir_all(&inside).unwrap();
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe {
+            std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1");
+            std::env::set_var("SLOC_GIT_LOCAL_ROOT", root.path());
+        }
+        let inside_path = inside.to_string_lossy().into_owned();
+        let res = validate_local_source(&inside_path, &GitSource::LocalPath);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("SLOC_GIT_ALLOW_LOCAL");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+        assert!(
+            res.is_ok(),
+            "a source under the root must be accepted: {res:?}"
+        );
+    }
+
+    #[test]
+    fn validate_local_source_rejects_unc_even_when_enabled() {
+        let _g = env_lock();
+        let root = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe {
+            std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1");
+            std::env::set_var("SLOC_GIT_LOCAL_ROOT", root.path());
+        }
+        let res = validate_local_source(r"\\attacker\share\repo", &GitSource::LocalPath);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("SLOC_GIT_ALLOW_LOCAL");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+        assert!(
+            res.is_err(),
+            "UNC/SMB paths must be treated as remote and rejected"
+        );
+    }
+
+    #[test]
+    fn clone_or_fetch_file_url_rejected_without_gate() {
+        // SSRF→LFI stays blocked: file:// is refused unless the local gate is explicitly on.
+        let _g = env_lock();
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe { std::env::remove_var("SLOC_GIT_ALLOW_LOCAL") };
+        let dest = tempfile::tempdir().unwrap();
+        assert!(clone_or_fetch("file:///etc/passwd", dest.path()).is_err());
+    }
 }
 
 // ── git subprocess integration tests ─────────────────────────────────────────
@@ -1508,6 +2179,84 @@ mod git_integration {
         let dest = tempdir().unwrap();
         let result = clone_or_fetch("https://169.254.169.254/repo", dest.path());
         assert!(result.is_err());
+    }
+
+    // ── offline import: git bundle / local path (SLOC_GIT_ALLOW_LOCAL gate) ────
+
+    #[test]
+    fn clone_or_fetch_imports_git_bundle_under_local_root() {
+        let _g = env_lock();
+        // Build a source repo and bundle it inside the allowed root (the air-gap import file).
+        let root = tempdir().unwrap();
+        let src = root.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        make_repo(&src);
+        let bundle = root.path().join("repo.bundle");
+        run_git(
+            &src,
+            &["bundle", "create", bundle.to_str().unwrap(), "--all"],
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded under ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1");
+            std::env::set_var("SLOC_GIT_LOCAL_ROOT", root.path());
+        }
+        let dest_root = tempdir().unwrap();
+        let dest = dest_root.path().join("clone");
+        let res = clone_or_fetch(bundle.to_str().unwrap(), &dest);
+        let refs = res.as_ref().ok().and(list_refs(&dest).ok());
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("SLOC_GIT_ALLOW_LOCAL");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+
+        res.unwrap();
+        assert!(
+            dest.join(".git").exists(),
+            "bundle import must produce a clone"
+        );
+        let names: Vec<String> = refs
+            .expect("refs must be listable from the imported clone")
+            .branches
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "main"),
+            "bundle clone must expose the main branch: {names:?}"
+        );
+    }
+
+    #[test]
+    fn clone_or_fetch_imports_local_path_under_root() {
+        let _g = env_lock();
+        let root = tempdir().unwrap();
+        let src = root.path().join("mirror");
+        std::fs::create_dir_all(&src).unwrap();
+        make_repo(&src);
+
+        // SAFETY: single-threaded under ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1");
+            std::env::set_var("SLOC_GIT_LOCAL_ROOT", root.path());
+        }
+        let dest_root = tempdir().unwrap();
+        let dest = dest_root.path().join("clone");
+        let res = clone_or_fetch(src.to_str().unwrap(), &dest);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("SLOC_GIT_ALLOW_LOCAL");
+            std::env::remove_var("SLOC_GIT_LOCAL_ROOT");
+        }
+
+        res.unwrap();
+        assert!(
+            dest.join(".git").exists(),
+            "local-path import must produce a clone"
+        );
     }
 
     // ── get_sha ───────────────────────────────────────────────────────────────

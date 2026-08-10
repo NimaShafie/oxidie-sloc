@@ -2,6 +2,12 @@
 
 This document covers how to wire oxide-sloc into your CI/CD pipelines and how to push scan results to external systems such as Confluence.
 
+> **Scanning code on a different git host than the pipeline?** (e.g. tooling on
+> `bitbucket.instance1.com`, code to scan on `bitbucket.instance2.com`.) See
+> **[Scanning multiple git instances](multi-instance.md)** for per-host credentials, corporate
+> proxy/VLAN guidance, and air-gapped offline import — it applies to local, server, and Jenkins
+> modes alike.
+
 ---
 
 ## Table of contents
@@ -1462,6 +1468,15 @@ The step stages the compiled binary and scan reports (`result.json`, `report.htm
 | `SLOC_API_KEY`        | Web UI      | When set, all requests must supply `Authorization: Bearer <key>` or `X-API-Key: <key>` |
 | `SLOC_TLS_CERT`       | Web UI      | Path to PEM certificate for native TLS termination                     |
 | `SLOC_TLS_KEY`        | Web UI      | Path to PEM private key for native TLS termination                     |
+| `SLOC_GIT_CRED_<HOSTKEY>`  | All modes | Per-host HTTPS credential `user:token` (PAT). `HOSTKEY` = hostname upper-cased, non-alphanumerics → `_`. See [Scanning multiple git instances](multi-instance.md) |
+| `SLOC_GIT_SSHKEY_<HOSTKEY>` | All modes | Per-host SSH private-key path                                         |
+| `SLOC_GIT_CRED_FILE`  | All modes   | Bulk `host = "user:token"` secrets file (chmod 600; never commit)      |
+| `SLOC_GIT_ALLOW_LOCAL`| All modes   | `1`/`true` to permit offline import (git bundle / `file://` / local path). Off by default |
+| `SLOC_GIT_LOCAL_ROOT` | All modes   | Directory offline sources must resolve under (required when `SLOC_GIT_ALLOW_LOCAL` is on) |
+| `SLOC_GIT_HOST_ALLOWLIST` | All modes | Comma-separated hosts permitted for clone (SSRF control)             |
+| `SLOC_GIT_REQUIRE_ALLOWLIST` | All modes | `1`/`true` to fail-closed unless the host is allowlisted          |
+| `SLOC_GIT_SSL_NO_VERIFY` | All modes | Last-resort: disable TLS verification (self-signed CA not in any trust store) |
+| `SLOC_GIT_TIMEOUT`    | All modes   | Per-git-subprocess wall-clock ceiling in seconds (default 300)         |
 | `SKIP_WEB_CHECK`      | Jenkins     | Skip the web UI health-check stage; set to any non-empty value         |
 | `SLOC_SMTP_HOST`      | `send`      | SMTP host (alternative to `--smtp-host`)                               |
 | `SLOC_SMTP_USER`      | `send`      | SMTP username (alternative to `--smtp-user`)                           |

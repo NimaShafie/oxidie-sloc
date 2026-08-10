@@ -41,6 +41,13 @@ pre-set to sensible defaults. **Point at the repo, hit Build — that's it.**
 Leave `TARGET_CREDENTIALS_ID` blank for public repos, or when the Jenkins agent
 already has git access (SSH agent / credential helper / local mirror).
 
+> **Scanning several instances in one run, or letting the app do the clone?** Instead of (or in
+> addition to) `TARGET_CREDENTIALS_ID`, expose tokens as Jenkins secrets and map them to
+> per-host env vars `SLOC_GIT_CRED_<HOSTKEY>=user:token` for the scan step — oxide-sloc then
+> authenticates each host on its own. For an **air-gapped agent**, set `SLOC_GIT_ALLOW_LOCAL=1`
+> + `SLOC_GIT_LOCAL_ROOT=<workspace dir>` and pass an imported `*.bundle` path as
+> `TARGET_REPO_URL`. Full guide: [../../docs/multi-instance.md](../../docs/multi-instance.md).
+
 ---
 
 ## Way 2 — trigger Jenkins from your repo's CI (push)

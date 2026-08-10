@@ -322,5 +322,33 @@ For air-gapped runners, the `vendor.tar.gz.*` parts are already in the workspace
 | `analyze` command | No |
 | `report` command | No |
 | PDF export | No — uses locally installed Chromium |
+| `git-scan` / `git-compare` of a **remote** instance | Yes — a route to that git host |
+| `git-scan` of an **offline bundle / `file://` / local path** | No — see below |
 | Email delivery (`--smtp-to`) | Yes |
 | Webhook delivery (`--webhook-url`) | Yes |
+
+---
+
+## Scanning air-gapped git instances (offline import)
+
+The sections above cover installing oxide-sloc offline. To **scan** code from a git instance that
+is unreachable from the machine running the tool, bring the repository in as an offline copy — a
+git bundle is the simplest carrier:
+
+```bash
+# On a machine that can reach the instance:
+git clone --mirror https://bitbucket.instance2.com/scm/proj/widget.git
+git -C widget.git bundle create /media/transfer/widget.bundle --all
+
+# On the air-gapped machine (copy the bundle in first):
+export SLOC_GIT_ALLOW_LOCAL=1
+export SLOC_GIT_LOCAL_ROOT=/srv/oxide-sloc/imports      # bundle must live under here
+oxide-sloc git-scan /srv/oxide-sloc/imports/widget.bundle \
+  --allow-local --local-root /srv/oxide-sloc/imports --html-out out/widget.html
+```
+
+Offline import is **off by default** and fail-closed: it requires both `SLOC_GIT_ALLOW_LOCAL` and
+`SLOC_GIT_LOCAL_ROOT`, and rejects any source outside that root as well as UNC / `file://host` SMB
+fetches. If the instance *is* reachable on the internal network, no offline step is needed — clone
+it directly and supply a per-host credential. Full detail (per-host credentials, proxies, VLANs,
+all three run modes) is in **[Scanning multiple git instances](multi-instance.md)**.
