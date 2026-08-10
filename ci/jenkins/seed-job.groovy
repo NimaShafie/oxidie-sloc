@@ -14,6 +14,12 @@
 // Alternatively, paste this script directly into:
 //   Manage Jenkins → Script Console (for one-shot execution without a seed job).
 //
+// Script-security caveat: with Job DSL script-security ON (the default), the
+//   System.getenv(...) fallback below is a sandboxed call and is REJECTED. Run this
+//   via the Script Console (admin, unsandboxed) OR pass JOB_NAME/REPO_URL/REPO_BRANCH
+//   as String parameters on the seed job — with those bindings present the script uses
+//   binding.hasVariable(...) and never reaches System.getenv, so it runs under the sandbox.
+//
 // Job name: defaults to 'oxide-sloc'. To override, set JOB_NAME before running:
 //   - Job DSL seed job: add a String parameter named JOB_NAME to the seed job.
 //   - Script Console: pass a binding variable, e.g. -DJOB_NAME=oxide-sloc-manual.

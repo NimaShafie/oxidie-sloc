@@ -254,3 +254,12 @@ Bitbucket status and Confluence page anyway (Tier-3).
   set. Blank scans the whole repo; a bad subtree fails fast with a clear message.
 - Serve Jenkins over HTTPS (`ci/jenkins/https/`) before sending tokens over the
   API — plain HTTP exposes them in transit.
+- **Windows agents** run the pipeline through Git Bash (install Git for Windows).
+  Known constraints and operator knobs — MAX_PATH (use a short agent remote-root
+  like `C:\J` + short job name), the Job DSL seed-job script-security caveat, and
+  the Windows air-gap defaults (`TEST_RUNNER=cargo-test`, coverage off) — are
+  documented in `docs/jenkins-manual-setup.md` § "Windows agents — known
+  constraints". New env knobs: `SLOC_CACHE_DIR` (writable Rust cache root when the
+  service-account profile is read-only) and `SLOC_ALLOW_ONLINE_RUSTUP=1` (opt-in
+  to internet rustup; unset fails fast offline instead of consuming the committed
+  `toolchain/` Windows bundle).
