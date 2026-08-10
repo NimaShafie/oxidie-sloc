@@ -522,6 +522,40 @@ jobs:
             oxide-sloc-*.rpm oxide-sloc-*.deb > SHA256SUMS-dist.txt
           cat SHA256SUMS-dist.txt
 
+      # Reconcile the master SHA256SUMS.txt with the assets we are about to clobber.
+      # release.yml already generated & uploaded SHA256SUMS.txt covering ITS build of
+      # oxide-sloc-linux-x86_64.tar.gz (musl) and oxide-sloc-windows-x64.zip. This job
+      # then overwrites both with the canonical dist builds (UBI 8 glibc-2.28 tarball,
+      # MSVC-signed zip), whose bytes differ — leaving those two lines in the master
+      # manifest pointing at bytes that are no longer served, so `sha256sum -c
+      # SHA256SUMS.txt` fails on them. Fold the freshly computed dist sums back into the
+      # master manifest (replacing the stale lines, appending the new rpm/deb) so it
+      # matches the bytes actually served. Air-gapped consumers verify against this file.
+      - name: Reconcile master SHA256SUMS.txt with clobbered dist assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.workflow_run.head_branch || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist/
+          if gh release download "$TAG" --repo "$REPO" \
+               --pattern SHA256SUMS.txt --output SHA256SUMS.master.txt --clobber; then
+            # $2 is the filename in `<hash>  <file>` (sha256sum -c) format. Replace any
+            # master line whose file we just rebuilt; append dist-only files (rpm/deb).
+            awk '
+              FNR == NR { sum[$2] = $1; if (!($2 in seen)) { order[++n] = $2; seen[$2] = 1 } next }
+              { if ($2 in sum) { print sum[$2] "  " $2; done[$2] = 1 } else { print } }
+              END { for (i = 1; i <= n; i++) if (!(order[i] in done)) print sum[order[i]] "  " order[i] }
+            ' SHA256SUMS-dist.txt SHA256SUMS.master.txt > SHA256SUMS.txt
+            rm -f SHA256SUMS.master.txt
+            echo "Reconciled master SHA256SUMS.txt:"
+            cat SHA256SUMS.txt
+          else
+            echo "::warning::master SHA256SUMS.txt not found on release $TAG — not reconciling; SHA256SUMS-dist.txt still covers the dist assets."
+            rm -f SHA256SUMS.txt
+          fi
+
       - name: Upload to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -536,6 +570,10 @@ jobs:
             dist/SHA256SUMS-dist.txt \
             --clobber \
             --repo "$REPO"
+          # Re-upload the reconciled master manifest only if the reconcile succeeded.
+          if [ -f dist/SHA256SUMS.txt ]; then
+            gh release upload "$TAG" dist/SHA256SUMS.txt --clobber --repo "$REPO"
+          fi
 
   # ── Open a PR to commit the Windows binary to dist/ ─────────────────────
   # Main is a protected branch (PRs + "Quality gates" check required), so a
