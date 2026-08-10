@@ -374,6 +374,24 @@ impl Default for WebConfig {
     }
 }
 
+/// Non-secret git integration settings. Per-host credentials are intentionally NOT here —
+/// tokens/keys live only in the environment (`SLOC_GIT_CRED_<HOST>`, `SLOC_GIT_SSHKEY_<HOST>`)
+/// or the `SLOC_GIT_CRED_FILE`, never in a committed TOML. This section only carries the
+/// offline-import gate so operators who prefer a config file over env vars can set it there.
+/// Values here are applied to the environment at startup **only if the corresponding env var
+/// is unset**, so an explicit env var always wins (see [`AppConfig::apply_git_settings_to_env`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitConfig {
+    /// Permit cloning from local/offline sources (git bundle, `file://`, local path).
+    /// Maps to `SLOC_GIT_ALLOW_LOCAL`. Default false (network sources only).
+    #[serde(default)]
+    pub allow_local: bool,
+    /// Directory that local/offline sources must resolve under (required when
+    /// `allow_local` is on). Maps to `SLOC_GIT_LOCAL_ROOT`.
+    #[serde(default)]
+    pub local_root: Option<PathBuf>,
+}
+
 /// A named configuration profile.
 ///
 /// All sub-config sections are optional; any present section *replaces* the
@@ -400,6 +418,9 @@ pub struct AppConfig {
     pub reporting: ReportingConfig,
     #[serde(default)]
     pub web: WebConfig,
+    /// Non-secret git integration settings (offline-import gate). See [`GitConfig`].
+    #[serde(default)]
+    pub git: GitConfig,
     /// Named profiles that override base config sections when selected via `--profile`.
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileConfig>,
@@ -432,6 +453,26 @@ impl AppConfig {
 }
 
 impl AppConfig {
+    /// Apply the `[git]` offline-import settings to the process environment so `sloc-git`
+    /// (which reads `SLOC_GIT_ALLOW_LOCAL` / `SLOC_GIT_LOCAL_ROOT` directly) picks them up.
+    ///
+    /// An explicit environment variable always wins: a config value is only applied when the
+    /// corresponding env var is unset. Call this once, early at startup, before any git op and
+    /// before spawning worker threads.
+    pub fn apply_git_settings_to_env(&self) {
+        if self.git.allow_local && std::env::var_os("SLOC_GIT_ALLOW_LOCAL").is_none() {
+            // SAFETY: called once at single-threaded startup before any git op / task spawn.
+            unsafe { std::env::set_var("SLOC_GIT_ALLOW_LOCAL", "1") };
+        }
+        if let Some(root) = &self.git.local_root
+            && std::env::var_os("SLOC_GIT_LOCAL_ROOT").is_none()
+            && !root.as_os_str().is_empty()
+        {
+            // SAFETY: called once at single-threaded startup before any git op / task spawn.
+            unsafe { std::env::set_var("SLOC_GIT_LOCAL_ROOT", root) };
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if the file cannot be read, the TOML cannot be parsed, or the
